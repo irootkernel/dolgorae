@@ -120,6 +120,14 @@ Active writers, unknown work, changed history and corrupt segments are blockers;
 settle them through their existing owners. Checkpoint support does not authorize
 content retirement, garbage collection, installation or consumer activation.
 
+For Profile journal maintenance select `--kind membership_compaction` on Plan.
+Its workspace generation is independent from ledger maintenance. The same
+complete-plan, operator, explicit-approval and original-scope lookup rules apply.
+Resume an interrupted global Profile owner before admitting new binding or
+membership changes. Preserve all old journal and binding bytes. A reported
+`profile_membership_cleanup_required` does not retract a successful Close:
+restore the namespace and repeat its authenticated Close for cleanup only.
+
 ## Resume retained Close and build recovery
 
 For retained session Close, preserve its operation identity and interrupt

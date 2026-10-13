@@ -254,6 +254,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "darwin",
                 "domain",
                 "fault",
+                "global_profile",
+                "global_runtime",
                 "jcs",
                 "ledger",
                 "ledger_generation",

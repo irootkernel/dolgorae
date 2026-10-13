@@ -842,6 +842,7 @@ fn leaf_spec(command: &str) -> LeafSpec {
     match command {
         "plan_maintenance" => spec(
             &[
+                "--kind",
                 "--workspace",
                 "--operator-file",
                 "--operator-fd",
@@ -1569,6 +1570,9 @@ fn validate_option_value(command: &str, flag: &str, value: &str) -> Result<(), S
             "access-transition-unavailable",
             "access-transition-unverified",
         ]),
+        "--kind" if command == "plan_maintenance" => {
+            Some(&["ledger_checkpoint", "membership_compaction"])
+        }
         "--kind" if command == "review-target.capture" => {
             Some(&["workspace", "staged", "dirty", "head", "commit", "range"])
         }

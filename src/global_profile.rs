@@ -47,24 +47,108 @@ pub struct GlobalProfileRegistry {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileBindingRecord {
+    #[serde(deserialize_with = "binding_name")]
     pub selected_name: String,
+    #[serde(deserialize_with = "binding_digest")]
     pub definition_sha256: String,
+    #[serde(deserialize_with = "binding_digest")]
     pub server_key: String,
+    #[serde(deserialize_with = "binding_digest")]
     pub launch_snapshot_sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileBindingHistory {
+    #[serde(deserialize_with = "binding_version")]
     schema_version: u32,
+    #[serde(deserialize_with = "binding_map")]
     bindings: BTreeMap<String, ProfileBindingRecord>,
+}
+
+fn binding_version<'de, D: serde::Deserializer<'de>>(de: D) -> Result<u32, D::Error> {
+    let version = u32::deserialize(de)?;
+    if version == 1 {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom(
+            "unsupported binding history version",
+        ))
+    }
+}
+fn binding_name<'de, D: serde::Deserializer<'de>>(de: D) -> Result<String, D::Error> {
+    let name = String::deserialize(de)?;
+    if is_global_profile_name(&name) {
+        Ok(name)
+    } else {
+        Err(serde::de::Error::custom("invalid binding name"))
+    }
+}
+fn binding_digest<'de, D: serde::Deserializer<'de>>(de: D) -> Result<String, D::Error> {
+    let value = String::deserialize(de)?;
+    if is_sha256(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom("invalid binding digest"))
+    }
+}
+fn binding_map<'de, D: serde::Deserializer<'de>>(
+    de: D,
+) -> Result<BTreeMap<String, ProfileBindingRecord>, D::Error> {
+    struct Bindings;
+    impl<'de> serde::de::Visitor<'de> for Bindings {
+        type Value = BTreeMap<String, ProfileBindingRecord>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("checked binding identities")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> Result<Self::Value, M::Error> {
+            let mut bindings = BTreeMap::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if bindings.contains_key(&key) {
+                    return Err(serde::de::Error::custom("duplicate binding identity"));
+                }
+                if !key
+                    .split_once(':')
+                    .is_some_and(|(name, digest)| is_global_profile_name(name) && is_sha256(digest))
+                {
+                    return Err(serde::de::Error::custom("invalid binding identity"));
+                }
+                let record: ProfileBindingRecord = map.next_value()?;
+                if key != format!("{}:{}", record.selected_name, record.server_key) {
+                    return Err(serde::de::Error::custom("binding identity mismatch"));
+                }
+                bindings.insert(key, record);
+            }
+            Ok(bindings)
+        }
+    }
+    de.deserialize_map(Bindings)
 }
 
 pub struct GlobalProfileStore {
     root: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BindingMaintenanceBarrier {
+    SourceSynced,
+    SourceDirectorySynced,
+    TargetSynced,
+    SelectionReplaced,
+    SelectionSynced,
+}
+
 impl GlobalProfileStore {
+    pub(crate) fn with_maintenance_lock<T>(
+        &self,
+        action: impl FnOnce(&Path) -> Result<T, MachineError>,
+    ) -> Result<T, MachineError> {
+        let _lock = lock_initialized_home(&self.root)?;
+        action(&self.root)
+    }
     #[must_use]
     pub fn new(home: &DolgoraeHome) -> Self {
         Self::from_root(home.root())
@@ -132,6 +216,14 @@ impl GlobalProfileStore {
         let _guard = guard(profile)?;
         registry.profiles.remove(name);
         let mut history = load_binding_history(&self.root)?;
+        if self.root.join("profile-maintenance-active.json").exists()
+            && let Some(record) = history
+                .bindings
+                .values()
+                .find(|record| record.selected_name == name)
+        {
+            return Err(binding_maintenance_busy(name, &record.server_key));
+        }
         let original_binding_count = history.bindings.len();
         history
             .bindings
@@ -210,6 +302,12 @@ impl GlobalProfileStore {
         }
         let mut history = load_binding_history(&self.root)?;
         let identity = format!("{}:{}", record.selected_name, record.server_key);
+        if self.root.join("profile-maintenance-active.json").exists() {
+            return Err(binding_maintenance_busy(
+                &record.selected_name,
+                &record.server_key,
+            ));
+        }
         if history.bindings.get(&identity) == Some(&record) {
             return Ok(());
         }
@@ -532,11 +630,53 @@ fn load_binding_history(root: &Path) -> Result<ProfileBindingHistory, MachineErr
     verify_secure_file(&path, DarwinSystem.current_uid())?;
     let bytes = read_prefix(&path, MAX_BINDING_HISTORY_BYTES)
         .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?;
+    parse_binding_history(root, &bytes)
+}
+
+fn parse_binding_history(root: &Path, bytes: &[u8]) -> Result<ProfileBindingHistory, MachineError> {
     if bytes.len() as u64 > MAX_BINDING_HISTORY_BYTES {
+        let text = match std::str::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(error) if error.error_len().is_none() => {
+                std::str::from_utf8(&bytes[..error.valid_up_to()])
+                    .map_err(|_| legacy_state_unsupported(root, "malformed_marker"))?
+            }
+            Err(_) => return Err(legacy_state_unsupported(root, "malformed_marker")),
+        };
+        if text.trim_start().starts_with('{') {
+            match crate::jcs::parse(text) {
+                Ok(_) => {
+                    // A complete bounded prefix must also have the checked shape.
+                    let history: ProfileBindingHistory = serde_json::from_str(text)
+                        .map_err(|_| legacy_state_unsupported(root, "malformed_marker"))?;
+                    validate_binding_history(root, &history)?;
+                }
+                Err(crate::jcs::JcsError::Json(error)) if error.is_eof() => {
+                    match serde_json::from_str::<ProfileBindingHistory>(text) {
+                        Err(error) if error.is_eof() => {}
+                        Ok(_) => {}
+                        Err(_) => return Err(legacy_state_unsupported(root, "malformed_marker")),
+                    }
+                }
+                Err(_) => return Err(legacy_state_unsupported(root, "malformed_marker")),
+            }
+            return Err(binding_capacity());
+        }
         return Err(legacy_state_unsupported(root, "malformed_marker"));
     }
-    let history: ProfileBindingHistory = serde_json::from_slice(&bytes)
+    let text = std::str::from_utf8(bytes)
         .map_err(|_| legacy_state_unsupported(root, "malformed_marker"))?;
+    crate::jcs::parse(text).map_err(|_| legacy_state_unsupported(root, "malformed_marker"))?;
+    let history: ProfileBindingHistory = serde_json::from_slice(bytes)
+        .map_err(|_| legacy_state_unsupported(root, "malformed_marker"))?;
+    validate_binding_history(root, &history)?;
+    Ok(history)
+}
+
+fn validate_binding_history(
+    root: &Path,
+    history: &ProfileBindingHistory,
+) -> Result<(), MachineError> {
     if history.schema_version != 1
         || history.bindings.iter().any(|(identity, record)| {
             identity != &format!("{}:{}", record.selected_name, record.server_key)
@@ -548,7 +688,7 @@ fn load_binding_history(root: &Path) -> Result<ProfileBindingHistory, MachineErr
     {
         return Err(legacy_state_unsupported(root, "malformed_marker"));
     }
-    Ok(history)
+    Ok(())
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -563,10 +703,7 @@ fn store_binding_history(root: &Path, history: &ProfileBindingHistory) -> Result
     let bytes = serde_json::to_vec_pretty(history)
         .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?;
     if bytes.len() as u64 > MAX_BINDING_HISTORY_BYTES {
-        return Err(MachineError::runtime_path_invalid(
-            &path,
-            "Profile binding history exceeds 1 MiB",
-        ));
+        return Err(binding_capacity());
     }
     let temporary = root.join(format!(".profile-bindings-{}.json", Uuid::now_v7()));
     atomic_create(&SystemWorkspacePlatform, &temporary, &bytes, 0o600)
@@ -574,6 +711,195 @@ fn store_binding_history(root: &Path, history: &ProfileBindingHistory) -> Result
     fs::rename(&temporary, &path)
         .and_then(|()| sync_directory(root))
         .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))
+}
+
+fn binding_capacity() -> MachineError {
+    MachineError::new(
+        "STORAGE_CAPACITY_EXCEEDED",
+        "Profile binding history exceeds 1 MiB",
+        false,
+        json!({"required_action":"observe_original_maintenance"}),
+    )
+}
+
+fn binding_maintenance_busy(profile: &str, server_key: &str) -> MachineError {
+    MachineError::new(
+        "PROFILE_SERVER_BUSY",
+        "retained Profile maintenance closes binding admission",
+        true,
+        json!({"profile":profile,"server_key":server_key,"reason":"resume the original Profile maintenance before changing binding history"}),
+    )
+}
+
+pub(crate) fn binding_maintenance_basis(root: &Path) -> Result<(String, Vec<u8>), MachineError> {
+    let history = load_binding_history(root)?;
+    let path = root.join("profile-bindings.json");
+    let source = read_prefix(&path, MAX_BINDING_HISTORY_BYTES)
+        .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?;
+    let target = serde_json::to_vec(&history)
+        .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?;
+    if target.len() as u64 > MAX_BINDING_HISTORY_BYTES {
+        return Err(binding_capacity());
+    }
+    Ok((crate::jcs::sha256_hex(&source), target))
+}
+
+pub(crate) fn verify_binding_maintenance_completion(
+    root: &Path,
+    operation_id: Uuid,
+    expected_digest: &str,
+    verify_selected: bool,
+) -> Result<(), MachineError> {
+    let generations = root.join("binding-generations");
+    let directory = generations.join(operation_id.to_string());
+    let source_path = directory.join("source.json");
+    verify_secure_directory(&generations, DarwinSystem.current_uid())?;
+    verify_secure_directory(&directory, DarwinSystem.current_uid())?;
+    verify_secure_file(&source_path, DarwinSystem.current_uid())?;
+    let source = read_prefix(&source_path, MAX_BINDING_HISTORY_BYTES)
+        .map_err(|error| MachineError::runtime_path_invalid(&source_path, error.to_string()))?;
+    if source.len() as u64 > MAX_BINDING_HISTORY_BYTES {
+        return Err(MachineError::new(
+            "LOOKUP_NAMESPACE_CORRUPT",
+            "retained binding source exceeds its approved bound",
+            false,
+            json!({}),
+        ));
+    }
+    let original = parse_binding_history(root, &source)?;
+    if crate::jcs::sha256_hex(&source) != expected_digest {
+        return Err(MachineError::new(
+            "LOOKUP_NAMESPACE_CORRUPT",
+            "retained binding source changed",
+            false,
+            json!({}),
+        ));
+    }
+    if verify_selected {
+        let path = root.join("profile-bindings.json");
+        verify_secure_file(&path, DarwinSystem.current_uid())?;
+        let selected = read_prefix(&path, MAX_BINDING_HISTORY_BYTES)
+            .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?;
+        let target = serde_json::to_vec(&original)
+            .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?;
+        if selected != target {
+            return Err(MachineError::new(
+                "LOOKUP_NAMESPACE_CORRUPT",
+                "selected binding history contradicts retained completion",
+                false,
+                json!({}),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn compact_binding_history(
+    root: &Path,
+    operation_id: Uuid,
+    expected_digest: &str,
+    barrier: &mut impl FnMut(BindingMaintenanceBarrier) -> Result<(), MachineError>,
+) -> Result<(), MachineError> {
+    let path = root.join("profile-bindings.json");
+    let (current_digest, target) = binding_maintenance_basis(root)?;
+    let generations = root.join("binding-generations");
+    let directory = generations.join(operation_id.to_string());
+    let source_path = directory.join("source.json");
+    if current_digest != expected_digest {
+        verify_secure_directory(&generations, DarwinSystem.current_uid())?;
+        verify_secure_directory(&directory, DarwinSystem.current_uid())?;
+        verify_secure_file(&source_path, DarwinSystem.current_uid())?;
+        let source = read_prefix(&source_path, MAX_BINDING_HISTORY_BYTES)
+            .map_err(|error| MachineError::runtime_path_invalid(&source_path, error.to_string()))?;
+        let original: ProfileBindingHistory = serde_json::from_slice(&source)
+            .map_err(|_| legacy_state_unsupported(root, "malformed_marker"))?;
+        let applied = read_prefix(&path, MAX_BINDING_HISTORY_BYTES)
+            .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?;
+        if crate::jcs::sha256_hex(&source) == expected_digest
+            && applied
+                == serde_json::to_vec(&original)
+                    .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?
+        {
+            sync_directory(root)
+                .map_err(|error| MachineError::runtime_path_invalid(root, error.to_string()))?;
+            return Ok(());
+        }
+        return Err(MachineError::new(
+            "MAINTENANCE_PLAN_STALE",
+            "Profile binding history changed since planning",
+            false,
+            json!({"operation_ref":operation_id}),
+        ));
+    }
+    if operation_id.get_version_num() != 7 {
+        return Err(MachineError::invalid_argument(
+            "plan_id",
+            "original UUIDv7 is required",
+        ));
+    }
+    if !generations.exists() {
+        create_directory(&generations, 0o700)
+            .map_err(|error| MachineError::runtime_path_invalid(&generations, error.to_string()))?;
+    }
+    verify_secure_directory(&generations, DarwinSystem.current_uid())?;
+    if !directory.exists() {
+        create_directory(&directory, 0o700)
+            .map_err(|error| MachineError::runtime_path_invalid(&directory, error.to_string()))?;
+    }
+    verify_secure_directory(&directory, DarwinSystem.current_uid())?;
+    let source = read_prefix(&path, MAX_BINDING_HISTORY_BYTES)
+        .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?;
+    if source_path.exists() {
+        verify_secure_file(&source_path, DarwinSystem.current_uid())?;
+        let retained = read_prefix(&source_path, MAX_BINDING_HISTORY_BYTES)
+            .map_err(|error| MachineError::runtime_path_invalid(&source_path, error.to_string()))?;
+        if retained != source {
+            return Err(MachineError::new(
+                "LOOKUP_NAMESPACE_CORRUPT",
+                "retained Profile binding source changed",
+                false,
+                json!({"operation_ref":operation_id,"effect":"unresolved","required_action":"restore_state"}),
+            ));
+        }
+    } else {
+        atomic_create(&SystemWorkspacePlatform, &source_path, &source, 0o600)
+            .map_err(|error| MachineError::runtime_path_invalid(&source_path, error.to_string()))?;
+    }
+    barrier(BindingMaintenanceBarrier::SourceSynced)?;
+    sync_directory(&directory)
+        .and_then(|()| sync_directory(&generations))
+        .and_then(|()| sync_directory(root))
+        .map_err(|error| MachineError::runtime_path_invalid(root, error.to_string()))?;
+    barrier(BindingMaintenanceBarrier::SourceDirectorySynced)?;
+    let temporary = directory.join("target.json");
+    if temporary.exists() {
+        verify_secure_file(&temporary, DarwinSystem.current_uid())?;
+        if read_prefix(&temporary, MAX_BINDING_HISTORY_BYTES)
+            .map_err(|error| MachineError::runtime_path_invalid(&temporary, error.to_string()))?
+            != target
+        {
+            return Err(MachineError::new(
+                "LOOKUP_NAMESPACE_CORRUPT",
+                "prepared Profile binding target changed",
+                false,
+                json!({"operation_ref":operation_id,"effect":"unresolved","required_action":"restore_state"}),
+            ));
+        }
+    } else {
+        atomic_create(&SystemWorkspacePlatform, &temporary, &target, 0o600)
+            .map_err(|error| MachineError::runtime_path_invalid(&temporary, error.to_string()))?;
+    }
+    sync_directory(&directory)
+        .map_err(|error| MachineError::runtime_path_invalid(&directory, error.to_string()))?;
+    barrier(BindingMaintenanceBarrier::TargetSynced)?;
+    fs::rename(&temporary, &path)
+        .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?;
+    barrier(BindingMaintenanceBarrier::SelectionReplaced)?;
+    sync_directory(root)
+        .and_then(|()| sync_directory(&directory))
+        .map_err(|error| MachineError::runtime_path_invalid(root, error.to_string()))?;
+    barrier(BindingMaintenanceBarrier::SelectionSynced)?;
+    Ok(())
 }
 
 fn parse_registry_bytes(path: &Path, bytes: &[u8]) -> Result<GlobalProfileRegistry, MachineError> {
@@ -1009,6 +1335,106 @@ mod tests {
     }
 
     #[test]
+    fn binding_compaction_preserves_identity_at_each_crash_boundary() {
+        for fault in [
+            BindingMaintenanceBarrier::SourceSynced,
+            BindingMaintenanceBarrier::SourceDirectorySynced,
+            BindingMaintenanceBarrier::TargetSynced,
+            BindingMaintenanceBarrier::SelectionReplaced,
+            BindingMaintenanceBarrier::SelectionSynced,
+        ] {
+            let (parent, home) = test_home();
+            initialize_generation(&home).unwrap();
+            let store = GlobalProfileStore::new(&home);
+            let profile = valid_profile(&parent);
+            store.add("primary".into(), profile.clone()).unwrap();
+            let record = ProfileBindingRecord {
+                selected_name: "primary".into(),
+                definition_sha256: crate::jcs::sha256_hex(
+                    &crate::jcs::canonicalize(
+                        &crate::jcs::parse(&serde_json::to_string(&profile).unwrap()).unwrap(),
+                    )
+                    .unwrap(),
+                ),
+                server_key: "a".repeat(64),
+                launch_snapshot_sha256: "b".repeat(64),
+            };
+            store.record_binding(record.clone()).unwrap();
+            let source = fs::read(home.root().join("profile-bindings.json")).unwrap();
+            let expected = crate::jcs::sha256_hex(&source);
+            let operation = Uuid::now_v7();
+            store
+                .with_maintenance_lock(|root| {
+                    assert!(
+                        compact_binding_history(root, operation, &expected, &mut |point| {
+                            if point == fault {
+                                Err(MachineError::new(
+                                    "RECOVERY_REQUIRED",
+                                    "injected binding crash",
+                                    false,
+                                    json!({}),
+                                ))
+                            } else {
+                                Ok(())
+                            }
+                        })
+                        .is_err()
+                    );
+                    compact_binding_history(root, operation, &expected, &mut |_| Ok(()))?;
+                    compact_binding_history(root, operation, &expected, &mut |_| Ok(()))?;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                load_binding_history(home.root()).unwrap().bindings["primary:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                record
+            );
+            assert_eq!(
+                fs::read(
+                    home.root()
+                        .join("binding-generations")
+                        .join(operation.to_string())
+                        .join("source.json")
+                )
+                .unwrap(),
+                source
+            );
+            assert!(
+                fs::metadata(home.root().join("profile-bindings.json"))
+                    .unwrap()
+                    .len()
+                    < source.len() as u64
+            );
+            store
+                .with_maintenance_lock(|root| {
+                    verify_binding_maintenance_completion(root, operation, &expected, true)?;
+                    let selected_path = root.join("profile-bindings.json");
+                    let selected = fs::read(&selected_path).unwrap();
+                    let mut changed = load_binding_history(root)?;
+                    changed
+                        .bindings
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .launch_snapshot_sha256 = "c".repeat(64);
+                    store_binding_history(root, &changed)?;
+                    assert_eq!(
+                        verify_binding_maintenance_completion(root, operation, &expected, true)
+                            .unwrap_err()
+                            .code,
+                        "LOOKUP_NAMESPACE_CORRUPT"
+                    );
+                    // Released admission permits later legitimate bindings while the original receipt remains provable.
+                    verify_binding_maintenance_completion(root, operation, &expected, false)?;
+                    fs::write(selected_path, selected).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            fs::remove_dir_all(parent).unwrap();
+        }
+    }
+
+    #[test]
     fn removal_retains_the_caller_guard_through_both_registry_commits() {
         struct CommitGuard {
             root: PathBuf,
@@ -1224,6 +1650,40 @@ mod tests {
     }
 
     #[test]
+    fn oversized_binding_prefix_rejects_known_integrity_errors() {
+        let (parent, home) = test_home();
+        initialize_generation(&home).unwrap();
+        let path = home.root().join("profile-bindings.json");
+        for prefix in [
+            "{\"schema_version\":2,",
+            "{\"schema_version\":\"1\",",
+            "{\"schema_version\":1,\"schema_version\":1,",
+            "{\"unknown\":0,",
+            "{\"schema_version\":1,\"bindings\":{\"invalid\":",
+        ] {
+            let mut bytes = prefix.as_bytes().to_vec();
+            bytes.resize(MAX_BINDING_HISTORY_BYTES as usize + 1, b' ');
+            bytes.extend_from_slice(b"\"bindings\":{}}");
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                load_binding_history(home.root()).unwrap_err().code,
+                "LEGACY_STATE_UNSUPPORTED",
+                "{prefix}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        let mut valid_prefix = b"{\"schema_version\":1,".to_vec();
+        valid_prefix.resize(MAX_BINDING_HISTORY_BYTES as usize + 1, b' ');
+        valid_prefix.extend_from_slice(b"\"bindings\":{}}");
+        fs::write(&path, &valid_prefix).unwrap();
+        assert_eq!(
+            load_binding_history(home.root()).unwrap_err().code,
+            "STORAGE_CAPACITY_EXCEEDED"
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
     fn persisted_file_limits_accept_the_boundary_and_reject_without_mutation() {
         for (name, maximum) in [
             ("state.json", MAX_HOME_STATE_BYTES),
@@ -1250,6 +1710,8 @@ mod tests {
                             load_registry_for_removal(home.root()).unwrap_err().code,
                             "PROFILE_CONFIG_INVALID"
                         );
+                    } else if name == "profile-bindings.json" {
+                        assert_eq!(error.code, "STORAGE_CAPACITY_EXCEEDED");
                     } else {
                         assert_eq!(error.code, "LEGACY_STATE_UNSUPPORTED");
                         assert_eq!(error.details["classification"], "malformed_marker");

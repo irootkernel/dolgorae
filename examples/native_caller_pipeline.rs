@@ -477,7 +477,18 @@ mod tests {
         fs::create_dir(home.root().join("profiles")).unwrap();
         assert!(!no_profile_prepared(&home).unwrap());
         fs::remove_dir(home.root().join("profiles")).unwrap();
-        fs::write(&history, br#"{"schema_version":1,"bindings":{"binding":{"selected_name":"fixture-a","definition_sha256":"digest","server_key":"key","launch_snapshot_sha256":"snapshot"}}}"#).unwrap();
+        let key = "a".repeat(64);
+        fs::write(
+            &history,
+            serde_json::to_vec(&json!({
+                "schema_version":1,"bindings":{format!("fixture-a:{key}"):{
+                    "selected_name":"fixture-a","definition_sha256":"b".repeat(64),
+                    "server_key":key,"launch_snapshot_sha256":"c".repeat(64),
+                }},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         assert!(!no_profile_prepared(&home).unwrap());
         fs::write(
             &history,

@@ -3237,3 +3237,16 @@ removal and sync, including its integrity-failure escape. This bounded admission
 exception introduces no upward blocking lock or external effect. Selection and
 reserve behavior are owned by the
 [v0.1.4 Ledger Capacity and Maintenance Runtime](../specs/dolgorae-v014-ledger-maintenance.md).
+
+Profile maintenance holds the initialized home-root lock, closes membership and
+binding admission with one retained global owner, and serializes journal
+selection under each Profile Server lock. Its workspace admission lease is
+nonblocking. A membership checkpoint retains latest member facts, absolute
+revision and chain head; immutable historical segments remain in the original
+byte-digest calculation. The selected append continues that head. Selection,
+activation and progress retain the original operation through interruption.
+Binding compaction archives the original bytes before atomic replacement.
+Successful Run and session Close receipts remain authoritative when membership
+cleanup fails; existing recovery projections report the independent obligation.
+The [Profile maintenance contract](../specs/dolgorae-v014-profile-maintenance.md)
+owns these bounds and recovery semantics.

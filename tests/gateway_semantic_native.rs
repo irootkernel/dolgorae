@@ -48,6 +48,18 @@ fn assert_lookup_machine_schema(envelope: &Value) {
     );
 }
 
+fn assert_profile_sidecars(home: &std::path::Path) {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output = Command::new(repository.join(".venv/bin/python"))
+        .args(["-B", "-c", "import json,pathlib,sys; sys.path.insert(0,str(pathlib.Path(sys.argv[1])/'tests/e2e')); from schema_support import validator,assert_valid; v=validator(pathlib.Path(sys.argv[1])/'docs/protocol','dolgorae-native-profile-maintenance-v1.schema.json'); found=[]; schemas=('dolgorae.membership-manifest/v1','dolgorae.membership-checkpoint/v1','dolgorae.membership-maintenance/v1','dolgorae.native-profile-maintenance-operation/v1','dolgorae.native-profile-maintenance-owner/v1','dolgorae.native-profile-maintenance-selection/v1'); files=pathlib.Path(sys.argv[2]).rglob('*.json'); [(assert_valid(j,v,str(p)),found.append(j['schema'])) for p in files if (j:=json.loads(p.read_text())).get('schema') in schemas]; assert found"])
+        .arg(repository).arg(home).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 struct PublicResultAdapter;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1328,6 +1340,13 @@ async fn root_close_persists_one_operation_and_survives_gateway_restart() {
         fs::read(run_root.join("audit.jsonl")).unwrap(),
         audit_before
     );
+    use std::os::unix::fs::PermissionsExt as _;
+    let membership = fixture
+        .home
+        .join(".dolgorae/profiles")
+        .join(&fixture.server_key)
+        .join("members.json");
+    fs::set_permissions(&membership, fs::Permissions::from_mode(0o644)).unwrap();
     let close_request = pb::CloseRunRequest {
         context: context(),
         run: Some(run.clone()),
@@ -1369,8 +1388,48 @@ async fn root_close_persists_one_operation_and_survives_gateway_restart() {
     assert_eq!(closed_run.lifecycle, pb::RunLifecycle::Closed as i32);
 
     let mut orchestration =
-        pb::orchestration_service_client::OrchestrationServiceClient::new(channel);
-    let observed = orchestration
+        pb::orchestration_service_client::OrchestrationServiceClient::new(channel.clone());
+    let mut observed = orchestration
+        .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
+            context: context(),
+            root_run: Some(run.clone()),
+            controller: Some(controller.clone()),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .session
+        .unwrap();
+    assert_eq!(
+        observed.close_progress,
+        pb::SessionCloseProgress::RecoveryRequired as i32
+    );
+    assert_eq!(
+        observed.close_operation_id.as_deref(),
+        Some(operation_id.as_str())
+    );
+    let terminal_audit = fs::read(run_root.join("audit.jsonl")).unwrap();
+    fs::set_permissions(&membership, fs::Permissions::from_mode(0o600)).unwrap();
+    let cleanup = runs
+        .close_run(pb::CloseRunRequest {
+            context: context(),
+            run: Some(run.clone()),
+            controller: Some(controller.clone()),
+            interrupt: false,
+            expected_state_revision: closed_run.state_revision,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        cleanup.context.unwrap().operation_id.as_deref(),
+        Some(operation_id.as_str())
+    );
+    assert_eq!(
+        fs::read(run_root.join("audit.jsonl")).unwrap(),
+        terminal_audit
+    );
+    observed = orchestration
         .get_orchestrated_session(pb::GetOrchestratedSessionRequest {
             context: context(),
             root_run: Some(run.clone()),
@@ -3061,6 +3120,858 @@ async fn profile_interrupt_preserves_a_closed_members_terminal_seal() {
         membership.load().unwrap().members[&key].disposition,
         MembershipDisposition::Released
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_close_retains_completed_receipt_during_membership_cleanup() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new("run_start_model_list.json");
+    let id = fixture.start_run(&[]);
+    let index = fixture
+        .home
+        .join(".dolgorae/profiles")
+        .join(&fixture.server_key)
+        .join("members.json");
+    let mut gateway = fixture.start_gateway();
+    let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let initial = native_snapshot(&mut runs, &fixture, &id).await;
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o644)).unwrap();
+    let close = |revision| pb::CloseRunRequest {
+        context: context(),
+        run: fixture.run_ref(&id),
+        controller: fixture.carrier(),
+        interrupt: false,
+        expected_state_revision: revision,
+    };
+    let completed = runs
+        .close_run(close(initial.state_revision))
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    assert_eq!(completed.lifecycle, pb::RunLifecycle::Closed as i32);
+    assert_eq!(
+        completed.recovery.as_ref().unwrap().state,
+        pb::RecoveryState::Required as i32
+    );
+    assert_eq!(
+        completed.recovery.as_ref().unwrap().required_action,
+        pb::RecoveryAction::OperatorRepair as i32
+    );
+    assert_eq!(
+        completed.recovery.as_ref().unwrap().blocker_code.as_deref(),
+        Some("profile_membership_cleanup_required")
+    );
+    let sealed = audit(&fixture, &id);
+    let observed = native_snapshot(&mut runs, &fixture, &id).await;
+    assert_eq!(observed.state_revision, completed.state_revision);
+    assert_eq!(observed.event_cursor, completed.event_cursor);
+    assert_eq!(observed.recovery, completed.recovery);
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o600)).unwrap();
+    let released = runs
+        .close_run(close(observed.state_revision))
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    assert_eq!(released.lifecycle, pb::RunLifecycle::Closed as i32);
+    assert_eq!(released.state_revision, completed.state_revision);
+    assert_eq!(released.event_cursor, completed.event_cursor);
+    assert_eq!(
+        released.recovery.as_ref().unwrap().state,
+        pb::RecoveryState::NotRequired as i32
+    );
+    assert_eq!(audit(&fixture, &id), sealed);
+    gateway.terminate();
+}
+
+#[test]
+fn failed_membership_release_preserves_close_and_retries_only_cleanup() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = Fixture::new("run_start_model_list.json");
+    let id = fixture.start_run(&[]);
+    let membership_root = fixture
+        .home
+        .join(".dolgorae/profiles")
+        .join(&fixture.server_key);
+    let index = membership_root.join("members.json");
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o644)).unwrap();
+    let close = [
+        "run",
+        "--controller-file",
+        fixture.controller.to_str().unwrap(),
+        "close",
+        &id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+    ];
+    let closed = fixture.cli(&close);
+    assert_eq!(closed["state"], "closed");
+    assert_eq!(closed["recovery"]["status"], "recovery_required");
+    assert_eq!(
+        closed["recovery"]["reason"],
+        "profile_membership_cleanup_required"
+    );
+    let sealed = audit(&fixture, &id);
+    let cursor = closed["event_cursor"].clone();
+    let status = fixture.cli(&[
+        "run",
+        "status",
+        &id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+    ]);
+    assert_eq!(status["state"], "closed");
+    assert_eq!(
+        status["recovery"]["reason"],
+        "profile_membership_cleanup_required"
+    );
+    assert_eq!(status["event_cursor"], cursor);
+    assert_eq!(audit(&fixture, &id), sealed);
+    let still_pending = fixture.cli(&close);
+    assert_eq!(still_pending["state"], "closed");
+    assert_eq!(still_pending["event_cursor"], cursor);
+    assert_eq!(audit(&fixture, &id), sealed);
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o600)).unwrap();
+    let completed = fixture.cli(&close);
+    assert_eq!(completed["state"], "closed");
+    assert_eq!(completed["recovery"]["status"], "closed");
+    assert_eq!(completed["recovery"]["reason"], Value::Null);
+    assert_eq!(completed["event_cursor"], cursor);
+    assert_eq!(audit(&fixture, &id), sealed);
+    let membership: Value = serde_json::from_slice(&fs::read(index).unwrap()).unwrap();
+    let key = format!("{}:{id}", fixture.workspace_id);
+    assert_eq!(membership["members"][&key]["disposition"], "released");
+    assert_eq!(fixture.cli(&close)["event_cursor"], cursor);
+    let profiles = fixture.home.join(".dolgorae/profiles");
+    let backup = fixture.root.join("safe-profile-parent");
+    for corruption in ["mode", "symlink"] {
+        if corruption == "mode" {
+            fs::set_permissions(&profiles, fs::Permissions::from_mode(0o755)).unwrap();
+        } else {
+            fs::rename(&profiles, &backup).unwrap();
+            std::os::unix::fs::symlink(&backup, &profiles).unwrap();
+        }
+        let closed = fixture.cli(&close);
+        assert_eq!(closed["state"], "closed");
+        assert_eq!(
+            closed["recovery"]["reason"],
+            "profile_membership_cleanup_required"
+        );
+        assert_eq!(closed["event_cursor"], cursor);
+        let status = fixture.cli(&[
+            "run",
+            "status",
+            &id,
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ]);
+        assert_eq!(
+            status["recovery"]["reason"],
+            "profile_membership_cleanup_required"
+        );
+        assert_eq!(audit(&fixture, &id), sealed);
+        if corruption == "mode" {
+            fs::set_permissions(&profiles, fs::Permissions::from_mode(0o700)).unwrap();
+        } else {
+            fs::remove_file(&profiles).unwrap();
+            fs::rename(&backup, &profiles).unwrap();
+        }
+        let restored = fixture.cli(&close);
+        assert_eq!(restored["recovery"]["status"], "closed");
+        assert_eq!(restored["event_cursor"], cursor);
+    }
+    assert_eq!(audit(&fixture, &id), sealed);
+}
+
+fn caller_fixture_manifest(original: &[u8]) -> dolgorae::run::RunManifest {
+    use dolgorae::domain::{Access, CallerWorkspaceAccess, ExecutionLane};
+    use dolgorae::instructions::{InstructionSnapshot, RoleCapture, SourceCapture};
+    use dolgorae::run::{CallerAgentConfigurationSnapshot, RunManifest};
+    let mut manifest: RunManifest = serde_json::from_slice(original).unwrap();
+    let common = "Follow the captured common guidance.\n".to_owned();
+    let role = "Implement the assigned task.\n".to_owned();
+    let instructions = InstructionSnapshot::compose(
+        SourceCapture {
+            byte_length: common.len() as u64,
+            sha256: dolgorae::jcs::sha256_hex(common.as_bytes()),
+            body: common,
+        },
+        RoleCapture {
+            name: "general".to_owned(),
+            byte_length: role.len() as u64,
+            sha256: dolgorae::jcs::sha256_hex(role.as_bytes()),
+            body: role,
+        },
+    )
+    .unwrap();
+    manifest.schema_version = 3;
+    manifest.initial_access = Access::Read;
+    manifest.requested_access = Some(CallerWorkspaceAccess::ReadOnly);
+    manifest.selected_role = Some("general".to_owned());
+    manifest.start_contract = Some("caller_workspace/v1".to_owned());
+    manifest.agent_configuration = CallerAgentConfigurationSnapshot {
+        schema_version: 3,
+        selected_profile: manifest.profile.profile_name.clone(),
+        global_profile_binding_sha256: manifest
+            .global_profile_binding
+            .as_ref()
+            .unwrap()
+            .digest()
+            .unwrap(),
+        model: manifest.model.clone(),
+        default_effort: manifest.default_reasoning_effort.clone(),
+        purpose: manifest.purpose.clone(),
+        required_capabilities: manifest.required_capabilities.clone(),
+        role_reference: None,
+        instructions: instructions.clone(),
+        execution_lane: ExecutionLane::Dedicated,
+        required_assurance: manifest.requested_assurance,
+        native_subagent_policy: "enabled".to_owned(),
+    }
+    .try_into()
+    .unwrap();
+    manifest.instructions = instructions.into();
+    manifest
+}
+
+#[test]
+fn caller_close_cleanup_retains_terminal_history_and_checked_recovery() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new("run_start_model_list.json");
+    let id = fixture.start_run(&["--execution-lane", "dedicated"]);
+    fixture.cli(&[
+        "run",
+        "close",
+        &id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--controller-file",
+        fixture.controller.to_str().unwrap(),
+    ]);
+    let terminal = audit(&fixture, &id);
+    let path = fixture
+        .state_root
+        .join("runs")
+        .join(&id)
+        .join("manifest.json");
+    let original = fs::read(&path).unwrap();
+    // Adopt a checked caller manifest in an already terminal isolated fixture;
+    // this tests the frozen reporting boundary, not caller runtime startup.
+    let manifest = caller_fixture_manifest(&original);
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    let membership = fixture
+        .home
+        .join(".dolgorae/profiles")
+        .join(&fixture.server_key)
+        .join("members.json");
+    fs::set_permissions(&membership, fs::Permissions::from_mode(0o644)).unwrap();
+    for verb in ["status", "close"] {
+        let mut args = vec![
+            "run",
+            verb,
+            &id,
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ];
+        if verb == "close" {
+            args.extend(["--controller-file", fixture.controller.to_str().unwrap()]);
+        }
+        let output = fixture.command(&args);
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{envelope}");
+        assert_eq!(envelope["schema_version"], 4);
+        assert_eq!(envelope["error"]["code"], "RECOVERY_REQUIRED");
+        assert_eq!(envelope["error"]["details"]["run_id"], id);
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Close is durably complete")
+        );
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut validator = Command::new(repository.join(".venv/bin/python"))
+            .args(["-B", "-c", "import json,pathlib,sys; sys.path.insert(0,str(pathlib.Path(sys.argv[1])/'tests/e2e')); from schema_support import validator,assert_valid; assert_valid(json.load(sys.stdin),validator(pathlib.Path(sys.argv[1])/'docs/protocol','dolgorae-machine-v4.schema.json'),'caller cleanup')"])
+            .arg(repository).stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        validator
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&envelope).unwrap())
+            .unwrap();
+        let checked = validator.wait_with_output().unwrap();
+        assert!(
+            checked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        assert_eq!(audit(&fixture, &id), terminal);
+    }
+    fs::set_permissions(&membership, fs::Permissions::from_mode(0o600)).unwrap();
+    let closed = fixture.cli(&[
+        "run",
+        "close",
+        &id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--controller-file",
+        fixture.controller.to_str().unwrap(),
+    ]);
+    assert_eq!(closed["run_id"], id);
+    assert_eq!(audit(&fixture, &id), terminal);
+    fs::write(path, original).unwrap();
+}
+
+#[test]
+fn native_profile_compaction_retains_original_scope_and_history() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new("run_start_model_list.json");
+    let id = fixture.start_run(&[]);
+    fixture.cli(&[
+        "run",
+        "--controller-file",
+        fixture.controller.to_str().unwrap(),
+        "close",
+        &id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+    ]);
+    let sealed = audit(&fixture, &id);
+    let profile_root = fixture
+        .home
+        .join(".dolgorae/profiles")
+        .join(&fixture.server_key);
+    let original_journal = fs::read(profile_root.join("membership.jsonl")).unwrap();
+    let original_index = fs::read(profile_root.join("members.json")).unwrap();
+    let checked = |args: &[&str]| {
+        let output = fixture.command(args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_lookup_machine_schema(&envelope);
+        envelope["data"].clone()
+    };
+    let plan = checked(&[
+        "maintenance",
+        "plan",
+        "--kind",
+        "membership_compaction",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+        "--selected-generation",
+        "1",
+    ])["plan"]
+        .clone();
+    assert_eq!(plan["kind"], "membership_compaction");
+    assert_eq!(plan["active_writers"], 0);
+    assert_eq!(plan["unknown_workload"], 0);
+    let path = fixture.root.join("profile-plan.json");
+    fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let args = [
+        "maintenance",
+        "apply",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+        "--plan-file",
+        path.to_str().unwrap(),
+        "--approve",
+    ];
+    let first = checked(&args);
+    assert_eq!(first["maintenance"]["state"], "completed");
+    assert_eq!(first["maintenance"]["operation_ref"], plan["plan_ref"]);
+    assert_eq!(checked(&args), first);
+    let lookup = checked(&[
+        "maintenance",
+        "get",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+        "--plan-id",
+        plan["plan_ref"].as_str().unwrap(),
+        "--selected-generation",
+        "1",
+    ]);
+    assert_eq!(lookup["maintenance"], first["maintenance"]);
+    assert_eq!(
+        fs::read(profile_root.join("membership.jsonl")).unwrap(),
+        original_journal
+    );
+    assert_eq!(
+        fs::read(profile_root.join("members.json")).unwrap(),
+        original_index
+    );
+    assert_eq!(audit(&fixture, &id), sealed);
+    assert!(profile_root.join("membership-selection.json").is_file());
+    let ledger_plan = checked(&[
+        "maintenance",
+        "plan",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+        "--selected-generation",
+        "1",
+    ])["plan"]
+        .clone();
+    let ledger_path = fixture.root.join("ledger-after-profile.json");
+    fs::write(&ledger_path, serde_json::to_vec(&ledger_plan).unwrap()).unwrap();
+    fs::set_permissions(&ledger_path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        checked(&[
+            "maintenance",
+            "apply",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--operator-file",
+            fixture.operator.to_str().unwrap(),
+            "--plan-file",
+            ledger_path.to_str().unwrap(),
+            "--approve"
+        ])["maintenance"]["state"],
+        "completed"
+    );
+    assert_eq!(
+        checked(&[
+            "maintenance",
+            "get",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--operator-file",
+            fixture.operator.to_str().unwrap(),
+            "--plan-id",
+            plan["plan_ref"].as_str().unwrap(),
+            "--selected-generation",
+            "1"
+        ])["maintenance"],
+        first["maintenance"]
+    );
+    let successor = checked(&[
+        "maintenance",
+        "plan",
+        "--kind",
+        "membership_compaction",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+        "--selected-generation",
+        "2",
+    ])["plan"]
+        .clone();
+    let successor_path = fixture.root.join("successor-profile-plan.json");
+    fs::write(&successor_path, serde_json::to_vec(&successor).unwrap()).unwrap();
+    fs::set_permissions(&successor_path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        checked(&[
+            "maintenance",
+            "apply",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--operator-file",
+            fixture.operator.to_str().unwrap(),
+            "--plan-file",
+            successor_path.to_str().unwrap(),
+            "--approve",
+        ])["maintenance"]["state"],
+        "completed"
+    );
+    assert_eq!(
+        checked(&[
+            "maintenance",
+            "get",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--operator-file",
+            fixture.operator.to_str().unwrap(),
+            "--plan-id",
+            plan["plan_ref"].as_str().unwrap(),
+            "--selected-generation",
+            "1",
+        ])["maintenance"],
+        first["maintenance"]
+    );
+    assert_eq!(audit(&fixture, &id), sealed);
+}
+
+#[test]
+fn native_profile_compaction_resumes_each_owned_crash_boundary() {
+    use dolgorae::controller::{CredentialCarrier, OperatorStore};
+    use dolgorae::global_profile::BindingMaintenanceBarrier as B;
+    use dolgorae::global_runtime::MembershipSwitchBarrier as M;
+    use dolgorae::maintenance::{ProfileMaintenanceBarrier as P, apply_profile_with_barrier};
+    use dolgorae::paths::DolgoraeHome;
+    use std::os::unix::fs::PermissionsExt as _;
+    for fault in [
+        P::OwnerSynced,
+        P::ProgressStarted,
+        P::Membership(M::PendingSynced),
+        P::Membership(M::CheckpointSynced),
+        P::Membership(M::AppendSynced),
+        P::Membership(M::ManifestSynced),
+        P::Membership(M::DirectorySynced),
+        P::Membership(M::SelectionReplaced),
+        P::Membership(M::SelectionSynced),
+        P::Membership(M::ActivationSynced),
+        P::MemberProgressSynced,
+        P::Binding(B::SourceSynced),
+        P::Binding(B::SourceDirectorySynced),
+        P::Binding(B::TargetSynced),
+        P::Binding(B::SelectionReplaced),
+        P::Binding(B::SelectionSynced),
+        P::BindingProgressSynced,
+        P::WorkspaceSelected,
+        P::Completed,
+    ] {
+        let mut fixture = Fixture::new("run_start_model_list.json");
+        let id = fixture.start_run(&[]);
+        fixture.cli(&[
+            "run",
+            "--controller-file",
+            fixture.controller.to_str().unwrap(),
+            "close",
+            &id,
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ]);
+        let sealed = audit(&fixture, &id);
+        let plan = fixture.cli(&[
+            "maintenance",
+            "plan",
+            "--kind",
+            "membership_compaction",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--operator-file",
+            fixture.operator.to_str().unwrap(),
+            "--selected-generation",
+            "1",
+        ])["plan"]
+            .clone();
+        let path = fixture.root.join("profile-plan.json");
+        fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let home = DolgoraeHome::from_canonical_home(fixture.home.clone()).unwrap();
+        let carrier = CredentialCarrier::open_path(&fixture.operator).unwrap();
+        {
+            let operator = OperatorStore::new(fixture.home.join(".dolgorae/operator"))
+                .authorize(&carrier)
+                .unwrap();
+            let failure = apply_profile_with_barrier(
+                &fixture.state_root,
+                &fixture.workspace_id,
+                &home,
+                &path,
+                &operator,
+                &mut |point| {
+                    if point == fault {
+                        Err(MachineError::new(
+                            "RECOVERY_REQUIRED",
+                            "injected Profile crash",
+                            false,
+                            serde_json::json!({}),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+            assert_eq!(failure.code, "RECOVERY_REQUIRED");
+            assert_eq!(failure.details["operation_ref"], plan["plan_ref"]);
+            assert_eq!(failure.details["effect"], "unresolved");
+        }
+        let mut credential = fixture.operator.clone();
+        if fault == P::OwnerSynced {
+            credential = fixture.root.join("rotated-operator.json");
+            OperatorStore::new(fixture.home.join(".dolgorae/operator"))
+                .rotate(&carrier, &credential)
+                .unwrap();
+            fixture.operator = credential.clone();
+        }
+        let get_args = [
+            "maintenance",
+            "get",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--operator-file",
+            credential.to_str().unwrap(),
+            "--selected-generation",
+            "1",
+            "--plan-id",
+            plan["plan_ref"].as_str().unwrap(),
+        ];
+        let interrupted = fixture.cli(&get_args);
+        assert_eq!(
+            interrupted["maintenance"]["operation_ref"],
+            plan["plan_ref"]
+        );
+        assert_eq!(
+            interrupted["maintenance"]["required_action"],
+            "resume_maintenance"
+        );
+        assert_eq!(
+            interrupted["maintenance"]["state"],
+            if fault == P::Completed {
+                "completed"
+            } else {
+                "recovery_needed"
+            }
+        );
+        let assert_damaged = || {
+            for command in ["apply", "get"] {
+                let mut args = vec![
+                    "maintenance",
+                    command,
+                    "--workspace",
+                    fixture.workspace.to_str().unwrap(),
+                    "--operator-file",
+                    credential.to_str().unwrap(),
+                ];
+                if command == "apply" {
+                    args.extend(["--plan-file", path.to_str().unwrap(), "--approve"]);
+                } else {
+                    args.extend([
+                        "--plan-id",
+                        plan["plan_ref"].as_str().unwrap(),
+                        "--selected-generation",
+                        "1",
+                    ]);
+                }
+                let output = fixture.command(&args);
+                assert!(
+                    !output.status.success(),
+                    "{command} accepted damaged owned state at {fault:?}"
+                );
+                let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_lookup_machine_schema(&envelope);
+                assert!(
+                    matches!(
+                        envelope["error"]["code"].as_str().unwrap(),
+                        "LOOKUP_NAMESPACE_CORRUPT" | "LOOKUP_NAMESPACE_UNAVAILABLE"
+                    ),
+                    "{envelope}"
+                );
+                assert_eq!(envelope["error"]["operation_ref"], plan["plan_ref"]);
+                assert_eq!(envelope["error"]["effect"], "unresolved");
+                assert_eq!(envelope["error"]["required_action"], "restore_state");
+                assert_eq!(audit(&fixture, &id), sealed);
+                assert!(
+                    fixture
+                        .home
+                        .join(".dolgorae/profile-maintenance-active.json")
+                        .exists()
+                );
+            }
+        };
+        if matches!(fault, P::MemberProgressSynced | P::Completed) {
+            let profile = fixture
+                .home
+                .join(".dolgorae/profiles")
+                .join(&fixture.server_key);
+            let generation = profile
+                .join("membership-generations")
+                .join(plan["plan_ref"].as_str().unwrap());
+            for damaged in [
+                profile.join("membership-selection.json"),
+                generation.join("manifest.json"),
+                generation.join("append.jsonl"),
+                profile.join("members.json"),
+                profile.join("state.json"),
+            ] {
+                let original = fs::read(&damaged).unwrap();
+                fs::write(&damaged, b"damaged selected membership\n").unwrap();
+                assert_damaged();
+                fs::write(&damaged, &original).unwrap();
+                if damaged == profile.join("membership-selection.json") {
+                    fs::remove_file(&damaged).unwrap();
+                    assert_damaged();
+                    fs::write(&damaged, &original).unwrap();
+                    fs::set_permissions(&damaged, fs::Permissions::from_mode(0o600)).unwrap();
+                }
+            }
+        }
+        if fault == P::MemberProgressSynced {
+            let profiles = fixture.home.join(".dolgorae/profiles");
+            let backup = fixture.root.join("safe-profile-parent");
+            for corruption in ["mode", "symlink"] {
+                if corruption == "mode" {
+                    fs::set_permissions(&profiles, fs::Permissions::from_mode(0o755)).unwrap();
+                } else {
+                    fs::rename(&profiles, &backup).unwrap();
+                    std::os::unix::fs::symlink(&backup, &profiles).unwrap();
+                }
+                assert_damaged();
+                let output = fixture.command(&[
+                    "maintenance",
+                    "plan",
+                    "--kind",
+                    "membership_compaction",
+                    "--workspace",
+                    fixture.workspace.to_str().unwrap(),
+                    "--operator-file",
+                    credential.to_str().unwrap(),
+                    "--selected-generation",
+                    "1",
+                ]);
+                assert!(!output.status.success());
+                assert_eq!(audit(&fixture, &id), sealed);
+                if corruption == "mode" {
+                    fs::set_permissions(&profiles, fs::Permissions::from_mode(0o700)).unwrap();
+                } else {
+                    fs::remove_file(&profiles).unwrap();
+                    fs::rename(&backup, &profiles).unwrap();
+                }
+            }
+        }
+        if fault == P::OwnerSynced {
+            let owner_path = fixture.state_root.join("profile-maintenance").join(format!(
+                "{}.profile.owner.json",
+                plan["plan_ref"].as_str().unwrap()
+            ));
+            let retained = fs::read(&owner_path).unwrap();
+            fs::remove_file(&owner_path).unwrap();
+            assert_damaged();
+            assert!(fs::symlink_metadata(&owner_path).is_err());
+            fs::write(&owner_path, retained).unwrap();
+            fs::set_permissions(&owner_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        if fault == P::ProgressStarted {
+            let namespace = fixture.state_root.join("profile-maintenance");
+            let backup = fixture.root.join("retained-profile-namespace");
+            fs::rename(&namespace, &backup).unwrap();
+            for corruption in ["missing", "mode", "file", "symlink"] {
+                match corruption {
+                    "missing" => {}
+                    "mode" => {
+                        fs::create_dir(&namespace).unwrap();
+                        fs::set_permissions(&namespace, fs::Permissions::from_mode(0o755)).unwrap();
+                    }
+                    "file" => {
+                        fs::write(&namespace, b"damaged namespace").unwrap();
+                    }
+                    "symlink" => {
+                        std::os::unix::fs::symlink(&backup, &namespace).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                assert_damaged();
+                match corruption {
+                    "missing" => assert!(fs::symlink_metadata(&namespace).is_err()),
+                    "mode" => fs::remove_dir(&namespace).unwrap(),
+                    _ => fs::remove_file(&namespace).unwrap(),
+                }
+            }
+            fs::rename(backup, namespace).unwrap();
+        }
+        if matches!(fault, P::BindingProgressSynced | P::Completed) {
+            let binding = fixture.home.join(".dolgorae/profile-bindings.json");
+            let original = fs::read(&binding).unwrap();
+            let mut changed: Value = serde_json::from_slice(&original).unwrap();
+            let record = changed["bindings"]
+                .as_object_mut()
+                .unwrap()
+                .values_mut()
+                .next()
+                .unwrap();
+            record["definition_sha256"] = serde_json::json!("a".repeat(64));
+            fs::write(&binding, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert_damaged();
+            fs::write(&binding, original).unwrap();
+        }
+        assert_profile_sidecars(&fixture.home.join(".dolgorae"));
+        if fault == P::ProgressStarted {
+            let retained = fixture.state_root.join("profile-maintenance").join(format!(
+                "{}.profile.json",
+                plan["plan_ref"].as_str().unwrap()
+            ));
+            let original = fs::read(&retained).unwrap();
+            let mut malformed: Value = serde_json::from_slice(&original).unwrap();
+            malformed["selected_manifest_digest"] =
+                serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+            let mut false_progress: Value = serde_json::from_slice(&original).unwrap();
+            false_progress["completed_profiles"] = serde_json::json!([fixture.server_key.clone()]);
+            for malformed in [malformed, false_progress] {
+                fs::write(&retained, serde_json::to_vec(&malformed).unwrap()).unwrap();
+                for command in ["apply", "get"] {
+                    let mut args = vec![
+                        "maintenance",
+                        command,
+                        "--workspace",
+                        fixture.workspace.to_str().unwrap(),
+                        "--operator-file",
+                        fixture.operator.to_str().unwrap(),
+                    ];
+                    if command == "apply" {
+                        args.extend(["--plan-file", path.to_str().unwrap(), "--approve"]);
+                    } else {
+                        args.extend([
+                            "--plan-id",
+                            plan["plan_ref"].as_str().unwrap(),
+                            "--selected-generation",
+                            "1",
+                        ]);
+                    }
+                    let output = fixture.command(&args);
+                    assert!(!output.status.success());
+                    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+                    assert_lookup_machine_schema(&envelope);
+                    assert_eq!(envelope["error"]["code"], "LOOKUP_NAMESPACE_CORRUPT");
+                    assert_eq!(envelope["error"]["operation_ref"], plan["plan_ref"]);
+                    assert_eq!(envelope["error"]["effect"], "unresolved");
+                    assert_eq!(envelope["error"]["required_action"], "restore_state");
+                    assert_eq!(audit(&fixture, &id), sealed);
+                }
+            }
+            fs::write(retained, original).unwrap();
+        }
+        let first = fixture.cli(&[
+            "maintenance",
+            "apply",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--operator-file",
+            credential.to_str().unwrap(),
+            "--plan-file",
+            path.to_str().unwrap(),
+            "--approve",
+        ]);
+        assert_eq!(first["maintenance"]["state"], "completed");
+        assert_eq!(first["maintenance"]["operation_ref"], plan["plan_ref"]);
+        let get = fixture.cli(&[
+            "maintenance",
+            "get",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--operator-file",
+            credential.to_str().unwrap(),
+            "--selected-generation",
+            "1",
+            "--plan-id",
+            plan["plan_ref"].as_str().unwrap(),
+        ]);
+        assert_eq!(get["maintenance"], first["maintenance"]);
+        assert_eq!(audit(&fixture, &id), sealed);
+        assert_profile_sidecars(&fixture.home.join(".dolgorae"));
+        assert!(
+            !fixture
+                .home
+                .join(".dolgorae/profile-maintenance-active.json")
+                .exists()
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4831,10 +5742,6 @@ async fn native_close_and_pause_interrupt() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_gateway_rejects_caller_manifest_before_effects() {
-    use dolgorae::domain::{Access, CallerWorkspaceAccess, ExecutionLane};
-    use dolgorae::instructions::{InstructionSnapshot, RoleCapture, SourceCapture};
-    use dolgorae::run::{CallerAgentConfigurationSnapshot, RunManifest};
-
     let fixture = Fixture::new("run_start_model_list.json");
     let list_args = [
         "run",
@@ -4856,50 +5763,7 @@ async fn legacy_gateway_rejects_caller_manifest_before_effects() {
     let root = fixture.state_root.join("runs").join(&id);
     let path = root.join("manifest.json");
     let original = fs::read(&path).unwrap();
-    let mut manifest: RunManifest = serde_json::from_slice(&original).unwrap();
-    let common = "Follow the captured common guidance.\n".to_owned();
-    let role = "Implement the assigned task.\n".to_owned();
-    let instructions = InstructionSnapshot::compose(
-        SourceCapture {
-            byte_length: common.len() as u64,
-            sha256: dolgorae::jcs::sha256_hex(common.as_bytes()),
-            body: common,
-        },
-        RoleCapture {
-            name: "general".to_owned(),
-            byte_length: role.len() as u64,
-            sha256: dolgorae::jcs::sha256_hex(role.as_bytes()),
-            body: role,
-        },
-    )
-    .unwrap();
-    manifest.schema_version = 3;
-    manifest.initial_access = Access::Read;
-    manifest.requested_access = Some(CallerWorkspaceAccess::ReadOnly);
-    manifest.selected_role = Some("general".to_owned());
-    manifest.start_contract = Some("caller_workspace/v1".to_owned());
-    manifest.agent_configuration = CallerAgentConfigurationSnapshot {
-        schema_version: 3,
-        selected_profile: manifest.profile.profile_name.clone(),
-        global_profile_binding_sha256: manifest
-            .global_profile_binding
-            .as_ref()
-            .unwrap()
-            .digest()
-            .unwrap(),
-        model: manifest.model.clone(),
-        default_effort: manifest.default_reasoning_effort.clone(),
-        purpose: manifest.purpose.clone(),
-        required_capabilities: manifest.required_capabilities.clone(),
-        role_reference: None,
-        instructions: instructions.clone(),
-        execution_lane: ExecutionLane::Dedicated,
-        required_assurance: manifest.requested_assurance,
-        native_subagent_policy: "enabled".to_owned(),
-    }
-    .try_into()
-    .unwrap();
-    manifest.instructions = instructions.into();
+    let manifest = caller_fixture_manifest(&original);
     fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     let snapshot = dolgorae::snapshot::RunSnapshot::load(
         &fixture.state_root,

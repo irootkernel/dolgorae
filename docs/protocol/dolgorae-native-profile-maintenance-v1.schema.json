@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/native-profile-maintenance/v1",
+  "title": "Native retained Profile maintenance sidecars",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/manifest"
+    },
+    {
+      "$ref": "#/$defs/checkpoint"
+    },
+    {
+      "$ref": "#/$defs/pending"
+    },
+    {
+      "$ref": "#/$defs/operation"
+    },
+    {
+      "$ref": "#/$defs/owner"
+    },
+    {
+      "$ref": "#/$defs/selection"
+    }
+  ],
+  "$defs": {
+    "profile_basis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "server_key",
+        "generation",
+        "journal_sha256",
+        "protected_references",
+        "writers",
+        "unknown"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "server_key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "journal_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "protected_references": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "writers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unknown": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "byte_length",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(membership.jsonl|membership-generations/[a-f0-9-]+/append.jsonl)$"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8388608
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "server_key",
+        "generation",
+        "operation_id",
+        "checkpoint_sha256",
+        "history"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.membership-manifest/v1"
+        },
+        "server_key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "operation_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "checkpoint_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "history": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/segment"
+          },
+          "maxItems": 4096
+        }
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "index",
+        "head_sha256"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.membership-checkpoint/v1"
+        },
+        "index": {
+          "$ref": "https://dolgorae.local/schema/profile-membership/v2"
+        },
+        "head_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "pending": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_id",
+        "generation",
+        "journal_sha256"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.membership-maintenance/v1"
+        },
+        "operation_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "journal_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "plan",
+        "operator_id",
+        "operator_generation",
+        "runs",
+        "profiles",
+        "bindings_sha256",
+        "state",
+        "completed_profiles",
+        "bindings_completed",
+        "selected_manifest_digest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-profile-maintenance-operation/v1"
+        },
+        "plan": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/maintenance_plan"
+        },
+        "operator_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "operator_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/native-ledger-maintenance/v1#/$defs/run_basis"
+          },
+          "maxItems": 4096
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/profile_basis"
+          },
+          "maxItems": 4096
+        },
+        "bindings_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "state": {
+          "enum": [
+            "planned",
+            "preparing",
+            "completed"
+          ]
+        },
+        "completed_profiles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "bindings_completed": {
+          "type": "boolean"
+        },
+        "selected_manifest_digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "plan",
+        "operator_id",
+        "operator_generation",
+        "source_sha256"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-profile-maintenance-owner/v1"
+        },
+        "plan": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/maintenance_plan"
+        },
+        "operator_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "operator_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "generation",
+        "operation_ref",
+        "selected_manifest_digest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-profile-maintenance-selection/v1"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "selected_manifest_digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    }
+  }
+}

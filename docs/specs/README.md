@@ -680,6 +680,10 @@ The operator recovery procedure is owned by the operations guide.
 
 Home admission and global registry reads retain their existing limits: 4096
 bytes for the home marker and 1 MiB each for the registry and binding history.
+An otherwise marked binding history that exceeds its storage bound returns
+typed capacity refusal; malformed or unsupported generation data still fails
+the existing generation gate. Operator-approved native Profile maintenance
+retains original binding bytes before compacting the selected representation.
 Readers consume at most the limit plus one byte before rejecting oversized
 input with the existing error classification, without changing stored state.
 
@@ -1043,7 +1047,11 @@ before using or changing membership. An absent journal represents revision zero
 only when no persisted index or server state contradicts it; a missing derived
 index alone does not erase the journal's authority.
 Global membership replay bounds input at its existing 8 MiB ceiling plus one
-overflow byte and retains `PROFILE_MEMBERSHIP_INCOMPLETE` on excess.
+overflow byte. Valid state exceeding that bound reports
+`STORAGE_CAPACITY_EXCEEDED` through the native boundary; frozen machine
+transports project that error as `CAPABILITY_UNSUPPORTED`. Detectable malformed
+or inconsistent state remains `PROFILE_MEMBERSHIP_INCOMPLETE`, including when
+the bounded prefix also exceeds capacity.
 Every record must end with LF. A nonempty journal without a terminal LF is
 incomplete and blocks both reads and appends with
 `PROFILE_MEMBERSHIP_INCOMPLETE`, without changing the journal, derived index,
@@ -5643,3 +5651,4 @@ These references describe Codex behavior. Dolgorae-specific policy in this SOT
 remains authoritative for Dolgorae.
 
 - [v0.1.4 Ledger Capacity and Maintenance Runtime](dolgorae-v014-ledger-maintenance.md) owns TASK-072 native capacity and checkpoint rollover.
+- [v0.1.4 Profile Journal Maintenance and Close Cleanup](dolgorae-v014-profile-maintenance.md) owns TASK-073 retained membership generations, binding compaction and cleanup recovery.

@@ -899,7 +899,9 @@ fn execute(cli: Cli) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            let modern = uses_modern_contract(&cli.command);
+            let modern = uses_modern_contract(&cli.command)
+                || (error.code == "RECOVERY_REQUIRED"
+                    && error.details["reason"] == "profile_membership_cleanup_required");
             render_failure_version(cli.human, command_name, error, modern)
         }
     }

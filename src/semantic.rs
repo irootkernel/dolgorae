@@ -1575,6 +1575,9 @@ fn coordinate_session_close_inner(
         }
     };
     if matches!(close.progress.as_str(), "completed" | "aborted") {
+        // The successful session receipt remains immutable; only its pending
+        // Profile release is retried. Observation retains any cleanup failure.
+        let _ = release_global_run_membership(state_root, &snapshot.manifest, run_id);
         store.complete_session_close(run_id)?;
         return Ok(Some(close.operation_id));
     }
@@ -1737,6 +1740,15 @@ pub(crate) fn observed_close_progress<'a>(
     run_id: Uuid,
     progress: &'a str,
 ) -> &'a str {
+    if matches!(progress, "completed" | "aborted")
+        && RunStore::new(SystemWorkspacePlatform, state_root)
+            .load_manifest(run_id)
+            .is_ok_and(|manifest| {
+                closed_membership_released(state_root, &manifest, run_id).is_err()
+            })
+    {
+        return "recovery_required";
+    }
     if progress == "settling"
         && !crate::worker::lifecycle_owner_active(state_root, workspace_id, run_id)
     {
@@ -6167,6 +6179,62 @@ fn run_control_admitted(
     run_id: Uuid,
     verb: RunVerb,
     carrier: Option<&CredentialCarrier>,
+    prepared: Prepared,
+    write: bool,
+    expected_state_revision: Option<u64>,
+) -> Result<(SemanticResult, Option<ControlResponseV1>), MachineError> {
+    let (mut result, response) = run_control_admitted_inner(
+        view,
+        state_root,
+        run_id,
+        verb,
+        carrier,
+        prepared,
+        write,
+        expected_state_revision,
+    )?;
+    if matches!(verb, RunVerb::Close | RunVerb::Status)
+        && RunStore::new(SystemWorkspacePlatform, state_root)
+            .load_state_projection(run_id)
+            .is_ok_and(|projection| projection.lifecycle == RunLifecycle::Closed)
+        && let SemanticResult::Run(value) = &mut result
+    {
+        let settled = RunStore::new(SystemWorkspacePlatform, state_root)
+            .load_manifest(run_id)
+            .and_then(|manifest| {
+                if verb == RunVerb::Close {
+                    release_global_run_membership(state_root, &manifest, run_id)
+                } else {
+                    closed_membership_released(state_root, &manifest, run_id)
+                }
+            });
+        if settled.is_err() && value.get("state").is_none() {
+            let snapshot = RunSources::load(state_root, run_id, 0)?;
+            return Err(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "Close is durably complete; its retained receipt requires Profile membership cleanup",
+                false,
+                json!({"run_id":run_id,"generation":snapshot.projection.run_generation,
+                    "identity_verdict":projection_identity_verdict(state_root,run_id),
+                    "reason":"profile_membership_cleanup_required"}),
+            ));
+        }
+        if settled.is_err() {
+            value["recovery"]["status"] = json!("recovery_required");
+            value["recovery"]["reason"] = json!("profile_membership_cleanup_required");
+            value["recovery"]["safe_actions"] = json!(["run.status", "run.events", "run.close"]);
+        }
+    }
+    Ok((result, response))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_control_admitted_inner(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    verb: RunVerb,
+    carrier: Option<&CredentialCarrier>,
     mut prepared: Prepared,
     write: bool,
     expected_state_revision: Option<u64>,
@@ -6271,11 +6339,6 @@ fn run_control_admitted(
             expected_state_revision,
         )?
     {
-        if verb == RunVerb::Close {
-            let manifest =
-                RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
-            let _ = release_global_run_membership(&manifest, run_id);
-        }
         return Ok((result, None));
     }
     // A caller Run must durably become a verified Reader before its terminal
@@ -6521,7 +6584,6 @@ fn run_control_admitted(
         ControlResponseV1::Status { lifecycle, .. } => lifecycle == "paused",
         _ => false,
     };
-    let closed = matches!(response, ControlResponseV1::Closed { .. });
     let mut control_socket_epoch = crate::worker::read_runtime_record(&runtime_record, uid)
         .map_or(1, |record| record.control_socket_epoch);
     if lifecycle_stopped {
@@ -6535,15 +6597,6 @@ fn run_control_admitted(
         verb,
         response.clone(),
     )?;
-    if closed {
-        let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
-        // The Run is already durably closed. A concurrently vanished profile
-        // lifetime cannot turn that completed mutation into a retryable close
-        // failure (which would invite replay of an effect that already
-        // happened). A live lifetime still receives the membership release;
-        // an absent/replaced one has no server left for the member to gate.
-        let _ = release_global_run_membership(&manifest, run_id);
-    }
     Ok((value, Some(response)))
 }
 
@@ -6816,7 +6869,7 @@ pub(crate) fn finish_external_run_close(
     {
         release_external_writer(view, state_root, run_id, engagement_id, owner)?;
     }
-    release_global_run_membership(&store.load_manifest(run_id)?, run_id)
+    release_global_run_membership(state_root, &store.load_manifest(run_id)?, run_id)
 }
 
 /// Quiesce one member selected by a durable Profile stop fence, then append
@@ -8609,22 +8662,65 @@ fn ensure_global_run_membership(
     Ok(())
 }
 
-fn release_global_run_membership(manifest: &RunManifest, run_id: Uuid) -> Result<(), MachineError> {
-    let binding = manifest.global_profile_binding.as_ref().ok_or_else(|| {
-        MachineError::new(
-            "LEGACY_STATE_UNSUPPORTED",
-            "legacy Run membership cannot be recovered after the global Profile cutover",
-            false,
-            json!({"run_id": run_id}),
-        )
-    })?;
-    let membership = GlobalMembershipStore::new(
-        &DolgoraeHome::system()?,
-        &binding.selected_name,
-        &binding.server_key,
-    )?;
+fn membership_for_run(
+    state_root: &Path,
+    manifest: &RunManifest,
+) -> Result<GlobalMembershipStore, MachineError> {
+    let workspaces = state_root
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "workspaces"))
+        .ok_or_else(|| internal("Run state does not bind a managed Profile home"))?;
+    let root = workspaces
+        .parent()
+        .ok_or_else(|| internal("Run Profile home is missing"))?;
+    let binding = manifest
+        .global_profile_binding
+        .as_ref()
+        .ok_or_else(|| internal("Run has no retained Profile binding"))?;
+    GlobalMembershipStore::from_root(root, &binding.selected_name, &binding.server_key)
+}
+
+pub(crate) fn profile_cleanup_required(
+    state_root: &Path,
+    snapshot: &crate::snapshot::RunSnapshot,
+) -> bool {
+    snapshot.projection.lifecycle == RunLifecycle::Closed
+        && closed_membership_released(state_root, &snapshot.manifest, snapshot.manifest.run_id)
+            .is_err()
+}
+
+fn closed_membership_released(
+    state_root: &Path,
+    manifest: &RunManifest,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
+    let membership = membership_for_run(state_root, manifest)?;
     if membership
         .load()?
+        .members
+        .get(&format!("{}:{run_id}", manifest.workspace_id))
+        .is_some_and(|member| member.disposition == MembershipDisposition::Released)
+    {
+        Ok(())
+    } else {
+        Err(internal("closed Run membership release requires recovery"))
+    }
+}
+
+fn release_global_run_membership(
+    state_root: &Path,
+    manifest: &RunManifest,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
+    let membership = membership_for_run(state_root, manifest)?;
+    let index = membership.load_existing()?;
+    if !index
+        .members
+        .contains_key(&format!("{}:{run_id}", manifest.workspace_id))
+    {
+        return Err(internal("the original Profile membership cannot be proven"));
+    }
+    if index
         .members
         .get(&format!("{}:{run_id}", manifest.workspace_id))
         .is_some_and(|member| member.disposition == MembershipDisposition::Released)

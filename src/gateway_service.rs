@@ -73,7 +73,11 @@ impl CoreGatewayBackend {
         if snapshot.manifest.workspace_id != view.workspace_id {
             return Err(invalid("run.run_id", "Run belongs to another workspace"));
         }
-        let facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
+        let mut facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
+        facts.profile_cleanup_required = crate::semantic::profile_cleanup_required(
+            &self.home.workspace_root(&snapshot.manifest.workspace_id),
+            &snapshot,
+        );
         Ok((root, snapshot, facts))
     }
 
@@ -1151,7 +1155,11 @@ impl GatewayBackend for CoreGatewayBackend {
             .into_iter()
             .map(|(snapshot, observation)| {
                 snapshot.manifest.require_legacy_adapter()?;
-                let facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
+                let mut facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
+                facts.profile_cleanup_required = crate::semantic::profile_cleanup_required(
+                    &self.home.workspace_root(&snapshot.manifest.workspace_id),
+                    &snapshot,
+                );
                 project::run_projection(&snapshot, &facts)
             })
             .collect::<Result<Vec<_>, MachineError>>()?;
@@ -1325,7 +1333,11 @@ impl GatewayBackend for CoreGatewayBackend {
             .workspace_root(&receipt.snapshot.manifest.workspace_id);
         let (snapshot, observation) =
             RunSnapshot::observe(&root, receipt.snapshot.manifest.run_id, 0)?;
-        let facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
+        let mut facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
+        facts.profile_cleanup_required = crate::semantic::profile_cleanup_required(
+            &self.home.workspace_root(&snapshot.manifest.workspace_id),
+            &snapshot,
+        );
         Ok(pb::StartRunResponse {
             context: Some(self.context()),
             run: Some(project::run_projection(&snapshot, &facts)?),

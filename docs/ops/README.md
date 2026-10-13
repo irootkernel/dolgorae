@@ -397,3 +397,20 @@ recovery rather than a new plan ID. Old generation files are retained.
 The [ledger maintenance runtime](../specs/dolgorae-v014-ledger-maintenance.md)
 owns crash ordering and bounds. This native support does not qualify public-v2,
 Gul E16, or any actual consumer scenario.
+
+For Profile journals use `maintenance plan --kind membership_compaction` with
+the same protected operator and workspace arguments. Its independent workspace
+maintenance generation starts at 1. Preserve the returned complete plan and
+original generation; Apply and Get use the ordinary maintenance routes. Resume
+the retained operation after interruption before admitting new binding or
+membership changes. Active or unknown references cannot be bypassed; the
+operator resolves their existing lifecycle first. Old journal generations and
+original binding bytes remain, without automatic deletion.
+
+A successful Close may report `profile_membership_cleanup_required`. Its
+terminal receipt and history remain valid. Restore the reported membership
+namespace, then repeat the authenticated Close to settle only cleanup. Status
+and public recovery projections retain this obligation until release is proven.
+Caller Machine-v4 reports registered recovery with an explicit completed-Close
+reason because its frozen access projection cannot carry the cleanup fields.
+See the [Profile maintenance contract](../specs/dolgorae-v014-profile-maintenance.md).

@@ -9,6 +9,10 @@ development commits.
 
 ### Added
 
+- Compact Profile membership and binding history through retained maintenance
+  operations, and expose pending cleanup while preserving successful Close
+  receipts and original audit history.
+
 - Reserve ledger finalization and interaction cleanup capacity, and provide
   operator-approved checkpoint rollover that retains receipts and history
   across interrupted generation switches.

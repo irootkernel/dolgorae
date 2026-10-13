@@ -3,6 +3,14 @@
 from run_native_gateway_case import run_case
 
 if __name__ == "__main__":
+    run_case("gateway_semantic_native", "caller_close_cleanup_retains_terminal_history_and_checked_recovery")
+    run_case("gateway_semantic_native", "native_profile_compaction_retains_original_scope_and_history")
+    run_case("gateway_semantic_native", "native_profile_compaction_resumes_each_owned_crash_boundary")
+    run_case("gateway_semantic_native", "public_close_retains_completed_receipt_during_membership_cleanup")
+    run_case(
+        "gateway_semantic_native",
+        "failed_membership_release_preserves_close_and_retries_only_cleanup",
+    )
     run_case(
         "gateway_semantic_native",
         "maintenance_recovers_every_switch_boundary_and_preserves_closed_run_history",

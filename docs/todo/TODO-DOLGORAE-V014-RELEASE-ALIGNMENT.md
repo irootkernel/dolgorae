@@ -555,6 +555,8 @@ Membership compaction preserves active/unknown members, Profile binding
 identity and audit continuity across every crash boundary. Release failure
 requires visible cleanup/recovery, even if the underlying close already
 succeeded; never retract its retained success receipt.
+TASK-073's [native Profile maintenance contract](../specs/dolgorae-v014-profile-maintenance.md)
+owns the selected membership journal, retained binding bytes and cleanup reporting.
 
 Store complete result bytes once with immutable digest references. Retention
 and GC are explicit operator operations with dry-run scope, ownership checks,

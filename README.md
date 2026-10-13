@@ -73,6 +73,12 @@ Checkpoint rollover preserves old files and performs no content deletion.
 See the [ledger capacity and maintenance contract](docs/specs/dolgorae-v014-ledger-maintenance.md).
 Public-v2 activation and actual consumer qualification retain their roadmap owners.
 
+For retained Profile journals, add `--kind membership_compaction` to Plan and
+use its independent Profile maintenance generation. Apply/Get retain the same
+operator approval and original-plan rules. Original journal and binding bytes
+are kept. [Profile maintenance and cleanup](docs/specs/dolgorae-v014-profile-maintenance.md)
+also describes cleanup recovery after an already successful Close.
+
 For a removed development or test home, inspect registered detached processes
 before cleanup. Use the exact digest from the inspection with the same selector:
 

@@ -18,6 +18,7 @@ pub struct ProjectionFacts {
     pub background: Option<BackgroundFacts>,
     pub active_turn_status: Option<pb::TurnStatus>,
     pub last_final_response: Option<crate::turn::FinalResponse>,
+    pub profile_cleanup_required: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -501,7 +502,15 @@ pub fn run_projection(
         event_cursor: snapshot.stamp.captured_head_cursor.clone(),
         pending_interaction_count: u32::try_from(state.pending_requests.len())
             .map_err(|_| missing("bounded pending interaction count"))?,
-        recovery: Some(recovery(snapshot)),
+        recovery: Some(if facts.profile_cleanup_required {
+            pb::RecoveryProjection {
+                state: pb::RecoveryState::Required as i32,
+                required_action: pb::RecoveryAction::OperatorRepair as i32,
+                blocker_code: Some("profile_membership_cleanup_required".to_owned()),
+            }
+        } else {
+            recovery(snapshot)
+        }),
         effective_policy: Some(effective_policy),
         writer_authority: Some(pb::WriterAuthorityProjection {
             state: writer_authority(authority) as i32,
@@ -1293,6 +1302,7 @@ impl ProjectionFacts {
                 ObservedTurnStatus::OutcomeUnknown => pb::TurnStatus::OutcomeUnknown,
             }),
             last_final_response: observed.last_final_response.clone(),
+            profile_cleanup_required: false,
         })
     }
 }
@@ -1406,5 +1416,6 @@ pub fn acceptance_facts(
         }),
         active_turn_status: Some(pb::TurnStatus::Accepted),
         last_final_response: None,
+        profile_cleanup_required: false,
     })
 }

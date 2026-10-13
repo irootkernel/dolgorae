@@ -375,6 +375,63 @@ pub struct GlobalMembershipIndex {
     pub members: BTreeMap<String, GlobalMembershipRecord>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MembershipSegment {
+    path: String,
+    byte_length: u64,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MembershipCheckpoint {
+    schema: String,
+    index: GlobalMembershipIndex,
+    head_sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MembershipManifest {
+    schema: String,
+    server_key: String,
+    generation: u64,
+    operation_id: Uuid,
+    checkpoint_sha256: String,
+    history: Vec<MembershipSegment>,
+}
+
+struct PinnedMembership {
+    journal: PathBuf,
+    history: Vec<MembershipSegment>,
+    base: Vec<GlobalMembershipRecord>,
+    generation: u64,
+    operation_id: Option<Uuid>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MembershipPending {
+    schema: String,
+    operation_id: Uuid,
+    generation: u64,
+    journal_sha256: String,
+}
+
+/// Actual durable boundaries of a membership generation switch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MembershipSwitchBarrier {
+    PendingSynced,
+    CheckpointSynced,
+    AppendSynced,
+    ManifestSynced,
+    DirectorySynced,
+    SelectionReplaced,
+    SelectionSynced,
+    ActivationSynced,
+}
+
 pub struct GlobalMembershipStore {
     home_root: PathBuf,
     profile: String,
@@ -410,6 +467,29 @@ pub fn remove_global_profile(home: &DolgoraeHome, selected_name: &str) -> Result
 }
 
 impl GlobalMembershipStore {
+    pub(crate) fn with_maintenance_server_lock<T>(
+        &self,
+        action: impl FnOnce(&Path, &Self) -> Result<T, MachineError>,
+    ) -> Result<T, MachineError> {
+        verify_secure_directory(&self.home_root, DarwinSystem.current_uid())?;
+        let profiles = self.home_root.join("profiles");
+        verify_secure_directory(&profiles, DarwinSystem.current_uid())?;
+        let root = profiles.join(&self.server_key);
+        verify_secure_directory(&root, DarwinSystem.current_uid())?;
+        let path = root.join("server.lock");
+        let lock =
+            open_secure_file_if_present(&path, DarwinSystem.current_uid())?.ok_or_else(|| {
+                membership_incomplete(
+                    &self.profile,
+                    &self.server_key,
+                    "membership maintenance lock is missing",
+                )
+            })?;
+        DarwinSystem
+            .lock_exclusive(&lock)
+            .map_err(|error| path_error(&path, error))?;
+        action(&root, self)
+    }
     pub fn new(home: &DolgoraeHome, profile: &str, server_key: &str) -> Result<Self, MachineError> {
         Self::from_root(home.root(), profile, server_key)
     }
@@ -537,9 +617,20 @@ impl GlobalMembershipStore {
         disposition: MembershipDisposition,
         mut facts: GlobalMembershipFacts,
     ) -> Result<GlobalMembershipIndex, MachineError> {
-        let journal = root.join("membership.jsonl");
-        let mut records = replay(&journal, &self.profile, &self.server_key)?;
-        let previous_index = derive_index(&self.server_key, &journal, &records)?;
+        if path_present(&root.join("membership-pending.json"))?
+            || path_present(&self.home_root.join("profile-maintenance-active.json"))?
+        {
+            return Err(MachineError::new(
+                "PROFILE_SERVER_BUSY",
+                "retained membership maintenance requires recovery",
+                true,
+                json!({"profile":self.profile,"server_key":self.server_key,"reason":"resume the original membership maintenance before appending"}),
+            ));
+        }
+        let pinned = pin_membership(root, &self.profile, &self.server_key)?;
+        let mut records = replay_membership(&pinned, &self.profile, &self.server_key)?;
+        let previous_index =
+            membership_index(&self.profile, &self.server_key, root, &pinned, &records)?;
         let previous_state = self.verify_consistency(root, &previous_index)?;
         if let Some(previous) = records
             .iter()
@@ -554,14 +645,26 @@ impl GlobalMembershipStore {
             facts.runtime_locator = facts
                 .runtime_locator
                 .or_else(|| previous.runtime_locator.clone());
+            if previous.disposition == disposition
+                && previous.controller_id == facts.controller_id
+                && previous.worker_generation == facts.worker_generation
+                && previous.thread_id == facts.thread_id
+                && previous.connection_id == facts.connection_id
+                && previous.lifecycle == facts.lifecycle
+                && previous.writer == facts.writer
+                && previous.observed_epoch == facts.observed_epoch
+                && previous.runtime_locator == facts.runtime_locator
+            {
+                return Ok(previous_index);
+            }
         }
-        let revision = u64::try_from(records.len()).map_err(|_| {
+        let revision = previous_index.revision.checked_add(1).ok_or_else(|| {
             membership_incomplete(
                 &self.profile,
                 &self.server_key,
                 "membership revision overflow",
             )
-        })? + 1;
+        })?;
         let previous_sha256 = records.last().map_or_else(
             || ZERO_HASH.to_owned(),
             |record| record.record_sha256.clone(),
@@ -599,9 +702,10 @@ impl GlobalMembershipStore {
             previous_sha256: body["previous_sha256"].as_str().expect("string").to_owned(),
             record_sha256: canonical_value_digest(&body)?,
         };
-        append_record(&journal, &record)?;
+        retain_membership_activation(root, &pinned, &self.server_key)?;
+        append_record(&pinned.journal, &record)?;
         records.push(record);
-        let index = derive_index(&self.server_key, &journal, &records)?;
+        let index = membership_index(&self.profile, &self.server_key, root, &pinned, &records)?;
         store_index(&root.join("members.json"), &index)?;
         let state_path = root.join("state.json");
         if let Some(mut state) = previous_state {
@@ -620,10 +724,265 @@ impl GlobalMembershipStore {
         Ok(index)
     }
 
+    pub(crate) fn maintenance_basis_under_server_lock(
+        &self,
+        root: &Path,
+    ) -> Result<(u64, GlobalMembershipIndex), MachineError> {
+        let pinned = pin_membership(root, &self.profile, &self.server_key)?;
+        let records = replay_membership(&pinned, &self.profile, &self.server_key)?;
+        let index = membership_index(&self.profile, &self.server_key, root, &pinned, &records)?;
+        self.verify_consistency(root, &index)?;
+        Ok((pinned.generation, index))
+    }
+
+    pub(crate) fn verify_maintenance_completion_under_server_lock(
+        &self,
+        root: &Path,
+        operation_id: Uuid,
+        generation: u64,
+        original_digest: &str,
+        verify_selected: bool,
+    ) -> Result<(), MachineError> {
+        let directory = root
+            .join("membership-generations")
+            .join(operation_id.to_string());
+        let manifest: MembershipManifest = membership_control(
+            &directory.join("activation.json"),
+            &self.profile,
+            &self.server_key,
+        )?;
+        let bytes = membership_control_bytes(
+            &directory.join("checkpoint.json"),
+            &self.profile,
+            &self.server_key,
+        )?;
+        let checkpoint: MembershipCheckpoint = serde_json::from_slice(&bytes).map_err(|_| {
+            membership_incomplete(
+                &self.profile,
+                &self.server_key,
+                "completed membership checkpoint is invalid",
+            )
+        })?;
+        if manifest.schema != "dolgorae.membership-manifest/v1"
+            || manifest.operation_id != operation_id
+            || manifest.generation != generation + 1
+            || manifest.server_key != self.server_key
+            || manifest.checkpoint_sha256 != sha256_hex(&bytes)
+            || checkpoint.schema != "dolgorae.membership-checkpoint/v1"
+            || checkpoint.index.journal_sha256 != original_digest
+        {
+            return Err(membership_incomplete(
+                &self.profile,
+                &self.server_key,
+                "membership completion disagrees with its original scope",
+            ));
+        }
+        for segment in &manifest.history {
+            membership_segment_bytes(root, segment, &self.profile, &self.server_key)?;
+        }
+        if verify_selected {
+            let pinned = pin_membership(root, &self.profile, &self.server_key)?;
+            if pinned.operation_id != Some(operation_id) || pinned.generation != generation + 1 {
+                return Err(membership_incomplete(
+                    &self.profile,
+                    &self.server_key,
+                    "selected membership disagrees with retained completion",
+                ));
+            }
+            let records = replay_membership(&pinned, &self.profile, &self.server_key)?;
+            let index = membership_index(&self.profile, &self.server_key, root, &pinned, &records)?;
+            self.verify_consistency(root, &index)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn compact_under_server_lock(
+        &self,
+        root: &Path,
+        operation_id: Uuid,
+        expected_generation: u64,
+        expected_digest: &str,
+        barrier: &mut impl FnMut(MembershipSwitchBarrier) -> Result<(), MachineError>,
+    ) -> Result<GlobalMembershipIndex, MachineError> {
+        let pinned = pin_membership(root, &self.profile, &self.server_key)?;
+        let records = replay_membership(&pinned, &self.profile, &self.server_key)?;
+        let index = membership_index(&self.profile, &self.server_key, root, &pinned, &records)?;
+        self.verify_consistency(root, &index)?;
+        let pending = MembershipPending {
+            schema: "dolgorae.membership-maintenance/v1".to_owned(),
+            operation_id,
+            generation: expected_generation,
+            journal_sha256: expected_digest.to_owned(),
+        };
+        let pending_path = root.join("membership-pending.json");
+        if path_present(&pending_path)? {
+            let retained: MembershipPending =
+                membership_control(&pending_path, &self.profile, &self.server_key)?;
+            if retained != pending {
+                return Err(membership_incomplete(
+                    &self.profile,
+                    &self.server_key,
+                    "membership maintenance has a different retained owner",
+                ));
+            }
+        }
+        if pinned.operation_id == Some(operation_id)
+            && pinned.generation == expected_generation.saturating_add(1)
+        {
+            let checkpoint: MembershipCheckpoint = membership_control(
+                &root
+                    .join("membership-generations")
+                    .join(operation_id.to_string())
+                    .join("checkpoint.json"),
+                &self.profile,
+                &self.server_key,
+            )?;
+            if checkpoint.index.journal_sha256 != expected_digest {
+                return Err(membership_incomplete(
+                    &self.profile,
+                    &self.server_key,
+                    "original membership maintenance digest changed",
+                ));
+            }
+            retain_membership_activation(root, &pinned, &self.server_key)?;
+            if path_present(&pending_path)? {
+                fs::remove_file(&pending_path)
+                    .and_then(|()| sync_directory(root))
+                    .map_err(|error| path_error(&pending_path, error))?;
+            }
+            return Ok(index);
+        }
+        if pinned.generation != expected_generation
+            || index.journal_sha256 != expected_digest
+            || operation_id.get_version_num() != 7
+        {
+            return Err(membership_incomplete(
+                &self.profile,
+                &self.server_key,
+                "membership maintenance source changed",
+            ));
+        }
+        let generation = expected_generation.checked_add(1).ok_or_else(|| {
+            membership_incomplete(
+                &self.profile,
+                &self.server_key,
+                "membership generation overflow",
+            )
+        })?;
+        let checkpoint = MembershipCheckpoint {
+            schema: "dolgorae.membership-checkpoint/v1".to_owned(),
+            index: index.clone(),
+            head_sha256: records.last().map_or_else(
+                || ZERO_HASH.to_owned(),
+                |record| record.record_sha256.clone(),
+            ),
+        };
+        let checkpoint_bytes = serde_json::to_vec(&checkpoint).map_err(internal)?;
+        if checkpoint_bytes.len() as u64 > MAX_MEMBERSHIP_BYTES {
+            return Err(membership_capacity(
+                &self.profile,
+                &self.server_key,
+                "membership checkpoint exceeds 8 MiB",
+            ));
+        }
+        if pinned.history.len() >= 4096 {
+            return Err(membership_capacity(
+                &self.profile,
+                &self.server_key,
+                "membership retained generation bound reached",
+            ));
+        }
+        if !path_present(&pending_path)? {
+            retain_membership_file(
+                &pending_path,
+                &serde_json::to_vec(&pending).map_err(internal)?,
+            )?;
+            sync_directory(root).map_err(|error| path_error(root, error))?;
+        }
+        barrier(MembershipSwitchBarrier::PendingSynced)?;
+        let generations = root.join("membership-generations");
+        if !path_present(&generations)? {
+            create_directory(&generations, 0o700)
+                .map_err(|error| path_error(&generations, error))?;
+        }
+        verify_secure_directory(&generations, DarwinSystem.current_uid())?;
+        let directory = generations.join(operation_id.to_string());
+        if !path_present(&directory)? {
+            create_directory(&directory, 0o700).map_err(|error| path_error(&directory, error))?;
+        }
+        verify_secure_directory(&directory, DarwinSystem.current_uid())?;
+        retain_membership_file(&directory.join("checkpoint.json"), &checkpoint_bytes)?;
+        barrier(MembershipSwitchBarrier::CheckpointSynced)?;
+        retain_membership_file(&directory.join("append.jsonl"), b"")?;
+        barrier(MembershipSwitchBarrier::AppendSynced)?;
+        let old_bytes =
+            match open_secure_file_if_present(&pinned.journal, DarwinSystem.current_uid())? {
+                Some(file) => {
+                    let mut bytes = Vec::new();
+                    file.take(MAX_MEMBERSHIP_BYTES + 1)
+                        .read_to_end(&mut bytes)
+                        .map_err(|error| path_error(&pinned.journal, error))?;
+                    bytes
+                }
+                None => Vec::new(),
+            };
+        let mut history = pinned.history.clone();
+        if !path_present(&pinned.journal)? {
+            retain_membership_file(&pinned.journal, b"")?;
+            sync_directory(root).map_err(|error| path_error(root, error))?;
+        }
+        let relative = pinned
+            .journal
+            .strip_prefix(root)
+            .map_err(internal)?
+            .to_str()
+            .ok_or_else(|| internal("membership journal path is not UTF-8"))?
+            .to_owned();
+        history.push(MembershipSegment {
+            path: relative,
+            byte_length: old_bytes.len() as u64,
+            sha256: sha256_hex(&old_bytes),
+        });
+        let manifest = MembershipManifest {
+            schema: "dolgorae.membership-manifest/v1".to_owned(),
+            server_key: self.server_key.clone(),
+            generation,
+            operation_id,
+            checkpoint_sha256: sha256_hex(&checkpoint_bytes),
+            history,
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).map_err(internal)?;
+        retain_membership_file(&directory.join("manifest.json"), &manifest_bytes)?;
+        barrier(MembershipSwitchBarrier::ManifestSynced)?;
+        sync_directory(&directory)
+            .and_then(|()| sync_directory(&generations))
+            .and_then(|()| sync_directory(root))
+            .map_err(|error| path_error(&directory, error))?;
+        barrier(MembershipSwitchBarrier::DirectorySynced)?;
+        let selected = root.join("membership-selection.json");
+        let temporary = root.join(format!(".membership-selection-{operation_id}.json"));
+        retain_membership_file(&temporary, &manifest_bytes)?;
+        fs::rename(&temporary, &selected).map_err(|error| path_error(&selected, error))?;
+        barrier(MembershipSwitchBarrier::SelectionReplaced)?;
+        sync_directory(root).map_err(|error| path_error(root, error))?;
+        barrier(MembershipSwitchBarrier::SelectionSynced)?;
+        let current = pin_membership(root, &self.profile, &self.server_key)?;
+        retain_membership_activation(root, &current, &self.server_key)?;
+        barrier(MembershipSwitchBarrier::ActivationSynced)?;
+        fs::remove_file(&pending_path)
+            .and_then(|()| sync_directory(root))
+            .map_err(|error| path_error(&pending_path, error))?;
+        Ok(index)
+    }
+
     pub fn load(&self) -> Result<GlobalMembershipIndex, MachineError> {
         let root = self.ensure_root()?;
         let _lock = lock_file(&root.join("server.lock"))?;
         self.load_locked(&root)
+    }
+
+    pub(crate) fn load_existing(&self) -> Result<GlobalMembershipIndex, MachineError> {
+        self.with_maintenance_server_lock(|root, store| store.load_locked(root))
     }
 
     pub(crate) fn load_under_server_lock(
@@ -710,9 +1069,9 @@ impl GlobalMembershipStore {
     }
 
     fn load_locked(&self, root: &Path) -> Result<GlobalMembershipIndex, MachineError> {
-        let journal = root.join("membership.jsonl");
-        let records = replay(&journal, &self.profile, &self.server_key)?;
-        let index = derive_index(&self.server_key, &journal, &records)?;
+        let pinned = pin_membership(root, &self.profile, &self.server_key)?;
+        let records = replay_membership(&pinned, &self.profile, &self.server_key)?;
+        let index = membership_index(&self.profile, &self.server_key, root, &pinned, &records)?;
         self.verify_consistency(root, &index)?;
         Ok(index)
     }
@@ -864,6 +1223,343 @@ impl GlobalMembershipStore {
     }
 }
 
+fn retain_membership_file(path: &Path, bytes: &[u8]) -> Result<(), MachineError> {
+    if let Some(mut file) = open_secure_file_if_present(path, DarwinSystem.current_uid())? {
+        let mut retained = Vec::new();
+        (&mut file)
+            .take(MAX_MEMBERSHIP_BYTES + 1)
+            .read_to_end(&mut retained)
+            .map_err(|error| path_error(path, error))?;
+        if retained != bytes {
+            return Err(internal(
+                "prepared membership file differs from its retained source",
+            ));
+        }
+        file.sync_all().map_err(|error| path_error(path, error))?;
+    } else {
+        atomic_create(&SystemWorkspacePlatform, path, bytes, 0o600)
+            .map_err(|error| path_error(path, error))?;
+    }
+    Ok(())
+}
+
+fn membership_control_bytes(
+    path: &Path,
+    profile: &str,
+    server_key: &str,
+) -> Result<Vec<u8>, MachineError> {
+    let file = open_secure_file_if_present(path, DarwinSystem.current_uid())?.ok_or_else(|| {
+        membership_incomplete(profile, server_key, "membership control is missing")
+    })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MEMBERSHIP_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| path_error(path, error))?;
+    if bytes.len() as u64 > MAX_MEMBERSHIP_BYTES {
+        return Err(membership_incomplete(
+            profile,
+            server_key,
+            "membership control exceeds its bound",
+        ));
+    }
+    parse(std::str::from_utf8(&bytes).map_err(|_| {
+        membership_incomplete(profile, server_key, "membership control is not UTF-8")
+    })?)
+    .map_err(|_| {
+        membership_incomplete(profile, server_key, "membership control JSON is invalid")
+    })?;
+    Ok(bytes)
+}
+
+fn membership_control<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    profile: &str,
+    server_key: &str,
+) -> Result<T, MachineError> {
+    let bytes = membership_control_bytes(path, profile, server_key)?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        membership_incomplete(profile, server_key, "membership control shape is invalid")
+    })
+}
+
+fn membership_segment_path(
+    root: &Path,
+    relative: &str,
+    profile: &str,
+    server_key: &str,
+) -> Result<PathBuf, MachineError> {
+    if relative == "membership.jsonl" {
+        return Ok(root.join(relative));
+    }
+    let parts = relative.split('/').collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts[0] != "membership-generations"
+        || parts[2] != "append.jsonl"
+        || !Uuid::parse_str(parts[1])
+            .is_ok_and(|id| id.get_version_num() == 7 && id.to_string() == parts[1])
+    {
+        return Err(membership_incomplete(
+            profile,
+            server_key,
+            "membership history contains an invalid relative path",
+        ));
+    }
+    verify_secure_directory(&root.join(parts[0]), DarwinSystem.current_uid())?;
+    verify_secure_directory(
+        &root.join(parts[0]).join(parts[1]),
+        DarwinSystem.current_uid(),
+    )?;
+    Ok(root.join(relative))
+}
+
+fn membership_segment_bytes(
+    root: &Path,
+    segment: &MembershipSegment,
+    profile: &str,
+    server_key: &str,
+) -> Result<Vec<u8>, MachineError> {
+    let path = membership_segment_path(root, &segment.path, profile, server_key)?;
+    let file =
+        open_secure_file_if_present(&path, DarwinSystem.current_uid())?.ok_or_else(|| {
+            membership_incomplete(
+                profile,
+                server_key,
+                "retained membership segment is missing",
+            )
+        })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MEMBERSHIP_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| path_error(&path, error))?;
+    if bytes.len() as u64 != segment.byte_length
+        || bytes.len() as u64 > MAX_MEMBERSHIP_BYTES
+        || sha256_hex(&bytes) != segment.sha256
+    {
+        return Err(membership_incomplete(
+            profile,
+            server_key,
+            "retained membership segment integrity is invalid",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn pin_membership(
+    root: &Path,
+    profile: &str,
+    server_key: &str,
+) -> Result<PinnedMembership, MachineError> {
+    let selected = root.join("membership-selection.json");
+    let generations = root.join("membership-generations");
+    let mut floor = 1;
+    if path_present(&generations)? {
+        verify_secure_directory(&generations, DarwinSystem.current_uid())?;
+        for entry in fs::read_dir(&generations).map_err(|error| path_error(&generations, error))? {
+            let entry = entry.map_err(|error| path_error(&generations, error))?;
+            verify_secure_directory(&entry.path(), DarwinSystem.current_uid())?;
+            let activation = entry.path().join("activation.json");
+            if path_present(&activation)? {
+                let manifest: MembershipManifest =
+                    membership_control(&activation, profile, server_key)?;
+                if manifest.schema != "dolgorae.membership-manifest/v1"
+                    || manifest.server_key != server_key
+                    || manifest.generation < 2
+                    || entry.file_name().to_str()
+                        != Some(manifest.operation_id.to_string().as_str())
+                {
+                    return Err(membership_incomplete(
+                        profile,
+                        server_key,
+                        "membership activation identity is invalid",
+                    ));
+                }
+                floor = floor.max(manifest.generation);
+            }
+        }
+    }
+    if !path_present(&selected)? {
+        if floor > 1 {
+            return Err(membership_incomplete(
+                profile,
+                server_key,
+                "activated membership selection is missing",
+            ));
+        }
+        return Ok(PinnedMembership {
+            journal: root.join("membership.jsonl"),
+            history: Vec::new(),
+            base: Vec::new(),
+            generation: 1,
+            operation_id: None,
+        });
+    }
+    let manifest: MembershipManifest = membership_control(&selected, profile, server_key)?;
+    if manifest.schema != "dolgorae.membership-manifest/v1"
+        || manifest.server_key != server_key
+        || manifest.generation < 2
+        || manifest.generation < floor
+        || manifest.operation_id.get_version_num() != 7
+        || manifest.history.is_empty()
+        || manifest.history.len() > 4096
+    {
+        return Err(membership_incomplete(
+            profile,
+            server_key,
+            "membership selection identity is invalid",
+        ));
+    }
+    let directory = generations.join(manifest.operation_id.to_string());
+    verify_secure_directory(&directory, DarwinSystem.current_uid())?;
+    let retained: MembershipManifest =
+        membership_control(&directory.join("manifest.json"), profile, server_key)?;
+    if serde_json::to_value(&retained).map_err(internal)?
+        != serde_json::to_value(&manifest).map_err(internal)?
+    {
+        return Err(membership_incomplete(
+            profile,
+            server_key,
+            "membership selection disagrees with its retained manifest",
+        ));
+    }
+    if path_present(&directory.join("activation.json"))? {
+        let activation: MembershipManifest =
+            membership_control(&directory.join("activation.json"), profile, server_key)?;
+        if serde_json::to_value(activation).map_err(internal)?
+            != serde_json::to_value(&manifest).map_err(internal)?
+        {
+            return Err(membership_incomplete(
+                profile,
+                server_key,
+                "membership activation disagrees with selection",
+            ));
+        }
+    }
+    let checkpoint_path = directory.join("checkpoint.json");
+    let checkpoint_bytes = membership_control_bytes(&checkpoint_path, profile, server_key)?;
+    let checkpoint: MembershipCheckpoint =
+        serde_json::from_slice(&checkpoint_bytes).map_err(|_| {
+            membership_incomplete(
+                profile,
+                server_key,
+                "membership checkpoint shape is invalid",
+            )
+        })?;
+    if sha256_hex(&checkpoint_bytes) != manifest.checkpoint_sha256
+        || checkpoint.schema != "dolgorae.membership-checkpoint/v1"
+        || checkpoint.index.schema_version != 2
+        || checkpoint.index.server_key != server_key
+        || checkpoint
+            .index
+            .members
+            .iter()
+            .any(|(key, member)| key != &format!("{}:{}", member.workspace_id, member.run_id))
+    {
+        return Err(membership_incomplete(
+            profile,
+            server_key,
+            "membership checkpoint integrity is invalid",
+        ));
+    }
+    let mut base = checkpoint.index.members.into_values().collect::<Vec<_>>();
+    base.sort_by_key(|record| record.revision);
+    if base.last().map_or(0, |record| record.revision) != checkpoint.index.revision
+        || base
+            .last()
+            .map_or(ZERO_HASH, |record| record.record_sha256.as_str())
+            != checkpoint.head_sha256
+    {
+        return Err(membership_incomplete(
+            profile,
+            server_key,
+            "membership checkpoint watermark is invalid",
+        ));
+    }
+    Ok(PinnedMembership {
+        journal: directory.join("append.jsonl"),
+        history: manifest.history,
+        base,
+        generation: manifest.generation,
+        operation_id: Some(manifest.operation_id),
+    })
+}
+
+fn replay_membership(
+    pinned: &PinnedMembership,
+    profile: &str,
+    server_key: &str,
+) -> Result<Vec<GlobalMembershipRecord>, MachineError> {
+    if pinned.operation_id.is_some() && !path_present(&pinned.journal)? {
+        return Err(membership_incomplete(
+            profile,
+            server_key,
+            "selected membership append is missing",
+        ));
+    }
+    let mut records = pinned.base.clone();
+    let revision = records.last().map_or(0, |record| record.revision);
+    let hash = records
+        .last()
+        .map_or(ZERO_HASH, |record| record.record_sha256.as_str());
+    let tail = replay_tail(&pinned.journal, profile, server_key, revision, hash)?;
+    records.extend(tail);
+    Ok(records)
+}
+
+fn membership_index(
+    profile: &str,
+    server_key: &str,
+    root: &Path,
+    pinned: &PinnedMembership,
+    records: &[GlobalMembershipRecord],
+) -> Result<GlobalMembershipIndex, MachineError> {
+    let mut index = derive_index(server_key, &pinned.journal, records)?;
+    if !pinned.history.is_empty() {
+        let mut digest = Sha256::new();
+        for segment in &pinned.history {
+            digest.update(membership_segment_bytes(
+                root, segment, profile, server_key,
+            )?);
+        }
+        let file = open_secure_file_if_present(&pinned.journal, DarwinSystem.current_uid())?
+            .ok_or_else(|| internal("selected membership append is missing"))?;
+        let mut bytes = Vec::new();
+        file.take(MAX_MEMBERSHIP_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| path_error(&pinned.journal, error))?;
+        if bytes.len() as u64 > MAX_MEMBERSHIP_BYTES {
+            return Err(membership_capacity(
+                "",
+                server_key,
+                "selected membership append exceeds 8 MiB",
+            ));
+        }
+        digest.update(bytes);
+        index.journal_sha256 = format!("{:x}", digest.finalize());
+    }
+    Ok(index)
+}
+
+fn retain_membership_activation(
+    root: &Path,
+    pinned: &PinnedMembership,
+    server_key: &str,
+) -> Result<(), MachineError> {
+    let Some(id) = pinned.operation_id else {
+        return Ok(());
+    };
+    let directory = root.join("membership-generations").join(id.to_string());
+    let path = directory.join("activation.json");
+    let manifest: MembershipManifest =
+        membership_control(&directory.join("manifest.json"), "", server_key)?;
+    let bytes = serde_json::to_vec(&manifest).map_err(internal)?;
+    if !path_present(&path)? {
+        atomic_create(&SystemWorkspacePlatform, &path, &bytes, 0o600)
+            .map_err(|error| path_error(&path, error))?;
+        sync_directory(&directory).map_err(|error| path_error(&directory, error))?;
+    }
+    Ok(())
+}
+
 fn path_present(path: &Path) -> Result<bool, MachineError> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -906,10 +1602,123 @@ fn derive_index(
     })
 }
 
+#[cfg(test)]
 fn replay(
     path: &Path,
     profile: &str,
     server_key: &str,
+) -> Result<Vec<GlobalMembershipRecord>, MachineError> {
+    replay_tail(path, profile, server_key, 0, ZERO_HASH)
+}
+
+fn verify_membership_record(
+    record: &GlobalMembershipRecord,
+    profile: &str,
+    server_key: &str,
+    expected_revision: u64,
+    previous: &str,
+) -> Result<(), MachineError> {
+    let body = json!({
+        "schema_version": record.schema_version,
+        "revision": record.revision,
+        "workspace_id": record.workspace_id,
+        "run_id": record.run_id,
+        "disposition": record.disposition,
+        "controller_id": record.controller_id,
+        "worker_generation": record.worker_generation,
+        "thread_id": record.thread_id,
+        "connection_id": record.connection_id,
+        "lifecycle": record.lifecycle,
+        "writer": record.writer,
+        "observed_epoch": record.observed_epoch,
+        "runtime_locator": record.runtime_locator,
+        "previous_sha256": record.previous_sha256,
+    });
+    if record.schema_version != 2
+        || record.revision != expected_revision
+        || record.previous_sha256 != previous
+        || record.record_sha256 != canonical_value_digest(&body)?
+    {
+        return Err(membership_incomplete(
+            profile,
+            server_key,
+            "membership hash chain breaks",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_membership_prefix(
+    bytes: &[u8],
+    expected_revision: u64,
+    previous: &str,
+) -> Result<(), serde_json::Error> {
+    struct Prefix<'a> {
+        revision: u64,
+        previous: &'a str,
+    }
+    impl<'de> serde::de::Visitor<'de> for Prefix<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a checked membership record prefix")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<(), M::Error> {
+            let mut fields = std::collections::BTreeSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !fields.insert(key.clone()) {
+                    return Err(serde::de::Error::custom("duplicate membership field"));
+                }
+                match key.as_str() {
+                    "schema_version" => {
+                        if map.next_value::<u32>()? != 2 {
+                            return Err(serde::de::Error::custom("unsupported membership version"));
+                        }
+                    }
+                    "revision" => {
+                        if map.next_value::<u64>()? != self.revision {
+                            return Err(serde::de::Error::custom("membership revision mismatch"));
+                        }
+                    }
+                    "previous_sha256" => {
+                        if map.next_value::<String>()? != self.previous {
+                            return Err(serde::de::Error::custom("membership chain mismatch"));
+                        }
+                    }
+                    "record_sha256" => {
+                        let value = map.next_value::<String>()?;
+                        if value.len() != 64
+                            || !value
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                        {
+                            return Err(serde::de::Error::custom("invalid membership record hash"));
+                        }
+                    }
+                    _ => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    serde::Deserializer::deserialize_map(
+        &mut de,
+        Prefix {
+            revision: expected_revision,
+            previous,
+        },
+    )?;
+    de.end()
+}
+
+fn replay_tail(
+    path: &Path,
+    profile: &str,
+    server_key: &str,
+    base_revision: u64,
+    base_hash: &str,
 ) -> Result<Vec<GlobalMembershipRecord>, MachineError> {
     let Some(file) = open_secure_file_if_present(path, DarwinSystem.current_uid())? else {
         return Ok(Vec::new());
@@ -918,14 +1727,61 @@ fn replay(
     file.take(MAX_MEMBERSHIP_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| path_error(path, error))?;
-    if bytes.len() as u64 > MAX_MEMBERSHIP_BYTES {
-        return Err(membership_incomplete(
-            profile,
-            server_key,
-            "membership journal exceeds 8 MiB",
-        ));
-    }
-    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+    let over_capacity = bytes.len() as u64 > MAX_MEMBERSHIP_BYTES;
+    if over_capacity {
+        let boundary = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |n| n + 1);
+        let partial = &bytes[boundary..];
+        if !partial.is_empty() {
+            // Header checks use the last complete record in this bounded prefix.
+            let complete = &bytes[..boundary];
+            let mut revision = base_revision;
+            let mut previous = base_hash.to_owned();
+            for line in complete
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+            {
+                let record: GlobalMembershipRecord =
+                    serde_json::from_slice(line).map_err(|_| {
+                        membership_incomplete(
+                            profile,
+                            server_key,
+                            "oversized membership journal has malformed input",
+                        )
+                    })?;
+                revision = record.revision;
+                previous = record.record_sha256;
+            }
+            let expected = revision.checked_add(1).ok_or_else(|| {
+                membership_incomplete(profile, server_key, "membership revision overflow")
+            })?;
+            let parsed = serde_json::from_slice::<GlobalMembershipRecord>(partial);
+            if let Ok(record) = &parsed {
+                verify_membership_record(record, profile, server_key, expected, &previous)?;
+            }
+            let headers = validate_membership_prefix(partial, expected, &previous);
+            let acceptable = |result: &Result<(), serde_json::Error>| {
+                result.is_ok() || result.as_ref().is_err_and(|error| error.is_eof())
+            };
+            if !(parsed.is_ok() || parsed.as_ref().is_err_and(|error| error.is_eof()))
+                || !acceptable(&headers)
+                || partial
+                    .iter()
+                    .copied()
+                    .find(|byte| !byte.is_ascii_whitespace())
+                    != Some(b'{')
+            {
+                return Err(membership_incomplete(
+                    profile,
+                    server_key,
+                    "oversized membership journal has malformed input",
+                ));
+            }
+        }
+        bytes.truncate(boundary);
+    } else if !bytes.is_empty() && !bytes.ends_with(b"\n") {
         return Err(membership_incomplete(
             profile,
             server_key,
@@ -933,7 +1789,7 @@ fn replay(
         ));
     }
     let mut records = Vec::new();
-    let mut previous = ZERO_HASH.to_owned();
+    let mut previous = base_hash.to_owned();
     for (offset, line) in bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -946,35 +1802,21 @@ fn replay(
                 format!("membership line {} is invalid", offset + 1),
             )
         })?;
-        let body = json!({
-            "schema_version": record.schema_version,
-            "revision": record.revision,
-            "workspace_id": record.workspace_id,
-            "run_id": record.run_id,
-            "disposition": record.disposition,
-            "controller_id": record.controller_id,
-            "worker_generation": record.worker_generation,
-            "thread_id": record.thread_id,
-            "connection_id": record.connection_id,
-            "lifecycle": record.lifecycle,
-            "writer": record.writer,
-            "observed_epoch": record.observed_epoch,
-            "runtime_locator": record.runtime_locator,
-            "previous_sha256": record.previous_sha256,
-        });
-        if record.schema_version != 2
-            || record.revision != u64::try_from(offset + 1).expect("bounded")
-            || record.previous_sha256 != previous
-            || record.record_sha256 != canonical_value_digest(&body)?
-        {
-            return Err(membership_incomplete(
-                profile,
-                server_key,
-                format!("membership hash chain breaks at line {}", offset + 1),
-            ));
-        }
+        let expected = base_revision
+            .checked_add(u64::try_from(offset + 1).expect("bounded"))
+            .ok_or_else(|| {
+                membership_incomplete(profile, server_key, "membership revision overflow")
+            })?;
+        verify_membership_record(&record, profile, server_key, expected, &previous)?;
         previous = record.record_sha256.clone();
         records.push(record);
+    }
+    if over_capacity {
+        return Err(membership_capacity(
+            profile,
+            server_key,
+            "membership journal exceeds 8 MiB",
+        ));
     }
     Ok(records)
 }
@@ -982,6 +1824,18 @@ fn replay(
 fn append_record(path: &Path, record: &GlobalMembershipRecord) -> Result<(), MachineError> {
     let mut line = serde_json::to_vec(record).map_err(internal)?;
     line.push(b'\n');
+    let current_bytes = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(path_error(path, error)),
+    };
+    if current_bytes.saturating_add(line.len() as u64) > MAX_MEMBERSHIP_BYTES {
+        return Err(membership_capacity(
+            "",
+            "",
+            "membership append exceeds 8 MiB",
+        ));
+    }
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1087,6 +1941,15 @@ fn canonical_value_digest(value: &Value) -> Result<String, MachineError> {
     let parsed = parse(&text).map_err(|error| internal(error.to_string()))?;
     let bytes = canonicalize(&parsed).map_err(|error| internal(error.to_string()))?;
     Ok(sha256_hex(&bytes))
+}
+
+fn membership_capacity(profile: &str, server_key: &str, reason: &str) -> MachineError {
+    MachineError::new(
+        "STORAGE_CAPACITY_EXCEEDED",
+        "Profile journal capacity is exhausted",
+        false,
+        json!({"profile":profile,"server_key":server_key,"reason":reason,"required_action":"observe_original_maintenance"}),
+    )
 }
 
 fn membership_incomplete(
@@ -1493,7 +2356,7 @@ mod tests {
         let error = store
             .record(&workspace_id, run_id, MembershipDisposition::Released)
             .unwrap_err();
-        assert_eq!(error.code, "PROFILE_MEMBERSHIP_INCOMPLETE");
+        assert_eq!(error.code, "STORAGE_CAPACITY_EXCEEDED");
         assert_eq!(error.details["reason"], "membership journal exceeds 8 MiB");
         assert_eq!(fs::read(&journal).unwrap(), oversized);
         assert_eq!(fs::read(root.join("members.json")).unwrap(), index_before);
@@ -2061,6 +2924,443 @@ mod tests {
         assert!(!handle.is_finished());
         drop(guard);
         assert_eq!(handle.join().unwrap().revision, 1);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn membership_compaction_recovers_every_durable_boundary() {
+        for fault in [
+            MembershipSwitchBarrier::PendingSynced,
+            MembershipSwitchBarrier::CheckpointSynced,
+            MembershipSwitchBarrier::AppendSynced,
+            MembershipSwitchBarrier::ManifestSynced,
+            MembershipSwitchBarrier::DirectorySynced,
+            MembershipSwitchBarrier::SelectionReplaced,
+            MembershipSwitchBarrier::SelectionSynced,
+            MembershipSwitchBarrier::ActivationSynced,
+        ] {
+            let (parent, home) = home();
+            let server_key = "8".repeat(64);
+            let workspace = "7".repeat(64);
+            let store = GlobalMembershipStore::new(&home, "default", &server_key).unwrap();
+            let active = Uuid::now_v7();
+            let unknown = Uuid::now_v7();
+            store
+                .record(&workspace, active, MembershipDisposition::Active)
+                .unwrap();
+            let before = store
+                .record(&workspace, unknown, MembershipDisposition::Unknown)
+                .unwrap();
+            let root = store.ensure_root().unwrap();
+            let original = fs::read(root.join("membership.jsonl")).unwrap();
+            let operation = Uuid::now_v7();
+            {
+                let _lock = lock_file(&root.join("server.lock")).unwrap();
+                let result = store.compact_under_server_lock(
+                    &root,
+                    operation,
+                    1,
+                    &before.journal_sha256,
+                    &mut |point| {
+                        if point == fault {
+                            Err(internal("injected membership crash"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                );
+                assert!(result.is_err());
+            }
+            assert_eq!(store.load().unwrap(), before);
+            assert_eq!(fs::read(root.join("membership.jsonl")).unwrap(), original);
+            assert_eq!(
+                store
+                    .record(&workspace, active, MembershipDisposition::Released)
+                    .unwrap_err()
+                    .code,
+                "PROFILE_SERVER_BUSY"
+            );
+            {
+                let _lock = lock_file(&root.join("server.lock")).unwrap();
+                assert_eq!(
+                    store
+                        .compact_under_server_lock(
+                            &root,
+                            operation,
+                            1,
+                            &before.journal_sha256,
+                            &mut |_| Ok(())
+                        )
+                        .unwrap(),
+                    before
+                );
+                assert_eq!(
+                    store
+                        .compact_under_server_lock(
+                            &root,
+                            operation,
+                            1,
+                            &before.journal_sha256,
+                            &mut |_| Ok(())
+                        )
+                        .unwrap(),
+                    before
+                );
+            }
+            let after = store
+                .record(&workspace, active, MembershipDisposition::Released)
+                .unwrap();
+            assert_eq!(after.revision, before.revision + 1);
+            assert_eq!(
+                after.members[&format!("{workspace}:{unknown}")],
+                before.members[&format!("{workspace}:{unknown}")]
+            );
+            assert_eq!(fs::read(root.join("membership.jsonl")).unwrap(), original);
+            fs::remove_dir_all(parent).unwrap();
+        }
+    }
+
+    #[test]
+    fn ten_thousand_synthetic_membership_cycles_keep_selected_journal_bounded() {
+        let (parent, home) = home();
+        let key = "8".repeat(64);
+        let workspace = "7".repeat(64);
+        let store = GlobalMembershipStore::new(&home, "default", &key).unwrap();
+        let active = Uuid::now_v7();
+        let unknown = Uuid::now_v7();
+        let cycling = Uuid::now_v7();
+        store
+            .record(&workspace, active, MembershipDisposition::Active)
+            .unwrap();
+        let protected = store
+            .record(&workspace, unknown, MembershipDisposition::Unknown)
+            .unwrap();
+        let root = store.ensure_root().unwrap();
+        let original = fs::read(root.join("membership.jsonl")).unwrap();
+        let mut maximum_append_bytes = 0;
+        for cycle in 1..=10_000 {
+            store
+                .record_observed(
+                    &workspace,
+                    cycling,
+                    MembershipDisposition::Active,
+                    GlobalMembershipFacts {
+                        worker_generation: Some(cycle),
+                        ..GlobalMembershipFacts::for_disposition(MembershipDisposition::Active)
+                    },
+                )
+                .unwrap();
+            store
+                .record(&workspace, cycling, MembershipDisposition::Released)
+                .unwrap();
+            let pinned = pin_membership(&root, "default", &key).unwrap();
+            maximum_append_bytes =
+                maximum_append_bytes.max(fs::metadata(&pinned.journal).unwrap().len());
+            assert!(maximum_append_bytes <= MAX_MEMBERSHIP_BYTES);
+            if cycle % 500 == 0 {
+                let _lock = lock_file(&root.join("server.lock")).unwrap();
+                let (generation, basis) = store.maintenance_basis_under_server_lock(&root).unwrap();
+                store
+                    .compact_under_server_lock(
+                        &root,
+                        Uuid::now_v7(),
+                        generation,
+                        &basis.journal_sha256,
+                        &mut |_| Ok(()),
+                    )
+                    .unwrap();
+            }
+        }
+        let index = store.load().unwrap();
+        assert_eq!(index.revision, 20_002);
+        assert_eq!(
+            index.members[&format!("{workspace}:{active}")],
+            protected.members[&format!("{workspace}:{active}")]
+        );
+        assert_eq!(
+            index.members[&format!("{workspace}:{unknown}")],
+            protected.members[&format!("{workspace}:{unknown}")]
+        );
+        assert_eq!(
+            index.members[&format!("{workspace}:{cycling}")].worker_generation,
+            Some(10_000)
+        );
+        assert_eq!(
+            fs::read(root.join("membership.jsonl")).unwrap()[..original.len()],
+            original
+        );
+        let pinned = pin_membership(&root, "default", &key).unwrap();
+        let retained_bytes = pinned
+            .history
+            .iter()
+            .map(|segment| segment.byte_length)
+            .sum::<u64>();
+        let retained_records = pinned
+            .history
+            .iter()
+            .map(|segment| {
+                membership_segment_bytes(&root, segment, "default", &key)
+                    .unwrap()
+                    .iter()
+                    .filter(|byte| **byte == b'\n')
+                    .count()
+            })
+            .sum::<usize>();
+        assert_eq!(retained_records, 20_002);
+        assert_eq!(pinned.generation, 21);
+        println!(
+            "synthetic_membership_cycles=10000 accepted_records={} selected_append_max_bytes={} retained_history_bytes={} selected_generation={}",
+            index.revision, maximum_append_bytes, retained_bytes, pinned.generation
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn membership_generation_refuses_missing_selection_and_corrupt_history() {
+        let (parent, home) = home();
+        let key = "8".repeat(64);
+        let workspace = "7".repeat(64);
+        let store = GlobalMembershipStore::new(&home, "default", &key).unwrap();
+        let member = Uuid::now_v7();
+        let original = store
+            .record(&workspace, member, MembershipDisposition::Unknown)
+            .unwrap();
+        let root = store.ensure_root().unwrap();
+        let id = Uuid::now_v7();
+        {
+            let _lock = lock_file(&root.join("server.lock")).unwrap();
+            store
+                .compact_under_server_lock(&root, id, 1, &original.journal_sha256, &mut |_| Ok(()))
+                .unwrap();
+        }
+        let selected = root.join("membership-selection.json");
+        let selection = fs::read(&selected).unwrap();
+        fs::remove_file(&selected).unwrap();
+        assert_eq!(
+            store.load().unwrap_err().code,
+            "PROFILE_MEMBERSHIP_INCOMPLETE"
+        );
+        assert_eq!(
+            store
+                .record(&workspace, member, MembershipDisposition::Released)
+                .unwrap_err()
+                .code,
+            "PROFILE_MEMBERSHIP_INCOMPLETE"
+        );
+        fs::write(&selected, &selection).unwrap();
+        fs::set_permissions(&selected, fs::Permissions::from_mode(0o600)).unwrap();
+        let historical = root.join("membership.jsonl");
+        let history = fs::read(&historical).unwrap();
+        fs::write(&historical, b"corrupt history\n").unwrap();
+        assert_eq!(
+            store.load().unwrap_err().code,
+            "PROFILE_MEMBERSHIP_INCOMPLETE"
+        );
+        fs::write(&historical, history).unwrap();
+        assert_eq!(store.load().unwrap(), original);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn maintenance_and_existing_reads_reject_unsafe_profile_parents() {
+        let (parent, home) = home();
+        let store = GlobalMembershipStore::new(&home, "default", &"8".repeat(64)).unwrap();
+        let root = store.ensure_root().unwrap();
+        let original = store.load().unwrap();
+        let profiles = home.root().join("profiles");
+        let backup = parent.join("safe-profiles");
+        for corruption in ["mode", "symlink"] {
+            if corruption == "mode" {
+                fs::set_permissions(&profiles, fs::Permissions::from_mode(0o755)).unwrap();
+            } else {
+                fs::rename(&profiles, &backup).unwrap();
+                std::os::unix::fs::symlink(&backup, &profiles).unwrap();
+            }
+            assert_eq!(
+                store.load_existing().unwrap_err().code,
+                "RUNTIME_PATH_INVALID"
+            );
+            assert!(
+                store
+                    .with_maintenance_server_lock(|_, _| -> Result<(), MachineError> {
+                        panic!("unsafe parent reached effect")
+                    })
+                    .is_err()
+            );
+            if corruption == "mode" {
+                fs::set_permissions(&profiles, fs::Permissions::from_mode(0o700)).unwrap();
+            } else {
+                fs::remove_file(&profiles).unwrap();
+                fs::rename(&backup, &profiles).unwrap();
+            }
+            assert_eq!(store.load().unwrap(), original);
+            assert!(root.is_dir());
+        }
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn membership_capacity_is_distinct_from_malformed_input() {
+        let (parent, home) = home();
+        let key = "8".repeat(64);
+        let store = GlobalMembershipStore::new(&home, "default", &key).unwrap();
+        let root = store.ensure_root().unwrap();
+        let journal = root.join("membership.jsonl");
+        fs::write(&journal, b"not JSON\n").unwrap();
+        fs::set_permissions(&journal, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            store.load().unwrap_err().code,
+            "PROFILE_MEMBERSHIP_INCOMPLETE"
+        );
+        fs::write(&journal, vec![b'x'; MAX_MEMBERSHIP_BYTES as usize + 1]).unwrap();
+        assert_eq!(
+            store.load().unwrap_err().code,
+            "PROFILE_MEMBERSHIP_INCOMPLETE"
+        );
+        let mut oversized = b"not JSON\n".to_vec();
+        oversized.resize(MAX_MEMBERSHIP_BYTES as usize + 1, b'\n');
+        fs::write(&journal, oversized).unwrap();
+        assert_eq!(
+            store.load().unwrap_err().code,
+            "PROFILE_MEMBERSHIP_INCOMPLETE"
+        );
+        for prefix in [
+            "{\"schema_version\":1,",
+            "{\"schema_version\":2,\"schema_version\":2,",
+            "{\"revision\":2,",
+            "{\"previous_sha256\":\"wrong\",",
+            "{\"record_sha256\":\"wrong\",",
+            "{\"writer\":\"wrong\",",
+        ] {
+            let mut bytes = prefix.as_bytes().to_vec();
+            bytes.resize(MAX_MEMBERSHIP_BYTES as usize + 1, b' ');
+            fs::write(&journal, &bytes).unwrap();
+            assert_eq!(
+                store.load().unwrap_err().code,
+                "PROFILE_MEMBERSHIP_INCOMPLETE",
+                "{prefix}"
+            );
+            assert_eq!(fs::read(&journal).unwrap(), bytes);
+        }
+        let mut bad_hash = serde_json::to_vec(&json!({
+            "schema_version":2,"revision":1,"workspace_id":"7".repeat(64),"run_id":Uuid::now_v7(),
+            "disposition":"active","lifecycle":"active","writer":false,
+            "previous_sha256":ZERO_HASH,"record_sha256":ZERO_HASH,
+        }))
+        .unwrap();
+        bad_hash.resize(MAX_MEMBERSHIP_BYTES as usize + 1, b' ');
+        fs::write(&journal, bad_hash).unwrap();
+        assert_eq!(
+            store.load().unwrap_err().code,
+            "PROFILE_MEMBERSHIP_INCOMPLETE"
+        );
+        let mut valid = b" {\"schema_version\":2,\"revision\":1,".to_vec();
+        valid.resize(MAX_MEMBERSHIP_BYTES as usize + 1, b' ');
+        fs::write(&journal, valid).unwrap();
+        assert_eq!(store.load().unwrap_err().code, "STORAGE_CAPACITY_EXCEEDED");
+        fs::write(&journal, vec![b'\n'; MAX_MEMBERSHIP_BYTES as usize + 1]).unwrap();
+        assert_eq!(store.load().unwrap_err().code, "STORAGE_CAPACITY_EXCEEDED");
+        let before = fs::read(&journal).unwrap();
+        assert_eq!(
+            store
+                .record(
+                    &"7".repeat(64),
+                    Uuid::now_v7(),
+                    MembershipDisposition::Active
+                )
+                .unwrap_err()
+                .code,
+            "STORAGE_CAPACITY_EXCEEDED"
+        );
+        assert_eq!(fs::read(&journal).unwrap(), before);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn identical_membership_facts_reuse_verified_durable_state() {
+        let (parent, home) = home();
+        let key = "8".repeat(64);
+        let workspace = "7".repeat(64);
+        let store = GlobalMembershipStore::new(&home, "default", &key).unwrap();
+        let id = Uuid::now_v7();
+        let first = store
+            .record(&workspace, id, MembershipDisposition::Active)
+            .unwrap();
+        let root = store.ensure_root().unwrap();
+        let journal = fs::read(root.join("membership.jsonl")).unwrap();
+        let index = fs::read(root.join("members.json")).unwrap();
+        assert_eq!(
+            store
+                .record(&workspace, id, MembershipDisposition::Active)
+                .unwrap(),
+            first
+        );
+        assert_eq!(fs::read(root.join("membership.jsonl")).unwrap(), journal);
+        assert_eq!(fs::read(root.join("members.json")).unwrap(), index);
+        fs::write(root.join("members.json"), b"{}").unwrap();
+        assert_eq!(
+            store
+                .record(&workspace, id, MembershipDisposition::Active)
+                .unwrap_err()
+                .code,
+            "PROFILE_MEMBERSHIP_INCOMPLETE"
+        );
+        assert_eq!(fs::read(root.join("membership.jsonl")).unwrap(), journal);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn membership_compaction_serializes_concurrent_reader_and_writer() {
+        let (parent, home) = home();
+        let key = "8".repeat(64);
+        let workspace = "7".repeat(64);
+        let store = Arc::new(GlobalMembershipStore::new(&home, "default", &key).unwrap());
+        let original = store
+            .record(&workspace, Uuid::now_v7(), MembershipDisposition::Unknown)
+            .unwrap();
+        let root = store.ensure_root().unwrap();
+        let lock = lock_file(&root.join("server.lock")).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let reader_store = Arc::clone(&store);
+        let reader_barrier = Arc::clone(&barrier);
+        let reader = thread::spawn(move || {
+            reader_barrier.wait();
+            reader_store.load().unwrap()
+        });
+        let writer_store = Arc::clone(&store);
+        let writer_barrier = Arc::clone(&barrier);
+        let writer_workspace = workspace.clone();
+        let writer = thread::spawn(move || {
+            writer_barrier.wait();
+            writer_store
+                .record(
+                    &writer_workspace,
+                    Uuid::now_v7(),
+                    MembershipDisposition::Active,
+                )
+                .unwrap()
+        });
+        barrier.wait();
+        thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!reader.is_finished() && !writer.is_finished());
+        store
+            .compact_under_server_lock(
+                &root,
+                Uuid::now_v7(),
+                1,
+                &original.journal_sha256,
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+        drop(lock);
+        let read = reader.join().unwrap();
+        let written = writer.join().unwrap();
+        assert!(read == original || read == written);
+        assert_eq!(written.revision, original.revision + 1);
+        for (id, member) in original.members {
+            assert_eq!(written.members[&id], member);
+        }
+        assert_eq!(store.load().unwrap(), written);
         fs::remove_dir_all(parent).unwrap();
     }
 }
