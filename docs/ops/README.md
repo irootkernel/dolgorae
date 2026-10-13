@@ -376,3 +376,24 @@ change. Substantive changes require all-consumer evidence-impact assessment
 and affected requalification. Only existing explicitly permitted QA-neutral
 metadata exceptions apply. Missing mandatory evidence or corrective work blocks
 release and incomplete Epic closeout.
+
+
+## Ledger capacity and checkpoint recovery
+
+Native `STORAGE_CAPACITY_EXCEEDED` refuses ordinary admission before dispatch.
+Frozen Run machine/public-v1 outputs use `CAPABILITY_UNSUPPORTED` with the
+successor storage reporting boundary; inspect the original operation and use
+explicitly approved native maintenance before an exact-key retry. Accepted
+Turn finalization, pending interaction cleanup, Close and writer release retain
+reserved capacity; integrity failures still require authoritative recovery.
+Use the selected binary's `maintenance plan/apply/get` commands only with
+explicit operator authority. Preserve the complete dry-run plan and its original
+workspace generation and ID before Apply. Stop existing writers through their
+lifecycle owners, then apply the exact plan with explicit approval. After reply
+loss or interruption, Get the original ID first. A retained owner can resume the
+same plan; changed history, a different selector or corrupt content requires
+recovery rather than a new plan ID. Old generation files are retained.
+
+The [ledger maintenance runtime](../specs/dolgorae-v014-ledger-maintenance.md)
+owns crash ordering and bounds. This native support does not qualify public-v2,
+Gul E16, or any actual consumer scenario.

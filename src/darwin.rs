@@ -1328,6 +1328,14 @@ impl DarwinSystem {
         Ok(())
     }
 
+    pub fn lock_shared_nonblocking(self, file: &std::fs::File) -> Result<(), std::io::Error> {
+        // SAFETY: flock borrows the live descriptor and retains no pointer.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn lock_exclusive_nonblocking(self, file: &std::fs::File) -> Result<(), std::io::Error> {
         // SAFETY: flock receives the live descriptor borrowed from `file`; it
         // neither takes ownership nor outlives the call. The lock remains tied

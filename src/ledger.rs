@@ -29,6 +29,8 @@ pub const MAX_AUDIT_LINE_BYTES: usize = REPRESENTED_PAYLOAD_LIMIT + 64 * 1024;
 pub const MAX_STATE_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_LEDGER_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_LEDGER_RECORDS: usize = 1_000_000;
+pub const FINALIZATION_RESERVED_BYTES: u64 = 32 * MAX_AUDIT_LINE_BYTES as u64;
+pub const FINALIZATION_RESERVED_RECORDS: usize = 256;
 pub const REPLAY_BUDGET_MILLIS: u64 = 5 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +51,7 @@ pub enum LedgerError {
     Fault(FaultInjected),
     SecurityPolicy(crate::machine::MachineError),
     Integrity(String),
+    Capacity(String),
     InvalidRecord(String),
     InvalidEvent(String),
     MissingEventStamp(u64),
@@ -75,6 +78,7 @@ impl std::fmt::Display for LedgerError {
                     error.code, error.message
                 )
             }
+            Self::Capacity(reason) => write!(formatter, "storage capacity exceeded: {reason}"),
             Self::Integrity(reason) => write!(formatter, "audit integrity failure: {reason}"),
             Self::InvalidRecord(reason) => write!(formatter, "invalid audit record: {reason}"),
             Self::InvalidEvent(reason) => write!(formatter, "invalid client event: {reason}"),
@@ -178,6 +182,9 @@ pub struct Ledger<C: LedgerClock = SystemLedgerClock, F: FaultInjector = NoFault
     file: File,
     records: Vec<AuditRecord>,
     ledger_bytes: u64,
+    generation_records: usize,
+    _anchor_file: File,
+    _workspace_lease: Option<crate::ledger_generation::WorkspaceLease>,
     durable_len: usize,
     projection: RunStateProjection,
     tail_projection: RunStateProjection,
@@ -249,6 +256,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             ));
         }
         let root = root.into();
+        let workspace_lease = crate::ledger_generation::WorkspaceLease::for_run(&root)?;
         let audit_path = root.join("audit.jsonl");
         let state_path = root.join("state.json");
         let recovery_path = root.join("recovery");
@@ -259,14 +267,14 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         if fs::symlink_metadata(&state_path).is_ok() {
             verify_secure_file(&state_path, uid).map_err(machine_as_security)?;
         }
-        let mut file = OpenOptions::new()
+        let anchor_file = OpenOptions::new()
             .read(true)
             .append(true)
             .mode(0o600)
             .open(&audit_path)
             .map_err(|error| io_at("open audit ledger", &audit_path, error))?;
         DarwinSystem
-            .lock_exclusive_nonblocking(&file)
+            .lock_exclusive_nonblocking(&anchor_file)
             .map_err(|error| {
                 if error
                     .raw_os_error()
@@ -278,8 +286,40 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
                 }
             })?;
         let replay_started = clock.monotonic_millis();
-        let (mut records, tail) =
-            scan_ledger(&mut file, &audit_path, run_id, &clock, replay_started)?;
+        let mut pin = crate::ledger_generation::pin(&root, run_id)?;
+        let mut records = Vec::new();
+        for mut historical in pin.historical.drain(..) {
+            let (next, tail) = scan_ledger(
+                &mut historical,
+                &audit_path,
+                run_id,
+                &clock,
+                replay_started,
+                records,
+            )?;
+            if tail.is_some() {
+                return Err(LedgerError::Integrity(
+                    "immutable history segment has a torn tail".to_owned(),
+                ));
+            }
+            records = next;
+        }
+        let generation_start = records.len();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&pin.append_path)?;
+        let (mut records, tail) = scan_ledger(
+            &mut file,
+            &pin.append_path,
+            run_id,
+            &clock,
+            replay_started,
+            records,
+        )?;
+        crate::ledger_generation::validate_checkpoint(&root, &pin, &records)?;
         let clock = Arc::new(clock);
         let faults = Arc::new(faults);
         let scheduled = Arc::new(ScheduledCommit {
@@ -297,6 +337,13 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
                 .len(),
             |tail| tail.prefix_length,
         );
+        let ledger_bytes = ledger_bytes.saturating_add(pin.base_bytes);
+        if ledger_bytes > MAX_LEDGER_BYTES {
+            return Err(LedgerError::Capacity(
+                "selected generation exceeds byte bound".to_owned(),
+            ));
+        }
+        let generation_records = records.len() - generation_start;
         let tail_interaction_revision = interaction_state_revision(&records);
         let mut ledger = Self {
             run_id,
@@ -309,6 +356,9 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             durable_len: records.len(),
             records: std::mem::take(&mut records),
             ledger_bytes,
+            generation_records,
+            _anchor_file: anchor_file,
+            _workspace_lease: workspace_lease,
             pending_since_millis: None,
             poisoned: false,
             clock,
@@ -319,6 +369,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             event_context: None,
             tail_interaction_revision,
         };
+        crate::ledger_generation::retain_activation(&ledger.root, run_id)?;
         if let Some(tail) = tail {
             ledger.preserve_and_truncate_tail(tail)?;
         }
@@ -518,7 +569,35 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             ));
         }
         let line_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
-        check_append_capacity(self.ledger_bytes, self.records.len(), line_bytes)?;
+        let protected_open = record.kind() == AuditKind::InteractionOpened
+            && self.records.last().is_some_and(|prior| {
+                prior.kind() == AuditKind::ApprovalRequested
+                    && approval_request_matches(prior, &record)
+            });
+        let pending = self.tail_projection.pending_requests.len()
+            + usize::from(
+                record.kind() == AuditKind::ApprovalRequested
+                    || (record.kind() == AuditKind::InteractionOpened && !protected_open),
+            );
+        let admission = matches!(
+            record.kind(),
+            AuditKind::TurnIntent | AuditKind::IdempotencyReserved | AuditKind::MutationAdmitted
+        );
+        check_record_capacity_with_reserve(
+            self.ledger_bytes,
+            self.generation_records,
+            line_bytes,
+            if record.kind() == AuditKind::InteractionOpened {
+                protected_open
+            } else if record.kind() == AuditKind::InteractionResolved {
+                payload_string(record.payload(), "request_id")
+                    .is_some_and(|id| self.tail_projection.pending_requests.contains(&id))
+            } else {
+                finalization_record(&record)
+            },
+            pending,
+            admission,
+        )?;
         let candidate_projection = project_next(self.run_id, &self.tail_projection, &record)
             .map_err(|error| {
                 LedgerError::InvalidRecord(format!("record cannot be projected: {error}"))
@@ -545,6 +624,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         self.tail_interaction_revision =
             next_interaction_revision(self.tail_interaction_revision, &record);
         self.records.push(record);
+        self.generation_records = self.generation_records.saturating_add(1);
         self.ledger_bytes = self.ledger_bytes.saturating_add(line_bytes);
         self.tail_projection = candidate_projection.clone();
         let started = *self
@@ -1320,19 +1400,20 @@ fn scan_ledger<C: LedgerClock>(
     run_id: Uuid,
     clock: &C,
     started_millis: u64,
+    mut records: Vec<AuditRecord>,
 ) -> Result<(Vec<AuditRecord>, Option<TornTail>), LedgerError> {
     let ledger_bytes = file
         .metadata()
         .map_err(|error| io_at("inspect audit ledger", audit_path, error))?
         .len();
     if ledger_bytes > MAX_LEDGER_BYTES {
-        return Err(LedgerError::Integrity(format!(
+        return Err(LedgerError::Capacity(format!(
             "audit ledger exceeds the {MAX_LEDGER_BYTES}-byte replay bound"
         )));
     }
     let mut reader = BufReader::new(file.try_clone()?);
     reader.seek(SeekFrom::Start(0))?;
-    let mut records = Vec::new();
+    let generation_start = records.len();
     let mut prefix_length = 0_u64;
     let mut tail = None;
     while let Some((mut line, terminated)) = read_bounded_segment(&mut reader)? {
@@ -1341,8 +1422,8 @@ fn scan_ledger<C: LedgerClock>(
                 "full replay exceeded {REPLAY_BUDGET_MILLIS} milliseconds"
             )));
         }
-        if records.len() >= MAX_LEDGER_RECORDS {
-            return Err(LedgerError::Integrity(format!(
+        if records.len() - generation_start >= MAX_LEDGER_RECORDS {
+            return Err(LedgerError::Capacity(format!(
                 "audit ledger exceeds the {MAX_LEDGER_RECORDS}-record replay bound"
             )));
         }
@@ -1406,22 +1487,133 @@ fn scan_ledger<C: LedgerClock>(
     Ok((records, tail))
 }
 
+#[cfg(test)]
 fn check_append_capacity(
     current_bytes: u64,
     current_records: usize,
     line_bytes: u64,
 ) -> Result<(), LedgerError> {
-    if current_records >= MAX_LEDGER_RECORDS {
-        return Err(LedgerError::Integrity(format!(
-            "append would exceed the {MAX_LEDGER_RECORDS}-record ledger bound"
-        )));
-    }
-    if current_bytes.saturating_add(line_bytes) > MAX_LEDGER_BYTES {
-        return Err(LedgerError::Integrity(format!(
-            "append would exceed the {MAX_LEDGER_BYTES}-byte ledger bound"
+    check_record_capacity(current_bytes, current_records, line_bytes, true)
+}
+
+#[cfg(test)]
+fn check_record_capacity(
+    current_bytes: u64,
+    current_records: usize,
+    line_bytes: u64,
+    finalization: bool,
+) -> Result<(), LedgerError> {
+    check_record_capacity_with_reserve(
+        current_bytes,
+        current_records,
+        line_bytes,
+        finalization,
+        0,
+        false,
+    )
+}
+fn check_record_capacity_with_reserve(
+    current_bytes: u64,
+    current_records: usize,
+    line_bytes: u64,
+    finalization: bool,
+    pending_interactions: usize,
+    admission: bool,
+) -> Result<(), LedgerError> {
+    let extra_records = pending_interactions
+        .saturating_mul(2)
+        .saturating_add(if admission { 2 } else { 0 });
+    let extra_bytes = (extra_records as u64).saturating_mul(MAX_AUDIT_LINE_BYTES as u64);
+    let (byte_limit, record_limit) = if finalization {
+        (MAX_LEDGER_BYTES, MAX_LEDGER_RECORDS)
+    } else {
+        (
+            MAX_LEDGER_BYTES
+                .saturating_sub(FINALIZATION_RESERVED_BYTES.saturating_add(extra_bytes)),
+            MAX_LEDGER_RECORDS
+                .saturating_sub(FINALIZATION_RESERVED_RECORDS.saturating_add(extra_records)),
+        )
+    };
+    if current_records >= record_limit || current_bytes.saturating_add(line_bytes) > byte_limit {
+        return Err(LedgerError::Capacity(format!(
+            "selected generation admission limit reached ({current_bytes} bytes, {current_records} records); operator checkpoint required"
         )));
     }
     Ok(())
+}
+
+fn approval_request_matches(prior: &AuditRecord, opened: &AuditRecord) -> bool {
+    let Some(request) = payload_string(opened.payload(), "request_id") else {
+        return false;
+    };
+    let LosslessJson::Object(entries) = prior.payload() else {
+        return false;
+    };
+    entries.iter().any(|(key, value)| {
+        key == "upstream_request_id"
+            && canonicalize(value).is_ok_and(|bytes| bytes == request.as_bytes())
+    })
+}
+
+fn finalization_record(record: &AuditRecord) -> bool {
+    match record.kind() {
+        AuditKind::ThreadBound
+        | AuditKind::TurnStarted
+        | AuditKind::TurnTerminal
+        | AuditKind::MutationCompleted
+        | AuditKind::OutcomeUnknown
+        | AuditKind::Reconciliation
+        | AuditKind::CleanupIntent
+        | AuditKind::CleanupResult
+        | AuditKind::WriterReleased
+        | AuditKind::RunGenerationStopped
+        | AuditKind::StartFailed
+        | AuditKind::LedgerTailRepaired
+        | AuditKind::ProjectionRewound
+        | AuditKind::ApprovalDecided
+        | AuditKind::WriterHandoffCancelled
+        | AuditKind::WriterHandoffCompleted => true,
+        AuditKind::TurnIntent => {
+            payload_string(record.payload(), "schema").as_deref()
+                == Some("dolgorae.submit-refusal/v1")
+                || payload_string(record.payload(), "provisional_thread_id").is_some()
+        }
+        AuditKind::LifecycleTransition => !matches!(
+            payload_string(record.payload(), "current").as_deref(),
+            Some("running" | "starting")
+        ),
+        AuditKind::MutationAdmitted => {
+            matches!(
+                payload_string(record.payload(), "operation").as_deref(),
+                Some(
+                    "close"
+                        | "interrupt"
+                        | "release_write"
+                        | "recover"
+                        | "reconcile"
+                        | "run.close"
+                        | "run.interrupt"
+                        | "run.release_write"
+                        | "run.recover"
+                        | "run.reconcile"
+                )
+            )
+        }
+        AuditKind::ClientEvent => event_from_payload(record.payload()).is_ok_and(|event| {
+            matches!(
+                event.data,
+                ClientEventData::ResponseFinal(_) | ClientEventData::UsageReported(_)
+            )
+        }),
+        _ => false,
+    }
+}
+
+pub(crate) fn project(
+    run_id: Uuid,
+    records: &[AuditRecord],
+) -> Result<RunStateProjection, LedgerError> {
+    replay_with_budget(run_id, records, &SystemLedgerClock::default(), 0)
 }
 
 fn read_bounded_segment(reader: &mut impl BufRead) -> Result<Option<(Vec<u8>, bool)>, LedgerError> {
@@ -1572,7 +1764,15 @@ impl ObservedLedger {
             run_id,
             head,
         )
-        .map_err(|error| audit_integrity_error(run_id, head, &error.to_string()))
+        .map_err(|error| match error {
+            LedgerError::Capacity(reason) => crate::machine::MachineError::new(
+                "STORAGE_CAPACITY_EXCEEDED",
+                reason,
+                false,
+                serde_json::json!({"run_id": run_id, "required_action": "operator_checkpoint"}),
+            ),
+            other => audit_integrity_error(run_id, head, &other.to_string()),
+        })
     }
 
     pub fn open(root: &Path, run_id: Uuid, head: u64) -> Result<Self, LedgerError> {
@@ -1605,6 +1805,18 @@ impl ObservedLedger {
     #[must_use]
     pub fn interaction_state_revision(&self) -> u64 {
         interaction_state_revision(&self.records)
+    }
+
+    /// Export this already selected, verified prefix without changing sequence or hash bytes.
+    /// Transport callers retain their existing Controller authorization obligation.
+    pub fn write_canonical_history(
+        &self,
+        output: &mut impl std::io::Write,
+    ) -> Result<(), LedgerError> {
+        for record in &self.records {
+            output.write_all(&record.canonical_line()?)?;
+        }
+        Ok(())
     }
 
     /// Read historical typed events without borrowing current snapshot revisions.
@@ -1777,25 +1989,43 @@ fn observe_records(
             "run identity must be UUIDv7".to_owned(),
         ));
     }
-    let audit_path = root.join("audit.jsonl");
     let uid = current_uid();
     verify_secure_directory(root, uid).map_err(machine_as_security)?;
-    verify_secure_file(&audit_path, uid).map_err(machine_as_security)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .open(&audit_path)
-        .map_err(|error| io_at("open audit ledger", &audit_path, error))?;
-    if file
-        .metadata()
-        .map_err(|error| io_at("inspect audit ledger", &audit_path, error))?
-        .len()
-        > MAX_LEDGER_BYTES
-    {
-        return Err(LedgerError::Integrity(format!(
-            "audit ledger exceeds the {MAX_LEDGER_BYTES}-byte replay bound"
-        )));
+    let pin = crate::ledger_generation::pin(root, run_id)?;
+    let mut pin = pin;
+    let mut files = std::mem::take(&mut pin.historical);
+    verify_secure_file(&pin.append_path, uid).map_err(machine_as_security)?;
+    files.push(
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&pin.append_path)?,
+    );
+    for file in &files {
+        if file.metadata()?.len() > MAX_LEDGER_BYTES {
+            return Err(LedgerError::Capacity(
+                "selected segment exceeds replay bound".to_owned(),
+            ));
+        }
     }
-    let mut reader = BufReader::new(file);
+    if files
+        .last()
+        .expect("selected append file")
+        .metadata()?
+        .len()
+        .saturating_add(pin.base_bytes)
+        > MAX_LEDGER_BYTES
+        || head.saturating_sub(pin.manifest.as_ref().map_or(0, |m| m.durable_watermark))
+            > MAX_LEDGER_RECORDS as u64
+    {
+        return Err(LedgerError::Capacity(
+            "selected generation exceeds replay bounds".to_owned(),
+        ));
+    }
+    let mut reader = GenerationReader {
+        files: files.into_iter().map(BufReader::new).collect(),
+        current: 0,
+    };
     let mut records: Vec<AuditRecord> = Vec::new();
     while records.len() < usize::try_from(head).unwrap_or(usize::MAX) {
         let Some((mut line, terminated)) = read_bounded_segment(&mut reader)? else {
@@ -1830,18 +2060,50 @@ fn observe_records(
             records.len()
         )));
     }
-    if require_complete
-        && !reader
-            .fill_buf()
-            .map_err(|error| io_at("inspect operation history tail", &audit_path, error))?
-            .is_empty()
-    {
+    if require_complete && !reader.fill_buf().map_err(LedgerError::Io)?.is_empty() {
         return Err(LedgerError::Integrity(
             "operation history has an unpublished tail; authoritative recovery is required"
                 .to_owned(),
         ));
     }
+    if pin
+        .manifest
+        .as_ref()
+        .is_some_and(|manifest| head >= manifest.durable_watermark)
+    {
+        crate::ledger_generation::validate_checkpoint(root, &pin, &records)?;
+    }
     Ok(records)
+}
+
+struct GenerationReader {
+    files: Vec<BufReader<File>>,
+    current: usize,
+}
+impl std::io::Read for GenerationReader {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let available = self.fill_buf()?;
+        let n = bytes.len().min(available.len());
+        bytes[..n].copy_from_slice(&available[..n]);
+        self.consume(n);
+        Ok(n)
+    }
+}
+impl BufRead for GenerationReader {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        while self.current < self.files.len() {
+            if !self.files[self.current].fill_buf()?.is_empty() {
+                return self.files[self.current].fill_buf();
+            }
+            self.current += 1;
+        }
+        Ok(&[])
+    }
+    fn consume(&mut self, amount: usize) {
+        if let Some(reader) = self.files.get_mut(self.current) {
+            reader.consume(amount);
+        }
+    }
 }
 
 fn is_reasoning_message(method: &str, raw: &[u8]) -> bool {
@@ -2035,5 +2297,147 @@ mod tests {
         assert!(check_append_capacity(MAX_LEDGER_BYTES - 1, MAX_LEDGER_RECORDS - 1, 1).is_ok());
         assert!(check_append_capacity(MAX_LEDGER_BYTES, MAX_LEDGER_RECORDS - 1, 1).is_err());
         assert!(check_append_capacity(0, MAX_LEDGER_RECORDS, 1).is_err());
+    }
+    #[test]
+    fn ordinary_exhaustion_preserves_terminal_close_and_cleanup_appends() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let root = std::env::temp_dir().join(format!("dolgorae-reserve-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join("recovery"))
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("audit.jsonl"))
+            .unwrap();
+        let run_id = Uuid::now_v7();
+        for (records_full, pending_count) in [(false, 0), (true, 0), (false, 8), (true, 8)] {
+            let mut ledger = Ledger::open(&root, run_id).unwrap();
+            ledger
+                .append_required_payload(
+                    AuditKind::ThreadBound,
+                    &serde_json::json!({"thread_id":"retained"}),
+                    1,
+                )
+                .unwrap();
+            ledger
+                .append_required_payload(
+                    AuditKind::TurnStarted,
+                    &serde_json::json!({"turn_id":"accepted"}),
+                    1,
+                )
+                .unwrap();
+            for id in 0..pending_count {
+                ledger
+                    .append_required_payload(
+                        AuditKind::InteractionOpened,
+                        &serde_json::json!({"request_id":id.to_string()}),
+                        1,
+                    )
+                    .unwrap();
+            }
+            // Exercise byte and record accounting independently at their real admission boundaries.
+            if records_full {
+                ledger.generation_records =
+                    MAX_LEDGER_RECORDS - FINALIZATION_RESERVED_RECORDS - pending_count * 2;
+            } else {
+                ledger.ledger_bytes = MAX_LEDGER_BYTES
+                    - FINALIZATION_RESERVED_BYTES
+                    - (pending_count * 2 * MAX_AUDIT_LINE_BYTES) as u64;
+            }
+            let before = fs::read(root.join("audit.jsonl")).unwrap();
+            // This is the never-policy journal path: a fresh Opened followed by
+            // Resolved, without an ApprovalRequested. Repetition must not drain reserve.
+            for request_id in 100..400 {
+                assert!(matches!(
+                    ledger.append_required_payload(
+                        AuditKind::InteractionOpened,
+                        &serde_json::json!({"request_id": request_id.to_string(),
+                        "method":"item/commandExecution/requestApproval"}),
+                        1
+                    ),
+                    Err(LedgerError::Capacity(_))
+                ));
+            }
+            assert_eq!(fs::read(root.join("audit.jsonl")).unwrap(), before);
+            let effect = std::sync::atomic::AtomicBool::new(false);
+            let ordinary = AuditRecord::new(
+                ledger.next_sequence(),
+                ledger.clock.timestamp(),
+                run_id,
+                1,
+                AuditKind::TurnIntent,
+                parse("{}").unwrap(),
+                ledger.previous_hash(),
+            )
+            .unwrap();
+            let refused = ledger.append_before_effect(ordinary, || {
+                effect.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            });
+            assert!(matches!(refused, Err(LedgerError::Capacity(_))));
+            assert!(!effect.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(fs::read(root.join("audit.jsonl")).unwrap(), before);
+            for id in 0..pending_count {
+                ledger.append_required_payload(AuditKind::ApprovalDecided, &serde_json::json!({"request_id":id.to_string(),"resolution":{"outcome":"stale"}}), 1).unwrap();
+                ledger
+                    .append_required_payload(
+                        AuditKind::InteractionResolved,
+                        &serde_json::json!({"request_id":id.to_string()}),
+                        1,
+                    )
+                    .unwrap();
+            }
+            for (kind, payload) in [
+                (
+                    AuditKind::TurnTerminal,
+                    serde_json::json!({"turn_id":"accepted"}),
+                ),
+                (
+                    AuditKind::MutationAdmitted,
+                    serde_json::json!({"operation":"close"}),
+                ),
+                (AuditKind::WriterReleased, serde_json::json!({})),
+                (
+                    AuditKind::CleanupResult,
+                    serde_json::json!({"confirmed":true}),
+                ),
+                (
+                    AuditKind::LifecycleTransition,
+                    serde_json::json!({"current":"closed"}),
+                ),
+            ] {
+                let record = AuditRecord::new(
+                    ledger.next_sequence(),
+                    ledger.clock.timestamp(),
+                    run_id,
+                    1,
+                    kind,
+                    parse(&payload.to_string()).unwrap(),
+                    ledger.previous_hash(),
+                )
+                .unwrap();
+                if matches!(
+                    kind,
+                    AuditKind::CleanupResult | AuditKind::LifecycleTransition
+                ) {
+                    ledger
+                        .append_conformance_record(record, AppendDurability::Required)
+                        .unwrap();
+                } else {
+                    ledger.append(record, AppendDurability::Required).unwrap();
+                }
+            }
+            let projection = ledger.projection().unwrap();
+            assert_eq!(projection.lifecycle, RunLifecycle::Closed);
+            assert!(projection.pending_requests.is_empty());
+            drop(ledger);
+            fs::write(root.join("audit.jsonl"), b"").unwrap();
+            fs::remove_file(root.join("state.json")).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 }

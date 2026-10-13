@@ -176,6 +176,7 @@ pub enum TurnError {
     InteractionStale {
         request_id: u64,
     },
+    Capacity(String),
     Journal(String),
     Artifact(String),
 }
@@ -197,6 +198,7 @@ impl TurnError {
             Self::InteractionResponseInvalid { .. } => "InteractionResponseInvalid",
             Self::InteractionAlreadyResolved { .. } => "InteractionAlreadyResolved",
             Self::InteractionStale { .. } => "InteractionStale",
+            Self::Capacity(_) => "Capacity",
             Self::Journal(_) => "Journal",
             Self::Artifact(_) => "Artifact",
         }
@@ -279,6 +281,7 @@ impl std::fmt::Display for TurnError {
             Self::InteractionStale { request_id } => {
                 write!(formatter, "interaction {request_id} is stale")
             }
+            Self::Capacity(reason) => write!(formatter, "storage capacity exceeded: {reason}"),
             Self::Journal(reason) => write!(formatter, "durable journal failed: {reason}"),
             Self::Artifact(reason) => write!(formatter, "response artifact failed: {reason}"),
         }
@@ -402,6 +405,12 @@ impl TurnError {
                 message,
                 false,
                 serde_json::json!({"run_id": run_id, "request_id": request_id.to_string()}),
+            ),
+            Self::Capacity(reason) => MachineError::new(
+                "STORAGE_CAPACITY_EXCEEDED",
+                message,
+                false,
+                serde_json::json!({"run_id": run_id, "reason": reason, "required_action": "operator_checkpoint"}),
             ),
             Self::Journal(reason) => MachineError::new(
                 "INTERNAL_ERROR",
@@ -843,6 +852,13 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> DurableTurnJournal
     }
 }
 
+fn journal_ledger_error(error: crate::ledger::LedgerError) -> TurnError {
+    match error {
+        crate::ledger::LedgerError::Capacity(reason) => TurnError::Capacity(reason),
+        other => TurnError::Journal(other.to_string()),
+    }
+}
+
 fn append_journal_payload<C: LedgerClock + 'static, F: FaultInjector + 'static>(
     ledger: &mut Ledger<C, F>,
     kind: AuditKind,
@@ -861,12 +877,12 @@ fn append_journal_payload<C: LedgerClock + 'static, F: FaultInjector + 'static>(
                 crate::ledger::AppendDurability::Required,
             )
             .map(|_| ())
-            .map_err(|error| TurnError::Journal(error.to_string()));
+            .map_err(journal_ledger_error);
     }
     if kind == AuditKind::TurnTerminal {
         ledger
             .append_final_response_event(payload, run_generation)
-            .map_err(|error| TurnError::Journal(error.to_string()))?;
+            .map_err(journal_ledger_error)?;
     }
     let outcome = if matches!(
         kind,
@@ -876,7 +892,7 @@ fn append_journal_payload<C: LedgerClock + 'static, F: FaultInjector + 'static>(
     } else {
         ledger.append_required_payload(kind, payload, run_generation)
     };
-    outcome.map_err(|error| TurnError::Journal(error.to_string()))
+    outcome.map_err(journal_ledger_error)
 }
 
 /// Truncate one untrusted routing field on a character boundary.

@@ -55,6 +55,24 @@ quiescent worker from another executable build. Busy or uncertain work remains
 fenced, and ordinary mutation keeps its exact-build checks. See the
 [Close and build recovery contract](docs/specs/dolgorae-v014-close-recovery.md).
 
+The source build provides operator-approved workspace ledger checkpoint rollover.
+Create a dry-run plan for the current workspace generation, retain the complete
+`data.plan` object in a private file, then apply that exact plan explicitly:
+
+```sh
+dolgorae maintenance plan --workspace /absolute/workspace --operator-file /absolute/private/operator.json --selected-generation GENERATION
+dolgorae maintenance apply --workspace /absolute/workspace --operator-file /absolute/private/operator.json --plan-file /absolute/private/plan.json --approve
+dolgorae maintenance get --workspace /absolute/workspace --operator-file /absolute/private/operator.json --selected-generation ORIGINAL_GENERATION --plan-id ORIGINAL_PLAN_ID
+```
+
+The initial workspace maintenance generation is 1. A completed operation reports
+its new generation. Resolve interrupted Apply through the original plan ID;
+retain that plan until observation confirms completion. Active writers and
+uncertain work require their existing lifecycle owners to settle first.
+Checkpoint rollover preserves old files and performs no content deletion.
+See the [ledger capacity and maintenance contract](docs/specs/dolgorae-v014-ledger-maintenance.md).
+Public-v2 activation and actual consumer qualification retain their roadmap owners.
+
 For a removed development or test home, inspect registered detached processes
 before cleanup. Use the exact digest from the inspection with the same selector:
 

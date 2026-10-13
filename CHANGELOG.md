@@ -9,6 +9,10 @@ development commits.
 
 ### Added
 
+- Reserve ledger finalization and interaction cleanup capacity, and provide
+  operator-approved checkpoint rollover that retains receipts and history
+  across interrupted generation switches.
+
 - Look up retained Submit operations by their original key and Controller,
   preserving receipts after attachment loss and synced refusal/retry boundaries
   across restarts.

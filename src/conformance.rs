@@ -1719,6 +1719,15 @@ pub fn delete_run_confirmed(
     run_id: Uuid,
     confirmed: bool,
 ) -> Result<(), ConformanceError> {
+    delete_run_confirmed_inner(state_root, run_id, confirmed, || {})
+}
+
+fn delete_run_confirmed_inner(
+    state_root: &Path,
+    run_id: Uuid,
+    confirmed: bool,
+    before_remove: impl FnOnce(),
+) -> Result<(), ConformanceError> {
     if !confirmed {
         return Err(ConformanceError::ConfirmationRequired);
     }
@@ -1728,6 +1737,7 @@ pub fn delete_run_confirmed(
     let state_identity = secure_directory_identity(state_root, uid)?;
     let runs_identity = secure_directory_identity(&runs_root, uid)?;
     let run_identity = secure_directory_identity(&run_root, uid)?;
+    let _workspace_lease = crate::ledger_generation::WorkspaceLease::for_run(&run_root)?;
     let escape_snapshot = capture_terminal_escape(&run_root, run_id);
     let terminal = match ConformantLedger::open(&run_root, run_id) {
         Ok(ledger) => {
@@ -1755,6 +1765,7 @@ pub fn delete_run_confirmed(
             "state, runs, or run directory identity changed before deletion".to_owned(),
         ));
     }
+    before_remove();
     fs::remove_dir_all(&run_root)?;
     sync_directory(&runs_root)?;
     Ok(())
@@ -1771,6 +1782,7 @@ struct TerminalEscapeSnapshot {
     final_record: AuditRecord,
     state_file: DirectoryIdentity,
     audit_file: DirectoryIdentity,
+    selected_append: (PathBuf, Option<String>),
 }
 
 fn secure_directory_identity(path: &Path, uid: u32) -> Result<DirectoryIdentity, ConformanceError> {
@@ -1820,12 +1832,15 @@ fn capture_terminal_escape(
     {
         return Err(ConformanceError::DeleteNotTerminal);
     }
-    let final_record = read_final_record(&run_root.join("audit.jsonl"))?;
+    let selected_append =
+        crate::ledger_generation::selected_terminal_record_path(run_root, run_id)?;
+    let final_record = read_final_record(&selected_append.0)?;
     Ok(TerminalEscapeSnapshot {
         state,
         final_record,
         state_file: file_identity(&state_path)?,
-        audit_file: file_identity(&run_root.join("audit.jsonl"))?,
+        audit_file: file_identity(&selected_append.0)?,
+        selected_append,
     })
 }
 
@@ -1835,7 +1850,9 @@ fn terminal_state_escape(
     snapshot: TerminalEscapeSnapshot,
 ) -> Result<bool, ConformanceError> {
     if file_identity(&run_root.join("state.json"))? != snapshot.state_file
-        || file_identity(&run_root.join("audit.jsonl"))? != snapshot.audit_file
+        || crate::ledger_generation::selected_terminal_record_path(run_root, run_id)?
+            != snapshot.selected_append
+        || file_identity(&snapshot.selected_append.0)? != snapshot.audit_file
     {
         return Err(ConformanceError::Security(
             "terminal escape evidence changed during verification".to_owned(),
@@ -2210,6 +2227,82 @@ mod tests {
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 
     const TIMESTAMP: &str = "2026-08-21T12:34:56.123456Z";
+
+    #[test]
+    fn terminal_delete_excludes_maintenance_through_removal_for_valid_and_corrupt_history() {
+        use crate::ledger_generation::WorkspaceLease;
+        for corrupt in [false, true] {
+            let state_root =
+                std::env::temp_dir().join(format!("dolgorae-delete-lease-{}", Uuid::now_v7()));
+            let run_id = Uuid::now_v7();
+            let run_root = state_root.join("runs").join(run_id.to_string());
+            for path in [
+                &state_root,
+                &state_root.join("runs"),
+                &run_root,
+                &run_root.join("recovery"),
+                &state_root.join("runtime"),
+                &state_root.join("runtime/locks"),
+            ] {
+                fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+            }
+            for path in [
+                state_root.join("workspace.json"),
+                run_root.join("audit.jsonl"),
+            ] {
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)
+                    .unwrap();
+            }
+            let mut ledger = ConformantLedger::open(&run_root, run_id).unwrap();
+            ledger
+                .bootstrap(&BootstrapRequest {
+                    timestamp: TIMESTAMP.to_owned(),
+                    workspace_id: "a".repeat(64),
+                    intent: IdempotencyIntent {
+                        schema_version: 1,
+                        operation: IdempotencyOperation::StartRun,
+                        idempotency_key: "delete".to_owned(),
+                        normalized_identity_sha256: "b".repeat(64),
+                        run_id,
+                    },
+                    record_kind: BootstrapRecordKind::RunCreated,
+                    initial_access: "read".to_owned(),
+                    default_effort: Some("medium".to_owned()),
+                })
+                .unwrap();
+            ledger.mark_threadless_ready(TIMESTAMP).unwrap();
+            ledger.seal_closed(TIMESTAMP, "worker absent").unwrap();
+            drop(ledger);
+            if corrupt {
+                let mut bytes = fs::read(run_root.join("audit.jsonl")).unwrap();
+                bytes[0] ^= 1;
+                fs::write(run_root.join("audit.jsonl"), bytes).unwrap();
+            }
+            let mut reached_removal = false;
+            delete_run_confirmed_inner(&state_root, run_id, true, || {
+                reached_removal = true;
+                assert!(run_root.exists());
+                let root = state_root.clone();
+                assert!(
+                    std::thread::spawn(move || matches!(
+                        WorkspaceLease::acquire(&root, true),
+                        Err(LedgerError::WriterBusy(_))
+                    ))
+                    .join()
+                    .unwrap()
+                );
+            })
+            .unwrap();
+            assert!(reached_removal);
+            assert!(!run_root.exists());
+            drop(WorkspaceLease::acquire(&state_root, true).unwrap());
+            fs::remove_dir_all(state_root).unwrap();
+        }
+    }
 
     #[test]
     fn caller_native_intent_allows_idle_uncertainty_without_relaxing_legacy_history() {

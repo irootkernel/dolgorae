@@ -187,6 +187,21 @@ impl MachineError {
     }
 }
 
+/// Frozen transports cannot carry successor-only storage vocabulary.
+#[must_use]
+pub fn legacy_transport_error(error: &MachineError) -> MachineError {
+    if error.code == "STORAGE_CAPACITY_EXCEEDED" {
+        MachineError::new(
+            "CAPABILITY_UNSUPPORTED",
+            "Legacy storage diagnostics require the successor contract; inspect the original operation and use approved native maintenance",
+            false,
+            serde_json::json!({"profile":null,"capability_name":"dolgorae.storage-capacity/v014","support":"recognized_unsupported"}),
+        )
+    } else {
+        error.clone()
+    }
+}
+
 /// Current checked error vocabulary, including the v1 codes inherited by v2.
 pub(crate) fn registered_errors() -> &'static BTreeMap<String, u8> {
     static ERRORS: OnceLock<BTreeMap<String, u8>> = OnceLock::new();
@@ -292,7 +307,7 @@ impl FailureEnvelope {
             ok: false,
             command: command.into(),
             invocation_id: new_uuid_v7(),
-            error,
+            error: legacy_transport_error(&error),
         }
     }
 }

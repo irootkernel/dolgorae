@@ -3,6 +3,10 @@
 from run_native_gateway_case import run_case
 
 if __name__ == "__main__":
+    run_case(
+        "gateway_semantic_native",
+        "maintenance_recovers_every_switch_boundary_and_preserves_closed_run_history",
+    )
     run_case("gateway_semantic_native", "event_revision_action_barrier")
     run_case("gateway_semantic_native", "public_bootstrap_and_machine_parity")
     run_case(

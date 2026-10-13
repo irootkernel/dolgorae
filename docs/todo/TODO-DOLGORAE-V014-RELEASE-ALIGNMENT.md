@@ -543,6 +543,13 @@ recovery and reader compatibility before changing the persisted contract.
 TASK-067 defines maintenance locking, concurrent-reader generation selection,
 over-cap recovery admission and interrupted-maintenance recovery. Maintenance
 never changes accepted identity bytes or bypasses a live writer.
+TASK-072's [native ledger maintenance contract](../specs/dolgorae-v014-ledger-maintenance.md)
+implements workspace-scoped retained plans and per-Run checkpoint selection.
+It reserves accepted finalization and each pending interaction's cleanup,
+preserves original chain/receipt/export bytes, and keeps old reader and recovery
+references without automatic pruning. Public-v2/facade activation remains
+TASK-078; actual consumer qualification and the complete Phase 3/H3 prerequisites
+retain their owners. EPIC-019 alone does not unlock Gul E16.
 
 Membership compaction preserves active/unknown members, Profile binding
 identity and audit continuity across every crash boundary. Release failure

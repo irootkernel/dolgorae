@@ -233,6 +233,25 @@ fn render_version(json_output: bool) -> ExitCode {
 
 fn execute(cli: Cli) -> ExitCode {
     let command_name = cli.command.machine_name();
+    if let Command::Maintenance { command } = &cli.command {
+        return match dolgorae::maintenance::execute_native(command_name, &command.leaf_args().args)
+        {
+            Ok(data) => {
+                if cli.human {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).expect("maintenance response")
+                    );
+                } else {
+                    render_json(
+                        &json!({"schema":"dolgorae-machine/v5","ok":true,"command":command_name,"data":data}),
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => render_failure(cli.human, command_name, error),
+        };
+    }
     if let Command::Version(args) = &cli.command {
         if args.json && cli.human {
             return render_failure(
@@ -1027,6 +1046,32 @@ fn render_failure_version(
     modern: bool,
 ) -> ExitCode {
     let status = error.exit_status();
+    if matches!(
+        command,
+        "plan_maintenance" | "apply_maintenance" | "get_maintenance"
+    ) && !human
+    {
+        let operation_ref = error
+            .details
+            .get("operation_ref")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let unresolved = error.details["effect"] == "unresolved";
+        let recovery = matches!(
+            error.code.as_str(),
+            "RECOVERY_REQUIRED"
+                | "ARTIFACT_INTEGRITY_FAILURE"
+                | "LOOKUP_NAMESPACE_UNAVAILABLE"
+                | "LOOKUP_NAMESPACE_CORRUPT"
+        );
+        render_json(
+            &json!({"schema":"dolgorae-machine/v5","ok":false,"command":command,
+            "error":{"schema":"dolgorae.successor-error/v1","code":error.code,"operation_kind":command,"operation_ref":operation_ref,
+                "effect":if unresolved || recovery {"unresolved"} else {"none"},"classification":if unresolved || recovery {"RecoveryNeeded"} else {"Rejected"},
+                "required_action":if unresolved && error.details["required_action"] != "restore_state" {"resume_maintenance"} else if unresolved || recovery {"restore_state"} else {"fix_request"},"retry_new_key":false,"subjects":null}}),
+        );
+        return ExitCode::from(status);
+    }
     if command == "run.lookup_operation" && !human {
         let (effect, classification, action) = match error.code.as_str() {
             "AUDIT_INTEGRITY_FAILURE" | "RECOVERY_REQUIRED" => {
@@ -1108,6 +1153,66 @@ mod gateway_cli_tests {
     use std::io::Read as _;
     use std::os::fd::IntoRawFd as _;
     use std::time::Duration;
+
+    #[test]
+    fn capacity_failure_renderer_child() {
+        if let Ok(command) = std::env::var("DOLGORAE_TEST_CAPACITY_COMMAND") {
+            println!();
+            let status = render_failure_version(
+                false,
+                &command,
+                MachineError::new(
+                    "STORAGE_CAPACITY_EXCEEDED",
+                    "selected admission full",
+                    false,
+                    json!({"required_action":"operator_checkpoint"}),
+                ),
+                false,
+            );
+            assert_eq!(status, ExitCode::from(4));
+            std::process::exit(4);
+        }
+    }
+    #[test]
+    fn run_cli_capacity_failure_matches_the_frozen_machine_contract() {
+        for command in ["run.send", "run.submit"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "gateway_cli_tests::capacity_failure_renderer_child",
+                    "--nocapture",
+                ])
+                .env("DOLGORAE_TEST_CAPACITY_COMMAND", command)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(4));
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let envelope: serde_json::Value =
+                serde_json::from_str(stdout.lines().find(|l| l.starts_with('{')).unwrap()).unwrap();
+            assert_eq!(envelope["command"], command);
+            assert_eq!(envelope["error"]["code"], "CAPABILITY_UNSUPPORTED");
+            assert_eq!(
+                envelope["error"]["details"]["capability_name"],
+                "dolgorae.storage-capacity/v014"
+            );
+            let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let mut checker = std::process::Command::new(repository.join(".venv/bin/python"))
+                .args(["-B", "-c", "import json,pathlib,sys; sys.path.insert(0,str(pathlib.Path(sys.argv[1])/'tests/e2e')); from schema_support import validator,assert_valid; assert_valid(json.load(sys.stdin),validator(pathlib.Path(sys.argv[1])/'docs/protocol','dolgorae-machine-v2.schema.json'),'Run capacity failure')"])
+                .arg(repository).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            checker
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(&serde_json::to_vec(&envelope).unwrap())
+                .unwrap();
+            let checked = checker.wait_with_output().unwrap();
+            assert!(
+                checked.status.success(),
+                "{}",
+                String::from_utf8_lossy(&checked.stderr)
+            );
+        }
+    }
 
     #[test]
     fn serve_keeps_the_exact_foreground_socket_syntax() {

@@ -5,6 +5,9 @@
 #[path = "support/gateway_native.rs"]
 mod support;
 
+#[path = "support/ledger_maintenance.rs"]
+mod ledger_maintenance;
+
 use dolgorae::machine::MachineError;
 use dolgorae::orchestration::{
     AcceptedSpecialistTask, AcceptedTaskContext, AdapterFailure, AssignSpecialistTask,
@@ -5408,4 +5411,10 @@ async fn native_watch_input_rejection() {
         assert_eq!(audit(&fixture, &id), before);
     }
     gateway.terminate();
+}
+
+#[test]
+fn maintenance_recovers_every_switch_boundary_and_preserves_closed_run_history() {
+    ledger_maintenance::maintenance_recovers_every_switch_boundary_and_preserves_closed_run_history(
+    );
 }

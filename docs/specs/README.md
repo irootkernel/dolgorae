@@ -5641,3 +5641,5 @@ optional or handoff-only does not satisfy acceptance.
 
 These references describe Codex behavior. Dolgorae-specific policy in this SOT
 remains authoritative for Dolgorae.
+
+- [v0.1.4 Ledger Capacity and Maintenance Runtime](dolgorae-v014-ledger-maintenance.md) owns TASK-072 native capacity and checkpoint rollover.

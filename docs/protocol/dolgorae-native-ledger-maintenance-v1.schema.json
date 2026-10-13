@@ -1,0 +1,407 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/native-ledger-maintenance/v1",
+  "title": "Native ledger checkpoint and workspace maintenance sidecars",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/generation"
+    },
+    {
+      "$ref": "#/$defs/checkpoint"
+    },
+    {
+      "$ref": "#/$defs/selection"
+    },
+    {
+      "$ref": "#/$defs/operation"
+    },
+    {
+      "$ref": "#/$defs/workspace_selection"
+    },
+    {
+      "$ref": "#/$defs/receipt_index"
+    },
+    {
+      "$ref": "#/$defs/owner"
+    }
+  ],
+  "$defs": {
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "byte_length",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(/|$))[A-Za-z0-9_./-]+$"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content",
+        "first_sequence",
+        "last_sequence",
+        "previous_chain_hash",
+        "terminal_chain_hash"
+      ],
+      "properties": {
+        "content": {
+          "$ref": "#/$defs/content"
+        },
+        "first_sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "last_sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "previous_chain_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "terminal_chain_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "run_basis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "manifest_sha256",
+        "ledger_generation",
+        "head"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "ledger_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "head": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sequence",
+            "hash"
+          ],
+          "properties": {
+            "sequence": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "hash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "generation",
+        "run_id",
+        "checkpoint",
+        "receipt_index",
+        "append_path",
+        "durable_watermark",
+        "chain_hash",
+        "finalization_reserved_bytes"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-ledger-generation/v1"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 9007199254740991
+        },
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/content"
+        },
+        "receipt_index": {
+          "$ref": "#/$defs/content"
+        },
+        "append_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(/|$))[A-Za-z0-9_./-]+$"
+        },
+        "durable_watermark": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "chain_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "finalization_reserved_bytes": {
+          "const": 102760448
+        }
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "run_id",
+        "projection",
+        "segments"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-ledger-checkpoint/v1"
+        },
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "projection": {
+          "$ref": "https://dolgorae.local/schema/ledger-state/v1"
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/segment"
+          },
+          "maxItems": 4096
+        }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "manifest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-ledger-selection/v1"
+        },
+        "manifest": {
+          "$ref": "#/$defs/content"
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "plan",
+        "operator_id",
+        "operator_generation",
+        "runs",
+        "state",
+        "completed_runs",
+        "selected_manifest_digest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-maintenance-operation/v1"
+        },
+        "plan": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/maintenance_plan"
+        },
+        "operator_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "operator_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/run_basis"
+          },
+          "maxItems": 4096
+        },
+        "state": {
+          "enum": [
+            "planned",
+            "preparing",
+            "completed"
+          ]
+        },
+        "completed_runs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+          },
+          "uniqueItems": true,
+          "maxItems": 4096
+        },
+        "selected_manifest_digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
+    "workspace_selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "generation",
+        "operation_ref",
+        "runs"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-maintenance-selection/v1"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 9007199254740991
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/run_basis"
+          },
+          "maxItems": 4096
+        }
+      }
+    },
+    "receipt_index": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence",
+          "hash",
+          "kind"
+        ],
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "run_created",
+              "write_continuation_created",
+              "turn_intent",
+              "turn_started",
+              "turn_terminal",
+              "mutation_admitted",
+              "mutation_completed",
+              "idempotency_reserved",
+              "reconciliation",
+              "outcome_unknown"
+            ]
+          }
+        }
+      },
+      "maxItems": 100000000
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_ref",
+        "plan_sha256",
+        "operator_id",
+        "operator_generation",
+        "workspace_ref",
+        "source_generation",
+        "runs_sha256"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-maintenance-owner/v1"
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "plan_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "operator_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "operator_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "workspace_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "source_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "runs_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    }
+  },
+  "x-invariants": [
+    "Native storage sidecars are additive to frozen H1. Operator scope and accepted record bytes remain unchanged.",
+    "One immutable generation is pinned per read; every segment digest, chain, watermark, checkpoint projection and receipt index is checked.",
+    "Files and directories are synced before atomic selection. All generations are retained; no automatic deletion."
+  ]
+}

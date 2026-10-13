@@ -72,6 +72,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "fault",
                 "jcs",
                 "ledger",
+                "ledger_generation",
                 "machine",
                 "workspace",
             ][..],
@@ -236,6 +237,34 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "machine",
                 "projection",
                 "workspace",
+                "ledger_generation",
+            ][..],
+        ),
+        (
+            "ledger_generation",
+            &["audit", "darwin", "jcs", "ledger", "workspace"][..],
+        ),
+        (
+            "maintenance",
+            &[
+                "audit",
+                "cli",
+                "conformance",
+                "controller",
+                "darwin",
+                "domain",
+                "fault",
+                "jcs",
+                "ledger",
+                "ledger_generation",
+                "machine",
+                "mutation_admission",
+                "paths",
+                "run",
+                "turn",
+                "worker",
+                "workspace",
+                "writer",
             ][..],
         ),
         ("machine", &["paths", "workspace"][..]),
@@ -897,10 +926,14 @@ fn native_test_functions(source: &str) -> BTreeSet<String> {
     let mut test_attribute = false;
     let mut tests = BTreeSet::new();
     for line in source.lines().map(str::trim) {
-        if line.starts_with("#[tokio::test") {
+        if line.starts_with("#[tokio::test") || line == "#[test]" {
             test_attribute = true;
-        } else if test_attribute && line.starts_with("async fn ") {
-            let name = line["async fn ".len()..]
+        } else if test_attribute
+            && let Some(declaration) = line
+                .strip_prefix("async fn ")
+                .or_else(|| line.strip_prefix("fn "))
+        {
+            let name = declaration
                 .split_once('(')
                 .expect("native test function declaration")
                 .0;

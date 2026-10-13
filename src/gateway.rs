@@ -1038,13 +1038,14 @@ pub fn error_status(error: &MachineError, method: &str) -> Status {
         ))
         .expect("checked gRPC mapping is valid")
     });
+    let legacy_error = crate::machine::legacy_transport_error(error);
     let private = mapping["private_machine_error_codes"]
         .as_array()
         .expect("checked private Machine error list")
         .iter()
-        .any(|code| code.as_str() == Some(error.code.as_str()));
-    let code = if crate::machine::registered_errors().contains_key(&error.code) && !private {
-        error.code.as_str()
+        .any(|code| code.as_str() == Some(legacy_error.code.as_str()));
+    let code = if crate::machine::registered_errors().contains_key(&legacy_error.code) && !private {
+        legacy_error.code.as_str()
     } else {
         "INTERNAL_ERROR"
     };
@@ -1539,6 +1540,31 @@ mod tests {
             detail(&unavailable).action,
             pb::RequiredClientAction::RefreshCapabilities as i32
         );
+    }
+
+    #[test]
+    fn public_v1_capacity_uses_the_frozen_reporting_boundary() {
+        let run_id = Uuid::now_v7();
+        let capacity = MachineError::new(
+            "STORAGE_CAPACITY_EXCEEDED",
+            "capacity",
+            false,
+            serde_json::json!({"run_id":run_id,"required_action":"operator_checkpoint"}),
+        );
+        let status = error_status(&capacity, "RunService.SubmitTurn");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        let rich = <GoogleRpcStatus as prost::Message>::decode(status.details()).unwrap();
+        let detail =
+            <pb::DolgoraeErrorDetail as prost::Message>::decode(rich.details[0].value.as_slice())
+                .unwrap();
+        assert_eq!(detail.dolgorae_error_code, "CAPABILITY_UNSUPPORTED");
+        assert_eq!(
+            detail.action,
+            pb::RequiredClientAction::from_str_name("REQUIRED_CLIENT_ACTION_REFRESH_CAPABILITIES")
+                .unwrap() as i32
+        );
+        assert_eq!(detail.run_id, Some(run_id.to_string()));
+        assert_eq!(capacity.code, "STORAGE_CAPACITY_EXCEEDED");
     }
 
     #[test]

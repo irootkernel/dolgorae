@@ -64,6 +64,18 @@ fn internal(reason: impl Into<String>) -> MachineError {
     )
 }
 
+fn ledger_failure(error: crate::ledger::LedgerError) -> MachineError {
+    match error {
+        crate::ledger::LedgerError::Capacity(reason) => MachineError::new(
+            "STORAGE_CAPACITY_EXCEEDED",
+            reason,
+            false,
+            json!({"required_action":"operator_checkpoint"}),
+        ),
+        other => internal(other.to_string()),
+    }
+}
+
 fn state_conflict(run_id: Uuid, state: RunLifecycle, operation: &str) -> MachineError {
     MachineError::new(
         "RUN_STATE_CONFLICT",
@@ -79,11 +91,18 @@ fn state_conflict(run_id: Uuid, state: RunLifecycle, operation: &str) -> Machine
 pub(crate) fn active_mutation_admission<C: LedgerClock + 'static, F: FaultInjector + 'static>(
     ledger: &Ledger<C, F>,
 ) -> Result<Option<MutationAdmission>, MachineError> {
+    active_mutation_admission_records(
+        ledger.durable_records().map_err(ledger_failure)?,
+        &ledger.projection().map_err(ledger_failure)?.lifecycle,
+    )
+}
+
+pub(crate) fn active_mutation_admission_records(
+    records: &[crate::audit::AuditRecord],
+    lifecycle: &RunLifecycle,
+) -> Result<Option<MutationAdmission>, MachineError> {
     let mut active = None;
-    for record in ledger
-        .durable_records()
-        .map_err(|error| internal(error.to_string()))?
-    {
+    for record in records {
         match record.kind() {
             AuditKind::MutationAdmitted => {
                 let payload =
@@ -125,12 +144,7 @@ pub(crate) fn active_mutation_admission<C: LedgerClock + 'static, F: FaultInject
             _ => {}
         }
     }
-    if ledger
-        .projection()
-        .map_err(|error| internal(error.to_string()))?
-        .lifecycle
-        == RunLifecycle::Closed
-    {
+    if *lifecycle == RunLifecycle::Closed {
         return Ok(None);
     }
     Ok(active)
@@ -165,9 +179,7 @@ pub(crate) fn admit_mutation_digest<C: LedgerClock + 'static, F: FaultInjector +
     operation: &'static str,
     allow_writer_acquire: bool,
 ) -> Result<MutationAdmission, MachineError> {
-    let projection = ledger
-        .projection()
-        .map_err(|error| internal(error.to_string()))?;
+    let projection = ledger.projection().map_err(ledger_failure)?;
     if matches!(
         projection.lifecycle,
         RunLifecycle::Closed | RunLifecycle::StartFailed
@@ -220,7 +232,7 @@ pub(crate) fn admit_mutation_digest<C: LedgerClock + 'static, F: FaultInjector +
             &admission,
             projection.run_generation,
         )
-        .map_err(|error| internal(error.to_string()))?;
+        .map_err(ledger_failure)?;
     Ok(admission)
 }
 
@@ -234,9 +246,7 @@ pub(crate) fn validate_mutation_admission<
     controller_id: Uuid,
     request: &R,
 ) -> Result<(), MachineError> {
-    let projection = ledger
-        .projection()
-        .map_err(|error| internal(error.to_string()))?;
+    let projection = ledger.projection().map_err(ledger_failure)?;
     let identity = request.mutation_request_identity()?;
     let Some(active) = active_mutation_admission(ledger)? else {
         return Err(state_conflict(
@@ -274,9 +284,7 @@ pub(crate) fn abort_prepared_turn_admission<
     request: &R,
 ) -> Result<(), MachineError> {
     let identity = request.mutation_request_identity()?;
-    let projection = ledger
-        .projection()
-        .map_err(|error| internal(error.to_string()))?;
+    let projection = ledger.projection().map_err(ledger_failure)?;
     let active = active_mutation_admission(ledger)?;
     let Some(active) = active.filter(|active| {
         matches!(
@@ -298,7 +306,7 @@ pub(crate) fn abort_prepared_turn_admission<
     };
     if ledger
         .durable_records()
-        .map_err(|error| internal(error.to_string()))?
+        .map_err(ledger_failure)?
         .iter()
         .any(|record| {
             record.sequence() > active.expected_state_revision
@@ -325,9 +333,7 @@ pub(crate) fn complete_mutation_admission<C: LedgerClock + 'static, F: FaultInje
     ledger: &mut Ledger<C, F>,
     admission_id: Uuid,
 ) -> Result<(), MachineError> {
-    let projection = ledger
-        .projection()
-        .map_err(|error| internal(error.to_string()))?;
+    let projection = ledger.projection().map_err(ledger_failure)?;
     if projection.lifecycle == RunLifecycle::Closed {
         return Ok(());
     }
@@ -348,7 +354,7 @@ pub(crate) fn complete_mutation_admission<C: LedgerClock + 'static, F: FaultInje
             &json!({"schema_version":1,"admission_id":admission_id}),
             projection.run_generation,
         )
-        .map_err(|error| internal(error.to_string()))
+        .map_err(ledger_failure)
 }
 
 #[cfg(test)]

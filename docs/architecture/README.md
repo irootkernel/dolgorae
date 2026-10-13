@@ -3214,3 +3214,26 @@ The verdict is written to every run generation.
 Runtime code tolerates additive data but never infers lifecycle progress from
 uncorrelated or unknown messages. This preserves compatibility without claiming
 that a schema probe can guarantee all future runtime behavior.
+
+### TASK-072 ledger generation ownership
+
+`maintenance` owns operator-scoped workspace plans, retained Apply ownership,
+original-scope observation and multi-Run checkpoint recovery. It uses RunStore,
+read-only ledger/projection, mutation-admission and conformance authorities; it does not dispatch
+work or retire content. `ledger_generation` owns private immutable checkpoint,
+segment and receipt-index files and the atomic per-Run selector. `ledger` remains
+the audit append and replay owner and delegates only generation selection and
+content verification. Both use the existing Darwin and secure workspace file
+boundaries. Product semantics stay in Rust.
+
+The workspace ledger-maintenance gate sits below operator authority and above
+Run lifecycle and ledger writer locks during maintenance. Each ordinary ledger
+writer takes a nonblocking shared admission lease before its audit flock; this
+lease can be borrowed below existing startup/writer holds because it never
+waits. Exclusive maintenance refuses when any shared holder exists, then takes
+sorted Run lifecycle leases and audit flocks without starting or stopping any
+worker. Explicit terminal deletion retains shared admission through directory
+removal and sync, including its integrity-failure escape. This bounded admission
+exception introduces no upward blocking lock or external effect. Selection and
+reserve behavior are owned by the
+[v0.1.4 Ledger Capacity and Maintenance Runtime](../specs/dolgorae-v014-ledger-maintenance.md).

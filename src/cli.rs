@@ -64,6 +64,10 @@ pub enum Command {
         #[command(subcommand)]
         command: ReviewTargetCommand,
     },
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
     Run(RunArgs),
 }
 
@@ -88,6 +92,7 @@ impl Command {
             Self::Profile { command } => command.machine_name(),
             Self::Specialist { command } => command.machine_name(),
             Self::ReviewTarget { command } => command.machine_name(),
+            Self::Maintenance { command } => command.machine_name(),
             Self::Run(args) => args.command.machine_name(),
         }
     }
@@ -131,7 +136,29 @@ impl Command {
             Self::Profile { command } => command.leaf_args(),
             Self::Specialist { command } => command.leaf_args(),
             Self::ReviewTarget { command } => Some(command.leaf_args()),
+            Self::Maintenance { command } => Some(command.leaf_args()),
             Self::Run(args) => args.command.leaf_args(),
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MaintenanceCommand {
+    Plan(LeafArgs),
+    Apply(LeafArgs),
+    Get(LeafArgs),
+}
+impl MaintenanceCommand {
+    pub const fn machine_name(&self) -> &'static str {
+        match self {
+            Self::Plan(_) => "plan_maintenance",
+            Self::Apply(_) => "apply_maintenance",
+            Self::Get(_) => "get_maintenance",
+        }
+    }
+    pub fn leaf_args(&self) -> &LeafArgs {
+        match self {
+            Self::Plan(a) | Self::Apply(a) | Self::Get(a) => a,
         }
     }
 }
@@ -813,6 +840,43 @@ fn leaf_spec(command: &str) -> LeafSpec {
     const W: &[&str] = &["--workspace"];
     const C: &[&str] = &["--workspace", "--controller-file", "--controller-fd"];
     match command {
+        "plan_maintenance" => spec(
+            &[
+                "--workspace",
+                "--operator-file",
+                "--operator-fd",
+                "--selected-generation",
+            ],
+            &[],
+            &[],
+            0,
+            0,
+        ),
+        "apply_maintenance" => spec(
+            &[
+                "--workspace",
+                "--operator-file",
+                "--operator-fd",
+                "--plan-file",
+            ],
+            &["--approve"],
+            &[],
+            0,
+            0,
+        ),
+        "get_maintenance" => spec(
+            &[
+                "--workspace",
+                "--operator-file",
+                "--operator-fd",
+                "--selected-generation",
+                "--plan-id",
+            ],
+            &[],
+            &[],
+            0,
+            0,
+        ),
         "runtime.capabilities" => spec(&["--profile"], &[], &[], 0, 0),
         "instructions.migrate" => spec(&["--workspace", "--file"], &["--request-stdin"], &[], 0, 0),
         "runtime.orphan.inspect" => spec(

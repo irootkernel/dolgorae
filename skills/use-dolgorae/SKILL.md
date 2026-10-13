@@ -107,6 +107,19 @@ the complete retained-namespace proof. Missing or incompatible output, integrity
 failure and current-request rejection never resolve an earlier unknown effect.
 This native diagnostic does not establish public-v2 or consumer runtime support.
 
+## Operator ledger checkpoint maintenance
+
+Use `maintenance plan`, `maintenance apply` and `maintenance get` only when the
+exact selected binary exposes them. Inspection of a requested plan does not
+authorize Apply. Applying requires explicit user authority for checkpoint
+maintenance, a protected operator carrier, the complete retained dry-run plan
+and `--approve`. Retain the original plan ID and workspace generation before
+Apply. After reply loss, inspect that ID before deciding whether an authorized
+resume is required. Preserve accepted history and all old generation files.
+Active writers, unknown work, changed history and corrupt segments are blockers;
+settle them through their existing owners. Checkpoint support does not authorize
+content retirement, garbage collection, installation or consumer activation.
+
 ## Resume retained Close and build recovery
 
 For retained session Close, preserve its operation identity and interrupt
