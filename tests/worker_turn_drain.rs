@@ -27,8 +27,10 @@ use dolgorae::turn::ImageDetail;
 use dolgorae::worker::{
     ControlRequestV1, ControlResponseV1, ExecutingBuild, REMEMBERED_TERMINAL_TURNS,
     RunControllerAuthority, RunFacts, SessionAttach, TurnControlImage, TurnControlRequest,
-    WorkerControlServer, WorkerControlState, WorkerHello, WorkerIdentity, WorkerSession,
-    WorkerSessionBootstrap, bind_worker_socket, read_frame, write_control_request,
+    WorkerControlServer, WorkerControlState, WorkerHello, WorkerIdentity, WorkerProtocolError,
+    WorkerRuntimeRecord, WorkerSession, WorkerSessionBootstrap, bind_worker_socket, read_frame,
+    read_runtime_record, runtime_record_path, runtime_root, write_control_request,
+    write_runtime_record,
 };
 use dolgorae::workspace::{GitBaseline, LosslessPath, SystemWorkspacePlatform, WorkspaceMode};
 use serde_json::{Value, json};
@@ -481,6 +483,7 @@ impl Run {
         make_dir(&state_root.join("runs"));
         make_dir(&state_root.join("runtime"));
         make_dir(&state_root.join("runtime/locks"));
+        make_dir(&state_root.join("runtime/runs"));
         dolgorae::writer::WriterStore::initialize_layout(
             &state_root,
             &"1".repeat(64),
@@ -552,6 +555,25 @@ impl Run {
         let identity = worker_identity(run_id);
         let lease = bind_worker_socket(&identity, None).unwrap();
         let control_path = lease.path().to_owned();
+        let runtime = runtime_record_path(&runtime_root(&state_root), run_id).unwrap();
+        write_runtime_record(
+            &runtime,
+            &WorkerRuntimeRecord {
+                schema_version: 1,
+                identity: identity.clone(),
+                socket_path: lease.path().to_owned(),
+                socket_identity: lease.identity().clone(),
+                control_socket_epoch: 1,
+                app_server_epoch: Some(1),
+                control_recovery_required: false,
+                startup_scope: None,
+                dedicated_server_identity: None,
+                dolgorae_version: "0.1.0".into(),
+                mutation_protocol_version: 1,
+                binary_sha256: "3".repeat(64),
+            },
+        )
+        .unwrap();
         let control = WorkerControlServer::new(
             WorkerHello {
                 schema_version: 1,
@@ -573,7 +595,18 @@ impl Run {
         );
         let serving = thread::spawn({
             let control = control.clone();
-            move || control.serve(&lease).unwrap()
+            let expected = identity.clone();
+            move || {
+                let served = control.clone().serve(&lease);
+                control.detach_run().unwrap();
+                if let Err(error) = served {
+                    assert_eq!(error, WorkerProtocolError::Io);
+                    let retained = read_runtime_record(&runtime, expected.uid).unwrap();
+                    assert!(retained.control_recovery_required);
+                    assert_eq!(retained.identity, expected);
+                    assert_eq!(retained.control_socket_epoch, 1);
+                }
+            }
         });
         control
             .attach_run(Arc::clone(&session), Arc::clone(&ledger))
@@ -2400,9 +2433,16 @@ fn a_transport_lost_under_an_accepted_turn_is_reported_as_outcome_unknown() {
     let turn_id = accepted(&run.call(&run.submit("accepted-then-lost")));
     run.await_lifecycle("running");
 
+    let waiting = run.begin(&run.wait(&turn_id));
+    // A status exchange after the Wait connection establishes that the owner
+    // has accepted it before failure stops further socket admission.
+    run.call(&ControlRequestV1::Status {
+        expected: run.identity.clone(),
+    });
+    assert!(!waiting.is_finished());
     run.server.hang_up();
 
-    match run.call(&run.wait(&turn_id)) {
+    match waiting.join().unwrap() {
         ControlResponseV1::Failed {
             code,
             retryable,
@@ -2419,11 +2459,24 @@ fn a_transport_lost_under_an_accepted_turn_is_reported_as_outcome_unknown() {
         }
         other => panic!("expected an outcome-unknown refusal, got {other:?}"),
     }
+    let deadline = Instant::now() + SETTLE;
+    while !run.serving.as_ref().unwrap().is_finished() {
+        assert!(Instant::now() < deadline, "failed owner stayed live");
+        thread::sleep(Duration::from_millis(2));
+    }
     assert!(
         run.recorded_kinds().contains(&AuditKind::OutcomeUnknown),
-        "the lost turn left no durable outcome_unknown: {:?}",
+        "the failed owner exited without durable outcome_unknown: {:?}",
         run.recorded_kinds()
     );
+    let retained = read_runtime_record(
+        &runtime_record_path(&runtime_root(&run.state_root), run.identity.run_id).unwrap(),
+        run.identity.uid,
+    )
+    .unwrap();
+    assert!(retained.control_recovery_required);
+    assert_eq!(retained.identity, run.identity);
+    assert_eq!(retained.control_socket_epoch, 1);
 }
 
 /// An app-server that answers `turn/start` with a JSON-RPC error has decided,

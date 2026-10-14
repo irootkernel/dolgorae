@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- Contain worker thread failures, preserve accepted operation recovery, and stop
+  failed generations without reusing poisoned journal state.
+
 - Compact Profile membership and binding history through retained maintenance
   operations, and expose pending cleanup while preserving successful Close
   receipts and original audit history.

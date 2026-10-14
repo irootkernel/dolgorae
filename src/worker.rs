@@ -3448,9 +3448,47 @@ pub struct WorkerControlServer {
     facts: RunFacts,
     state: Arc<Mutex<WorkerControlState>>,
     stopping: Arc<AtomicBool>,
+    thread_failed: Arc<AtomicBool>,
+    startup_gate: Arc<Mutex<()>>,
+    startup_connection: Arc<Mutex<Option<StartupConnection>>>,
+    caller_connections: Arc<Mutex<BTreeMap<u64, UnixStream>>>,
+    #[cfg(test)]
+    panic_next_caller: Arc<AtomicBool>,
+    #[cfg(test)]
+    caller_join_started: Arc<AtomicBool>,
+    #[cfg(test)]
+    panic_on_serve: bool,
+    #[cfg(test)]
+    poison_on_panic: bool,
     run: Arc<Mutex<RunHandles>>,
     authority: Arc<RunControllerAuthority>,
     ready_runtime_path: Arc<Mutex<Option<PathBuf>>>,
+}
+
+struct StartupConnection {
+    mailbox: Arc<SessionMailbox>,
+    closer: UnixStream,
+}
+
+struct ControlCallerConnection {
+    connections: Arc<Mutex<BTreeMap<u64, UnixStream>>>,
+    id: u64,
+}
+
+impl Drop for ControlCallerConnection {
+    fn drop(&mut self) {
+        if let Ok(mut connections) = self.connections.lock() {
+            connections.remove(&self.id);
+        }
+    }
+}
+
+fn abort_control_callers(connections: &Mutex<BTreeMap<u64, UnixStream>>) {
+    if let Ok(connections) = connections.lock() {
+        for connection in connections.values() {
+            let _ = connection.shutdown(std::net::Shutdown::Both);
+        }
+    }
 }
 
 impl WorkerControlServer {
@@ -3466,6 +3504,18 @@ impl WorkerControlServer {
             facts,
             state: Arc::new(Mutex::new(state)),
             stopping: Arc::new(AtomicBool::new(false)),
+            thread_failed: Arc::new(AtomicBool::new(false)),
+            startup_gate: Arc::new(Mutex::new(())),
+            startup_connection: Arc::new(Mutex::new(None)),
+            caller_connections: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(test)]
+            panic_next_caller: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            caller_join_started: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            panic_on_serve: false,
+            #[cfg(test)]
+            poison_on_panic: false,
             run: Arc::new(Mutex::new(RunHandles::default())),
             authority: Arc::new(authority),
             ready_runtime_path: Arc::new(Mutex::new(None)),
@@ -3551,23 +3601,165 @@ impl WorkerControlServer {
     }
 
     fn persist_control_recovery(&self) -> Result<(), WorkerProtocolError> {
-        let Some(path) = self
+        let path = self
             .ready_runtime_path
             .lock()
             .map_err(|_| WorkerProtocolError::Io)?
             .clone()
-        else {
-            return Ok(());
-        };
-        let mut record = read_runtime_record(&path, self.hello.identity.uid)?;
-        // Never overwrite another generation's locator or a newer socket epoch.
-        if record.identity != self.hello.identity
-            || record.control_socket_epoch != self.hello.control_socket_epoch
-        {
-            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+            .unwrap_or(runtime_record_path(
+                &runtime_root(&self.authority.state_root),
+                self.facts.run_id,
+            )?);
+        update_runtime_record(&path, self.hello.identity.uid, |record| {
+            // Never overwrite another generation's locator or a newer socket epoch.
+            if record.identity != self.hello.identity
+                || record.control_socket_epoch != self.hello.control_socket_epoch
+            {
+                return Err(WorkerProtocolError::InvalidRuntimeRecord);
+            }
+            record.control_recovery_required = true;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    fn contain_thread_failure(&self) -> Result<(), WorkerProtocolError> {
+        self.thread_failed.store(true, Ordering::Release);
+        self.stop();
+        let retained = (|| {
+            self.abort_startup_connection()?;
+            let _startup = self
+                .startup_gate
+                .lock()
+                .map_err(|_| WorkerProtocolError::Io)?;
+            let retained = self.persist_control_recovery();
+            if let Some(session) = self
+                .run
+                .lock()
+                .map_err(|_| WorkerProtocolError::Io)?
+                .session()
+            {
+                session.stop_failed_generation();
+            }
+            retained
+        })();
+        // Deliver already-known typed failures without letting incomplete
+        // frames or stalled responses extend the failed owner's lifetime.
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < deadline {
+            if self
+                .caller_connections
+                .lock()
+                .map_or(true, |connections| connections.is_empty())
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
         }
-        record.control_recovery_required = true;
-        write_runtime_record(&path, &record)
+        abort_control_callers(&self.caller_connections);
+        retained
+    }
+
+    fn generation_failed(&self) -> bool {
+        self.thread_failed.load(Ordering::Acquire)
+            || self.run.lock().map_or(true, |run| {
+                run.session()
+                    .is_some_and(|session| session.thread_failed.load(Ordering::Acquire))
+            })
+    }
+
+    fn register_startup_connection(
+        &self,
+        mailbox: Arc<SessionMailbox>,
+        stream: &UnixStream,
+    ) -> Result<(), WorkerProtocolError> {
+        mailbox.register_connection(stream)?;
+        let mut connection = self
+            .startup_connection
+            .lock()
+            .map_err(|_| WorkerProtocolError::Io)?;
+        if self.is_stopping() || self.thread_failed.load(Ordering::Acquire) || connection.is_some()
+        {
+            return Err(WorkerProtocolError::WorkerStartFailed);
+        }
+        *connection = Some(StartupConnection {
+            mailbox,
+            closer: stream.try_clone().map_err(|_| WorkerProtocolError::Io)?,
+        });
+        Ok(())
+    }
+
+    fn abort_startup_connection(&self) -> Result<(), WorkerProtocolError> {
+        if let Some(connection) = self
+            .startup_connection
+            .lock()
+            .map_err(|_| WorkerProtocolError::Io)?
+            .take()
+        {
+            for mutation in connection.mailbox.fail_thread() {
+                mutation
+                    .outcome
+                    .settle(failed(&TurnError::OutcomeUnknown, &self.facts.bare()));
+            }
+            let _ = connection.closer.shutdown(std::net::Shutdown::Both);
+        }
+        Ok(())
+    }
+
+    fn finish_startup(
+        &self,
+        path: &Path,
+        owned: Option<Arc<WorkerSession>>,
+        ledger: Arc<Mutex<Ledger>>,
+        publish_ready: impl FnOnce(&WorkerRuntimeRecord) -> Result<(), WorkerProtocolError>,
+    ) -> Result<(), WorkerProtocolError> {
+        // Readiness and containment share one publication boundary. Failure
+        // raises the latch before waiting here, so a late startup cannot attach.
+        let _startup = self
+            .startup_gate
+            .lock()
+            .map_err(|_| WorkerProtocolError::Io)?;
+        if self.is_stopping() || self.thread_failed.load(Ordering::Acquire) {
+            if let Some(owned) = owned {
+                owned.stop_failed_generation();
+            }
+            return Err(WorkerProtocolError::WorkerStartFailed);
+        }
+        let record = update_runtime_record(path, self.hello.identity.uid, |record| {
+            if record.identity != self.hello.identity
+                || record.control_socket_epoch != self.hello.control_socket_epoch
+                || record.control_recovery_required
+            {
+                return Err(WorkerProtocolError::InvalidRuntimeRecord);
+            }
+            if let Some(owned) = &owned {
+                record.dedicated_server_identity = owned.dedicated_server_identity();
+            }
+            Ok(())
+        })?;
+        if let Some(owned) = owned {
+            self.replace_state(owned.control_state())?;
+            self.attach_run(owned, ledger)?;
+        } else {
+            self.attach_ledger(ledger)?;
+        }
+        if self.thread_failed.load(Ordering::Acquire) {
+            return Err(WorkerProtocolError::WorkerStartFailed);
+        }
+        publish_ready(&record)?;
+        self.startup_connection
+            .lock()
+            .map_err(|_| WorkerProtocolError::Io)?
+            .take();
+        Ok(())
+    }
+
+    fn stop_failed_startup(&self) {
+        if self.thread_failed.load(Ordering::Acquire) {
+            let _ = self.contain_thread_failure();
+        }
+        self.stop();
+        let _ = self.abort_startup_connection();
     }
 
     fn maintain_runtime(
@@ -3658,67 +3850,154 @@ impl WorkerControlServer {
             .set_nonblocking(true)
             .map_err(|_| WorkerProtocolError::Io)?;
         let stopping = Arc::clone(&self.stopping);
-        let mut callers = Vec::new();
+        let mut callers: Vec<thread::JoinHandle<()>> = Vec::new();
+        let mut next_caller_id = 0;
         let mut replacement = None;
         let mut next_maintenance = std::time::Instant::now();
-        while !stopping.load(Ordering::Acquire) {
-            if std::time::Instant::now() >= next_maintenance {
-                match self.maintain_runtime(replacement.as_ref().unwrap_or(lease)) {
-                    Ok(Some(new_lease)) => replacement = Some(new_lease),
-                    Ok(None) => {}
-                    Err(error) => {
-                        let persisted = self.persist_control_recovery();
-                        let _ = self.terminate();
-                        persisted?;
-                        return Err(error);
+        let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if self.panic_on_serve {
+                let ledger = self.run.lock().unwrap().ledger.clone();
+                inject_thread_panic(if self.poison_on_panic { ledger } else { None });
+            }
+            while !stopping.load(Ordering::Acquire) {
+                let session = self
+                    .run
+                    .lock()
+                    .map_err(|_| WorkerProtocolError::Io)?
+                    .session()
+                    .cloned();
+                if self.thread_failed.load(Ordering::Acquire)
+                    || session
+                        .as_ref()
+                        .is_some_and(|session| session.thread_failed.load(Ordering::Acquire))
+                {
+                    return Err(WorkerProtocolError::Io);
+                }
+                if std::time::Instant::now() >= next_maintenance {
+                    match self.maintain_runtime(replacement.as_ref().unwrap_or(lease)) {
+                        Ok(Some(new_lease)) => replacement = Some(new_lease),
+                        Ok(None) => {}
+                        Err(error) => {
+                            let persisted = self.persist_control_recovery();
+                            let _ = self.terminate();
+                            persisted?;
+                            return Err(error);
+                        }
                     }
+                    next_maintenance = std::time::Instant::now() + Duration::from_millis(100);
                 }
-                next_maintenance = std::time::Instant::now() + Duration::from_millis(100);
+                match replacement.as_ref().unwrap_or(lease).listener.accept() {
+                    Ok((stream, _)) => {
+                        // Darwin propagates the listener's non-blocking flag to
+                        // every accepted socket, which would make the per-caller
+                        // read and write timeouts inert and drop a caller that had
+                        // not managed to write yet. Each caller owns a thread, so
+                        // it can afford to block within its own bounded budget.
+                        stream
+                            .set_nonblocking(false)
+                            .map_err(|_| WorkerProtocolError::Io)?;
+                        let hello = self.hello.clone();
+                        let facts = self.facts.clone();
+                        let state = Arc::clone(&self.state);
+                        let stopping = Arc::clone(&stopping);
+                        let authority = Arc::clone(&self.authority);
+                        let thread_failed = Arc::clone(&self.thread_failed);
+                        let caller_connections = Arc::clone(&self.caller_connections);
+                        let caller_connection = {
+                            let mut connections = caller_connections
+                                .lock()
+                                .map_err(|_| WorkerProtocolError::Io)?;
+                            if thread_failed.load(Ordering::Acquire) {
+                                return Err(WorkerProtocolError::Io);
+                            }
+                            connections.insert(
+                                next_caller_id,
+                                stream.try_clone().map_err(|_| WorkerProtocolError::Io)?,
+                            );
+                            ControlCallerConnection {
+                                connections: Arc::clone(&caller_connections),
+                                id: next_caller_id,
+                            }
+                        };
+                        next_caller_id += 1;
+                        #[cfg(test)]
+                        let poison_on_panic = self.poison_on_panic;
+                        #[cfg(test)]
+                        let panic_next_caller = Arc::clone(&self.panic_next_caller);
+                        let run = self
+                            .run
+                            .lock()
+                            .map_err(|_| WorkerProtocolError::Io)?
+                            .clone();
+                        callers.push(thread::spawn(move || {
+                            let _connection = caller_connection;
+                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                #[cfg(test)]
+                                if panic_next_caller.swap(false, Ordering::AcqRel) {
+                                    inject_thread_panic(if poison_on_panic {
+                                        run.ledger.clone()
+                                    } else {
+                                        None
+                                    });
+                                }
+                                let _ = serve_control_caller(
+                                    stream, &hello, &facts, &state, &stopping, &run, &authority,
+                                );
+                            }))
+                            .is_err()
+                            {
+                                thread_failed.store(true, Ordering::Release);
+                            }
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    // A caller that hangs up between connect and accept, or a
+                    // signal that interrupts the accept, is that caller's problem
+                    // alone. Neither may take the Run's whole control plane down.
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(_) => return Err(WorkerProtocolError::Io),
+                }
             }
-            match replacement.as_ref().unwrap_or(lease).listener.accept() {
-                Ok((stream, _)) => {
-                    // Darwin propagates the listener's non-blocking flag to
-                    // every accepted socket, which would make the per-caller
-                    // read and write timeouts inert and drop a caller that had
-                    // not managed to write yet. Each caller owns a thread, so
-                    // it can afford to block within its own bounded budget.
-                    stream
-                        .set_nonblocking(false)
-                        .map_err(|_| WorkerProtocolError::Io)?;
-                    let hello = self.hello.clone();
-                    let facts = self.facts.clone();
-                    let state = Arc::clone(&self.state);
-                    let stopping = Arc::clone(&stopping);
-                    let authority = Arc::clone(&self.authority);
-                    let run = self
-                        .run
-                        .lock()
-                        .map_err(|_| WorkerProtocolError::Io)?
-                        .clone();
-                    callers.push(thread::spawn(move || {
-                        let _ = serve_control_caller(
-                            stream, &hello, &facts, &state, &stopping, &run, &authority,
-                        );
-                    }));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(2));
-                }
-                // A caller that hangs up between connect and accept, or a
-                // signal that interrupts the accept, is that caller's problem
-                // alone. Neither may take the Run's whole control plane down.
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::Interrupted
-                    ) => {}
-                Err(_) => return Err(WorkerProtocolError::Io),
+            Ok(())
+        }));
+        let mut result = served.unwrap_or(Err(WorkerProtocolError::Io));
+        let mut contained = result.is_err() || self.generation_failed();
+        let mut retained = if contained {
+            if result.is_ok() {
+                result = Err(WorkerProtocolError::Io);
             }
+            self.contain_thread_failure()
+        } else {
+            Ok(())
+        };
+        #[cfg(test)]
+        self.caller_join_started.store(true, Ordering::Release);
+        while callers.iter().any(|caller| !caller.is_finished()) {
+            if !contained && self.generation_failed() {
+                contained = true;
+                result = Err(WorkerProtocolError::Io);
+                retained = self.contain_thread_failure();
+            }
+            thread::sleep(Duration::from_millis(2));
         }
         for caller in callers {
-            caller.join().map_err(|_| WorkerProtocolError::Io)?;
+            if caller.join().is_err() {
+                self.thread_failed.store(true, Ordering::Release);
+            }
         }
-        Ok(())
+        if result.is_ok() && self.thread_failed.load(Ordering::Acquire) {
+            self.contain_thread_failure()?;
+            result = Err(WorkerProtocolError::Io);
+        }
+        retained?;
+        result
     }
 }
 
@@ -3919,6 +4198,11 @@ pub const REMEMBERED_TERMINAL_TURNS: usize = 64;
 
 /// One mutation a control caller handed to the Run's drain thread.
 enum SessionCommand {
+    #[cfg(test)]
+    Panic {
+        ledger: Option<Arc<Mutex<Ledger>>>,
+        accept: bool,
+    },
     VerifyCallerPolicy {
         operation_id: Uuid,
     },
@@ -4108,12 +4392,19 @@ enum SessionWork {
 /// answered before a new grant is issued.
 struct SessionMailbox {
     facts: RunFacts,
+    failure: Arc<AtomicBool>,
+    connection: Mutex<Option<UnixStream>>,
     state: Mutex<MailboxState>,
     changed: Condvar,
+    #[cfg(test)]
+    panic_next_read: AtomicBool,
+    #[cfg(test)]
+    panic_next_primary: AtomicBool,
 }
 
 #[derive(Default)]
 struct MailboxState {
+    thread_failed: bool,
     /// A message the reader has read and the drain has not taken yet.
     delivered: Option<Result<Value, TurnError>>,
     /// Messages read out of turn while a request awaited its own reply.
@@ -4136,16 +4427,39 @@ struct MailboxState {
 }
 
 impl SessionMailbox {
+    #[cfg(test)]
     fn new(facts: RunFacts) -> Self {
+        Self::with_failure_latch(facts, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn with_failure_latch(facts: RunFacts, failure: Arc<AtomicBool>) -> Self {
         Self {
             facts,
+            failure,
+            connection: Mutex::new(None),
             state: Mutex::new(MailboxState::default()),
             changed: Condvar::new(),
+            #[cfg(test)]
+            panic_next_read: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_next_primary: AtomicBool::new(false),
         }
     }
 
     fn lost() -> TurnError {
         TurnError::transport(TransportStage::Shutdown, "app-server drain is stopping")
+    }
+
+    fn register_connection(&self, stream: &UnixStream) -> Result<(), WorkerProtocolError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| WorkerProtocolError::Io)?;
+        if self.failure.load(Ordering::Acquire) || connection.is_some() {
+            return Err(WorkerProtocolError::WorkerStartFailed);
+        }
+        *connection = Some(stream.try_clone().map_err(|_| WorkerProtocolError::Io)?);
+        Ok(())
     }
 
     /// Reader: block until the drain grants one read.  `false` means stop.
@@ -4254,6 +4568,9 @@ impl SessionMailbox {
             return SessionWork::Stop;
         };
         loop {
+            if state.thread_failed || self.failure.load(Ordering::Acquire) {
+                return SessionWork::Stop;
+            }
             if let Some(carried) = state.carried.pop_front() {
                 return SessionWork::Message(Ok(carried));
             }
@@ -4291,7 +4608,7 @@ impl SessionMailbox {
         let Ok(mut state) = self.state.lock() else {
             return Some(failed(&stopping, &self.facts.bare()));
         };
-        if state.stopping {
+        if state.stopping || self.failure.load(Ordering::Acquire) {
             return Some(failed(&stopping, &self.facts.bare()));
         }
         // Shutdown's own work is never refused here.  The fence is what it
@@ -4322,7 +4639,7 @@ impl SessionMailbox {
                 serde_json::json!({}),
             )
         })?;
-        if state.stopping {
+        if state.stopping || self.failure.load(Ordering::Acquire) {
             return Err(MachineError::new(
                 "ORCHESTRATION_TRANSPORT_UNAVAILABLE",
                 "the Primary tool mailbox is stopping",
@@ -4383,11 +4700,62 @@ impl SessionMailbox {
         self.changed.notify_all();
         refused
     }
+
+    fn fail_thread(&self) -> Vec<SessionMutation> {
+        self.failure.store(true, Ordering::Release);
+        // Close the owned socket before waiting for a mailbox/send fence.
+        // A writer holding that fence may itself be blocked by backpressure.
+        if let Ok(connection) = self.connection.lock()
+            && let Some(stream) = connection.as_ref()
+        {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        let refused = match self.state.lock() {
+            Ok(mut state) => {
+                state.thread_failed = true;
+                state.stopping = true;
+                state.mutations.drain(..).collect()
+            }
+            Err(_) => Vec::new(),
+        };
+        self.changed.notify_all();
+        refused
+    }
 }
 
 struct WorkerPrimaryToolDispatcher {
     state_root: PathBuf,
     mailbox: Arc<SessionMailbox>,
+}
+
+fn dispatch_reserved_primary_tool(
+    mailbox: &SessionMailbox,
+    call: PrimaryToolCall,
+    dispatch: impl FnOnce(&PrimaryToolCall) -> Result<Value, MachineError>,
+) {
+    // This is bridge-entry admission, separate from reserving a worker slot.
+    // A reserved thread may not have run before another thread failed. Once
+    // admitted, bridge work keeps its own durable operation; the mailbox lock
+    // must not cover that execution or its waits.
+    let admitted = mailbox.state.lock().is_ok_and(|state| {
+        !state.stopping && !state.thread_failed && !mailbox.failure.load(Ordering::Acquire)
+    });
+    if !admitted {
+        mailbox.release_primary_tool();
+        return;
+    }
+    #[cfg(test)]
+    if mailbox.panic_next_primary.swap(false, Ordering::AcqRel) {
+        panic!("injected Primary tool failure");
+    }
+    let source_tool_call_id = call.context.source_tool_call_id.clone();
+    let result = dispatch(&call);
+    mailbox.complete_primary_tool(PrimaryToolCompletion {
+        request_id: call.request_id,
+        run_generation: call.run_generation,
+        source_tool_call_id,
+        result,
+    });
 }
 
 impl PrimaryToolDispatcher for WorkerPrimaryToolDispatcher {
@@ -4398,15 +4766,21 @@ impl PrimaryToolDispatcher for WorkerPrimaryToolDispatcher {
         let spawned = thread::Builder::new()
             .name("dolgorae-primary-tool".to_owned())
             .spawn(move || {
-                let source_tool_call_id = call.context.source_tool_call_id.clone();
-                let result =
-                    crate::primary_bridge::dispatch(&state_root, &call.context, &call.payload);
-                mailbox.complete_primary_tool(PrimaryToolCompletion {
-                    request_id: call.request_id,
-                    run_generation: call.run_generation,
-                    source_tool_call_id,
-                    result,
-                });
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    dispatch_reserved_primary_tool(&mailbox, call, |call| {
+                        crate::primary_bridge::dispatch(&state_root, &call.context, &call.payload)
+                    });
+                }))
+                .is_err()
+                {
+                    let refused = mailbox.fail_thread();
+                    mailbox.release_primary_tool();
+                    for mutation in refused {
+                        mutation
+                            .outcome
+                            .settle(failed(&TurnError::OutcomeUnknown, &mailbox.facts.bare()));
+                    }
+                }
             });
         if spawned.is_err() {
             self.mailbox.release_primary_tool();
@@ -4753,6 +5127,8 @@ struct SessionServer {
     /// failed rather than merely been slow.
     budget: Duration,
     next_request_id: u64,
+    #[cfg(test)]
+    panic_on_turn_start: bool,
 }
 
 impl SessionServer {
@@ -4762,6 +5138,8 @@ impl SessionServer {
             mailbox,
             budget,
             next_request_id: 1,
+            #[cfg(test)]
+            panic_on_turn_start: false,
         }
     }
 
@@ -4778,12 +5156,33 @@ impl SessionServer {
     }
 
     fn send(&self, value: &Value) -> Result<(), TurnError> {
-        self.wire.send(value).map_err(TurnError::from)
+        self.with_dispatch_fence(|| self.wire.send(value).map_err(TurnError::from))
+    }
+
+    fn with_dispatch_fence(
+        &self,
+        send: impl FnOnce() -> Result<(), TurnError>,
+    ) -> Result<(), TurnError> {
+        // Serialize dispatch with the reader's failure fence. A mutation
+        // already popped by the drain must not send after that fence either.
+        let state = self
+            .mailbox
+            .state
+            .lock()
+            .map_err(|_| TurnError::OutcomeUnknown)?;
+        if state.thread_failed || self.mailbox.failure.load(Ordering::Acquire) {
+            return Err(TurnError::OutcomeUnknown);
+        }
+        send()
     }
 }
 
 impl AppServer for SessionServer {
     fn request(&mut self, method: &str, params: Value) -> Result<Value, TurnError> {
+        #[cfg(test)]
+        if self.panic_on_turn_start && method == "turn/start" {
+            inject_thread_panic(None);
+        }
         let id = self.allocate()?;
         self.send(&serde_json::json!({"id": id, "method": method, "params": params}))?;
         let deadline = self.deadline();
@@ -4829,7 +5228,8 @@ impl AppServer for SessionServer {
 
     fn respond_sensitive_result(&mut self, id: u64, result: &mut Value) -> Result<(), TurnError> {
         let mut envelope = serde_json::json!({"id": id, "result": result.take()});
-        let outcome = self.wire.send_sensitive(&envelope).map_err(TurnError::from);
+        let outcome = self
+            .with_dispatch_fence(|| self.wire.send_sensitive(&envelope).map_err(TurnError::from));
         crate::turn::zeroize_protected_json(&mut envelope);
         outcome
     }
@@ -4879,6 +5279,7 @@ pub struct WorkerSession {
     wire: Arc<DuplexConnection>,
     mailbox: Arc<SessionMailbox>,
     progress: Arc<SessionProgress>,
+    thread_failed: Arc<AtomicBool>,
     /// The coordinator, until the drain thread takes ownership of it.
     coordinator: Mutex<Option<SessionCoordinator>>,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
@@ -4938,12 +5339,42 @@ impl WorkerSession {
         state_root: &Path,
         workspace_id: &str,
     ) -> Result<Self, WorkerProtocolError> {
+        Self::connect_supervised(
+            session,
+            facts,
+            ledger,
+            run_generation,
+            uid,
+            state_root,
+            workspace_id,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_supervised(
+        session: &WorkerSessionBootstrap,
+        facts: RunFacts,
+        ledger: Arc<Mutex<Ledger>>,
+        run_generation: u64,
+        uid: u32,
+        state_root: &Path,
+        workspace_id: &str,
+        control: Option<&WorkerControlServer>,
+    ) -> Result<Self, WorkerProtocolError> {
         session.validate()?;
         let foreign_diagnostics = Box::new(ProfileForeignDiagnostics {
             profile_root: profile_diagnostics_root(state_root, &session.server_key)?,
         });
         let artifacts = FileArtifactStore::open(&session.artifact_root, uid)?;
-        let mailbox = Arc::new(SessionMailbox::new(facts.clone()));
+        let thread_failed = control.map_or_else(
+            || Arc::new(AtomicBool::new(false)),
+            |control| Arc::clone(&control.thread_failed),
+        );
+        let mailbox = Arc::new(SessionMailbox::with_failure_latch(
+            facts.clone(),
+            Arc::clone(&thread_failed),
+        ));
         // Resolve durable authorities before starting an owned server.
         let manifest = RunStore::new(SystemWorkspacePlatform, state_root)
             .load_manifest(facts.run_id)
@@ -5067,9 +5498,22 @@ impl WorkerSession {
             .as_ref()
             .map(|config| start_dedicated_server(config, &facts))
             .transpose()?;
-        let wire = match DuplexConnection::connect(
+        let wire = match DuplexConnection::connect_registered(
             &session.app_server_socket,
             Duration::from_secs(session.transport_timeout_seconds),
+            |stream| {
+                if let Some(control) = control {
+                    control
+                        .register_startup_connection(Arc::clone(&mailbox), stream)
+                        .map_err(|_| TransportError::Closed)?;
+                } else {
+                    mailbox
+                        .register_connection(stream)
+                        .map_err(|_| TransportError::Closed)?;
+                }
+                Ok(())
+            },
+            || mailbox.failure.load(Ordering::Acquire),
         ) {
             Ok(wire) => Arc::new(wire),
             Err(_) => {
@@ -5101,7 +5545,8 @@ impl WorkerSession {
         let reader = thread::spawn({
             let wire = Arc::clone(&wire);
             let mailbox = Arc::clone(&mailbox);
-            move || read_app_server(&wire, &mailbox)
+            let thread_failed = Arc::clone(&thread_failed);
+            move || read_app_server(&wire, &mailbox, &thread_failed)
         });
         let mut startup_phase = "ledger_replay";
         let mut startup_details = None;
@@ -5307,6 +5752,7 @@ impl WorkerSession {
             wire,
             mailbox,
             progress,
+            thread_failed,
             coordinator: Mutex::new(Some(coordinator)),
             workers: Mutex::new(vec![reader]),
             dedicated_server: Mutex::new(dedicated_server),
@@ -5333,6 +5779,7 @@ impl WorkerSession {
             .ok_or(WorkerProtocolError::Io)?;
         let mailbox = Arc::clone(&self.mailbox);
         let progress = Arc::clone(&self.progress);
+        let thread_failed = Arc::clone(&self.thread_failed);
         let drain = thread::spawn(move || {
             drain_run(
                 coordinator,
@@ -5341,6 +5788,7 @@ impl WorkerSession {
                 &progress,
                 &control,
                 &authority,
+                &thread_failed,
             );
         });
         self.workers
@@ -5815,6 +6263,20 @@ impl WorkerSession {
             let _ = stop_dedicated_server(&mut owned);
         }
     }
+
+    fn stop_failed_generation(&self) {
+        self.thread_failed.store(true, Ordering::Release);
+        if let Ok(mut state) = self.progress.state.lock() {
+            state.fatal.get_or_insert(TurnError::OutcomeUnknown);
+        }
+        self.progress.changed.notify_all();
+        for mutation in self.mailbox.fail_thread() {
+            mutation
+                .outcome
+                .settle(failed(&TurnError::OutcomeUnknown, &self.facts.bare()));
+        }
+        self.wire.shutdown();
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -6174,14 +6636,30 @@ impl Drop for WorkerSession {
 /// The reader touches no Run state, so it can stay parked on the socket for as
 /// long as the app-server is quiet without holding anything a control caller
 /// needs.
-fn read_app_server(wire: &DuplexConnection, mailbox: &SessionMailbox) {
-    while mailbox.await_grant() {
-        let message = wire.receive().map_err(TurnError::from);
-        let lost = message.is_err();
-        mailbox.deliver(message);
-        if lost {
-            break;
+fn read_app_server(wire: &DuplexConnection, mailbox: &SessionMailbox, thread_failed: &AtomicBool) {
+    let reader_failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        while mailbox.await_grant() {
+            #[cfg(test)]
+            if mailbox.panic_next_read.swap(false, Ordering::AcqRel) {
+                panic!("injected reader failure");
+            }
+            match wire.receive() {
+                Ok(message) => mailbox.deliver(Ok(message)),
+                Err(_) => return true,
+            }
         }
+        false
+    }))
+    .unwrap_or(true);
+    if reader_failed {
+        thread_failed.store(true, Ordering::Release);
+        for mutation in mailbox.fail_thread() {
+            mutation
+                .outcome
+                .settle(failed(&TurnError::OutcomeUnknown, &mailbox.facts.bare()));
+        }
+        mailbox.deliver(Err(TurnError::OutcomeUnknown));
+        wire.shutdown();
     }
 }
 
@@ -6193,57 +6671,69 @@ fn drain_run(
     progress: &SessionProgress,
     control: &Mutex<WorkerControlState>,
     authority: &RunControllerAuthority,
+    thread_failed: &AtomicBool,
 ) {
-    publish_state(&coordinator, progress, control);
-    loop {
-        match mailbox.next_work() {
-            SessionWork::Stop => break,
-            SessionWork::Message(Err(error)) => {
-                // A transport that dies under an accepted Turn has cost this
-                // Run that Turn's outcome, not merely its next message.  The
-                // loss is recorded durably and restated as the uncertainty it
-                // is, so no caller is handed a retryable transport hiccup for
-                // a Turn that may still be running on the app-server.
-                remember_lost(&coordinator, progress);
-                let reported = coordinator.lost_in_flight(error);
-                progress.fail(reported);
-                publish_state(&coordinator, progress, control);
-                break;
-            }
-            SessionWork::Message(Ok(message)) => {
-                match coordinator.ingest(message) {
-                    Ok(Some(terminal)) => progress.settle(terminal),
-                    // A terminal this Run already published is noise on a
-                    // shared server, not a second outcome.
-                    Ok(None) | Err(TurnError::DuplicateTerminal) => {}
-                    // A message this Run could not place is only fatal if it
-                    // cost the Run the outcome of a Turn it had in flight.
-                    // Otherwise it is noise on a shared server, and reporting
-                    // it to every later caller would be the real fault.
-                    Err(error) => {
-                        if *coordinator.state() == CoordinatorState::OutcomeUnknown {
-                            progress.fail(error);
+    let mut in_flight: Option<Arc<MutationOutcome>> = None;
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        publish_state(&coordinator, progress, control);
+        loop {
+            match mailbox.next_work() {
+                SessionWork::Stop => break,
+                SessionWork::Message(Err(error)) => {
+                    // A transport that dies under an accepted Turn has cost this
+                    // Run that Turn's outcome, not merely its next message.  The
+                    // loss is recorded durably and restated as the uncertainty it
+                    // is, so no caller is handed a retryable transport hiccup for
+                    // a Turn that may still be running on the app-server.
+                    remember_lost(&coordinator, progress);
+                    let reported = coordinator.lost_in_flight(error);
+                    progress.fail(reported);
+                    publish_state(&coordinator, progress, control);
+                    break;
+                }
+                SessionWork::Message(Ok(message)) => {
+                    match coordinator.ingest(message) {
+                        Ok(Some(terminal)) => progress.settle(terminal),
+                        // A terminal this Run already published is noise on a
+                        // shared server, not a second outcome.
+                        Ok(None) | Err(TurnError::DuplicateTerminal) => {}
+                        // A message this Run could not place is only fatal if it
+                        // cost the Run the outcome of a Turn it had in flight.
+                        // Otherwise it is noise on a shared server, and reporting
+                        // it to every later caller would be the real fault.
+                        Err(error) => {
+                            if *coordinator.state() == CoordinatorState::OutcomeUnknown {
+                                progress.fail(error);
+                            }
                         }
                     }
+                    publish_state(&coordinator, progress, control);
                 }
-                publish_state(&coordinator, progress, control);
-            }
-            SessionWork::PrimaryTool(completion) => {
-                if let Err(error) = coordinator.complete_primary_tool(completion)
-                    && *coordinator.state() == CoordinatorState::OutcomeUnknown
-                {
-                    progress.fail(error);
+                SessionWork::PrimaryTool(completion) => {
+                    if let Err(error) = coordinator.complete_primary_tool(completion)
+                        && *coordinator.state() == CoordinatorState::OutcomeUnknown
+                    {
+                        progress.fail(error);
+                    }
+                    publish_state(&coordinator, progress, control);
                 }
-                publish_state(&coordinator, progress, control);
-            }
-            SessionWork::Mutation(mutation) => {
-                let outcome = Arc::clone(&mutation.outcome);
-                outcome.start();
-                let response = perform(&mut coordinator, identity, progress, authority, *mutation);
-                publish_state(&coordinator, progress, control);
-                outcome.settle(response);
+                SessionWork::Mutation(mutation) => {
+                    let outcome = Arc::clone(&mutation.outcome);
+                    in_flight = Some(Arc::clone(&outcome));
+                    outcome.start();
+                    let response =
+                        perform(&mut coordinator, identity, progress, authority, *mutation);
+                    publish_state(&coordinator, progress, control);
+                    outcome.settle(response);
+                    in_flight = None;
+                }
             }
         }
+    }))
+    .is_err();
+    if panicked {
+        thread_failed.store(true, Ordering::Release);
+        progress.fail(TurnError::OutcomeUnknown);
     }
     // Whatever ended the drain, a Turn still in flight has just lost the only
     // thread that could observe it.  ADR-011 wants that in the ledger before
@@ -6251,8 +6741,25 @@ fn drain_run(
     // shutdown does rather than dropping the coordinator on the floor and
     // leaving a Turn that ran with nothing durable to recover it from.
     remember_lost(&coordinator, progress);
-    if let Err(error) = coordinator.abandon() {
-        progress.fail(error);
+    let abandoned =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| coordinator.abandon()));
+    let failure = match abandoned {
+        Ok(Ok(())) => TurnError::OutcomeUnknown,
+        Ok(Err(error)) => {
+            thread_failed.store(true, Ordering::Release);
+            progress.fail(error.clone());
+            error
+        }
+        Err(_) => {
+            thread_failed.store(true, Ordering::Release);
+            let error =
+                TurnError::Journal("worker drain could not record terminal uncertainty".to_owned());
+            progress.fail(error.clone());
+            error
+        }
+    };
+    if let Some(outcome) = in_flight {
+        outcome.settle(failed(&failure, &progress.facts.bare()));
     }
     publish_state(&coordinator, progress, control);
     let stopping = progress.facts.bare();
@@ -6266,6 +6773,12 @@ fn drain_run(
 }
 
 /// Perform one mutation, proving Controller authority immediately before it.
+#[cfg(test)]
+fn inject_thread_panic(ledger: Option<Arc<Mutex<Ledger>>>) -> ! {
+    let _guard = ledger.as_ref().map(|ledger| ledger.lock().unwrap());
+    panic!("injected worker thread failure");
+}
+
 fn perform(
     coordinator: &mut SessionCoordinator,
     identity: &WorkerIdentity,
@@ -6273,6 +6786,21 @@ fn perform(
     authority: &RunControllerAuthority,
     mutation: SessionMutation,
 ) -> ControlResponseV1 {
+    #[cfg(test)]
+    if let SessionCommand::Panic { ledger, accept } = &mutation.command {
+        if *accept {
+            let _ = coordinator.accept(TurnRequest {
+                write: false,
+                idempotency_key: "original".into(),
+                message: "bounded fixture".into(),
+                images: Vec::new(),
+                model: "test-model".into(),
+                effort: None,
+                delivery: DeliveryMode::Submit,
+            });
+        }
+        inject_thread_panic(ledger.clone());
+    }
     // ADR-016: the CLI's check was an early rejection and the caller's thread
     // only carried the descriptor here.  This is the authoritative check, on
     // the thread that performs the effect, with nothing between it and the
@@ -6968,6 +7496,8 @@ fn perform_command(
         | SessionCommand::ShutdownAbandon => {
             internal_invariant("unauthenticated work reached the effects")
         }
+        #[cfg(test)]
+        SessionCommand::Panic { .. } => unreachable!("injected before dispatch"),
     }
 }
 
@@ -8096,27 +8626,33 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
                 Ledger::open(&bootstrap.ledger_root, bootstrap.run_id)
                     .map_err(|_| WorkerProtocolError::LedgerReplay)?,
             ));
-            if let Some(session) = &bootstrap.session {
-                let owned = WorkerSession::connect(
-                    session,
-                    facts.clone(),
-                    Arc::clone(&ledger),
-                    bootstrap.run_generation,
-                    uid,
-                    &bootstrap.state_root,
-                    &bootstrap.workspace_id,
-                )?;
-                record = read_runtime_record(&bootstrap.runtime_record_path, uid)?;
-                record.dedicated_server_identity = owned.dedicated_server_identity();
-                write_runtime_record(&bootstrap.runtime_record_path, &record)?;
-                control.replace_state(owned.control_state())?;
-                control.attach_run(Arc::new(owned), Arc::clone(&ledger))?;
-            } else {
-                control.attach_ledger(Arc::clone(&ledger))?;
-            }
-            write_startup_handoff(&StartupHandoff::Ready {
-                record: record.clone(),
-            })?;
+            let owned = bootstrap
+                .session
+                .as_ref()
+                .map(|session| {
+                    WorkerSession::connect_supervised(
+                        session,
+                        facts.clone(),
+                        Arc::clone(&ledger),
+                        bootstrap.run_generation,
+                        uid,
+                        &bootstrap.state_root,
+                        &bootstrap.workspace_id,
+                        Some(&control),
+                    )
+                    .map(Arc::new)
+                })
+                .transpose()?;
+            control.finish_startup(
+                &bootstrap.runtime_record_path,
+                owned,
+                Arc::clone(&ledger),
+                |record| {
+                    write_startup_handoff(&StartupHandoff::Ready {
+                        record: record.clone(),
+                    })
+                },
+            )?;
             DarwinSystem
                 .close_startup_fd3()
                 .map_err(|_| WorkerProtocolError::Io)?;
@@ -8130,15 +8666,19 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
         let ledger = match startup {
             Ok(ledger) => ledger,
             Err(error) => {
-                control.stop();
+                control.stop_failed_startup();
                 let _ = serving_thread.join();
+                let _ = control.detach_run();
                 return Err(error);
             }
         };
-        let served = serving_thread.join().map_err(|_| WorkerProtocolError::Io)?;
-        control.detach_run()?;
+        let served = serving_thread
+            .join()
+            .unwrap_or(Err(WorkerProtocolError::Io));
+        let detached = control.detach_run();
         drop(ledger);
-        served
+        served?;
+        detached
     });
     let release = owner_guard.release();
     result?;
@@ -8516,6 +9056,13 @@ fn write_runtime_record_locked(
     match fs::symlink_metadata(path) {
         Ok(_) => {
             let prior = read_runtime_record(path, record.identity.uid)?;
+            if prior.identity == record.identity
+                && prior.control_socket_epoch == record.control_socket_epoch
+                && prior.control_recovery_required
+                && !record.control_recovery_required
+            {
+                return Err(WorkerProtocolError::InvalidRuntimeRecord);
+            }
             if let Some(old) = &prior.startup_scope {
                 let new = record
                     .startup_scope
@@ -9565,6 +10112,1054 @@ mod tests {
         append_private_diagnostic(&link, &diagnostic);
         assert_eq!(fs::read(&path).unwrap(), accepted);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    struct PanicFixture {
+        root: PathBuf,
+        fake: Child,
+        wire: Arc<DuplexConnection>,
+        reader: Option<thread::JoinHandle<()>>,
+        ledger: Arc<Mutex<Ledger>>,
+        mailbox: Arc<SessionMailbox>,
+        progress: Arc<SessionProgress>,
+        coordinator: Option<SessionCoordinator>,
+        thread_failed: Arc<AtomicBool>,
+        identity: WorkerIdentity,
+    }
+
+    impl PanicFixture {
+        fn new() -> Self {
+            Self::with_pending_start(false)
+        }
+
+        fn with_pending_start(pending: bool) -> Self {
+            use std::io::Read as _;
+            use std::process::Stdio;
+            let root = std::env::temp_dir().join(format!("d74-{}", Uuid::now_v7().simple()));
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let socket = root.join("s.sock");
+            let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let transcript = root.join("requests.jsonl");
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&transcript)
+                .unwrap();
+            let (mut ready, ready_sink) = UnixStream::pair().unwrap();
+            ready
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut fake = Command::new(repository.join(".venv/bin/python"))
+                .env_clear()
+                .arg(repository.join("tools/fake_app_server"))
+                .args(["--socket", socket.to_str().unwrap(), "--scenario"])
+                .arg(repository.join("tools/fake_app_server/scenarios/shutdown_interrupt.json"))
+                .arg("--transcript")
+                .arg(&transcript)
+                .args(["--ready-fd", "1"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(std::os::fd::OwnedFd::from(ready_sink)))
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut readiness = [0u8; 6];
+            if let Err(error) = ready.read_exact(&mut readiness) {
+                let _ = fake.kill();
+                let _ = fake.wait();
+                let _ = fs::remove_dir_all(&root);
+                panic!("scripted server did not report listen readiness: {error}");
+            }
+            assert_eq!(&readiness, b"ready\n");
+            let mut identity = identity();
+            identity.uid = DarwinSystem.current_uid();
+            identity.run_generation = 1;
+            let facts = RunFacts {
+                run_id: identity.run_id,
+                profile: "default".into(),
+            };
+            let thread_failed = Arc::new(AtomicBool::new(false));
+            let mailbox = Arc::new(SessionMailbox::with_failure_latch(
+                facts.clone(),
+                Arc::clone(&thread_failed),
+            ));
+            let wire = Arc::new(
+                DuplexConnection::connect_registered(
+                    &socket,
+                    Duration::from_secs(5),
+                    |stream| {
+                        mailbox
+                            .register_connection(stream)
+                            .map_err(|_| TransportError::Closed)
+                    },
+                    || mailbox.failure.load(Ordering::Acquire),
+                )
+                .unwrap(),
+            );
+            let reader = thread::spawn({
+                let wire = Arc::clone(&wire);
+                let mailbox = Arc::clone(&mailbox);
+                let failed = Arc::clone(&thread_failed);
+                move || read_app_server(&wire, &mailbox, &failed)
+            });
+            let ledger_root = root.join("ledger");
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&ledger_root)
+                .unwrap();
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(ledger_root.join("recovery"))
+                .unwrap();
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(ledger_root.join("audit.jsonl"))
+                .unwrap();
+            let mut ledger = Ledger::open(&ledger_root, identity.run_id).unwrap();
+            ledger
+                .append_conformance_payload(
+                    crate::audit::AuditKind::LifecycleTransition,
+                    &serde_json::json!({"previous":"starting","current":"idle"}),
+                    1,
+                )
+                .unwrap();
+            let ledger = Arc::new(Mutex::new(ledger));
+            let mut server = SessionServer::new(
+                Arc::clone(&wire),
+                Arc::clone(&mailbox),
+                Duration::from_secs(5),
+            );
+            server.panic_on_turn_start = pending;
+            let mut coordinator = TurnCoordinator::initialize(
+                server,
+                SharedLedgerJournal::new(Arc::clone(&ledger), 1),
+                FileArtifactStore::open(&root.join("artifacts"), identity.uid).unwrap(),
+                CoordinatorConfig {
+                    attach: ThreadAttach::Start,
+                    foreign_diagnostics: Box::new(ProfileForeignDiagnostics {
+                        profile_root: root.clone(),
+                    }),
+                    fixed_model: "test-model".into(),
+                    default_effort: "medium".into(),
+                    supported_efforts: ["medium".into()].into(),
+                    cwd: root.clone(),
+                    developer_instructions: String::new(),
+                    sandbox: "read-only".into(),
+                    approval_policy: "never".into(),
+                    safety_policy: SessionSafetyPolicy::ReviewerReadOnly,
+                    run_generation: 1,
+                    server_key: "a".repeat(64),
+                    server_epoch: 1,
+                    run_id: identity.run_id,
+                    controller_id: Uuid::now_v7(),
+                    control_mode: "managed_agent".into(),
+                    record_accepted_user_input: false,
+                    primary_tool: None,
+                    candidate_tools: false,
+                    candidate_reader: None,
+                },
+                "/tmp/codex-home",
+            )
+            .unwrap();
+            if !pending {
+                assert!(matches!(
+                    coordinator
+                        .accept(TurnRequest {
+                            write: false,
+                            idempotency_key: "original".into(),
+                            message: "bounded fixture".into(),
+                            images: Vec::new(),
+                            model: "test-model".into(),
+                            effort: None,
+                            delivery: DeliveryMode::Submit,
+                        })
+                        .unwrap(),
+                    DeliveryResult::Accepted(_)
+                ));
+            }
+            let progress = Arc::new(SessionProgress::new(facts));
+            Self {
+                root,
+                fake,
+                wire,
+                reader: Some(reader),
+                ledger,
+                mailbox,
+                progress,
+                coordinator: Some(coordinator),
+                thread_failed,
+                identity,
+            }
+        }
+    }
+
+    impl PanicFixture {
+        fn control(
+            &self,
+        ) -> (
+            WorkerControlServer,
+            WorkerSocketLease,
+            WorkerRuntimeRecord,
+            PathBuf,
+        ) {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(self.root.join("runtime"))
+                .unwrap();
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(self.root.join("runtime/locks"))
+                .unwrap();
+            crate::writer::WriterStore::initialize_layout(
+                &self.root,
+                &self.identity.workspace_id,
+                self.identity.uid,
+            )
+            .unwrap();
+            let lease = bind_worker_socket(&self.identity, None).unwrap();
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(self.root.join("runtime/runs"))
+                .unwrap();
+            let runtime =
+                runtime_record_path(&runtime_root(&self.root), self.identity.run_id).unwrap();
+            let record = WorkerRuntimeRecord {
+                schema_version: 1,
+                identity: self.identity.clone(),
+                socket_path: lease.path.clone(),
+                socket_identity: lease.identity.clone(),
+                control_socket_epoch: 1,
+                app_server_epoch: Some(1),
+                control_recovery_required: false,
+                startup_scope: None,
+                dedicated_server_identity: None,
+                dolgorae_version: env!("CARGO_PKG_VERSION").into(),
+                mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+                binary_sha256: current_dolgorae_build().unwrap().binary_sha256,
+            };
+            write_runtime_record(&runtime, &record).unwrap();
+            let server = WorkerControlServer::new(
+                WorkerHello {
+                    schema_version: 1,
+                    identity: self.identity.clone(),
+                    control_socket_epoch: 1,
+                    dolgorae_version: record.dolgorae_version.clone(),
+                    mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+                    binary_sha256: record.binary_sha256.clone(),
+                },
+                self.progress.facts.clone(),
+                WorkerControlState {
+                    lifecycle: "running".into(),
+                    active_turn: Some("turn-1".into()),
+                },
+                RunControllerAuthority::new(self.root.clone(), self.identity.run_id),
+            );
+            (server, lease, record, runtime)
+        }
+    }
+
+    impl Drop for PanicFixture {
+        fn drop(&mut self) {
+            self.mailbox.stop();
+            self.wire.shutdown();
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
+            let _ = self.fake.kill();
+            let _ = self.fake.wait();
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn drain_panics_wake_original_and_queued_callers_without_writing_poisoned_journal() {
+        for (poison, pending) in [(false, false), (true, false), (false, true)] {
+            let mut fixture = PanicFixture::with_pending_start(pending);
+            let before = fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap();
+            let original = Arc::new(MutationOutcome::default());
+            let queued = Arc::new(MutationOutcome::default());
+            for (outcome, command) in [
+                (
+                    Arc::clone(&original),
+                    SessionCommand::Panic {
+                        ledger: poison.then(|| Arc::clone(&fixture.ledger)),
+                        accept: pending,
+                    },
+                ),
+                (Arc::clone(&queued), SessionCommand::ShutdownAbandon),
+            ] {
+                assert!(
+                    fixture
+                        .mailbox
+                        .submit(SessionMutation {
+                            preconditions: MutationPreconditions::default(),
+                            operation: "turn",
+                            credential: None,
+                            external_engagement: None,
+                            command,
+                            outcome,
+                        })
+                        .is_none()
+                );
+            }
+            let started = Instant::now();
+            drain_run(
+                fixture.coordinator.take().unwrap(),
+                &fixture.identity,
+                &fixture.mailbox,
+                &fixture.progress,
+                &Mutex::new(WorkerControlState {
+                    lifecycle: "running".into(),
+                    active_turn: Some("turn-1".into()),
+                }),
+                &unreachable_authority(),
+                &fixture.thread_failed,
+            );
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(fixture.thread_failed.load(Ordering::Acquire));
+            let Some(ControlResponseV1::Failed {
+                code, retryable, ..
+            }) = original.await_settled(Duration::from_secs(1))
+            else {
+                panic!("original caller did not fail promptly");
+            };
+            assert!(!retryable);
+            assert_eq!(
+                code,
+                if poison {
+                    "INTERNAL_ERROR"
+                } else {
+                    "OUTCOME_UNKNOWN"
+                }
+            );
+            assert!(matches!(
+                queued.await_settled(Duration::from_secs(1)),
+                Some(ControlResponseV1::Failed { .. })
+            ));
+            let after = fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap();
+            if poison {
+                assert!(fixture.ledger.is_poisoned());
+                assert_eq!(after, before);
+            } else {
+                assert!(after.starts_with(&before));
+                let ledger = fixture.ledger.lock().unwrap();
+                let records = ledger.durable_records().unwrap();
+                let intent = records
+                    .iter()
+                    .find(|r| r.kind() == crate::audit::AuditKind::TurnIntent)
+                    .unwrap();
+                let unknown = records
+                    .iter()
+                    .find(|r| r.kind() == crate::audit::AuditKind::OutcomeUnknown)
+                    .unwrap();
+                let intent: Value =
+                    serde_json::from_slice(&crate::jcs::canonicalize(intent.payload()).unwrap())
+                        .unwrap();
+                let unknown: Value =
+                    serde_json::from_slice(&crate::jcs::canonicalize(unknown.payload()).unwrap())
+                        .unwrap();
+                assert_eq!(intent["operation_id"], unknown["operation_id"]);
+                assert_eq!(
+                    ledger.projection().unwrap().lifecycle,
+                    crate::domain::RunLifecycle::OutcomeUnknown
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reader_failures_fence_queued_and_popped_dispatch() {
+        use std::io::Read;
+        for panic in [false, true] {
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            let mailbox = Arc::new(SessionMailbox::new(RunFacts {
+                run_id: Uuid::now_v7(),
+                profile: "default".into(),
+            }));
+            mailbox.register_connection(&socket).unwrap();
+            let wire = Arc::new(DuplexConnection::attach(socket).unwrap());
+            let outcome = Arc::new(MutationOutcome::default());
+            assert!(
+                mailbox
+                    .submit(SessionMutation {
+                        preconditions: MutationPreconditions::default(),
+                        operation: "turn",
+                        credential: None,
+                        external_engagement: None,
+                        command: SessionCommand::Accept {
+                            request: TurnControlRequest {
+                                write: false,
+                                normalized_request_sha256: None,
+                                message: "queued before reader failure".into(),
+                                idempotency_key: "queued".into(),
+                                effort: None,
+                                images: Vec::new(),
+                            },
+                            delivery: DeliveryMode::Submit,
+                        },
+                        outcome: Arc::clone(&outcome),
+                    })
+                    .is_none()
+            );
+            mailbox.state.lock().unwrap().reading = true;
+            mailbox.panic_next_read.store(panic, Ordering::Release);
+            if !panic {
+                peer.write_all(&[0x81, 1, b'{']).unwrap();
+            }
+            let failed = AtomicBool::new(false);
+            let started = Instant::now();
+            read_app_server(&wire, &mailbox, &failed);
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert!(failed.load(Ordering::Acquire));
+            assert!(matches!(mailbox.next_work(), SessionWork::Stop));
+            assert!(matches!(outcome.await_settled(Duration::from_secs(1)),
+            Some(ControlResponseV1::Failed { code, .. }) if code == "OUTCOME_UNKNOWN"));
+            let mut server = SessionServer::new(wire, mailbox, Duration::from_secs(1));
+            assert!(matches!(
+                server.request("turn/start", serde_json::json!({})),
+                Err(TurnError::OutcomeUnknown)
+            ));
+            let mut bytes = Vec::new();
+            peer.read_to_end(&mut bytes).unwrap();
+            // Emergency cancellation closes the owned socket directly, without
+            // waiting for the shared writer to send a close frame.
+            assert!(bytes.is_empty(), "failed reader sent a JSON-RPC frame");
+        }
+    }
+
+    #[test]
+    fn pre_ready_failure_retains_marker_and_prevents_late_ready_publication() {
+        for reader_failure in [false, true] {
+            let fixture = PanicFixture::with_pending_start(true);
+            let before = fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap();
+            let (mut control, _lease, stale, runtime) = fixture.control();
+            if reader_failure {
+                // The connect handshake uses this same reader and shared owner
+                // latch before a WorkerSession exists or can be attached.
+                control.thread_failed = Arc::clone(&fixture.thread_failed);
+                fixture
+                    .mailbox
+                    .panic_next_read
+                    .store(true, Ordering::Release);
+                let mut server = SessionServer::new(
+                    Arc::clone(&fixture.wire),
+                    Arc::clone(&fixture.mailbox),
+                    Duration::from_secs(1),
+                );
+                assert!(server.request("initialize", serde_json::json!({})).is_err());
+                assert!(control.thread_failed.load(Ordering::Acquire));
+                control.stop_failed_startup();
+            } else {
+                let failed = control.clone();
+                thread::spawn(move || failed.contain_thread_failure())
+                    .join()
+                    .unwrap()
+                    .unwrap();
+            }
+            // This is the old schema-1 stale-write order from the finding.
+            assert_eq!(
+                write_runtime_record(&runtime, &stale),
+                Err(WorkerProtocolError::InvalidRuntimeRecord)
+            );
+            let updated = update_runtime_record(&runtime, fixture.identity.uid, |record| {
+                record.app_server_epoch = Some(2);
+                Ok(())
+            })
+            .unwrap();
+            assert!(updated.control_recovery_required);
+            let mut published = false;
+            assert_eq!(
+                control.finish_startup(&runtime, None, Arc::clone(&fixture.ledger), |_| {
+                    published = true;
+                    Ok(())
+                }),
+                Err(WorkerProtocolError::WorkerStartFailed)
+            );
+            assert!(!published);
+            assert!(control.run.lock().unwrap().ledger.is_none());
+            let retained = read_runtime_record(&runtime, fixture.identity.uid).unwrap();
+            assert!(retained.control_recovery_required);
+            assert_eq!(retained.identity, stale.identity);
+            assert_eq!(retained.control_socket_epoch, stale.control_socket_epoch);
+            assert_eq!(
+                fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn startup_cancellation_before_connect_does_not_open_an_upstream_connection() {
+        let fixture = PanicFixture::with_pending_start(true);
+        let (control, _lease, _, runtime) = fixture.control();
+        let path = fixture.root.join("cancelled.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mailbox = Arc::new(SessionMailbox::with_failure_latch(
+            fixture.progress.facts.clone(),
+            Arc::clone(&control.thread_failed),
+        ));
+        let started = Instant::now();
+        assert!(
+            DuplexConnection::connect_registered(
+                &path,
+                Duration::from_secs(86400),
+                |stream| {
+                    control
+                        .register_startup_connection(Arc::clone(&mailbox), stream)
+                        .map_err(|_| TransportError::Closed)?;
+                    control
+                        .contain_thread_failure()
+                        .map_err(|_| TransportError::Closed)
+                },
+                || mailbox.failure.load(Ordering::Acquire)
+            )
+            .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        assert!(
+            read_runtime_record(&runtime, fixture.identity.uid)
+                .unwrap()
+                .control_recovery_required
+        );
+    }
+
+    #[test]
+    fn failed_startup_cancels_backpressured_write_before_acquiring_send_fence() {
+        let fixture = PanicFixture::with_pending_start(true);
+        let (control, _lease, _, runtime) = fixture.control();
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(86400)))
+            .unwrap();
+        let mailbox = Arc::new(SessionMailbox::with_failure_latch(
+            fixture.progress.facts.clone(),
+            Arc::clone(&control.thread_failed),
+        ));
+        control
+            .register_startup_connection(Arc::clone(&mailbox), &socket)
+            .unwrap();
+        let wire = Arc::new(DuplexConnection::attach(socket).unwrap());
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let writer = thread::spawn(move || {
+            let server = SessionServer::new(Arc::clone(&wire), mailbox, Duration::from_secs(86400));
+            let value = serde_json::json!({"method":"bounded-fixture","params":"x".repeat(2 * 1024 * 1024)});
+            server.with_dispatch_fence(|| {
+                entered.send(()).unwrap();
+                wire.send(&value).map_err(TurnError::from)
+            })
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        thread::sleep(Duration::from_millis(25));
+        assert!(
+            !writer.is_finished(),
+            "fixture did not create write pressure"
+        );
+        let started = Instant::now();
+        control.contain_thread_failure().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(writer.join().unwrap().is_err());
+        assert!(
+            read_runtime_record(&runtime, fixture.identity.uid)
+                .unwrap()
+                .control_recovery_required
+        );
+    }
+
+    #[test]
+    fn pre_ready_control_panic_interrupts_upgrade_and_initialize_without_transport_timeout() {
+        use base64::Engine as _;
+        use sha1::{Digest as _, Sha1};
+        use std::io::{BufRead as _, BufReader, Read as _};
+        for initialize in [false, true] {
+            let fixture = PanicFixture::with_pending_start(true);
+            let (mut control, lease, original, runtime) = fixture.control();
+            let socket = fixture.root.join("blocked.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let (entered, waiting) = std::sync::mpsc::channel();
+            let peer = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut key = None;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.trim_end().split_once(':')
+                        && name.eq_ignore_ascii_case("sec-websocket-key")
+                    {
+                        key = Some(value.trim().to_owned());
+                    }
+                }
+                if initialize {
+                    let digest = Sha1::digest(
+                        format!("{}258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key.unwrap()).as_bytes(),
+                    );
+                    let accept = base64::engine::general_purpose::STANDARD.encode(digest);
+                    write!(stream, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").unwrap();
+                    stream.flush().unwrap();
+                    let mut prefix = [0u8; 2];
+                    stream.read_exact(&mut prefix).unwrap();
+                    assert_eq!(prefix[0], 0x81);
+                    assert_ne!(prefix[1] & 0x80, 0);
+                    assert!(prefix[1] & 0x7f < 126);
+                    let mut mask = [0u8; 4];
+                    stream.read_exact(&mut mask).unwrap();
+                    let mut payload = vec![0u8; usize::from(prefix[1] & 0x7f)];
+                    stream.read_exact(&mut payload).unwrap();
+                    for (i, byte) in payload.iter_mut().enumerate() {
+                        *byte ^= mask[i % 4];
+                    }
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&payload).unwrap()["method"],
+                        "initialize"
+                    );
+                }
+                entered.send(()).unwrap();
+                let mut later = Vec::new();
+                stream.read_to_end(&mut later).unwrap();
+                assert!(later.is_empty(), "failed startup sent another request");
+            });
+            let connecting = control.clone();
+            let facts = fixture.progress.facts.clone();
+            let client = thread::spawn(move || {
+                let mailbox = Arc::new(SessionMailbox::with_failure_latch(
+                    facts,
+                    Arc::clone(&connecting.thread_failed),
+                ));
+                let wire = DuplexConnection::connect_registered(
+                    &socket,
+                    Duration::from_secs(86400),
+                    |stream| {
+                        connecting
+                            .register_startup_connection(Arc::clone(&mailbox), stream)
+                            .map_err(|_| TransportError::Closed)
+                    },
+                    || mailbox.failure.load(Ordering::Acquire),
+                )
+                .map_err(|_| WorkerProtocolError::AppServerUnavailable)?;
+                let wire = Arc::new(wire);
+                let reader = thread::spawn({
+                    let wire = Arc::clone(&wire);
+                    let mailbox = Arc::clone(&mailbox);
+                    let failed = Arc::clone(&connecting.thread_failed);
+                    move || read_app_server(&wire, &mailbox, &failed)
+                });
+                let result =
+                    SessionServer::new(Arc::clone(&wire), mailbox, Duration::from_secs(86400))
+                        .request("initialize", serde_json::json!({}));
+                wire.shutdown();
+                reader.join().unwrap();
+                result
+                    .map(|_| ())
+                    .map_err(|_| WorkerProtocolError::AppServerUnavailable)
+            });
+            waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+            control.panic_on_serve = true;
+            let failed = control.clone();
+            let owner = thread::spawn(move || failed.serve(&lease));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !owner.is_finished() || !client.is_finished() {
+                assert!(
+                    Instant::now() < deadline,
+                    "failed startup waited for transport timeout"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(owner.join().unwrap().is_err());
+            assert!(client.join().unwrap().is_err());
+            peer.join().unwrap();
+            let retained = read_runtime_record(&runtime, fixture.identity.uid).unwrap();
+            assert!(retained.control_recovery_required);
+            assert_eq!(retained.identity, original.identity);
+            assert_eq!(retained.control_socket_epoch, original.control_socket_epoch);
+            let mut ready = false;
+            assert!(
+                control
+                    .finish_startup(&runtime, None, Arc::clone(&fixture.ledger), |_| {
+                        ready = true;
+                        Ok(())
+                    })
+                    .is_err()
+            );
+            assert!(!ready);
+            assert!(control.startup_connection.lock().unwrap().is_none());
+        }
+    }
+
+    fn primary_fixture_call(run_id: Uuid) -> PrimaryToolCall {
+        PrimaryToolCall {
+            request_id: 1,
+            run_generation: 1,
+            context: crate::primary_tool::PrimaryCallContext {
+                session_id: run_id,
+                source_run_id: run_id,
+                source_turn_id: "turn-1".into(),
+                source_tool_call_id: "original-tool".into(),
+                idempotency_key: "original-tool-key".into(),
+            },
+            payload: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn primary_failure_fences_reservation_and_delayed_bridge_entry() {
+        let fixture = PanicFixture::new();
+        let mailbox = Arc::clone(&fixture.mailbox);
+        mailbox.reserve_primary_tool().unwrap();
+        let (entered, waiting) = std::sync::mpsc::sync_channel(0);
+        let (release, released) = std::sync::mpsc::sync_channel(0);
+        let called = Arc::new(AtomicBool::new(false));
+        let thread_mailbox = Arc::clone(&mailbox);
+        let bridge_called = Arc::clone(&called);
+        let call = primary_fixture_call(fixture.identity.run_id);
+        let reserved = thread::spawn(move || {
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+            dispatch_reserved_primary_tool(&thread_mailbox, call, |_| {
+                bridge_called.store(true, Ordering::Release);
+                Ok(serde_json::json!({}))
+            });
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Model the real control-caller failure before the owner epilogue has
+        // changed mailbox state. Neither reservation nor execution may rely
+        // on that later state update.
+        mailbox.failure.store(true, Ordering::Release);
+        assert!(!mailbox.state.lock().unwrap().stopping);
+        assert!(mailbox.reserve_primary_tool().is_err());
+        assert!(matches!(mailbox.next_work(), SessionWork::Stop));
+        release.send(()).unwrap();
+        reserved.join().unwrap();
+        assert!(!called.load(Ordering::Acquire));
+        let state = mailbox.state.lock().unwrap();
+        assert_eq!(state.primary_tools_in_flight, 0);
+        assert!(state.primary_tool_completions.is_empty());
+    }
+
+    #[test]
+    fn primary_bridge_started_before_failure_keeps_original_completion_without_mailbox_lock() {
+        let fixture = PanicFixture::new();
+        let mailbox = Arc::clone(&fixture.mailbox);
+        mailbox.reserve_primary_tool().unwrap();
+        let (entered, waiting) = std::sync::mpsc::sync_channel(0);
+        let (release, released) = std::sync::mpsc::sync_channel(0);
+        let thread_mailbox = Arc::clone(&mailbox);
+        let call = primary_fixture_call(fixture.identity.run_id);
+        let reserved = thread::spawn(move || {
+            dispatch_reserved_primary_tool(&thread_mailbox, call, |_| {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+                Ok(serde_json::json!({"original":true}))
+            });
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(mailbox.state.try_lock().is_ok());
+        mailbox.failure.store(true, Ordering::Release);
+        assert!(mailbox.reserve_primary_tool().is_err());
+        release.send(()).unwrap();
+        reserved.join().unwrap();
+        let mut state = mailbox.state.lock().unwrap();
+        assert_eq!(state.primary_tools_in_flight, 0);
+        let completion = state.primary_tool_completions.pop_front().unwrap();
+        assert_eq!(completion.request_id, 1);
+        assert_eq!(completion.source_tool_call_id, "original-tool");
+        assert_eq!(
+            completion.result.unwrap(),
+            serde_json::json!({"original":true})
+        );
+        assert!(state.primary_tool_completions.is_empty());
+    }
+
+    #[test]
+    fn failure_aborts_partial_control_peers_before_join_and_owner_release() {
+        for (control_panic, late_join_failure) in [(false, false), (true, false), (false, true)] {
+            let mut fixture = PanicFixture::new();
+            let session = Arc::new(WorkerSession {
+                facts: fixture.progress.facts.clone(),
+                wire: Arc::clone(&fixture.wire),
+                mailbox: Arc::clone(&fixture.mailbox),
+                progress: Arc::clone(&fixture.progress),
+                thread_failed: Arc::clone(&fixture.thread_failed),
+                coordinator: Mutex::new(fixture.coordinator.take()),
+                workers: Mutex::new(vec![fixture.reader.take().unwrap()]),
+                dedicated_server: Mutex::new(None),
+            });
+            let (server, lease, original, runtime) = fixture.control();
+            server
+                .attach_run(session, Arc::clone(&fixture.ledger))
+                .unwrap();
+            let serving = server.clone();
+            let socket = lease.path.clone();
+            let owner = thread::spawn(move || {
+                let result = serving.clone().serve(&lease);
+                serving.detach_run().unwrap();
+                result
+            });
+            let mut peer = UnixStream::connect(&socket).unwrap();
+            peer.write_all(b"{").unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while server.caller_connections.lock().unwrap().len() != 1 {
+                assert!(Instant::now() < deadline, "partial caller was not admitted");
+                thread::sleep(Duration::from_millis(2));
+            }
+            let started = Instant::now();
+            if late_join_failure {
+                server.stop();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !server.caller_join_started.load(Ordering::Acquire) {
+                    assert!(
+                        Instant::now() < deadline,
+                        "owner did not enter caller joins"
+                    );
+                    thread::sleep(Duration::from_millis(2));
+                }
+                // A caller panic raises this latch even after the owner has
+                // stopped admission and entered its normal join phase.
+                server.thread_failed.store(true, Ordering::Release);
+            } else if control_panic {
+                server.panic_next_caller.store(true, Ordering::Release);
+                let mut trigger = UnixStream::connect(&socket).unwrap();
+                let _ = write_frame(
+                    &mut trigger,
+                    &ControlRequestV1::Status {
+                        expected: fixture.identity.clone(),
+                    },
+                );
+            } else {
+                fixture.fake.kill().unwrap();
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !owner.is_finished() {
+                assert!(
+                    Instant::now() < deadline,
+                    "partial control frame retained failed owner"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert!(owner.join().unwrap().is_err());
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(server.caller_connections.lock().unwrap().is_empty());
+            let mut remaining = Vec::new();
+            std::io::Read::read_to_end(&mut peer, &mut remaining).unwrap();
+            assert!(remaining.is_empty());
+            let retained = read_runtime_record(&runtime, fixture.identity.uid).unwrap();
+            assert!(retained.control_recovery_required);
+            assert_eq!(retained.identity, original.identity);
+            assert_eq!(retained.control_socket_epoch, original.control_socket_epoch);
+            assert!(
+                matches!(fixture.progress.await_turn("turn-1", Some(Duration::from_secs(1))),
+                ControlResponseV1::Failed {code, retryable:false,..} if code=="OUTCOME_UNKNOWN")
+            );
+        }
+    }
+
+    #[test]
+    fn failure_aborts_backpressured_control_response_before_join() {
+        let fixture = PanicFixture::new();
+        let (server, _lease, original, runtime) = fixture.control();
+        let (mut response, mut peer) = UnixStream::pair().unwrap();
+        response
+            .set_write_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        server
+            .caller_connections
+            .lock()
+            .unwrap()
+            .insert(0, response.try_clone().unwrap());
+        let connection = ControlCallerConnection {
+            connections: Arc::clone(&server.caller_connections),
+            id: 0,
+        };
+        let caller = thread::spawn(move || {
+            let _connection = connection;
+            write_frame(
+                &mut response,
+                &ControlResponseV1::Failed {
+                    code: "TRANSPORT_FAILURE".into(),
+                    message: "bounded response fixture".into(),
+                    retryable: false,
+                    details: serde_json::json!({"payload":"x".repeat(2*1024*1024)}),
+                },
+            )
+        });
+        let mut first = [0u8; 1];
+        std::io::Read::read_exact(&mut peer, &mut first).unwrap();
+        assert!(
+            !caller.is_finished(),
+            "response did not encounter backpressure"
+        );
+        server.contain_thread_failure().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !caller.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "control response waited for write timeout"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(caller.join().unwrap().is_err());
+        assert!(server.caller_connections.lock().unwrap().is_empty());
+        let retained = read_runtime_record(&runtime, fixture.identity.uid).unwrap();
+        assert!(retained.control_recovery_required);
+        assert_eq!(retained.identity, original.identity);
+        assert_eq!(retained.control_socket_epoch, original.control_socket_epoch);
+    }
+
+    #[test]
+    fn control_panic_stops_serving_and_retains_recovery_without_replaying_acceptance() {
+        for (control_owner, poison, reader_error, primary_failure) in [
+            (false, false, false, false),
+            (false, true, false, false),
+            (true, false, false, false),
+            (true, true, false, false),
+            (false, false, true, false),
+            (false, true, true, false),
+            (false, false, false, true),
+            (false, true, false, true),
+        ] {
+            let mut fixture = PanicFixture::new();
+            let before = fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap();
+            let session = Arc::new(WorkerSession {
+                facts: fixture.progress.facts.clone(),
+                wire: Arc::clone(&fixture.wire),
+                mailbox: Arc::clone(&fixture.mailbox),
+                progress: Arc::clone(&fixture.progress),
+                thread_failed: Arc::clone(&fixture.thread_failed),
+                coordinator: Mutex::new(fixture.coordinator.take()),
+                workers: Mutex::new(vec![fixture.reader.take().unwrap()]),
+                dedicated_server: Mutex::new(None),
+            });
+            let (mut server, lease, record, runtime) = fixture.control();
+            if !control_owner {
+                *server.ready_runtime_path.lock().unwrap() = Some(runtime.clone());
+            }
+            server
+                .attach_run(Arc::clone(&session), Arc::clone(&fixture.ledger))
+                .unwrap();
+            server
+                .panic_next_caller
+                .store(!reader_error && !primary_failure, Ordering::Release);
+            server.panic_on_serve = control_owner;
+            server.poison_on_panic = poison;
+            let serving = server.clone();
+            let path = lease.path.clone();
+            let owner = thread::spawn(move || {
+                let result = serving.clone().serve(&lease);
+                serving.detach_run().unwrap();
+                result
+            });
+            let started = Instant::now();
+            if (reader_error || primary_failure) && poison {
+                let ledger = Arc::clone(&fixture.ledger);
+                assert!(
+                    thread::spawn(move || inject_thread_panic(Some(ledger)))
+                        .join()
+                        .is_err()
+                );
+            }
+            if reader_error {
+                fixture.fake.kill().unwrap();
+            } else if primary_failure {
+                fixture
+                    .mailbox
+                    .panic_next_primary
+                    .store(true, Ordering::Release);
+                WorkerPrimaryToolDispatcher {
+                    state_root: fixture.root.clone(),
+                    mailbox: Arc::clone(&fixture.mailbox),
+                }
+                .dispatch(PrimaryToolCall {
+                    request_id: 1,
+                    run_generation: 1,
+                    context: crate::primary_tool::PrimaryCallContext {
+                        session_id: fixture.identity.run_id,
+                        source_run_id: fixture.identity.run_id,
+                        source_turn_id: "turn-1".into(),
+                        source_tool_call_id: "original-tool".into(),
+                        idempotency_key: "original-tool-key".into(),
+                    },
+                    payload: serde_json::json!({}),
+                })
+                .unwrap();
+            } else if let Ok(mut caller) = UnixStream::connect(&path) {
+                caller
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let _ = write_frame(
+                    &mut caller,
+                    &ControlRequestV1::Status {
+                        expected: fixture.identity.clone(),
+                    },
+                );
+                assert!(
+                    read_frame::<_, ControlResponseV1>(&mut std::io::BufReader::new(caller))
+                        .is_err()
+                );
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !owner.is_finished() {
+                assert!(
+                    Instant::now() < deadline,
+                    "failed control owner remained live"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(owner.join().unwrap().is_err());
+            assert!(started.elapsed() < Duration::from_secs(2));
+            let retained = read_runtime_record(&runtime, fixture.identity.uid).unwrap();
+            assert!(retained.control_recovery_required);
+            assert_eq!(retained.identity, record.identity);
+            assert_eq!(retained.control_socket_epoch, record.control_socket_epoch);
+            assert_eq!(fixture.ledger.is_poisoned(), poison);
+            assert!(
+                matches!(fixture.progress.await_turn("turn-1", Some(Duration::from_secs(1))), ControlResponseV1::Failed { code, retryable: false, .. } if code == "OUTCOME_UNKNOWN")
+            );
+            if primary_failure {
+                assert_eq!(
+                    fixture
+                        .mailbox
+                        .state
+                        .lock()
+                        .unwrap()
+                        .primary_tools_in_flight,
+                    0
+                );
+            }
+            let audit = fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap();
+            if poison {
+                assert_eq!(audit, before);
+            }
+            recover_control_runtime(&runtime, fixture.identity.uid).unwrap();
+            assert!(!runtime.exists());
+            assert_eq!(
+                fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap(),
+                audit
+            );
+            let transcript = fs::read_to_string(fixture.root.join("requests.jsonl")).unwrap();
+            assert_eq!(
+                transcript
+                    .lines()
+                    .filter(
+                        |line| serde_json::from_str::<Value>(line).unwrap()["method"]
+                            == "turn/start"
+                    )
+                    .count(),
+                1
+            );
+        }
     }
 
     fn identity() -> WorkerIdentity {

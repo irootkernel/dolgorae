@@ -3021,6 +3021,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             accepted_input,
         };
         self.journal.append_and_sync(JournalEntry::Intent(intent))?;
+        self.active_operation_id = Some(operation_id);
         self.unresolved_idempotency
             .insert(request.idempotency_key.clone(), digest.clone());
         if let Some(identity) = successor_identity
@@ -3106,7 +3107,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         })?;
         self.active_turn_id = Some(turn_id.clone());
         self.active_turn_effort = Some(effort.clone());
-        self.active_operation_id = Some(operation_id);
         self.state = CoordinatorState::Running;
         let accepted = AcceptedTurn {
             thread_id,
@@ -3149,6 +3149,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.unresolved_idempotency.remove(key);
         self.refused_idempotency
             .insert(key.to_owned(), digest.to_owned());
+        self.active_operation_id = None;
         Ok(())
     }
 

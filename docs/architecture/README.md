@@ -1589,6 +1589,28 @@ One worker serves one run. There is no shared supervisor or global in-memory
 registry. Concurrent start/recovery attempts for the same run are serialized by
 a per-run startup lock.
 
+Thread supervision stays inside that worker. Reader and drain failures, and
+panics in independent control callers, latch a failed-generation condition.
+Returned reader errors and Primary tool panics use the same failure latch and
+mailbox fence. An owned startup connection is registered before its WebSocket
+upgrade and initialization waits; containment shuts it down even before a Run
+session is attached. Cancellation precedes mailbox locking so a blocked writer
+cannot delay containment. Each independent control caller registers its owned
+connection until that caller exits. After failure notification, the owner
+allows a fixed 250 ms for existing typed replies, closes remaining connections,
+and joins callers. It observes failure while waiting for normal caller exit,
+so a late caller panic cannot strand it in a blocking join. Primary reservation and bridge-entry admission share the
+failure fence, without holding the mailbox lock during bridge execution. Calls
+cancelled before bridge admission release their reservation. Already-admitted
+work keeps its original durable operation and is never replayed. The drain
+retains its coordinator and current
+response owner across unwind so it can wake callers and record uncertainty through the ordinary fallible
+journal. Poisoned journal state remains unavailable. The control owner persists
+the existing exact-generation recovery marker, stops serving, and detaches the
+session before releasing its startup owner. Recovery reuses the recorded
+generation's process/history/writer proof; the failure latch grants no signalling,
+replacement, replay or journal-repair authority.
+
 The worker is detached from the transient CLI before it accepts requests. It
 runs through the hidden `__worker` argv mode after a single fork and `setsid()`,
 with no controlling terminal, null stdin/stdout/stderr, and `umask(077)`. It
@@ -2517,6 +2539,13 @@ readback. These components are production adapters used by the per-Run worker,
 but they do not themselves authorize an external mutation. Controller
 credential ingestion, same-uid observer projection, and public command wiring
 remain the TASK-007 boundary.
+
+For TASK-074 startup cancellation, `app_server` obtains its registered Unix
+connection through `darwin::DeadlineStream`. This edge reuses the existing
+nonblocking connect and deadline adapter while registering owned cancellation
+before connect or WebSocket upgrade can wait. WebSocket framing and JSON-RPC
+remain in `app_server`; raw socket and poll calls remain in `darwin`. Neither
+adapter acquires Controller, process-signalling or replay authority.
 
 ## Workspace Identity and Local Layout
 

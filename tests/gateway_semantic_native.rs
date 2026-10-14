@@ -5580,23 +5580,28 @@ async fn native_pending_interaction_parity_after_lost_interrupt_response() {
     .unwrap();
     let runtime: dolgorae::worker::WorkerRuntimeRecord =
         serde_json::from_slice(&fs::read(&runtime_path).unwrap()).unwrap();
-    let exit = dolgorae::darwin::DarwinSystem
-        .watch_process_exit(runtime.identity.pid)
-        .unwrap();
-    assert!(
-        std::process::Command::new("/bin/kill")
-            .args(["-KILL", &runtime.identity.pid.to_string()])
-            .status()
-            .unwrap()
-            .success()
-    );
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !exit.exited().unwrap() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        loop {
+            match dolgorae::worker::classify_worker_identity(&runtime) {
+                dolgorae::worker::ProcessIdentityVerdict::Absent => break,
+                dolgorae::worker::ProcessIdentityVerdict::Match => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                dolgorae::worker::ProcessIdentityVerdict::Mismatch
+                | dolgorae::worker::ProcessIdentityVerdict::Unverifiable => {
+                    panic!("cannot verify the failed worker's original identity");
+                }
+            }
         }
     })
     .await
     .expect("transport-lost worker remained alive during cleanup");
+    dolgorae::worker::prove_worker_generation_absent(&runtime).unwrap();
+    let retained =
+        dolgorae::worker::read_runtime_record(&runtime_path, runtime.identity.uid).unwrap();
+    assert!(retained.control_recovery_required);
+    assert_eq!(retained.identity, runtime.identity);
+    assert_eq!(retained.control_socket_epoch, runtime.control_socket_epoch);
     let recovered = runs
         .recover_run(pb::RecoverRunRequest {
             context: context(),

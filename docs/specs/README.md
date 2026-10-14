@@ -2465,6 +2465,32 @@ activity-derived kill authority do not exist in v1.
 If worker `SIGTERM` arrives during an active turn, it sends `turn/interrupt`,
 waits up to five seconds for a terminal event, fsyncs terminal evidence when
 observed, and records `outcome_unknown` on expiry before generation cleanup.
+The worker supervises its reader, drain, control-caller and Primary tool thread
+boundaries.
+A panic wakes waiting callers and stops the failed worker generation instead
+of leaving a live owner whose drain can no longer advance.
+Reader failure fences queued work and app-server sends immediately. Startup
+shares the failure latch with the control owner and serializes readiness with
+containment. The recovery marker cannot be cleared by a stale write for the
+same worker identity and socket epoch, including records without startup scope.
+Startup connection and handshake waits are registered for owned cancellation
+before readiness, so control failure wakes them without waiting for a transport
+deadline. Cancellation closes the owned socket before waiting for a send fence,
+including when a writer is blocked by backpressure.
+After notifying callers, failure allows at most 250 ms to deliver existing
+typed outcomes, then closes remaining owned control connections before joining
+their threads. Partial frames and stalled peers cannot extend this deadline.
+Primary tool reservation and bridge-entry admission check the same failure
+latch. A reserved call that has not been admitted to bridge execution is cancelled
+without effect and releases its accounting. Calls already admitted retain
+their original operation and uncertainty and are never replayed.
+The original accepted intent and receipts remain authoritative. When the journal
+is usable, the drain records uncertainty for its in-flight accepted operation before
+cleanup. A poisoned journal is never recovered in memory for another append;
+the worker persists its exact generation's control-recovery marker and exits
+through owned connection and process cleanup. Explicit recovery requires the
+existing exact process, history and writer proofs and never redispatches an
+accepted operation or signals an unverified process.
 The worker holding byte 1 normally unlinks its own socket. There is no volatile
 sibling sidecar: `~/.dolgorae/workspaces/<workspace-id>/runtime/runs/<run-id>.json` is the sole socket
 identity authority. On recovery, only the byte-0 election winner may authorize

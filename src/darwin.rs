@@ -27,6 +27,15 @@ impl DeadlineStream {
     }
 
     pub(crate) fn connect(path: &Path, deadline: std::time::Instant) -> std::io::Result<Self> {
+        Self::connect_registered(path, deadline, |_| Ok(()), || false)
+    }
+
+    pub(crate) fn connect_registered(
+        path: &Path,
+        deadline: std::time::Instant,
+        register: impl FnOnce(&UnixStream) -> std::io::Result<()>,
+        cancelled: impl Fn() -> bool,
+    ) -> std::io::Result<Self> {
         // SAFETY: the descriptor is immediately owned and closed on every error.
         let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
         if fd < 0 {
@@ -55,6 +64,7 @@ impl DeadlineStream {
         }
         let stream = UnixStream::from(owned);
         stream.set_nonblocking(true)?;
+        register(&stream)?;
         // SAFETY: sockaddr_un is a plain C address initialized before connect.
         let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
         let bytes = path.as_os_str().as_bytes();
@@ -71,6 +81,9 @@ impl DeadlineStream {
         }
         let connected = Self { stream, deadline };
         connected.remaining()?;
+        if cancelled() {
+            return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        }
         // SAFETY: address remains alive for this nonblocking syscall; its size
         // and family match the owned AF_UNIX descriptor.
         if unsafe {
@@ -87,12 +100,45 @@ impl DeadlineStream {
             {
                 return Err(error);
             }
-            connected.wait(libc::POLLOUT)?;
+            loop {
+                if cancelled() {
+                    return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+                }
+                let remaining = connected.remaining()?.min(Duration::from_millis(50));
+                let mut poll = libc::pollfd {
+                    fd: connected.stream.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                // SAFETY: poll references one descriptor owned by connected.
+                let result = unsafe {
+                    libc::poll(
+                        &mut poll,
+                        1,
+                        remaining.as_millis().saturating_add(1) as libc::c_int,
+                    )
+                };
+                if result > 0 {
+                    break;
+                }
+                if result < 0
+                    && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             if let Some(error) = connected.stream.take_error()? {
                 return Err(error);
             }
         }
+        if cancelled() {
+            return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        }
         Ok(connected)
+    }
+
+    pub(crate) fn into_stream(self) -> UnixStream {
+        self.stream
     }
 
     fn remaining(&self) -> std::io::Result<Duration> {

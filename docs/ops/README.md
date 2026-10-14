@@ -63,6 +63,23 @@ machine error and supervisor exit status to the repository maintainers. There
 is no in-place rollback beyond stopping the replacement; the prior gateway can
 be relaunched only after its own process and socket identity are revalidated.
 
+## Failed worker thread recovery
+
+A reader error, or a drain, control-thread or Primary tool panic, stops the
+failed worker generation. Owned control connections are closed before caller
+threads are joined, including partial-frame and stalled-response peers.
+Existing typed outcomes have a fixed 250 ms delivery grace; slow peers cannot
+extend it. Queued
+Primary tool calls cannot enter the bridge after failure is latched.
+Preserve the original Run, operation key, accepted intent and receipts. A usable
+journal records uncertainty; a poisoned journal remains unavailable for append.
+The retained control-recovery marker belongs to that exact generation, including
+a failure before startup reports ready. Use the selected build's checked
+recovery operation with the original workspace and authority. Recovery must
+prove the old generation's exact process absence and settle its writer/history
+obligations before replacement. Do not redispatch accepted work, repair a
+poisoned journal in memory, delete its history or signal an unverified PID.
+
 ## Global Profile generation recovery
 
 After the EPIC-013 activation, `LEGACY_STATE_UNSUPPORTED` means Dolgorae found a

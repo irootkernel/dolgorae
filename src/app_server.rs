@@ -986,7 +986,28 @@ impl DuplexConnection {
     /// timeout is not a failed Run, and a read that expired mid-frame would
     /// leave the reassembly state torn.  `shutdown` is what ends a read.
     pub fn connect(path: &Path, timeout: Duration) -> Result<Self, TransportError> {
-        let mut stream = UnixStream::connect(path)?;
+        Self::connect_registered(path, timeout, |_| Ok(()), || false)
+    }
+
+    pub(crate) fn connect_registered(
+        path: &Path,
+        timeout: Duration,
+        register: impl FnOnce(&UnixStream) -> Result<(), TransportError>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Self, TransportError> {
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or(TransportError::Closed)?;
+        let mut stream = crate::darwin::DeadlineStream::connect_registered(
+            path,
+            deadline,
+            |stream| {
+                register(stream).map_err(|_| std::io::Error::from(std::io::ErrorKind::Interrupted))
+            },
+            cancelled,
+        )?
+        .into_stream();
+        stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         upgrade(&mut stream)?;

@@ -269,7 +269,7 @@ Current acceptance failures cannot be closed by moving them to future work.
 | CD-03 | TASK-075 | Reuse own executing-build evidence correctly and replace 25 ms repeated observation with bounded durable waits |
 | CD-04 | TASK-072 | Capacity errors, terminal/lifecycle reserve, segments/checkpoints and recoverable maintenance |
 | CD-05 | TASK-073 | Profile journal compaction, capacity versus corruption, durable cleanup failure and crash-safe reduced writes |
-| CD-06 | TASK-074 | Contain worker-thread failure; test durable intent and recovery when journal state is poisoned |
+| CD-06 | TASK-074 | Supervise reader/drain/control and Primary tool failure; cancel owned startup/control connections and fence Primary bridge admission; retain original intent through pre-ready and poisoned-journal recovery without replay or unverified signalling |
 | CD-07 | TASK-075 | Database fast path, useful indexes, content deduplication and explicit result retention/GC |
 | CD-08 | TASK-075 | Cache Git availability and workspace observation with identity invalidation; steady calls spawn no Git |
 | CD-09 | TASK-067, TASK-078 | Modern public contract and mixed-manifest coexistence; retain accepted legacy meanings |

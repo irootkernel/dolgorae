@@ -50,7 +50,7 @@ fn orchestration_production_depends_on_the_adapter_trait() {
 #[test]
 fn source_module_dependencies_match_the_approved_graph() {
     let approved = BTreeMap::from([
-        ("app_server", &["jcs"][..]),
+        ("app_server", &["darwin", "jcs"][..]),
         ("codex_socket", &[][..]),
         ("audit", &["event", "jcs"][..]),
         ("operation", &["audit", "domain", "jcs", "turn"][..]),

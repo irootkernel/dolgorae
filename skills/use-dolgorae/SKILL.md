@@ -140,6 +140,15 @@ the original key and receipt; do not bypass exact-build refusal or signal a PID
 from a stale locator. Installation and actual consumer qualification remain
 separate authorizations.
 
+A reader error or worker thread panic retains the original accepted intent and
+operation key. This includes Primary tool execution and failures during startup
+connection waits. Failure cancels owned control connections and Primary calls
+that have not entered the bridge; it does not replay already-started work.
+Preserve the exact generation's returned recovery requirement, even when the
+worker failed before reporting ready. A poisoned journal cannot authorize a
+new append or retry. Use only the selected build's checked recovery path and
+fresh process/history/writer proof; never redispatch the accepted operation.
+
 ## Prepare a one-shot review
 
 1. Confirm that the requested source scope is exactly one of `workspace`,
