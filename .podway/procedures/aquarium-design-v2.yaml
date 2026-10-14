@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-design-v2
-version: "3"
+version: "8"
 name: Aquarium Design
 purpose: Shape one approved project, feature epic, or refactor document set without implementing it.
 description: A Podway record of Aquarium context capture, Ouroboros discovery, drafting, challenge, guarded quality review, exact-diff approval, document application, and closeout.
@@ -12,7 +12,8 @@ node_definitions:
     intent: Bind the workflow to its canonical identity, source authority, scope, and approved provider boundary.
     instructions:
       - Use the invoking design skill to record exact repository, document authority, scope, and approved discovery boundary.
-      - Do not implement product behavior, mutate unapproved files, stage, commit, or publish.
+      - Do not implement product behavior, mutate unapproved files, or publish. Staging and committing approved documents require the shared separately authorized task-commit boundary.
+      - Deliver the complete original artifacts, exact target, requirements, checks and effect boundaries in aquarium.worker-handoff/v1. Accept its authentic current native result and receipt before separate Action completion; Worker delivery is not Judge passage or Primary acceptance.
     items:
       - id: context-summary
         type: text
@@ -21,6 +22,12 @@ node_definitions:
         min_length: 1
         max_length: 5000
         multiline: true
+      - id: worker-handoff
+        type: artifact
+        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        required: true
+        allowed_media_types:
+          - application/json
   discovery-record:
     type: action
     title: Record Ouroboros discovery
@@ -28,6 +35,7 @@ node_definitions:
     instructions:
       - Use the approved Ouroboros discovery leaf and independently verify its bounded requirements evidence.
       - Discovery does not authorize implementation or applying draft documents.
+      - Deliver the complete original artifacts, exact target, requirements, checks and effect boundaries in aquarium.worker-handoff/v1. Accept its authentic current native result and receipt before separate Action completion; Worker delivery is not Judge passage or Primary acceptance.
     items:
       - id: discovery-summary
         type: text
@@ -36,6 +44,12 @@ node_definitions:
         min_length: 1
         max_length: 6000
         multiline: true
+      - id: worker-handoff
+        type: artifact
+        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        required: true
+        allowed_media_types:
+          - application/json
   draft-record:
     type: action
     title: Record the proposed design
@@ -43,6 +57,7 @@ node_definitions:
     instructions:
       - Draft only the approved design documents and preserve target paths, alternatives, and unresolved constraints.
       - Do not apply the draft or implement source behavior.
+      - Deliver the complete original artifacts, exact target, requirements, checks and effect boundaries in aquarium.worker-handoff/v1. Accept its authentic current native result and receipt before separate Action completion; Worker delivery is not Judge passage or Primary acceptance.
     items:
       - id: draft-summary
         type: text
@@ -51,6 +66,12 @@ node_definitions:
         min_length: 1
         max_length: 5000
         multiline: true
+      - id: worker-handoff
+        type: artifact
+        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        required: true
+        allowed_media_types:
+          - application/json
   challenge-record:
     type: action
     title: Challenge the proposed design
@@ -58,6 +79,7 @@ node_definitions:
     instructions:
       - Challenge the exact draft with relevant counterarguments and missing evidence without changing source behavior.
       - Return bounded findings to the design owner; do not infer approval.
+      - Deliver the complete original artifacts, exact target, requirements, checks and effect boundaries in aquarium.worker-handoff/v1. Accept its authentic current native result and receipt before separate Action completion; Worker delivery is not Judge passage or Primary acceptance.
     items:
       - id: counterarguments
         type: list
@@ -75,6 +97,12 @@ node_definitions:
         min_length: 1
         max_length: 4000
         multiline: true
+      - id: worker-handoff
+        type: artifact
+        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        required: true
+        allowed_media_types:
+          - application/json
   quality-record:
     type: action
     title: Record Ouroboros quality evidence
@@ -82,6 +110,9 @@ node_definitions:
     instructions:
       - Use the approved quality capability on the exact draft and adjudicate findings against repository authority.
       - A passing record does not authorize document application, staging, commit, or implementation.
+      - Preserve the raw QA PASS, REVISE, or FAIL verdict and exact draft identity in quality-summary. A completed locally adjudicable operation records pass; record every unresolved valid issue in its owner count and list.
+      - Route content findings to their owner before another QA pass. Artifact FAIL is not operation failure. Failed, missing, or non-adjudicable operation evidence records fail or inconclusive; retry unchanged input only through supported authorized recovery.
+      - Deliver the complete original artifacts, exact target, requirements, checks and effect boundaries in aquarium.worker-handoff/v1. Accept its authentic current native result and receipt before separate Action completion; Worker delivery is not Judge passage or Primary acceptance.
     items:
       - id: quality-result
         type: check_result
@@ -148,6 +179,12 @@ node_definitions:
         max_item_length: 1000
         max_total_length: 20000
         unique: true
+      - id: worker-handoff
+        type: artifact
+        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        required: true
+        allowed_media_types:
+          - application/json
   quality-decision:
     type: decision
     title: Evaluate design quality
@@ -158,7 +195,7 @@ node_definitions:
     options:
       - id: passed
         label: Quality passed
-        criteria: The external quality result passed and no unresolved discovery or draft finding remains.
+        criteria: The quality operation completed with adjudicable output and no unresolved discovery or draft finding remains.
         guards:
           - evidence:
               node: quality
@@ -205,7 +242,7 @@ node_definitions:
             at_least: 1
       - id: incomplete
         label: Quality review incomplete
-        criteria: The external quality result failed or is inconclusive.
+        criteria: The quality operation failed, returned no adjudicable output, or is inconclusive.
         guards:
           - evidence:
               node: quality
@@ -238,7 +275,9 @@ node_definitions:
     intent: Record only approved document changes and current validation evidence.
     instructions:
       - Apply only the exact user-approved document diff to unchanged target paths and run current document validation.
-      - Do not implement product code, stage, commit, publish, or extend the approval.
+      - Do not implement product code, publish, or extend document approval into commit authority. Use the shared separately authorized task-commit boundary when repository policy requires committed delivery input.
+      - Deliver the complete original artifacts, exact target, requirements, checks and effect boundaries in aquarium.worker-handoff/v1. Accept its authentic current native result and receipt before separate Action completion; Worker delivery is not Judge passage or Primary acceptance.
+      - Primary supplies the actual exact-diff approval and current snapshot basis. Recheck before any write. A changed proposal or target returns through original draft/investigation, challenge where applicable, quality and actual approval. Evidence-only re-entry verifies unchanged approved bytes without application authority for a changed diff.
     items:
       - id: application-summary
         type: text
@@ -247,6 +286,23 @@ node_definitions:
         min_length: 1
         max_length: 6000
         multiline: true
+      - id: worker-handoff
+        type: artifact
+        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        required: true
+        allowed_media_types:
+          - application/json
+      - id: application-approval-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-application-approval; Podway does not execute or attest this check.
+        help: Verify actual user approval of the complete exact current proposal or no-change, unchanged approved target snapshots before writes, applied bytes matching that approval and required validation. Changed proposals or targets require original quality and actual exact-diff approval again. Neither a Worker nor Judge verdict grants this authority.
+        required: true
+        operation_id: aquarium-design-application-approval
+        operation_digest: sha256:395e4186c41d5296fec5ad178af052f6f897f41b0cb9a5e242da4b6c651da546
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
   goal-assessment:
     type: decision
     title: Assess the design goal
@@ -254,16 +310,45 @@ node_definitions:
     prompt: What is the outcome of the current design goal?
     evidence_guidance:
       - Read the approved diff, applied digests, validation, and unresolved constraints.
+      - Use the current applicable final Judge report and fresh original native criterion statuses; every mandatory original criterion and integration obligation must pass.
+      - Faithful negative checkpoints, zero provider findings and unsupported manual claims cannot establish whole-goal success.
     options:
       - id: achieved
         label: Goal achieved
         criteria: The exact approved documents are applied and all required validation is current.
+        guards:
+          - evidence:
+              node: judge-design
+              item: judge-goal-outcome
+            equals: achieved
+          - evidence:
+              node: judge-design
+              item: judge-verdict
+            equals: pass
+          - evidence:
+              node: judge-design
+              item: judge-unmet-criteria
+            equals: 0
+          - evidence:
+              node: judge-design
+              item: judge-unverified-criteria
+            equals: 0
       - id: not-achieved
         label: Goal not achieved
         criteria: Required documents, validation, or unresolved constraints remain incomplete.
+        guards:
+          - evidence:
+              node: judge-design
+              item: judge-goal-outcome
+            equals: not-achieved
       - id: superseded
         label: Goal superseded
         criteria: The desired design outcome has been replaced explicitly.
+        guards:
+          - evidence:
+              node: judge-design
+              item: judge-goal-outcome
+            equals: superseded
     reason:
       required: true
       prompt: Explain the outcome using current artifact evidence.
@@ -288,12 +373,1703 @@ node_definitions:
         min_length: 1
         max_length: 4000
         multiline: true
+  judge-context-record:
+    type: action
+    title: Assess the current candidate
+    intent: Obtain a retained report-only Judge assessment from all original evidence and current phase obligations.
+    instructions:
+      - Read every original workflow criterion, current phase obligation, applicable parent constraint and original artifact directly. Retain one logical report-only Judge and its complete history throughout this invocation; a Worker summary or inherited verdict never replaces evidence.
+      - Preserve all actual original criterion rows, global outcome verdict and unmet/unverified counts. The separate checkpoint result assesses the actual current phase obligations; later workflow work may remain unmet without inventing a global pass. Report completeness alone cannot establish correction or application success.
+      - Accept a complete applicable native report without reassessing or recursively judging the Judge. Record all final items, retain idle state, obtain current Podway receipt, then complete separately with fresh fences.
+      - Missing original criteria, stale targets, unreadable evidence or unsupported native role/configuration/task/result bindings prevent applicability. A Judge report supplies no effects, clipboard, application, implementation, installation, staging, commit or publication authority.
+    items:
+      - id: judge-assessment
+        type: artifact
+        prompt: Reference the complete aquarium.judge-assessment/v1 report and its exact digest; Podway stores metadata only.
+        required: true
+        allowed_media_types:
+          - application/json
+      - id: judge-verdict
+        type: choice
+        prompt: Record the Judge verdict.
+        required: true
+        choices:
+          - pass
+          - rework
+          - evidence-needed
+      - id: judge-unmet-criteria
+        type: integer
+        prompt: Count mandatory unmet criteria, including omitted original criteria.
+        required: true
+        minimum: 0
+      - id: judge-unverified-criteria
+        type: integer
+        prompt: Count mandatory unverified criteria, including incomplete compound criteria.
+        required: true
+        minimum: 0
+      - id: judge-applicability
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-diagnosis-judge-applicability; Podway does not execute or attest this check.
+        help: Verify every original criterion and current phase obligation, applicable parent constraints and direct original evidence; exact current target, requirement basis, goal revision, placement and attempt; Worker result, retained logical Judge identity and complete history; authentic acknowledged role/configuration/task/result bindings and current receipt. Original negative rows and actual verdict/counts remain unchanged.
+        required: true
+        operation_id: aquarium-design-diagnosis-judge-applicability
+        operation_digest: sha256:673d55d2530a272d112cd1febcc902e36efaf5c1317483c3009edc87037894c7
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+      - id: judge-summary
+        type: text
+        prompt: Record all original criterion rows and sources, current phase obligations and parent constraints, outcome gaps, remaining effect authority and proposed correction or evidence owner.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: judge-checkpoint-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-context-checkpoint; Podway does not execute or attest this check.
+        help: Verify actual satisfaction of all current context phase obligations and applicable parent constraints from direct original evidence and exact candidate bytes, authorized checks and current authority. Preserve the complete original workflow rows, global verdict and remaining unmet/unverified counts; report completeness alone is insufficient.
+        required: true
+        operation_id: aquarium-design-context-checkpoint
+        operation_digest: sha256:51645cc93188be0f2e40994bc0f90c19d6468976f81359e880eead21937527f8
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  decide-context-assessment:
+    type: decision
+    title: Evaluate context checkpoint
+    objective: Is this exact current phase checkpoint ready for its original successor?
+    prompt: Is this exact current phase checkpoint ready for its original successor?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: passed
+        label: Checkpoint passed
+        criteria: Current applicability and actual phase obligations are verified; original workflow outcome gaps remain preserved.
+        guards:
+          - evidence:
+              node: judge-context
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-context
+              item: judge-checkpoint-result
+            field: outcome
+            equals: pass
+      - id: inapplicable
+        label: Report inapplicable
+        criteria: Current original coverage or native bindings require reassessment.
+        guards:
+          - evidence:
+              node: judge-context
+              item: judge-applicability
+            field: outcome
+            not_equals: pass
+      - id: rework
+        label: Checkpoint correction required
+        criteria: Actual checkpoint obligations failed; retain original outcome and require local correction authority.
+        guards:
+          - evidence:
+              node: judge-context
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-context
+              item: judge-checkpoint-result
+            field: outcome
+            equals: fail
+      - id: evidence-needed
+        label: Checkpoint evidence incomplete
+        criteria: Missing or inconclusive phase evidence requires separate local evidence authority.
+        guards:
+          - evidence:
+              node: judge-context
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-context
+              item: judge-checkpoint-result
+            field: outcome
+            equals: inconclusive
+    reason:
+      required: true
+      prompt: Record the current original evidence, target, attempt and authority basis.
+  record-context-rework:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized rework operation may return to capture-context. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - capture-context
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-context-rework-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact rework effect, original criterion and report, target, attempt and owner capture-context. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-context-rework-authority
+        operation_digest: sha256:85b0a6287dce176f8fc4ad1267e774dd0b05e58de673a964d6cedd55d868ee2b
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-context-rework-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-context-rework
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-context-rework
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  record-context-evidence-needed:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized evidence-needed operation may return to capture-context. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - capture-context
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-context-evidence-needed-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact evidence-needed effect, original criterion and report, target, attempt and owner capture-context. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-context-evidence-needed-authority
+        operation_digest: sha256:3a8f59e0b0153426217262d3403bd94c76ba033b295bb5d13836ab02ca4e6bca
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-context-evidence-needed-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-context-evidence-needed
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-context-evidence-needed
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  judge-discovery-record:
+    type: action
+    title: Assess the current candidate
+    intent: Obtain a retained report-only Judge assessment from all original evidence and current phase obligations.
+    instructions:
+      - Read every original workflow criterion, current phase obligation, applicable parent constraint and original artifact directly. Retain one logical report-only Judge and its complete history throughout this invocation; a Worker summary or inherited verdict never replaces evidence.
+      - Preserve all actual original criterion rows, global outcome verdict and unmet/unverified counts. The separate checkpoint result assesses the actual current phase obligations; later workflow work may remain unmet without inventing a global pass. Report completeness alone cannot establish correction or application success.
+      - Accept a complete applicable native report without reassessing or recursively judging the Judge. Record all final items, retain idle state, obtain current Podway receipt, then complete separately with fresh fences.
+      - Missing original criteria, stale targets, unreadable evidence or unsupported native role/configuration/task/result bindings prevent applicability. A Judge report supplies no effects, clipboard, application, implementation, installation, staging, commit or publication authority.
+    items:
+      - id: judge-assessment
+        type: artifact
+        prompt: Reference the complete aquarium.judge-assessment/v1 report and its exact digest; Podway stores metadata only.
+        required: true
+        allowed_media_types:
+          - application/json
+      - id: judge-verdict
+        type: choice
+        prompt: Record the Judge verdict.
+        required: true
+        choices:
+          - pass
+          - rework
+          - evidence-needed
+      - id: judge-unmet-criteria
+        type: integer
+        prompt: Count mandatory unmet criteria, including omitted original criteria.
+        required: true
+        minimum: 0
+      - id: judge-unverified-criteria
+        type: integer
+        prompt: Count mandatory unverified criteria, including incomplete compound criteria.
+        required: true
+        minimum: 0
+      - id: judge-applicability
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-diagnosis-judge-applicability; Podway does not execute or attest this check.
+        help: Verify every original criterion and current phase obligation, applicable parent constraints and direct original evidence; exact current target, requirement basis, goal revision, placement and attempt; Worker result, retained logical Judge identity and complete history; authentic acknowledged role/configuration/task/result bindings and current receipt. Original negative rows and actual verdict/counts remain unchanged.
+        required: true
+        operation_id: aquarium-design-diagnosis-judge-applicability
+        operation_digest: sha256:673d55d2530a272d112cd1febcc902e36efaf5c1317483c3009edc87037894c7
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+      - id: judge-summary
+        type: text
+        prompt: Record all original criterion rows and sources, current phase obligations and parent constraints, outcome gaps, remaining effect authority and proposed correction or evidence owner.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: judge-checkpoint-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-discovery-checkpoint; Podway does not execute or attest this check.
+        help: Verify actual satisfaction of all current discovery phase obligations and applicable parent constraints from direct original evidence and exact candidate bytes, authorized checks and current authority. Preserve the complete original workflow rows, global verdict and remaining unmet/unverified counts; report completeness alone is insufficient.
+        required: true
+        operation_id: aquarium-design-discovery-checkpoint
+        operation_digest: sha256:60e88315e8f394ada6adb39beb1132685bd26b0ec6cd414b6b638649c4088587
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  decide-discovery-assessment:
+    type: decision
+    title: Evaluate discovery checkpoint
+    objective: Is this exact current phase checkpoint ready for its original successor?
+    prompt: Is this exact current phase checkpoint ready for its original successor?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: passed
+        label: Checkpoint passed
+        criteria: Current applicability and actual phase obligations are verified; original workflow outcome gaps remain preserved.
+        guards:
+          - evidence:
+              node: judge-discovery
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-discovery
+              item: judge-checkpoint-result
+            field: outcome
+            equals: pass
+      - id: inapplicable
+        label: Report inapplicable
+        criteria: Current original coverage or native bindings require reassessment.
+        guards:
+          - evidence:
+              node: judge-discovery
+              item: judge-applicability
+            field: outcome
+            not_equals: pass
+      - id: rework
+        label: Checkpoint correction required
+        criteria: Actual checkpoint obligations failed; retain original outcome and require local correction authority.
+        guards:
+          - evidence:
+              node: judge-discovery
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-discovery
+              item: judge-checkpoint-result
+            field: outcome
+            equals: fail
+      - id: evidence-needed
+        label: Checkpoint evidence incomplete
+        criteria: Missing or inconclusive phase evidence requires separate local evidence authority.
+        guards:
+          - evidence:
+              node: judge-discovery
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-discovery
+              item: judge-checkpoint-result
+            field: outcome
+            equals: inconclusive
+    reason:
+      required: true
+      prompt: Record the current original evidence, target, attempt and authority basis.
+  record-discovery-rework:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized rework operation may return to discover. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - discover
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-discovery-rework-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact rework effect, original criterion and report, target, attempt and owner discover. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-discovery-rework-authority
+        operation_digest: sha256:03349277698757610bb2eeeb1866464918c7fc01e792e00d0bb035411f5d8d80
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-discovery-rework-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-discovery-rework
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-discovery-rework
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  record-discovery-evidence-needed:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized evidence-needed operation may return to discover. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - discover
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-discovery-evidence-needed-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact evidence-needed effect, original criterion and report, target, attempt and owner discover. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-discovery-evidence-needed-authority
+        operation_digest: sha256:9ec439dd67a17a6c7d4b6272203edc00a43971d6dc9af231b8e5b611fa2853df
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-discovery-evidence-needed-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-discovery-evidence-needed
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-discovery-evidence-needed
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  judge-draft-record:
+    type: action
+    title: Assess the current candidate
+    intent: Obtain a retained report-only Judge assessment from all original evidence and current phase obligations.
+    instructions:
+      - Read every original workflow criterion, current phase obligation, applicable parent constraint and original artifact directly. Retain one logical report-only Judge and its complete history throughout this invocation; a Worker summary or inherited verdict never replaces evidence.
+      - Preserve all actual original criterion rows, global outcome verdict and unmet/unverified counts. The separate checkpoint result assesses the actual current phase obligations; later workflow work may remain unmet without inventing a global pass. Report completeness alone cannot establish correction or application success.
+      - Accept a complete applicable native report without reassessing or recursively judging the Judge. Record all final items, retain idle state, obtain current Podway receipt, then complete separately with fresh fences.
+      - Missing original criteria, stale targets, unreadable evidence or unsupported native role/configuration/task/result bindings prevent applicability. A Judge report supplies no effects, clipboard, application, implementation, installation, staging, commit or publication authority.
+    items:
+      - id: judge-assessment
+        type: artifact
+        prompt: Reference the complete aquarium.judge-assessment/v1 report and its exact digest; Podway stores metadata only.
+        required: true
+        allowed_media_types:
+          - application/json
+      - id: judge-verdict
+        type: choice
+        prompt: Record the Judge verdict.
+        required: true
+        choices:
+          - pass
+          - rework
+          - evidence-needed
+      - id: judge-unmet-criteria
+        type: integer
+        prompt: Count mandatory unmet criteria, including omitted original criteria.
+        required: true
+        minimum: 0
+      - id: judge-unverified-criteria
+        type: integer
+        prompt: Count mandatory unverified criteria, including incomplete compound criteria.
+        required: true
+        minimum: 0
+      - id: judge-applicability
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-diagnosis-judge-applicability; Podway does not execute or attest this check.
+        help: Verify every original criterion and current phase obligation, applicable parent constraints and direct original evidence; exact current target, requirement basis, goal revision, placement and attempt; Worker result, retained logical Judge identity and complete history; authentic acknowledged role/configuration/task/result bindings and current receipt. Original negative rows and actual verdict/counts remain unchanged.
+        required: true
+        operation_id: aquarium-design-diagnosis-judge-applicability
+        operation_digest: sha256:673d55d2530a272d112cd1febcc902e36efaf5c1317483c3009edc87037894c7
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+      - id: judge-summary
+        type: text
+        prompt: Record all original criterion rows and sources, current phase obligations and parent constraints, outcome gaps, remaining effect authority and proposed correction or evidence owner.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: judge-checkpoint-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-draft-checkpoint; Podway does not execute or attest this check.
+        help: Verify actual satisfaction of all current draft phase obligations and applicable parent constraints from direct original evidence and exact candidate bytes, authorized checks and current authority. Preserve the complete original workflow rows, global verdict and remaining unmet/unverified counts; report completeness alone is insufficient.
+        required: true
+        operation_id: aquarium-design-draft-checkpoint
+        operation_digest: sha256:f0909226f2a51cf8b25194c3b78a2658e17f3c89669ad2244363bf288a39d001
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  decide-draft-assessment:
+    type: decision
+    title: Evaluate draft checkpoint
+    objective: Is this exact current phase checkpoint ready for its original successor?
+    prompt: Is this exact current phase checkpoint ready for its original successor?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: passed
+        label: Checkpoint passed
+        criteria: Current applicability and actual phase obligations are verified; original workflow outcome gaps remain preserved.
+        guards:
+          - evidence:
+              node: judge-draft
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-draft
+              item: judge-checkpoint-result
+            field: outcome
+            equals: pass
+      - id: inapplicable
+        label: Report inapplicable
+        criteria: Current original coverage or native bindings require reassessment.
+        guards:
+          - evidence:
+              node: judge-draft
+              item: judge-applicability
+            field: outcome
+            not_equals: pass
+      - id: rework
+        label: Checkpoint correction required
+        criteria: Actual checkpoint obligations failed; retain original outcome and require local correction authority.
+        guards:
+          - evidence:
+              node: judge-draft
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-draft
+              item: judge-checkpoint-result
+            field: outcome
+            equals: fail
+      - id: evidence-needed
+        label: Checkpoint evidence incomplete
+        criteria: Missing or inconclusive phase evidence requires separate local evidence authority.
+        guards:
+          - evidence:
+              node: judge-draft
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-draft
+              item: judge-checkpoint-result
+            field: outcome
+            equals: inconclusive
+    reason:
+      required: true
+      prompt: Record the current original evidence, target, attempt and authority basis.
+  record-draft-rework:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized rework operation may return to draft. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - draft
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-draft-rework-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact rework effect, original criterion and report, target, attempt and owner draft. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-draft-rework-authority
+        operation_digest: sha256:da4e75109e40ef704151d19aac7e51b73fc0cbac0deed9b39451aa33199ec798
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-draft-rework-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-draft-rework
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-draft-rework
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  record-draft-evidence-needed:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized evidence-needed operation may return to draft. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - draft
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-draft-evidence-needed-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact evidence-needed effect, original criterion and report, target, attempt and owner draft. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-draft-evidence-needed-authority
+        operation_digest: sha256:5123ec65593f3707d60aaae07855e7539107bf9ab39576323a1f2e449f135992
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-draft-evidence-needed-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-draft-evidence-needed
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-draft-evidence-needed
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  judge-challenge-record:
+    type: action
+    title: Assess the current candidate
+    intent: Obtain a retained report-only Judge assessment from all original evidence and current phase obligations.
+    instructions:
+      - Read every original workflow criterion, current phase obligation, applicable parent constraint and original artifact directly. Retain one logical report-only Judge and its complete history throughout this invocation; a Worker summary or inherited verdict never replaces evidence.
+      - Preserve all actual original criterion rows, global outcome verdict and unmet/unverified counts. The separate checkpoint result assesses the actual current phase obligations; later workflow work may remain unmet without inventing a global pass. Report completeness alone cannot establish correction or application success.
+      - Accept a complete applicable native report without reassessing or recursively judging the Judge. Record all final items, retain idle state, obtain current Podway receipt, then complete separately with fresh fences.
+      - Missing original criteria, stale targets, unreadable evidence or unsupported native role/configuration/task/result bindings prevent applicability. A Judge report supplies no effects, clipboard, application, implementation, installation, staging, commit or publication authority.
+    items:
+      - id: judge-assessment
+        type: artifact
+        prompt: Reference the complete aquarium.judge-assessment/v1 report and its exact digest; Podway stores metadata only.
+        required: true
+        allowed_media_types:
+          - application/json
+      - id: judge-verdict
+        type: choice
+        prompt: Record the Judge verdict.
+        required: true
+        choices:
+          - pass
+          - rework
+          - evidence-needed
+      - id: judge-unmet-criteria
+        type: integer
+        prompt: Count mandatory unmet criteria, including omitted original criteria.
+        required: true
+        minimum: 0
+      - id: judge-unverified-criteria
+        type: integer
+        prompt: Count mandatory unverified criteria, including incomplete compound criteria.
+        required: true
+        minimum: 0
+      - id: judge-applicability
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-diagnosis-judge-applicability; Podway does not execute or attest this check.
+        help: Verify every original criterion and current phase obligation, applicable parent constraints and direct original evidence; exact current target, requirement basis, goal revision, placement and attempt; Worker result, retained logical Judge identity and complete history; authentic acknowledged role/configuration/task/result bindings and current receipt. Original negative rows and actual verdict/counts remain unchanged.
+        required: true
+        operation_id: aquarium-design-diagnosis-judge-applicability
+        operation_digest: sha256:673d55d2530a272d112cd1febcc902e36efaf5c1317483c3009edc87037894c7
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+      - id: judge-summary
+        type: text
+        prompt: Record all original criterion rows and sources, current phase obligations and parent constraints, outcome gaps, remaining effect authority and proposed correction or evidence owner.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: judge-checkpoint-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-challenge-checkpoint; Podway does not execute or attest this check.
+        help: Verify actual satisfaction of all current challenge phase obligations and applicable parent constraints from direct original evidence and exact candidate bytes, authorized checks and current authority. Preserve the complete original workflow rows, global verdict and remaining unmet/unverified counts; report completeness alone is insufficient.
+        required: true
+        operation_id: aquarium-design-challenge-checkpoint
+        operation_digest: sha256:d3ab5a30300af893441814c2027a898f5f99f6c0f4c67f6aa05f2b827d5b4eef
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  decide-challenge-assessment:
+    type: decision
+    title: Evaluate challenge checkpoint
+    objective: Is this exact current phase checkpoint ready for its original successor?
+    prompt: Is this exact current phase checkpoint ready for its original successor?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: passed
+        label: Checkpoint passed
+        criteria: Current applicability and actual phase obligations are verified; original workflow outcome gaps remain preserved.
+        guards:
+          - evidence:
+              node: judge-challenge
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-challenge
+              item: judge-checkpoint-result
+            field: outcome
+            equals: pass
+      - id: inapplicable
+        label: Report inapplicable
+        criteria: Current original coverage or native bindings require reassessment.
+        guards:
+          - evidence:
+              node: judge-challenge
+              item: judge-applicability
+            field: outcome
+            not_equals: pass
+      - id: rework
+        label: Checkpoint correction required
+        criteria: Actual checkpoint obligations failed; retain original outcome and require local correction authority.
+        guards:
+          - evidence:
+              node: judge-challenge
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-challenge
+              item: judge-checkpoint-result
+            field: outcome
+            equals: fail
+      - id: evidence-needed
+        label: Checkpoint evidence incomplete
+        criteria: Missing or inconclusive phase evidence requires separate local evidence authority.
+        guards:
+          - evidence:
+              node: judge-challenge
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-challenge
+              item: judge-checkpoint-result
+            field: outcome
+            equals: inconclusive
+    reason:
+      required: true
+      prompt: Record the current original evidence, target, attempt and authority basis.
+  record-challenge-rework:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized rework operation may return to challenge. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - challenge
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-challenge-rework-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact rework effect, original criterion and report, target, attempt and owner challenge. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-challenge-rework-authority
+        operation_digest: sha256:3c3ee4a88e333490127822bb0eada432f2fbf166aa105b737c74245213129723
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-challenge-rework-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-challenge-rework
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-challenge-rework
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  record-challenge-evidence-needed:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized evidence-needed operation may return to challenge. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - challenge
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-challenge-evidence-needed-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact evidence-needed effect, original criterion and report, target, attempt and owner challenge. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-challenge-evidence-needed-authority
+        operation_digest: sha256:a07cbce95641e2a07a87a19da898b1d98c72cb9869379bd8e327d98cd8783146
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-challenge-evidence-needed-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-challenge-evidence-needed
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-challenge-evidence-needed
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  judge-quality-record:
+    type: action
+    title: Assess the current candidate
+    intent: Obtain a retained report-only Judge assessment from all original evidence and current phase obligations.
+    instructions:
+      - Read every original workflow criterion, current phase obligation, applicable parent constraint and original artifact directly. Retain one logical report-only Judge and its complete history throughout this invocation; a Worker summary or inherited verdict never replaces evidence.
+      - Preserve all actual original criterion rows, global outcome verdict and unmet/unverified counts. The separate checkpoint result assesses the actual current phase obligations; later workflow work may remain unmet without inventing a global pass. Report completeness alone cannot establish correction or application success.
+      - Accept a complete applicable native report without reassessing or recursively judging the Judge. Record all final items, retain idle state, obtain current Podway receipt, then complete separately with fresh fences.
+      - Missing original criteria, stale targets, unreadable evidence or unsupported native role/configuration/task/result bindings prevent applicability. A Judge report supplies no effects, clipboard, application, implementation, installation, staging, commit or publication authority.
+    items:
+      - id: judge-assessment
+        type: artifact
+        prompt: Reference the complete aquarium.judge-assessment/v1 report and its exact digest; Podway stores metadata only.
+        required: true
+        allowed_media_types:
+          - application/json
+      - id: judge-verdict
+        type: choice
+        prompt: Record the Judge verdict.
+        required: true
+        choices:
+          - pass
+          - rework
+          - evidence-needed
+      - id: judge-unmet-criteria
+        type: integer
+        prompt: Count mandatory unmet criteria, including omitted original criteria.
+        required: true
+        minimum: 0
+      - id: judge-unverified-criteria
+        type: integer
+        prompt: Count mandatory unverified criteria, including incomplete compound criteria.
+        required: true
+        minimum: 0
+      - id: judge-applicability
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-diagnosis-judge-applicability; Podway does not execute or attest this check.
+        help: Verify every original criterion and current phase obligation, applicable parent constraints and direct original evidence; exact current target, requirement basis, goal revision, placement and attempt; Worker result, retained logical Judge identity and complete history; authentic acknowledged role/configuration/task/result bindings and current receipt. Original negative rows and actual verdict/counts remain unchanged.
+        required: true
+        operation_id: aquarium-design-diagnosis-judge-applicability
+        operation_digest: sha256:673d55d2530a272d112cd1febcc902e36efaf5c1317483c3009edc87037894c7
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+      - id: judge-summary
+        type: text
+        prompt: Record all original criterion rows and sources, current phase obligations and parent constraints, outcome gaps, remaining effect authority and proposed correction or evidence owner.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: judge-checkpoint-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-quality-checkpoint; Podway does not execute or attest this check.
+        help: Verify the complete faithful current quality checkpoint, direct original artifacts and all original criterion rows, actual global verdict and unmet/unverified counts, evidence gaps and applicable parent constraints. Preserve raw QA verdict separately from operation outcome, every locally adjudicated issue, exact original correction owner and counts. A faithful negative QA report may reach the original owner router without claiming whole-goal success.
+        required: true
+        operation_id: aquarium-design-quality-checkpoint
+        operation_digest: sha256:d496de8c44e24922b42cae8681703885dc1ab2a64d24b982d712f7775c55295a
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  decide-quality-assessment:
+    type: decision
+    title: Evaluate quality checkpoint
+    objective: Is this exact current phase checkpoint ready for its original successor?
+    prompt: Is this exact current phase checkpoint ready for its original successor?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: passed
+        label: Checkpoint passed
+        criteria: Current applicability and actual phase obligations are verified; original workflow outcome gaps remain preserved.
+        guards:
+          - evidence:
+              node: judge-quality
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-quality
+              item: judge-checkpoint-result
+            field: outcome
+            equals: pass
+      - id: inapplicable
+        label: Report inapplicable
+        criteria: Current original coverage or native bindings require reassessment.
+        guards:
+          - evidence:
+              node: judge-quality
+              item: judge-applicability
+            field: outcome
+            not_equals: pass
+      - id: rework
+        label: Checkpoint correction required
+        criteria: Actual checkpoint obligations failed; retain original outcome and require local correction authority.
+        guards:
+          - evidence:
+              node: judge-quality
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-quality
+              item: judge-checkpoint-result
+            field: outcome
+            equals: fail
+      - id: evidence-needed
+        label: Checkpoint evidence incomplete
+        criteria: Missing or inconclusive phase evidence requires separate local evidence authority.
+        guards:
+          - evidence:
+              node: judge-quality
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-quality
+              item: judge-checkpoint-result
+            field: outcome
+            equals: inconclusive
+    reason:
+      required: true
+      prompt: Record the current original evidence, target, attempt and authority basis.
+  record-quality-rework:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized rework operation may return to quality. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - quality
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-quality-rework-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact rework effect, original criterion and report, target, attempt and owner quality. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-quality-rework-authority
+        operation_digest: sha256:a0a8e50b239363bf42a6f67538aae611b36bf807fb28c2b6f29f08ec7fd945b0
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-quality-rework-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-quality-rework
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-quality-rework
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  record-quality-evidence-needed:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized evidence-needed operation may return to quality. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - quality
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-quality-evidence-needed-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact evidence-needed effect, original criterion and report, target, attempt and owner quality. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-quality-evidence-needed-authority
+        operation_digest: sha256:879b588c8a3d8939ccdbfc79d35e15d00401d291ca6cbfb25678dfa91df7e31c
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-quality-evidence-needed-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-quality-evidence-needed
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-quality-evidence-needed
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  judge-application-record:
+    type: action
+    title: Assess the current candidate
+    intent: Obtain a retained report-only Judge assessment from all original evidence and current phase obligations.
+    instructions:
+      - Read every original workflow criterion, current phase obligation, applicable parent constraint and original artifact directly. Retain one logical report-only Judge and its complete history throughout this invocation; a Worker summary or inherited verdict never replaces evidence.
+      - Preserve all actual original criterion rows, global outcome verdict and unmet/unverified counts. The separate checkpoint result assesses the actual current phase obligations; later workflow work may remain unmet without inventing a global pass. Report completeness alone cannot establish correction or application success.
+      - Accept a complete applicable native report without reassessing or recursively judging the Judge. Record all final items, retain idle state, obtain current Podway receipt, then complete separately with fresh fences.
+      - Missing original criteria, stale targets, unreadable evidence or unsupported native role/configuration/task/result bindings prevent applicability. A Judge report supplies no effects, clipboard, application, implementation, installation, staging, commit or publication authority.
+    items:
+      - id: judge-assessment
+        type: artifact
+        prompt: Reference the complete aquarium.judge-assessment/v1 report and its exact digest; Podway stores metadata only.
+        required: true
+        allowed_media_types:
+          - application/json
+      - id: judge-verdict
+        type: choice
+        prompt: Record the Judge verdict.
+        required: true
+        choices:
+          - pass
+          - rework
+          - evidence-needed
+      - id: judge-unmet-criteria
+        type: integer
+        prompt: Count mandatory unmet criteria, including omitted original criteria.
+        required: true
+        minimum: 0
+      - id: judge-unverified-criteria
+        type: integer
+        prompt: Count mandatory unverified criteria, including incomplete compound criteria.
+        required: true
+        minimum: 0
+      - id: judge-applicability
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-diagnosis-judge-applicability; Podway does not execute or attest this check.
+        help: Verify every original criterion and current phase obligation, applicable parent constraints and direct original evidence; exact current target, requirement basis, goal revision, placement and attempt; Worker result, retained logical Judge identity and complete history; authentic acknowledged role/configuration/task/result bindings and current receipt. Original negative rows and actual verdict/counts remain unchanged.
+        required: true
+        operation_id: aquarium-design-diagnosis-judge-applicability
+        operation_digest: sha256:673d55d2530a272d112cd1febcc902e36efaf5c1317483c3009edc87037894c7
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+      - id: judge-summary
+        type: text
+        prompt: Record all original criterion rows and sources, current phase obligations and parent constraints, outcome gaps, remaining effect authority and proposed correction or evidence owner.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: judge-checkpoint-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-application-checkpoint; Podway does not execute or attest this check.
+        help: Verify actual satisfaction of all current application phase obligations and applicable parent constraints from direct original evidence and exact candidate bytes, authorized checks and current authority. Preserve the complete original workflow rows, global verdict and remaining unmet/unverified counts; report completeness alone is insufficient. Verify exact actually approved proposal and current target snapshots, applied bytes or approved verified no-change, required checks and exclusions. Changed proposal or target bytes invalidate approval and must return through original drafting, quality and actual exact-diff approval; Judge passage never grants application authority.
+        required: true
+        operation_id: aquarium-design-application-checkpoint
+        operation_digest: sha256:d054ac17cd777b8e5d8e5e1fc31f80f93ae061650fdd90ed8062f6d3fc41f604
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  decide-application-assessment:
+    type: decision
+    title: Evaluate application checkpoint
+    objective: Is this exact current phase checkpoint ready for its original successor?
+    prompt: Is this exact current phase checkpoint ready for its original successor?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: passed
+        label: Checkpoint passed
+        criteria: Current applicability and actual phase obligations are verified; original workflow outcome gaps remain preserved.
+        guards:
+          - evidence:
+              node: judge-application
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-application
+              item: judge-checkpoint-result
+            field: outcome
+            equals: pass
+      - id: inapplicable
+        label: Report inapplicable
+        criteria: Current original coverage or native bindings require reassessment.
+        guards:
+          - evidence:
+              node: judge-application
+              item: judge-applicability
+            field: outcome
+            not_equals: pass
+      - id: rework
+        label: Checkpoint correction required
+        criteria: Actual checkpoint obligations failed; retain original outcome and require local correction authority.
+        guards:
+          - evidence:
+              node: judge-application
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-application
+              item: judge-checkpoint-result
+            field: outcome
+            equals: fail
+      - id: evidence-needed
+        label: Checkpoint evidence incomplete
+        criteria: Missing or inconclusive phase evidence requires separate local evidence authority.
+        guards:
+          - evidence:
+              node: judge-application
+              item: judge-applicability
+            field: outcome
+            equals: pass
+          - evidence:
+              node: judge-application
+              item: judge-checkpoint-result
+            field: outcome
+            equals: inconclusive
+    reason:
+      required: true
+      prompt: Record the current original evidence, target, attempt and authority basis.
+  record-application-rework:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized rework operation may return to draft. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+      - Correction or changed proposal/target invalidates prior application approval and returns through original drafting, quality and actual exact-diff approval. Evidence-only return permits verification of unchanged approved bytes or no-change only; discovering any changed proposal or target requires the original reapproval route before writes.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - draft
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-application-rework-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact rework effect, original criterion and report, target, attempt and owner draft. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-application-rework-authority
+        operation_digest: sha256:da4e75109e40ef704151d19aac7e51b73fc0cbac0deed9b39451aa33199ec798
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-application-rework-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-application-rework
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-application-rework
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  record-application-evidence-needed:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read the actual triggering Judge report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
+      - Only the exact currently authorized evidence-needed operation may return to apply-documents. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+      - Correction or changed proposal/target invalidates prior application approval and returns through original drafting, quality and actual exact-diff approval. Evidence-only return permits verification of unchanged approved bytes or no-change only; discovering any changed proposal or target requires the original reapproval route before writes.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - apply-documents
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-application-evidence-needed-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact evidence-needed effect, original criterion and report, target, attempt and owner apply-documents. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-application-evidence-needed-authority
+        operation_digest: sha256:9dac56cec465324622abc32fd01e177e37faf946e88145b6974d6a0b52a0f287
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-application-evidence-needed-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-application-evidence-needed
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-application-evidence-needed
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
+  final-assessment-candidate:
+    type: action
+    title: Prepare final original-goal evidence
+    intent: Deliver a complete Worker candidate for final original-criterion assessment.
+    instructions:
+      - Read every original workflow criterion and all actual phase evidence, original artifacts, current applicable Judge reports, exact actual approval, applied bytes or verified no-change, checks, authority and unresolved gaps directly. Include all original outcome rows and parent constraints; a completed phase label cannot prove achievement.
+      - Preserve supported diagnosis outcomes without claiming a fixed defect. Non-Git new-project retains explicit Podway inapplicability and never initializes Git or Podway implicitly.
+    items:
+      - id: final-assessment-summary
+        type: text
+        prompt: Record complete original criterion coverage, current target, evidence gaps and authority boundaries.
+        required: true
+        min_length: 1
+        max_length: 5000
+        multiline: true
+      - id: worker-handoff
+        type: artifact
+        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        required: true
+        allowed_media_types:
+          - application/json
+  final-judge-assessment-record:
+    type: action
+    title: Assess the current candidate
+    intent: Obtain a retained report-only Judge assessment from all original evidence and current phase obligations.
+    instructions:
+      - Read every original workflow criterion, current phase obligation, applicable parent constraint and original artifact directly. Retain one logical report-only Judge and its complete history throughout this invocation; a Worker summary or inherited verdict never replaces evidence.
+      - Preserve all actual original criterion rows, global outcome verdict and unmet/unverified counts. The separate checkpoint result assesses the actual current phase obligations; later workflow work may remain unmet without inventing a global pass. Report completeness alone cannot establish correction or application success.
+      - Accept a complete applicable native report without reassessing or recursively judging the Judge. Record all final items, retain idle state, obtain current Podway receipt, then complete separately with fresh fences.
+      - Missing original criteria, stale targets, unreadable evidence or unsupported native role/configuration/task/result bindings prevent applicability. A Judge report supplies no effects, clipboard, application, implementation, installation, staging, commit or publication authority.
+    items:
+      - id: judge-assessment
+        type: artifact
+        prompt: Reference the complete aquarium.judge-assessment/v1 report and its exact digest; Podway stores metadata only.
+        required: true
+        allowed_media_types:
+          - application/json
+      - id: judge-verdict
+        type: choice
+        prompt: Record the Judge verdict.
+        required: true
+        choices:
+          - pass
+          - rework
+          - evidence-needed
+      - id: judge-unmet-criteria
+        type: integer
+        prompt: Count mandatory unmet criteria, including omitted original criteria.
+        required: true
+        minimum: 0
+      - id: judge-unverified-criteria
+        type: integer
+        prompt: Count mandatory unverified criteria, including incomplete compound criteria.
+        required: true
+        minimum: 0
+      - id: judge-applicability
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-diagnosis-judge-applicability; Podway does not execute or attest this check.
+        help: Verify every original criterion and current phase obligation, applicable parent constraints and direct original evidence; exact current target, requirement basis, goal revision, placement and attempt; Worker result, retained logical Judge identity and complete history; authentic acknowledged role/configuration/task/result bindings and current receipt. Original negative rows and actual verdict/counts remain unchanged.
+        required: true
+        operation_id: aquarium-design-diagnosis-judge-applicability
+        operation_digest: sha256:673d55d2530a272d112cd1febcc902e36efaf5c1317483c3009edc87037894c7
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+      - id: judge-summary
+        type: text
+        prompt: Record all original criterion rows and sources, current phase obligations and parent constraints, outcome gaps, remaining effect authority and proposed correction or evidence owner.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: judge-goal-outcome
+        type: choice
+        prompt: Record the exact original workflow goal outcome from every original criterion and actual artifact.
+        required: true
+        choices:
+          - achieved
+          - not-achieved
+          - superseded
+  confirm-design-assessment-applicability:
+    type: decision
+    title: Confirm final assessment applicability
+    objective: Reject missing original coverage, stale target, wrong attempt and unsupported native bindings.
+    prompt: Is the complete final report applicable?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: current
+        label: Report current
+        criteria: The complete report binds the current original requirements and exact target.
+        guards:
+          - evidence:
+              node: judge-design
+              item: judge-applicability
+            field: outcome
+            equals: pass
+      - id: invalid
+        label: Report inapplicable
+        criteria: The report must be reassessed on current original evidence.
+        guards:
+          - evidence:
+              node: judge-design
+              item: judge-applicability
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Explain current coverage, target and native binding applicability.
+  confirm-application-approval:
+    type: decision
+    title: Confirm exact current application approval
+    objective: Reject changed proposal or target snapshots before semantic passage.
+    prompt: Do applied bytes or approved no-change match actual exact user approval?
+    evidence_guidance:
+      - Read the actual current proposal, exact user approval, pre-write snapshot recheck and applied-byte validation.
+    options:
+      - id: current
+        label: Approval current
+        criteria: Actual complete approval and unchanged target verification pass.
+        guards:
+          - evidence:
+              node: apply-documents
+              item: application-approval-result
+            field: outcome
+            equals: pass
+      - id: invalid
+        label: Approval invalid
+        criteria: Missing, changed or inconclusive actual approval requires original quality and actual approval again.
+        guards:
+          - evidence:
+              node: apply-documents
+              item: application-approval-result
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record actual exact approval and target comparison or gap.
+  record-application-approval-gap:
+    type: action
+    title: Record work correction basis
+    intent: Bind the actual correction or evidence owner to remaining authority without creating another review or effect.
+    instructions:
+      - Read actual failed or stale application approval, exact current proposal and target snapshots. Preserve all original criteria and require remaining authority for original proposal preparation; no stale approval authorizes writes.
+      - Only the exact currently authorized rework operation may return to draft. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
+      - Correction or changed proposal/target invalidates prior application approval and returns through original drafting, quality and actual exact-diff approval. Evidence-only return permits verification of unchanged approved bytes or no-change only; discovering any changed proposal or target requires the original reapproval route before writes.
+    items:
+      - id: semantic-followup-summary
+        type: text
+        prompt: Record source node/attempt/report, exact target, required work or evidence, original criterion IDs, finding lineage, consumed ordinals, remaining authority and exclusions.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: semantic-owner
+        type: choice
+        prompt: Record the earliest actual owner.
+        required: true
+        choices:
+          - draft
+      - id: semantic-authority
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-design-application-rework-authority; Podway does not execute or attest this check.
+        help: Verify actual current unconsumed authority for the exact rework effect, original criterion and report, target, attempt and owner draft. Preserve actual document approval, clipboard authority, Ouroboros leaf scope, provider and check consumption; negative semantic evidence cannot create authority. Application evidence-only work permits verification of unchanged approved bytes, never a changed diff.
+        required: true
+        operation_id: aquarium-design-application-rework-authority
+        operation_digest: sha256:da4e75109e40ef704151d19aac7e51b73fc0cbac0deed9b39451aa33199ec798
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+  confirm-application-approval-gap-authority:
+    type: decision
+    title: Confirm semantic followup authority
+    objective: Block uncovered corrections and evidence operations.
+    prompt: Is the exact followup operation already authorized?
+    evidence_guidance:
+      - Read the complete current original evidence, target, applicable Judge report and actual authority.
+    options:
+      - id: authorized
+        label: Followup authorized
+        criteria: The exact current operation is covered by existing authority.
+        guards:
+          - evidence:
+              node: record-application-approval-gap
+              item: semantic-authority
+            field: outcome
+            equals: pass
+      - id: blocked
+        label: Authority missing
+        criteria: The effect is uncovered or uncertain; await actual bounded authority.
+        guards:
+          - evidence:
+              node: record-application-approval-gap
+              item: semantic-authority
+            field: outcome
+            not_equals: pass
+    reason:
+      required: true
+      prompt: Record the exact authority and consumption basis or blocker.
 graph:
   entry: capture-context
   nodes:
     - id: capture-context
       use: context-record
-      next: discover
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-worker/v1
+        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
+        max_rounds: 32
+        after_accept: retain
+      next: judge-context
     - id: discover
       use: discovery-record
       evidence_from:
@@ -301,7 +2077,13 @@ graph:
           required: true
           items:
             - context-summary
-      next: draft
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-worker/v1
+        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
+        max_rounds: 32
+        after_accept: retain
+      next: judge-discovery
     - id: draft
       use: draft-record
       evidence_from:
@@ -309,7 +2091,13 @@ graph:
           required: true
           items:
             - discovery-summary
-      next: challenge
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-worker/v1
+        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
+        max_rounds: 32
+        after_accept: retain
+      next: judge-draft
     - id: challenge
       use: challenge-record
       evidence_from:
@@ -317,7 +2105,13 @@ graph:
           required: true
           items:
             - draft-summary
-      next: quality
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-worker/v1
+        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
+        max_rounds: 32
+        after_accept: retain
+      next: judge-challenge
     - id: quality
       use: quality-record
       evidence_from:
@@ -330,7 +2124,13 @@ graph:
           items:
             - counterarguments
             - uncertainty
-      next: decide-quality
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-worker/v1
+        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
+        max_rounds: 32
+        after_accept: retain
+      next: judge-quality
     - id: decide-quality
       use: quality-decision
       evidence_from:
@@ -396,7 +2196,13 @@ graph:
             - draft-summary
         - node: approve-diff
           required: true
-      next: assess-goal
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-worker/v1
+        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
+        max_rounds: 32
+        after_accept: retain
+      next: confirm-application-approval
     - id: assess-goal
       use: goal-assessment
       evidence_from:
@@ -408,6 +2214,13 @@ graph:
           required: true
           items:
             - application-summary
+        - node: judge-design
+          required: true
+          items:
+            - judge-goal-outcome
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
       routes:
         achieved:
           to: closeout
@@ -424,6 +2237,773 @@ graph:
         - node: assess-goal
           required: true
       terminal: true
+    - id: judge-context
+      use: judge-context-record
+      evidence_from:
+        - node: capture-context
+          required: true
+          items:
+            - context-summary
+            - worker-handoff
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-goal-judge/v1
+        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
+        max_rounds: 32
+        after_accept: retain
+      next: decide-context-assessment
+    - id: record-context-rework
+      use: record-context-rework
+      evidence_from:
+        - node: judge-context
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-context-rework-authority
+    - id: confirm-context-rework-authority
+      use: confirm-context-rework-authority
+      evidence_from:
+        - node: record-context-rework
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: capture-context
+          effect: rework
+        blocked:
+          to: record-context-rework
+          effect: rework
+    - id: record-context-evidence-needed
+      use: record-context-evidence-needed
+      evidence_from:
+        - node: judge-context
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-context-evidence-needed-authority
+    - id: confirm-context-evidence-needed-authority
+      use: confirm-context-evidence-needed-authority
+      evidence_from:
+        - node: record-context-evidence-needed
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: capture-context
+          effect: rework
+        blocked:
+          to: record-context-evidence-needed
+          effect: rework
+    - id: decide-context-assessment
+      use: decide-context-assessment
+      evidence_from:
+        - node: judge-context
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      routes:
+        passed:
+          to: discover
+          effect: advance
+        inapplicable:
+          to: judge-context
+          effect: rework
+        rework:
+          to: record-context-rework
+          effect: advance
+        evidence-needed:
+          to: record-context-evidence-needed
+          effect: advance
+    - id: judge-discovery
+      use: judge-discovery-record
+      evidence_from:
+        - node: discover
+          required: true
+          items:
+            - discovery-summary
+            - worker-handoff
+        - node: capture-context
+          required: true
+          items:
+            - context-summary
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-goal-judge/v1
+        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
+        max_rounds: 32
+        after_accept: retain
+      next: decide-discovery-assessment
+    - id: record-discovery-rework
+      use: record-discovery-rework
+      evidence_from:
+        - node: judge-discovery
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-discovery-rework-authority
+    - id: confirm-discovery-rework-authority
+      use: confirm-discovery-rework-authority
+      evidence_from:
+        - node: record-discovery-rework
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: discover
+          effect: rework
+        blocked:
+          to: record-discovery-rework
+          effect: rework
+    - id: record-discovery-evidence-needed
+      use: record-discovery-evidence-needed
+      evidence_from:
+        - node: judge-discovery
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-discovery-evidence-needed-authority
+    - id: confirm-discovery-evidence-needed-authority
+      use: confirm-discovery-evidence-needed-authority
+      evidence_from:
+        - node: record-discovery-evidence-needed
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: discover
+          effect: rework
+        blocked:
+          to: record-discovery-evidence-needed
+          effect: rework
+    - id: decide-discovery-assessment
+      use: decide-discovery-assessment
+      evidence_from:
+        - node: judge-discovery
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      routes:
+        passed:
+          to: draft
+          effect: advance
+        inapplicable:
+          to: judge-discovery
+          effect: rework
+        rework:
+          to: record-discovery-rework
+          effect: advance
+        evidence-needed:
+          to: record-discovery-evidence-needed
+          effect: advance
+    - id: judge-draft
+      use: judge-draft-record
+      evidence_from:
+        - node: draft
+          required: true
+          items:
+            - draft-summary
+            - worker-handoff
+        - node: discover
+          required: true
+          items:
+            - discovery-summary
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-goal-judge/v1
+        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
+        max_rounds: 32
+        after_accept: retain
+      next: decide-draft-assessment
+    - id: record-draft-rework
+      use: record-draft-rework
+      evidence_from:
+        - node: judge-draft
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-draft-rework-authority
+    - id: confirm-draft-rework-authority
+      use: confirm-draft-rework-authority
+      evidence_from:
+        - node: record-draft-rework
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: draft
+          effect: rework
+        blocked:
+          to: record-draft-rework
+          effect: rework
+    - id: record-draft-evidence-needed
+      use: record-draft-evidence-needed
+      evidence_from:
+        - node: judge-draft
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-draft-evidence-needed-authority
+    - id: confirm-draft-evidence-needed-authority
+      use: confirm-draft-evidence-needed-authority
+      evidence_from:
+        - node: record-draft-evidence-needed
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: draft
+          effect: rework
+        blocked:
+          to: record-draft-evidence-needed
+          effect: rework
+    - id: decide-draft-assessment
+      use: decide-draft-assessment
+      evidence_from:
+        - node: judge-draft
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      routes:
+        passed:
+          to: challenge
+          effect: advance
+        inapplicable:
+          to: judge-draft
+          effect: rework
+        rework:
+          to: record-draft-rework
+          effect: advance
+        evidence-needed:
+          to: record-draft-evidence-needed
+          effect: advance
+    - id: judge-challenge
+      use: judge-challenge-record
+      evidence_from:
+        - node: challenge
+          required: true
+          items:
+            - counterarguments
+            - uncertainty
+            - worker-handoff
+        - node: draft
+          required: true
+          items:
+            - draft-summary
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-goal-judge/v1
+        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
+        max_rounds: 32
+        after_accept: retain
+      next: decide-challenge-assessment
+    - id: record-challenge-rework
+      use: record-challenge-rework
+      evidence_from:
+        - node: judge-challenge
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-challenge-rework-authority
+    - id: confirm-challenge-rework-authority
+      use: confirm-challenge-rework-authority
+      evidence_from:
+        - node: record-challenge-rework
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: challenge
+          effect: rework
+        blocked:
+          to: record-challenge-rework
+          effect: rework
+    - id: record-challenge-evidence-needed
+      use: record-challenge-evidence-needed
+      evidence_from:
+        - node: judge-challenge
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-challenge-evidence-needed-authority
+    - id: confirm-challenge-evidence-needed-authority
+      use: confirm-challenge-evidence-needed-authority
+      evidence_from:
+        - node: record-challenge-evidence-needed
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: challenge
+          effect: rework
+        blocked:
+          to: record-challenge-evidence-needed
+          effect: rework
+    - id: decide-challenge-assessment
+      use: decide-challenge-assessment
+      evidence_from:
+        - node: judge-challenge
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      routes:
+        passed:
+          to: quality
+          effect: advance
+        inapplicable:
+          to: judge-challenge
+          effect: rework
+        rework:
+          to: record-challenge-rework
+          effect: advance
+        evidence-needed:
+          to: record-challenge-evidence-needed
+          effect: advance
+    - id: judge-quality
+      use: judge-quality-record
+      evidence_from:
+        - node: quality
+          required: true
+          items:
+            - quality-result
+            - quality-summary
+            - unresolved-discovery-findings
+            - unresolved-draft-findings
+            - discovery-findings
+            - draft-findings
+            - quality-observations
+            - worker-handoff
+        - node: draft
+          required: true
+          items:
+            - draft-summary
+        - node: challenge
+          required: true
+          items:
+            - counterarguments
+            - uncertainty
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-goal-judge/v1
+        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
+        max_rounds: 32
+        after_accept: retain
+      next: decide-quality-assessment
+    - id: record-quality-rework
+      use: record-quality-rework
+      evidence_from:
+        - node: judge-quality
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-quality-rework-authority
+    - id: confirm-quality-rework-authority
+      use: confirm-quality-rework-authority
+      evidence_from:
+        - node: record-quality-rework
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: quality
+          effect: rework
+        blocked:
+          to: record-quality-rework
+          effect: rework
+    - id: record-quality-evidence-needed
+      use: record-quality-evidence-needed
+      evidence_from:
+        - node: judge-quality
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-quality-evidence-needed-authority
+    - id: confirm-quality-evidence-needed-authority
+      use: confirm-quality-evidence-needed-authority
+      evidence_from:
+        - node: record-quality-evidence-needed
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: quality
+          effect: rework
+        blocked:
+          to: record-quality-evidence-needed
+          effect: rework
+    - id: decide-quality-assessment
+      use: decide-quality-assessment
+      evidence_from:
+        - node: judge-quality
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      routes:
+        passed:
+          to: decide-quality
+          effect: advance
+        inapplicable:
+          to: judge-quality
+          effect: rework
+        rework:
+          to: record-quality-rework
+          effect: advance
+        evidence-needed:
+          to: record-quality-evidence-needed
+          effect: advance
+    - id: judge-application
+      use: judge-application-record
+      evidence_from:
+        - node: apply-documents
+          required: true
+          items:
+            - application-summary
+            - worker-handoff
+            - application-approval-result
+        - node: draft
+          required: true
+          items:
+            - draft-summary
+        - node: approve-diff
+          required: true
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-goal-judge/v1
+        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
+        max_rounds: 32
+        after_accept: retain
+      next: decide-application-assessment
+    - id: record-application-rework
+      use: record-application-rework
+      evidence_from:
+        - node: judge-application
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-application-rework-authority
+    - id: confirm-application-rework-authority
+      use: confirm-application-rework-authority
+      evidence_from:
+        - node: record-application-rework
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: draft
+          effect: rework
+        blocked:
+          to: record-application-rework
+          effect: rework
+    - id: record-application-evidence-needed
+      use: record-application-evidence-needed
+      evidence_from:
+        - node: judge-application
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      next: confirm-application-evidence-needed-authority
+    - id: confirm-application-evidence-needed-authority
+      use: confirm-application-evidence-needed-authority
+      evidence_from:
+        - node: record-application-evidence-needed
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: apply-documents
+          effect: rework
+        blocked:
+          to: record-application-evidence-needed
+          effect: rework
+    - id: decide-application-assessment
+      use: decide-application-assessment
+      evidence_from:
+        - node: judge-application
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-checkpoint-result
+      routes:
+        passed:
+          to: prepare-design-assessment
+          effect: advance
+        inapplicable:
+          to: judge-application
+          effect: rework
+        rework:
+          to: record-application-rework
+          effect: advance
+        evidence-needed:
+          to: record-application-evidence-needed
+          effect: advance
+    - id: prepare-design-assessment
+      use: final-assessment-candidate
+      evidence_from:
+        - node: capture-context
+          required: true
+          items:
+            - context-summary
+            - worker-handoff
+        - node: discover
+          required: true
+          items:
+            - discovery-summary
+            - worker-handoff
+        - node: draft
+          required: true
+          items:
+            - draft-summary
+            - worker-handoff
+        - node: challenge
+          required: true
+          items:
+            - counterarguments
+            - uncertainty
+            - worker-handoff
+        - node: quality
+          required: true
+          items:
+            - quality-result
+            - quality-summary
+            - unresolved-discovery-findings
+            - unresolved-draft-findings
+            - discovery-findings
+            - draft-findings
+            - quality-observations
+            - worker-handoff
+        - node: apply-documents
+          required: true
+          items:
+            - application-summary
+            - worker-handoff
+            - application-approval-result
+        - node: approve-diff
+          required: true
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-worker/v1
+        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
+        max_rounds: 32
+        after_accept: retain
+      next: judge-design
+    - id: judge-design
+      use: final-judge-assessment-record
+      evidence_from:
+        - node: prepare-design-assessment
+          required: true
+          items:
+            - final-assessment-summary
+            - worker-handoff
+      delegation:
+        binding_ref: aquarium-native
+        role_ref: aquarium-goal-judge/v1
+        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
+        max_rounds: 32
+        after_accept: retain
+      next: confirm-design-assessment-applicability
+    - id: confirm-design-assessment-applicability
+      use: confirm-design-assessment-applicability
+      evidence_from:
+        - node: judge-design
+          required: true
+          items:
+            - judge-assessment
+            - judge-verdict
+            - judge-unmet-criteria
+            - judge-unverified-criteria
+            - judge-applicability
+            - judge-summary
+            - judge-goal-outcome
+      routes:
+        current:
+          to: assess-goal
+          effect: advance
+        invalid:
+          to: judge-design
+          effect: rework
+    - id: confirm-application-approval
+      use: confirm-application-approval
+      evidence_from:
+        - node: apply-documents
+          required: true
+          items:
+            - application-approval-result
+            - worker-handoff
+      routes:
+        current:
+          to: judge-application
+          effect: advance
+        invalid:
+          to: record-application-approval-gap
+          effect: advance
+    - id: record-application-approval-gap
+      use: record-application-approval-gap
+      evidence_from:
+        - node: apply-documents
+          required: true
+          items:
+            - application-summary
+            - worker-handoff
+            - application-approval-result
+      next: confirm-application-approval-gap-authority
+    - id: confirm-application-approval-gap-authority
+      use: confirm-application-approval-gap-authority
+      evidence_from:
+        - node: record-application-approval-gap
+          required: true
+          items:
+            - semantic-followup-summary
+            - semantic-owner
+            - semantic-authority
+      routes:
+        authorized:
+          to: draft
+          effect: rework
+        blocked:
+          to: record-application-approval-gap
+          effect: rework
 manual_rework:
   allowed_targets:
     - discover
