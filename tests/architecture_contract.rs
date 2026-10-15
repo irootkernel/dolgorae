@@ -52,6 +52,7 @@ fn source_module_dependencies_match_the_approved_graph() {
     let approved = BTreeMap::from([
         ("app_server", &["darwin", "jcs"][..]),
         ("codex_socket", &[][..]),
+        ("global_runtime_observation", &["workspace"][..]),
         ("audit", &["event", "jcs"][..]),
         ("operation", &["audit", "domain", "jcs", "turn"][..]),
         (

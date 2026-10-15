@@ -141,7 +141,7 @@ pub fn lookup_submit_operation(args: &[OsString]) -> Result<Value, MachineError>
     let mut lookup = crate::operation::lookup(observer.records(), &namespace)
         .map_err(|error| match error {
             crate::turn::TurnError::InvalidInput(_) => MachineError::new("RUN_STATE_CONFLICT",
-                "this key has no retained successor namespace; preserve its original legacy receipt",
+                "this key belongs to another retained namespace or a legacy operation; preserve its original receipt",
                 false, json!({"run_id":run_id,"state":state.lifecycle.as_str(),"operation":"run.lookup_operation"})),
             _ => MachineError::new("AUDIT_INTEGRITY_FAILURE", "operation history requires authoritative recovery",
                 false, json!({"run_id":run_id,"sequence":state.ledger_head.sequence,"reason":"retained operation facts are inconsistent"})),
@@ -3838,6 +3838,54 @@ fn history_reconciliation_admitted(
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BuildHandoffControlPhase {
+    Status,
+    Shutdown,
+}
+
+fn confirm_build_handoff_control(
+    expected: &crate::worker::WorkerIdentity,
+    lifecycle: &RunLifecycle,
+    mut exchange: impl FnMut(BuildHandoffControlPhase) -> Result<ControlResponseV1, MachineError>,
+    confirm_absence: impl FnOnce() -> Result<(), MachineError>,
+    revalidate: impl FnOnce() -> Result<(), MachineError>,
+) -> Result<(), MachineError> {
+    let blocked = |reason| {
+        crate::controller::recovery_required(expected.run_id, expected.run_generation, reason)
+    };
+    match exchange(BuildHandoffControlPhase::Status)? {
+        ControlResponseV1::Status {
+            identity,
+            lifecycle: observed,
+            active_turn,
+            ..
+        } if identity == *expected && observed == lifecycle.as_str() && active_turn.is_none() => {}
+        _ => return Err(blocked("build_handoff_status_not_quiescent")),
+    }
+    if !matches!(exchange(BuildHandoffControlPhase::Shutdown)?,
+        ControlResponseV1::Shutdown {identity, terminal_confirmed: true} if identity == *expected)
+    {
+        return Err(blocked("build_handoff_shutdown_unconfirmed"));
+    }
+    confirm_absence()?;
+    revalidate()
+}
+
+fn wait_build_handoff_exit(
+    exit: &crate::darwin::ProcessExitWatch,
+    budget: Duration,
+) -> Result<(), ()> {
+    let deadline = std::time::Instant::now() + budget;
+    while !exit.exited().map_err(|_| ())? {
+        if std::time::Instant::now() >= deadline {
+            return Err(());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
 fn handoff_quiescent_build(
     view: &WorkspaceView,
     state_root: &Path,
@@ -3957,63 +4005,66 @@ fn handoff_quiescent_build(
             }
             crate::worker::prove_worker_workload_absent(&record)
                 .map_err(|_| blocked("build_handoff_workload_unverifiable"))?;
-            let status = crate::worker::call_frozen_worker_bounded(
-                state_root,
-                run_id,
-                uid,
-                Duration::from_secs(10),
-                |expected| ControlRequestV1::Status { expected },
-            )
-            .map_err(|_| blocked("build_handoff_status_unverifiable"))?;
-            match status {
-                ControlResponseV1::Status {
-                    identity,
-                    lifecycle,
-                    active_turn,
-                    ..
-                } if identity == record.identity
-                    && lifecycle == before.lifecycle.as_str()
-                    && active_turn.is_none() => {}
-                _ => return Err(blocked("build_handoff_status_not_quiescent")),
-            }
-            let exit = DarwinSystem
-                .watch_process_exit(record.identity.pid)
-                .map_err(|_| blocked("build_handoff_process_unverifiable"))?;
-            let stopped = crate::worker::call_frozen_worker_bounded(
-                state_root,
-                run_id,
-                uid,
-                Duration::from_secs(10),
-                |expected| ControlRequestV1::Shutdown { expected },
-            )
-            .map_err(|_| blocked("build_handoff_shutdown_unconfirmed"))?;
-            if !matches!(stopped, ControlResponseV1::Shutdown { identity, terminal_confirmed:true }
-            if identity == record.identity)
-            {
-                return Err(blocked("build_handoff_shutdown_unconfirmed"));
-            }
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while !exit
-                .exited()
-                .map_err(|_| blocked("build_handoff_absence_unverifiable"))?
-            {
-                if std::time::Instant::now() >= deadline {
-                    return Err(blocked("build_handoff_absence_unverifiable"));
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            let (after, _) = observe_run_ledger(state_root, run_id, true)?;
-            if after != before
-                || store.load_manifest(run_id)? != manifest
-                || load_reconciled_controller_binding(state_root, run_id)? != binding
-                || writers
-                    .load()?
-                    .holder
-                    .as_ref()
-                    .is_some_and(|holder| holder.run_id == run_id)
-            {
-                return Err(blocked("build_handoff_retained_state_changed"));
-            }
+            let exit = std::cell::RefCell::new(None);
+            confirm_build_handoff_control(
+                &record.identity,
+                &before.lifecycle,
+                |phase| {
+                    if phase == BuildHandoffControlPhase::Shutdown {
+                        *exit.borrow_mut() = Some(
+                            DarwinSystem
+                                .watch_process_exit(record.identity.pid)
+                                .map_err(|_| blocked("build_handoff_process_unverifiable"))?,
+                        );
+                    }
+                    crate::worker::call_frozen_worker_bounded(
+                        state_root,
+                        run_id,
+                        uid,
+                        Duration::from_secs(10),
+                        |expected| match phase {
+                            BuildHandoffControlPhase::Status => {
+                                ControlRequestV1::Status { expected }
+                            }
+                            BuildHandoffControlPhase::Shutdown => {
+                                ControlRequestV1::Shutdown { expected }
+                            }
+                        },
+                    )
+                    .map_err(|_| {
+                        blocked(match phase {
+                            BuildHandoffControlPhase::Status => "build_handoff_status_unverifiable",
+                            BuildHandoffControlPhase::Shutdown => {
+                                "build_handoff_shutdown_unconfirmed"
+                            }
+                        })
+                    })
+                },
+                || {
+                    wait_build_handoff_exit(
+                        exit.borrow()
+                            .as_ref()
+                            .expect("confirmed shutdown retains exit watch"),
+                        Duration::from_secs(10),
+                    )
+                    .map_err(|_| blocked("build_handoff_absence_unverifiable"))
+                },
+                || {
+                    let (after, _) = observe_run_ledger(state_root, run_id, true)?;
+                    if after != before
+                        || store.load_manifest(run_id)? != manifest
+                        || load_reconciled_controller_binding(state_root, run_id)? != binding
+                        || writers
+                            .load()?
+                            .holder
+                            .as_ref()
+                            .is_some_and(|holder| holder.run_id == run_id)
+                    {
+                        return Err(blocked("build_handoff_retained_state_changed"));
+                    }
+                    Ok(())
+                },
+            )?;
             crate::worker::remove_verified_absent_runtime(&path, uid)
                 .map_err(|_| blocked("build_handoff_absence_unverifiable"))?;
             Ok::<_, MachineError>(manifest)
@@ -8691,12 +8742,7 @@ fn closed_membership_released(
     run_id: Uuid,
 ) -> Result<(), MachineError> {
     let membership = membership_for_run(state_root, manifest)?;
-    if membership
-        .load()?
-        .members
-        .get(&format!("{}:{run_id}", manifest.workspace_id))
-        .is_some_and(|member| member.disposition == MembershipDisposition::Released)
-    {
+    if membership.released_for_display(&manifest.workspace_id, run_id)? {
         Ok(())
     } else {
         Err(internal("closed Run membership release requires recovery"))
@@ -11407,6 +11453,117 @@ impl RunMutationLock for RunStartupLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_handoff_control_requires_terminal_absence_and_retained_state_before_replacement() {
+        use std::cell::RefCell;
+        for scenario in 0..6 {
+            let child = RefCell::new(
+                std::process::Command::new("/bin/sleep")
+                    .arg("60")
+                    .spawn()
+                    .unwrap(),
+            );
+            let identity = crate::worker::WorkerIdentity {
+                workspace_id: "a".repeat(64),
+                run_id: Uuid::now_v7(),
+                run_generation: 1,
+                boot_uuid: Uuid::now_v7(),
+                pid: child.borrow().id(),
+                process_group_id: 1,
+                session_id: 1,
+                uid: DarwinSystem.current_uid(),
+                start_tvsec: 1,
+                start_tvusec: 0,
+                executable_path: PathBuf::from("/bin/sleep"),
+                executable_device: 1,
+                executable_inode: 1,
+                executable_sha256: "b".repeat(64),
+            };
+            let calls = RefCell::new(Vec::new());
+            let exit = RefCell::new(None);
+            let blocked = |reason| crate::controller::recovery_required(identity.run_id, 1, reason);
+            let result = confirm_build_handoff_control(
+                &identity,
+                &RunLifecycle::Idle,
+                |phase| {
+                    calls.borrow_mut().push(match phase {
+                        BuildHandoffControlPhase::Status => "status",
+                        BuildHandoffControlPhase::Shutdown => "shutdown",
+                    });
+                    match phase {
+                        BuildHandoffControlPhase::Status => Ok(ControlResponseV1::Status {
+                            identity: identity.clone(),
+                            lifecycle: "idle".into(),
+                            active_turn: (scenario == 0).then(|| "still-active".into()),
+                            last_terminal: None,
+                        }),
+                        BuildHandoffControlPhase::Shutdown => {
+                            if scenario == 2 {
+                                return Err(blocked("build_handoff_shutdown_unconfirmed"));
+                            }
+                            *exit.borrow_mut() =
+                                Some(DarwinSystem.watch_process_exit(identity.pid).unwrap());
+                            if scenario >= 4 {
+                                child.borrow_mut().kill().unwrap();
+                            }
+                            Ok(ControlResponseV1::Shutdown {
+                                identity: identity.clone(),
+                                terminal_confirmed: scenario != 1,
+                            })
+                        }
+                    }
+                },
+                || {
+                    calls.borrow_mut().push("absence");
+                    wait_build_handoff_exit(
+                        exit.borrow().as_ref().unwrap(),
+                        Duration::from_millis(50),
+                    )
+                    .map_err(|_| blocked("build_handoff_absence_unverifiable"))
+                },
+                || {
+                    calls.borrow_mut().push("retained");
+                    if scenario == 4 {
+                        Err(blocked("build_handoff_retained_state_changed"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            match scenario {
+                0 => assert_eq!(*calls.borrow(), vec!["status"]),
+                1 | 2 => assert_eq!(*calls.borrow(), vec!["status", "shutdown"]),
+                3 => assert_eq!(*calls.borrow(), vec!["status", "shutdown", "absence"]),
+                _ => assert_eq!(
+                    *calls.borrow(),
+                    vec!["status", "shutdown", "absence", "retained"]
+                ),
+            }
+            if scenario < 4 {
+                // The handoff path never signals or replaces an unproved peer.
+                assert!(child.borrow_mut().try_wait().unwrap().is_none());
+                child.borrow_mut().kill().unwrap();
+            }
+            child.borrow_mut().wait().unwrap();
+            if scenario == 5 {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, "RECOVERY_REQUIRED");
+                assert_eq!(error.details["run_id"], identity.run_id.to_string());
+                assert_eq!(
+                    error.details["reason"],
+                    match scenario {
+                        0 => "build_handoff_status_not_quiescent",
+                        1 | 2 => "build_handoff_shutdown_unconfirmed",
+                        3 => "build_handoff_absence_unverifiable",
+                        _ => "build_handoff_retained_state_changed",
+                    }
+                );
+            }
+        }
+    }
 
     #[test]
     fn modern_close_diagnostics_preserve_intent_without_replaying_unknown_effects() {

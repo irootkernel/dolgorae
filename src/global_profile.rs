@@ -700,7 +700,7 @@ fn is_sha256(value: &str) -> bool {
 
 fn store_binding_history(root: &Path, history: &ProfileBindingHistory) -> Result<(), MachineError> {
     let path = root.join("profile-bindings.json");
-    let bytes = serde_json::to_vec_pretty(history)
+    let bytes = serde_json::to_vec(history)
         .map_err(|error| MachineError::runtime_path_invalid(&path, error.to_string()))?;
     if bytes.len() as u64 > MAX_BINDING_HISTORY_BYTES {
         return Err(binding_capacity());
@@ -1335,6 +1335,85 @@ mod tests {
     }
 
     #[test]
+    fn compacted_binding_history_keeps_capacity_for_the_next_normal_write() {
+        let (parent, home) = test_home();
+        initialize_generation(&home).unwrap();
+        let store = GlobalProfileStore::new(&home);
+        let profile = valid_profile(&parent);
+        store.add("primary".into(), profile.clone()).unwrap();
+        let definition_sha256 = crate::jcs::sha256_hex(
+            &crate::jcs::canonicalize(
+                &crate::jcs::parse(&serde_json::to_string(&profile).unwrap()).unwrap(),
+            )
+            .unwrap(),
+        );
+        let mut history = load_binding_history(home.root()).unwrap();
+        for index in 0..10_000 {
+            let record = ProfileBindingRecord {
+                selected_name: "primary".into(),
+                definition_sha256: definition_sha256.clone(),
+                server_key: format!("{index:064x}"),
+                launch_snapshot_sha256: "b".repeat(64),
+            };
+            history
+                .bindings
+                .insert(format!("primary:{}", record.server_key), record);
+            if index % 128 == 0
+                && serde_json::to_vec_pretty(&history).unwrap().len() as u64
+                    > MAX_BINDING_HISTORY_BYTES
+            {
+                break;
+            }
+        }
+        while serde_json::to_vec_pretty(&history).unwrap().len() as u64 > MAX_BINDING_HISTORY_BYTES
+        {
+            history.bindings.pop_last().unwrap();
+        }
+        let source = serde_json::to_vec_pretty(&history).unwrap();
+        assert!(source.len() as u64 <= MAX_BINDING_HISTORY_BYTES);
+        let next = ProfileBindingRecord {
+            selected_name: "primary".into(),
+            definition_sha256,
+            server_key: "f".repeat(64),
+            launch_snapshot_sha256: "c".repeat(64),
+        };
+        let mut expected = history.clone();
+        expected
+            .bindings
+            .insert(format!("primary:{}", next.server_key), next.clone());
+        assert!(
+            serde_json::to_vec_pretty(&expected).unwrap().len() as u64 > MAX_BINDING_HISTORY_BYTES
+        );
+        let path = home.root().join("profile-bindings.json");
+        fs::write(&path, &source).unwrap();
+        let operation = Uuid::now_v7();
+        store
+            .with_maintenance_lock(|root| {
+                compact_binding_history(
+                    root,
+                    operation,
+                    &crate::jcs::sha256_hex(&source),
+                    &mut |_| Ok(()),
+                )
+            })
+            .unwrap();
+        store.record_binding(next).unwrap();
+        assert_eq!(load_binding_history(home.root()).unwrap(), expected);
+        assert!(fs::metadata(&path).unwrap().len() <= MAX_BINDING_HISTORY_BYTES);
+        assert_eq!(
+            fs::read(
+                home.root()
+                    .join("binding-generations")
+                    .join(operation.to_string())
+                    .join("source.json")
+            )
+            .unwrap(),
+            source
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
     fn binding_compaction_preserves_identity_at_each_crash_boundary() {
         for fault in [
             BindingMaintenanceBarrier::SourceSynced,
@@ -1360,6 +1439,13 @@ mod tests {
                 launch_snapshot_sha256: "b".repeat(64),
             };
             store.record_binding(record.clone()).unwrap();
+            // Existing homes may still contain the old pretty representation.
+            let path = home.root().join("profile-bindings.json");
+            fs::write(
+                &path,
+                serde_json::to_vec_pretty(&load_binding_history(home.root()).unwrap()).unwrap(),
+            )
+            .unwrap();
             let source = fs::read(home.root().join("profile-bindings.json")).unwrap();
             let expected = crate::jcs::sha256_hex(&source);
             let operation = Uuid::now_v7();

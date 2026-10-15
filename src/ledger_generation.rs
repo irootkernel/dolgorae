@@ -383,6 +383,11 @@ pub(crate) fn retain_activation(root: &Path, run_id: Uuid) -> Result<(), LedgerE
     Ok(())
 }
 
+/// Metadata provenance only; this does not prove ledger history or absence.
+pub(crate) fn observed_generation(root: &Path, run_id: Uuid) -> Result<u64, LedgerError> {
+    Ok(selected_manifest(root, run_id)?.map_or(1, |(_, manifest)| manifest.generation))
+}
+
 pub(crate) fn pin(root: &Path, run_id: Uuid) -> Result<PinnedGeneration, LedgerError> {
     let Some((selection, manifest)) = selected_manifest(root, run_id)? else {
         return Ok(PinnedGeneration {

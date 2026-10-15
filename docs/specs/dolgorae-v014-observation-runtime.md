@@ -51,6 +51,15 @@ truncation or a changed generation invalidates the prefix. Event cursors and
 captured durable heads remain unchanged, and readers never combine generations.
 Terminal response decoding, interaction revision and policy inputs belong to
 that exact verified captured head and may be shared with its display readers.
+The display cache retains up to 16 Runs within a shared 512 MiB budget of
+canonical record bytes, with 120-second idle eviction. Larger Runs use a larger
+share of that budget; inserting or extending a capture evicts older entries as
+needed. Captures larger than the whole budget bypass retention without evicting
+other entries and remain readable through full verification. The budget covers
+idle cache ownership; parsed JSON allocation and active reader snapshots have
+separate lifetimes. Suffix extension reuses owned records, copying only while
+an older snapshot shares them, and extends the freshly verified prefix hasher
+with the checked suffix bytes.
 An older captured head or changed prefix receives its own derived views.
 A valid concurrent append or generation publication may prevent a coherent
 capture from completing within its fixed budget. That bounded source-motion
@@ -116,6 +125,9 @@ delivery transaction before recording any new delivery receipt, state or event.
 An integrity refusal leaves all selected delivery evidence unchanged.
 Missing published content is
 an integrity failure, never an invitation to regenerate an accepted result.
+Run-scoped publication and startup recovery expose exhausted quota-lock
+contention as retryable `RUN_BUSY` with the original Run and `attachment` owner,
+including when recovery runs while opening the orchestration store.
 Logical content limits still apply to each owning Run. A shared per-Run artifact
 quota lease serializes ordinary response storage and brokered publication from
 quota check through publication. Contending publishers wait for this brief critical section before opening their publication transaction, with the same five-second bound as database writer admission. Lock identity and security are rechecked while waiting and after acquisition; exhausted contention reports `RUN_BUSY`, while an untrusted lock remains an integrity failure. The 256 MiB bound counts each retained artifact

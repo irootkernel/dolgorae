@@ -336,8 +336,16 @@ impl Registration {
     }
 }
 
-fn read_record(path: &Path) -> Result<Record, MachineError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| unsafe_state(error.to_string()))?;
+#[cfg(test)]
+type RecordOpenHook = Option<Box<dyn FnMut(&Path)>>;
+#[cfg(test)]
+thread_local! { static RECORD_OPEN_HOOK: std::cell::RefCell<RecordOpenHook> = const { std::cell::RefCell::new(None) }; }
+
+fn read_record_if_present(path: &Path) -> Result<Option<Record>, MachineError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        other => other.map_err(|error| unsafe_state(error.to_string()))?,
+    };
     if !metadata.file_type().is_file()
         || metadata.uid() != DarwinSystem.current_uid()
         || metadata.mode() & 0o777 != 0o600
@@ -345,11 +353,20 @@ fn read_record(path: &Path) -> Result<Record, MachineError> {
     {
         return Err(unsafe_state("process inventory record is unsafe"));
     }
-    let file = OpenOptions::new()
+    #[cfg(test)]
+    RECORD_OPEN_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path);
+        }
+    });
+    let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
-        .map_err(|error| unsafe_state(error.to_string()))?;
+    {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        other => other.map_err(|error| unsafe_state(error.to_string()))?,
+    };
     let mut bytes = Vec::new();
     file.take(MAX_RECORD_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -390,7 +407,7 @@ fn read_record(path: &Path) -> Result<Record, MachineError> {
     {
         return Err(unsafe_state("process inventory record identity is invalid"));
     }
-    Ok(record)
+    Ok(Some(record))
 }
 
 fn classify(record: &Record) -> Verdict {
@@ -589,15 +606,42 @@ fn selected(record: &Record, selection: &Selection) -> bool {
                 .is_some_and(|process| selection.pids.contains(&process.pid)))
 }
 
+fn inventory_directory_identity(path: &Path) -> Result<(u64, u64), MachineError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| unsafe_state(error.to_string()))?;
+    if !metadata.is_dir()
+        || metadata.uid() != DarwinSystem.current_uid()
+        || metadata.mode() & 0o777 != 0o700
+    {
+        return Err(unsafe_state("process inventory directory is not private"));
+    }
+    Ok((metadata.dev(), metadata.ino()))
+}
+fn verify_inventory_directory(path: &Path, original: (u64, u64)) -> Result<(), MachineError> {
+    if inventory_directory_identity(path)? != original {
+        return Err(unsafe_state(
+            "process inventory directory changed during collection",
+        ));
+    }
+    Ok(())
+}
 fn inventory(selection: &Selection) -> Result<Vec<(PathBuf, Record, Candidate)>, MachineError> {
+    inventory_at(&root()?, selection)
+}
+fn inventory_at(
+    directory: &Path,
+    selection: &Selection,
+) -> Result<Vec<(PathBuf, Record, Candidate)>, MachineError> {
+    let identity = inventory_directory_identity(directory)?;
     let mut entries = Vec::new();
-    for entry in fs::read_dir(root()?).map_err(|error| unsafe_state(error.to_string()))? {
+    for entry in fs::read_dir(directory).map_err(|error| unsafe_state(error.to_string()))? {
         let entry = entry.map_err(|error| unsafe_state(error.to_string()))?;
         let path = entry.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             continue;
         }
-        let record = read_record(&path)?;
+        let Some(record) = read_record_if_present(&path)? else {
+            continue;
+        };
         if !selected(&record, selection) {
             continue;
         }
@@ -615,6 +659,7 @@ fn inventory(selection: &Selection) -> Result<Vec<(PathBuf, Record, Candidate)>,
         };
         entries.push((path, record, candidate));
     }
+    verify_inventory_directory(directory, identity)?;
     entries.sort_by_key(|(_, record, _)| record.id);
     Ok(entries)
 }
@@ -781,14 +826,18 @@ pub fn execute(cleanup: bool, arguments: &[OsString]) -> Result<Value, MachineEr
 
 /// Retire only an exact recorded PID after ordinary lifecycle absence proof.
 pub fn retire_pid(pid: u32) -> Result<(), MachineError> {
-    for entry in fs::read_dir(root()?).map_err(|error| unsafe_state(error.to_string()))? {
+    let directory = root()?;
+    let identity = inventory_directory_identity(&directory)?;
+    for entry in fs::read_dir(&directory).map_err(|error| unsafe_state(error.to_string()))? {
         let path = entry
             .map_err(|error| unsafe_state(error.to_string()))?
             .path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             continue;
         }
-        let record = read_record(&path)?;
+        let Some(record) = read_record_if_present(&path)? else {
+            continue;
+        };
         if let Some(process) = record.process.filter(|process| process.pid == pid) {
             match DarwinSystem.bsd_process_identity(pid) {
                 Ok(current) if !same_recorded_process(&current, &process) => {
@@ -806,17 +855,126 @@ pub fn retire_pid(pid: u32) -> Result<(), MachineError> {
             if members.iter().any(|member| *member != pid) {
                 return Err(unsafe_state("cannot retire live process registration"));
             }
+            verify_inventory_directory(&directory, identity)?;
             remove_registered_socket(&record)?;
             fs::remove_file(path).map_err(|error| unsafe_state(error.to_string()))?;
         }
     }
+    verify_inventory_directory(&directory, identity)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::process::{Child, Command, Stdio};
+
+    #[test]
+    fn scoped_inventory_handles_retired_entries_but_rejects_root_motion_and_bad_records() {
+        struct HookGuard;
+        impl Drop for HookGuard {
+            fn drop(&mut self) {
+                RECORD_OPEN_HOOK.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        let _hook = HookGuard;
+        let parent =
+            std::env::temp_dir().join(format!("dolgorae-inventory-race-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&parent).unwrap();
+        let directory = parent.join("inventory");
+        let owner = parent.join("owner");
+        for path in [&directory, &owner] {
+            fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+        }
+        let owner_metadata = fs::metadata(&owner).unwrap();
+        let executable = fs::canonicalize("/bin/sleep").unwrap();
+        let image = fs::metadata(&executable).unwrap();
+        let selected_record = Record {
+            schema_version: 1,
+            id: Uuid::now_v7(),
+            kind: "profile_log_drainer".into(),
+            owner_root: owner.clone(),
+            owner_device: owner_metadata.dev(),
+            owner_inode: owner_metadata.ino(),
+            boot_uuid: DarwinSystem.boot_session_uuid().unwrap(),
+            executable,
+            executable_device: image.dev(),
+            executable_inode: image.ino(),
+            expected_argument: "sleep 30".into(),
+            socket: None,
+            profile: None,
+            run_id: None,
+            process: None,
+            fingerprint: None,
+            socket_device: None,
+            socket_inode: None,
+        };
+        let mut unrelated = selected_record.clone();
+        unrelated.id = Uuid::now_v7();
+        unrelated.owner_root = parent.join("unrelated-owner");
+        let selected_path = directory.join(format!("{}.json", selected_record.id));
+        let unrelated_path = directory.join(format!("{}.json", unrelated.id));
+        write_record(&selected_path, &selected_record, false).unwrap();
+        write_record(&unrelated_path, &unrelated, false).unwrap();
+        let selection = Selection {
+            owner_roots: BTreeSet::from([owner]),
+            ..Selection::default()
+        };
+        let retired = unrelated_path.clone();
+        RECORD_OPEN_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |path| {
+                if path == retired {
+                    fs::remove_file(path).unwrap();
+                }
+            }))
+        });
+        let entries = inventory_at(&directory, &selection).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.id, selected_record.id);
+        RECORD_OPEN_HOOK.with(|hook| *hook.borrow_mut() = None);
+
+        // Existing corrupt or unsafe rows still refuse even outside the selector.
+        write_record(&unrelated_path, &unrelated, false).unwrap();
+        fs::write(&unrelated_path, b"{invalid}").unwrap();
+        assert_eq!(
+            inventory_at(&directory, &selection).err().unwrap().code,
+            "ORPHAN_STATE_UNVERIFIABLE"
+        );
+        fs::remove_file(&unrelated_path).unwrap();
+        write_record(&unrelated_path, &unrelated, false).unwrap();
+        fs::set_permissions(&unrelated_path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            inventory_at(&directory, &selection).err().unwrap().code,
+            "ORPHAN_STATE_UNVERIFIABLE"
+        );
+        fs::remove_file(&unrelated_path).unwrap();
+
+        let inspected = digest(&inventory_at(&directory, &selection).unwrap()).unwrap();
+        fs::remove_file(&selected_path).unwrap();
+        assert_ne!(
+            digest(&inventory_at(&directory, &selection).unwrap()).unwrap(),
+            inspected
+        );
+        write_record(&selected_path, &selected_record, false).unwrap();
+
+        // Only this test-owned registry is replaced; the real inventory is untouched.
+        let current = directory.clone();
+        let retained = parent.join("retained-inventory");
+        let previous = retained.clone();
+        RECORD_OPEN_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                fs::rename(&current, &previous).unwrap();
+                fs::DirBuilder::new().mode(0o700).create(&current).unwrap();
+            }))
+        });
+        assert_eq!(
+            inventory_at(&directory, &selection).err().unwrap().code,
+            "ORPHAN_STATE_UNVERIFIABLE"
+        );
+        RECORD_OPEN_HOOK.with(|hook| *hook.borrow_mut() = None);
+        fs::remove_dir_all(parent).unwrap();
+    }
 
     struct ChildCleanup(Option<Child>);
 

@@ -3899,7 +3899,8 @@ impl OrchestrationStore {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(internal(error)),
         }
-        let _quota = crate::artifact::ArtifactQuotaLease::acquire(&artifact_root)?;
+        let _quota =
+            crate::artifact::ArtifactQuotaLease::acquire_for_run(&artifact_root, session_id)?;
         let retained = crate::artifact::logical_artifact_bytes(&artifact_root)?;
         let existing: bool = self
             .connection
@@ -4048,7 +4049,10 @@ impl OrchestrationStore {
             let publication = self.result_publication(task_id)?;
             let artifact_root = crate::run::run_root(&self.state_root, publication.primary_run_id)
                 .join("artifacts");
-            let _quota = crate::artifact::ArtifactQuotaLease::acquire(&artifact_root)?;
+            let _quota = crate::artifact::ArtifactQuotaLease::acquire_for_run(
+                &artifact_root,
+                publication.primary_run_id,
+            )?;
             if crate::artifact::logical_artifact_bytes(&artifact_root)?
                 > crate::artifact::MAX_RUN_ARTIFACT_BYTES
             {

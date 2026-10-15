@@ -53,6 +53,8 @@ event observation may still read its published prefix without classifying that
 tail; it does not establish operation absence.
 History is not retired automatically. Controller replacement cannot expose
 another principal's operation or reuse its receipt.
+When the same key exists outside the requested Controller namespace, lookup
+refuses it without classifying a modern operation as a legacy receipt.
 
 The native `run lookup-operation <run-id> --idempotency-key <key>` diagnostic
 uses the ordinary protected Controller carrier and returns H1's

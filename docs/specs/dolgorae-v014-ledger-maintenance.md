@@ -15,9 +15,21 @@ interaction reserves two additional maximum-size lines and records for its
 decision and resolution. A new interaction without an adjacent, matching
 accepted approval intent uses ordinary admission; only an already admitted
 interaction may use protected opening/resolution capacity. Repeated policy-denied
-requests cannot consume the terminal reserve. New admission also leaves two lines
-for its remaining pre-effect intent records. A Run admits only one active Turn; Turn admission, other new mutations and ordinary streaming cannot
-consume this reserve. Terminal response/usage, terminal and unknown outcomes,
+requests cannot consume the terminal reserve.
+
+Submit/Send admission reserves its remaining pre-effect records as one group.
+A prepared `MutationAdmitted` reserves three following record slots for read
+admission, or four for writer preparation. A direct `IdempotencyReserved`
+reserves two. These cover the input reservation, successor identity and
+applicable caller-native intent or writer-policy update. The records share
+the existing byte allowance of two maximum-size audit lines. Each matching
+continuation consumes its actual slot and bytes; unrelated records cannot use
+the remainder. Acceptance or definitive resolution releases the reservation,
+and ledger reopen reconstructs it from durable records.
+
+A Run admits only one active Turn. Other Turn admission, new mutations and
+ordinary streaming cannot consume the fixed finalization reserve.
+Terminal response/usage, terminal and unknown outcomes,
 Close, writer release, cleanup and authoritative recovery may consume it.
 These writes still validate record shape, chain and projection and remain
 inside the absolute generation ceilings. Exhaustion is
@@ -53,6 +65,14 @@ process locks are released. Ledger writers, database leases and new Run
 publication cannot change its frozen source before the original operation
 resumes. Sidecar inspection and exclusive original-operation Apply remain
 available; completion reopens ordinary admission.
+While holding shared admission, a process may reuse a successful complete
+namespace inspection only while freshly checked workspace and maintenance
+directory identities remain unchanged. Owner retention and every progress or
+completion publication change a directory entry atomically, invalidating this
+reuse even for older writers. The first admission and every changed identity
+require the complete inspection. Pending and failed inspections are never
+cached. Original-operation Plan/Get/Apply still validate their retained files;
+this optimization does not prove history or authorize maintenance effects.
 All locks are nonblocking; a busy workspace requires stopping its writers
 through their existing lifecycle owners before applying maintenance.
 

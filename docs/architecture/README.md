@@ -3116,6 +3116,11 @@ matches and it is a zombie with no other group members. A stale registration
 with the same PID but a different start time does not block retirement of the
 current generation. The inventory is a recovery index, never a replacement for
 Profile, Run, membership, or Controller authority.
+Collection skips entries retired between enumeration and open, while checking
+that the private inventory directory retains its device and inode. Missing
+entries supply no process-absence evidence. Unsafe or unreadable existing
+entries still refuse collection, and cleanup keeps its exact selection and live
+process checks.
 
 `runtime orphan inspect` compares each registration with its recorded owner-root
 device/inode and live process identity. A reparented process with an intact
@@ -3314,9 +3319,13 @@ reserve behavior are owned by the
 
 Profile maintenance holds the initialized home-root lock, closes membership and
 binding admission with one retained global owner, and serializes journal
-selection under each Profile Server lock. Its workspace admission lease is
-nonblocking. A membership checkpoint retains latest member facts, absolute
-revision and chain head; immutable historical segments remain in the original
+selection under each Profile Server lock. It does not acquire the workspace
+ledger admission lease or require active and unknown Runs to become quiescent.
+Run bindings remain planning provenance. Apply checks each planned Profile's
+membership source and the binding-history digest; unrelated Run publication,
+removal or ledger progress does not invalidate those sources. A membership checkpoint
+retains latest member facts, absolute revision and chain head; immutable
+historical segments remain in the original
 byte-digest calculation. The selected append continues that head. Selection,
 activation and progress retain the original operation through interruption.
 Binding compaction archives the original bytes before atomic replacement.

@@ -9,6 +9,7 @@ if __name__ == "__main__":
     run_case("gateway_semantic_native", "result_content_cli::native_result_content_cli_preserves_frozen_projection_and_retained_owner")
     run_case("gateway_semantic_native", "caller_close_cleanup_retains_terminal_history_and_checked_recovery")
     run_case("gateway_semantic_native", "native_profile_compaction_retains_original_scope_and_history")
+    run_case("gateway_semantic_native", "native_profile_compaction_preserves_live_and_unknown_members")
     run_case("gateway_semantic_native", "native_profile_compaction_resumes_each_owned_crash_boundary")
     run_case("gateway_semantic_native", "public_close_retains_completed_receipt_during_membership_cleanup")
     run_case(

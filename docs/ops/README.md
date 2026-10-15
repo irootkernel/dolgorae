@@ -420,8 +420,9 @@ the same protected operator and workspace arguments. Its independent workspace
 maintenance generation starts at 1. Preserve the returned complete plan and
 original generation; Apply and Get use the ordinary maintenance routes. Resume
 the retained operation after interruption before admitting new binding or
-membership changes. Active or unknown references cannot be bypassed; the
-operator resolves their existing lifecycle first. Old journal generations and
+membership changes. Compaction preserves active and unknown references and
+does not require closing Runs; it serializes membership changes under the
+home-root and Profile Server locks. Old journal generations and
 original binding bytes remain, without automatic deletion.
 
 A successful Close may report `profile_membership_cleanup_required`. Its

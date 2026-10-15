@@ -503,6 +503,12 @@ fn workspace_generation(root: &Path) -> Result<u64, MachineError> {
     }
 }
 fn run_ids(state_root: &Path) -> Result<Vec<Uuid>, MachineError> {
+    run_ids_with_bootstrap(state_root, false)
+}
+fn run_ids_with_bootstrap(
+    state_root: &Path,
+    allow_bootstrap: bool,
+) -> Result<Vec<Uuid>, MachineError> {
     verify_secure_directory(&state_root.join("runs"), DarwinSystem.current_uid())?;
     let mut runs = Vec::new();
     for entry in fs::read_dir(state_root.join("runs"))
@@ -512,6 +518,9 @@ fn run_ids(state_root: &Path) -> Result<Vec<Uuid>, MachineError> {
         let name = entry.file_name();
         // RunStore owns temporary bootstrap directories; they are not accepted Runs.
         if name.to_str().is_some_and(|name| name.starts_with('.')) {
+            if allow_bootstrap {
+                continue;
+            }
             return Err(error("RUN_BUSY", "Run bootstrap is in progress"));
         }
         let run = name
@@ -1514,6 +1523,34 @@ fn verify_profile_completed_members(
 
 type ProfileSource = (Vec<RunBasis>, Vec<ProfileBasis>, String, u64, u64, u64);
 
+fn profile_basis(
+    home: &crate::paths::DolgoraeHome,
+    profile: &str,
+    server_key: &str,
+) -> Result<ProfileBasis, MachineError> {
+    let store = crate::global_runtime::GlobalMembershipStore::new(home, profile, server_key)?;
+    store.with_maintenance_server_lock(|root, store| {
+        let (generation, index) = store.maintenance_basis_under_server_lock(root)?;
+        Ok(ProfileBasis {
+            profile: profile.to_owned(),
+            server_key: server_key.to_owned(),
+            generation,
+            journal_sha256: index.journal_sha256,
+            protected_references: index
+                .members
+                .values()
+                .filter(|m| m.disposition != crate::global_runtime::MembershipDisposition::Released)
+                .count() as u64,
+            writers: index.members.values().filter(|m| m.writer).count() as u64,
+            unknown: index
+                .members
+                .values()
+                .filter(|m| m.disposition == crate::global_runtime::MembershipDisposition::Unknown)
+                .count() as u64,
+        })
+    })
+}
+
 fn profile_bases(
     state_root: &Path,
     workspace: &str,
@@ -1523,68 +1560,44 @@ fn profile_bases(
     let mut selected = std::collections::BTreeMap::new();
     let mut active = 0;
     let mut unknown = 0;
-    let mut receipts = 0;
-    for id in run_ids(state_root)? {
-        let (basis, ledger, projection, _) = observe_basis(state_root, workspace, id)?;
-        let (a, u) = workload_counts(state_root, id)?;
-        active += a;
-        unknown += u + u64::from(projection.lifecycle == RunLifecycle::OutcomeUnknown);
-        receipts += ledger
-            .records()
-            .iter()
-            .filter(|record| {
-                matches!(
-                    record.kind(),
-                    AuditKind::TurnStarted | AuditKind::MutationCompleted
-                )
-            })
-            .count() as u64;
-        let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(id)?;
-        let binding = manifest.global_profile_binding.ok_or_else(|| {
-            error(
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    for id in run_ids_with_bootstrap(state_root, true)? {
+        let manifest = store.load_manifest(id)?;
+        if manifest.workspace_id != workspace {
+            return Err(error(
                 "LOOKUP_NAMESPACE_CORRUPT",
-                "Run lacks immutable Profile binding",
-            )
-        })?;
+                "Run belongs to another workspace",
+            ));
+        }
+        let Some(binding) = manifest.global_profile_binding.as_ref() else {
+            continue;
+        };
         binding.validate_for_recovery()?;
         selected
-            .entry(binding.server_key)
-            .or_insert(binding.selected_name);
-        runs.push(basis);
+            .entry(binding.server_key.clone())
+            .or_insert(binding.selected_name.clone());
+        // Profile compaction never transforms Run history. Its head is planning
+        // provenance, not a quiescence or complete-history admission operand.
+        runs.push(RunBasis {
+            run_id: id,
+            manifest_sha256: digest(&manifest)?,
+            ledger_generation: ledger_generation::observed_generation(
+                &state_root.join("runs").join(id.to_string()),
+                id,
+            )
+            .map_err(ledger_error)?,
+            head: store.load_state_projection(id)?.ledger_head,
+        });
     }
     let mut profiles = Vec::new();
     for (server_key, profile) in selected {
-        let store = crate::global_runtime::GlobalMembershipStore::new(home, &profile, &server_key)?;
-        let basis = store.with_maintenance_server_lock(|root, store| {
-            let (generation, index) = store.maintenance_basis_under_server_lock(root)?;
-            Ok(ProfileBasis {
-                profile: profile.clone(),
-                server_key: server_key.clone(),
-                generation,
-                journal_sha256: index.journal_sha256,
-                protected_references: index
-                    .members
-                    .values()
-                    .filter(|m| {
-                        m.disposition != crate::global_runtime::MembershipDisposition::Released
-                    })
-                    .count() as u64,
-                writers: index.members.values().filter(|m| m.writer).count() as u64,
-                unknown: index
-                    .members
-                    .values()
-                    .filter(|m| {
-                        m.disposition != crate::global_runtime::MembershipDisposition::Released
-                    })
-                    .count() as u64,
-            })
-        })?;
+        let basis = profile_basis(home, &profile, &server_key)?;
         active += basis.writers;
         unknown += basis.unknown;
         profiles.push(basis);
     }
     let (bindings, _) = crate::global_profile::binding_maintenance_basis(home.root())?;
-    Ok((runs, profiles, bindings, active, unknown, receipts))
+    Ok((runs, profiles, bindings, active, unknown, 0))
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProfileMaintenanceBarrier {
@@ -1754,7 +1767,6 @@ fn execute_profile_maintenance_at(
             if home.root().join("profile-maintenance-active.json").exists() {
                 return Err(error("RUN_BUSY", "resume the retained global Profile maintenance before planning another operation"));
             }
-            let _lease = WorkspaceLease::acquire(state_root, true).map_err(ledger_error)?;
             let selected = generation()?;
             if profile_generation(&root)? != selected {
                 return Err(error(
@@ -1851,7 +1863,6 @@ fn execute_profile_maintenance_at(
                 }
                 return Ok(json!({"maintenance":profile_observation(&saved, false)}));
             }
-            let _lease = WorkspaceLease::acquire(state_root, true).map_err(ledger_error)?;
             let active_path = home.root().join("profile-maintenance-active.json");
             let expected_active = profile_owner(&saved)?;
             if active_path.exists() {
@@ -1900,30 +1911,25 @@ fn execute_profile_maintenance_at(
                     sync_directory(home.root()).map_err(|_| error("RECOVERY_REQUIRED", "global Profile admission sync is uncertain"))?;
                 }
                 let validated = (|| -> Result<(), MachineError> {
-                    let (runs, profiles, bindings, a, u, _) =
-                    profile_bases(state_root, workspace, home)?;
-                if a != 0 || u != 0 {
-                    return Err(error(
-                        "RUN_BUSY",
-                        "Profile maintenance cannot bypass active or unknown work",
-                    ));
-                }
-                if runs != saved.runs
-                    || profiles != saved.profiles
-                    || bindings != saved.bindings_sha256
-                {
-                    return Err(error(
-                        "MAINTENANCE_PLAN_STALE",
-                        "Profile maintenance source changed",
-                    ));
-                }
+                    for expected in &saved.profiles {
+                        let current = profile_basis(home, &expected.profile, &expected.server_key)?;
+                        if current.generation != expected.generation
+                            || current.journal_sha256 != expected.journal_sha256
+                            || current.protected_references != expected.protected_references {
+                            return Err(error("MAINTENANCE_PLAN_STALE", "Profile maintenance source changed"));
+                        }
+                    }
+                    let (bindings, _) = crate::global_profile::binding_maintenance_basis(home.root())?;
+                    if bindings != saved.bindings_sha256 {
+                        return Err(error("MAINTENANCE_PLAN_STALE", "Profile binding source changed"));
+                    }
                     Ok(())
                 })();
                 if let Err(failure) = validated {
-                    if matches!(failure.code.as_str(), "MAINTENANCE_PLAN_STALE" | "RUN_BUSY") {
-                        fs::remove_file(&active_path).and_then(|()| sync_directory(home.root()))
-                            .map_err(|_| error("RECOVERY_REQUIRED", "unapplied Profile admission release is uncertain"))?;
-                    }
+                    // No selection or content change precedes this validation.
+                    // Keep the immutable owner, but reopen unrelated admission.
+                    fs::remove_file(&active_path).and_then(|()| sync_directory(home.root()))
+                        .map_err(|_| error("RECOVERY_REQUIRED", "unapplied Profile admission release is uncertain"))?;
                     return Err(failure);
                 }
                 barrier(ProfileMaintenanceBarrier::OwnerSynced)?;
@@ -2202,7 +2208,83 @@ fn read_content_operation(
     }
     Ok(saved)
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AdmissionDirectory {
+    device: u64,
+    inode: u64,
+    uid: u32,
+    mode: u32,
+    links: u64,
+    length: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+fn admission_directory(path: &Path) -> Result<Option<AdmissionDirectory>, MachineError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => {
+            return Err(MachineError::runtime_path_invalid(
+                path,
+                "maintenance directory unavailable",
+            ));
+        }
+        Ok(metadata) => metadata,
+    };
+    verify_secure_directory(path, DarwinSystem.current_uid())?;
+    Ok(Some(AdmissionDirectory {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        uid: metadata.uid(),
+        mode: metadata.mode(),
+        links: metadata.nlink(),
+        length: metadata.len(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    }))
+}
+type AdmissionStamp = [Option<AdmissionDirectory>; 3];
+fn admission_stamp(state_root: &Path) -> Result<AdmissionStamp, MachineError> {
+    Ok([
+        admission_directory(state_root)?,
+        admission_directory(&state_root.join("maintenance"))?,
+        admission_directory(&state_root.join("result-maintenance"))?,
+    ])
+}
+type AdmissionCache = std::sync::Mutex<Vec<(PathBuf, AdmissionStamp)>>;
+static ADMISSION_CACHE: std::sync::OnceLock<AdmissionCache> = std::sync::OnceLock::new();
+#[cfg(test)]
+thread_local! { static ADMISSION_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 pub(crate) fn workspace_maintenance_pending(state_root: &Path) -> Result<bool, MachineError> {
+    // The caller holds the shared maintenance flock. All supported owner and
+    // progress publications replace directory entries under its exclusive side.
+    // Never retain a pending/failed result or hold the cache mutex across I/O.
+    let before = admission_stamp(state_root)?;
+    let cache = ADMISSION_CACHE.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if cache.lock().is_ok_and(|entries| {
+        entries
+            .iter()
+            .any(|(root, stamp)| root == state_root && *stamp == before)
+    }) {
+        return Ok(false);
+    }
+    let pending = inspect_workspace_maintenance_pending(state_root)?;
+    if !pending
+        && before == admission_stamp(state_root)?
+        && let Ok(mut entries) = cache.lock()
+    {
+        entries.retain(|(root, _)| root != state_root);
+        if entries.len() >= 64 {
+            entries.remove(0);
+        }
+        entries.push((state_root.to_path_buf(), before));
+    }
+    Ok(pending)
+}
+fn inspect_workspace_maintenance_pending(state_root: &Path) -> Result<bool, MachineError> {
+    #[cfg(test)]
+    ADMISSION_SCANS.with(|count| count.set(count.get() + 1));
     let content_root = state_root.join("result-maintenance");
     let content = content_pending(state_root, None)
         .map_err(|error| admission_namespace_error(&content_root, error))?;
@@ -3083,6 +3165,73 @@ mod content_tests {
     use super::*;
     use crate::controller::{CredentialCarrier, OperatorStore};
     const WORKSPACE_ID: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    #[test]
+    fn shared_admission_reuses_history_and_detects_owner_publications() {
+        let fixture = ContentFixture::new();
+        let root = control_root(&fixture.root).unwrap();
+        let mut last = None;
+        for generation in 1..=200 {
+            let runs = Vec::<RunBasis>::new();
+            let saved = SavedOperation {
+                schema: "dolgorae.native-maintenance-operation/v1".into(),
+                plan: MaintenancePlan {
+                    plan_ref: Uuid::now_v7(),
+                    workspace_ref: WORKSPACE_ID.into(),
+                    selected_generation: generation,
+                    dry_run: true,
+                    kind: "ledger_checkpoint".into(),
+                    admission_closed: true,
+                    active_writers: 0,
+                    unknown_workload: 0,
+                    protected_reference_count: 0,
+                    retire_content: Vec::new(),
+                    retained_receipt_count: 0,
+                    expected_manifest_digest: digest(&runs).unwrap(),
+                },
+                operator_id: fixture.operator.operator_id,
+                operator_generation: fixture.operator.operator_generation,
+                runs,
+                state: "completed".into(),
+                completed_runs: Vec::new(),
+                selected_manifest_digest: String::new(),
+            };
+            persist(&root.join(format!("{}.json", saved.plan.plan_ref)), &saved).unwrap();
+            // Completion normally follows retained ownership. Build that valid
+            // historical pair directly without running 200 empty checkpoints.
+            persist(
+                &root.join(format!("{}.owner.json", saved.plan.plan_ref)),
+                &expected_owner(&saved).unwrap(),
+            )
+            .unwrap();
+            last = Some(saved);
+        }
+        let before = ADMISSION_SCANS.with(|count| count.get());
+        for _ in 0..100 {
+            drop(WorkspaceLease::acquire(&fixture.root, false).unwrap());
+        }
+        assert_eq!(ADMISSION_SCANS.with(|count| count.get()) - before, 1);
+        let mut pending = last.unwrap();
+        pending.plan.plan_ref = Uuid::now_v7();
+        pending.plan.selected_generation = 201;
+        pending.state = "planned".into();
+        let path = root.join(format!("{}.json", pending.plan.plan_ref));
+        persist(&path, &pending).unwrap();
+        retain_owner(&root, &pending).unwrap();
+        assert!(matches!(
+            WorkspaceLease::acquire(&fixture.root, false),
+            Err(LedgerError::WriterBusy(_))
+        ));
+        pending.state = "completed".into();
+        // The same temp+rename publication used by older binaries invalidates
+        // the cached namespace without any cache-specific writer cooperation.
+        persist(&path, &pending).unwrap();
+        drop(WorkspaceLease::acquire(&fixture.root, false).unwrap());
+        fs::remove_file(root.join(format!("{}.owner.json", pending.plan.plan_ref))).unwrap();
+        assert!(matches!(
+            WorkspaceLease::acquire(&fixture.root, false),
+            Err(LedgerError::SecurityPolicy(_))
+        ));
+    }
     struct ContentFixture {
         root: PathBuf,
         operator: OperatorAuthorization,

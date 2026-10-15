@@ -203,6 +203,131 @@ pub struct Ledger<C: LedgerClock = SystemLedgerClock, F: FaultInjector = NoFault
     scheduler: Option<thread::JoinHandle<()>>,
     event_context: Option<EventAppendContext>,
     tail_interaction_revision: u64,
+    submit_admission: Option<SubmitAdmission>,
+}
+
+#[derive(Clone)]
+struct SubmitAdmission {
+    operation_id: Option<String>,
+    admission_id: Option<String>,
+    idempotency_pending: bool,
+    identity_pending: bool,
+    native_pending: bool,
+    writer_intent_pending: bool,
+    writer_pending: bool,
+    bytes: u64,
+}
+impl SubmitAdmission {
+    fn remaining(&self) -> usize {
+        usize::from(self.idempotency_pending)
+            + usize::from(self.identity_pending)
+            + usize::from(self.native_pending)
+            + usize::from(self.writer_intent_pending)
+            + usize::from(self.writer_pending)
+    }
+    fn advance(
+        current: Option<Self>,
+        record: &AuditRecord,
+        line_bytes: u64,
+    ) -> (Option<Self>, bool) {
+        let mut current = current;
+        if let Some(reservation) = &current {
+            let matching_operation = reservation.operation_id.is_some()
+                && payload_string(record.payload(), "operation_id") == reservation.operation_id;
+            let resolved = record.kind() == AuditKind::OutcomeUnknown
+                || (record.kind() == AuditKind::TurnStarted && matching_operation)
+                || (record.kind() == AuditKind::MutationCompleted
+                    && reservation.admission_id.is_some()
+                    && payload_string(record.payload(), "admission_id")
+                        == reservation.admission_id)
+                || (record.kind() == AuditKind::TurnIntent
+                    && matching_operation
+                    && payload_string(record.payload(), "schema").as_deref()
+                        == Some("dolgorae.submit-refusal/v1"));
+            if resolved {
+                return (None, false);
+            }
+        }
+        if record.kind() == AuditKind::MutationAdmitted
+            && matches!(
+                payload_string(record.payload(), "operation").as_deref(),
+                Some("run.submit" | "run.send")
+            )
+        {
+            let write = record
+                .payload_value()
+                .is_ok_and(|value| value["allow_writer_acquire"] == true);
+            return (
+                Some(Self {
+                    operation_id: None,
+                    admission_id: payload_string(record.payload(), "admission_id"),
+                    idempotency_pending: true,
+                    identity_pending: true,
+                    native_pending: !write,
+                    writer_intent_pending: write,
+                    writer_pending: write,
+                    // One maximum-size accepted-input record plus the bounded
+                    // identity/policy controls fit the existing two-line allowance.
+                    bytes: 2 * MAX_AUDIT_LINE_BYTES as u64,
+                }),
+                false,
+            );
+        }
+        let mut continuation = false;
+        if let Some(reservation) = &mut current {
+            if record.kind() == AuditKind::IdempotencyReserved && reservation.idempotency_pending {
+                reservation.operation_id = payload_string(record.payload(), "operation_id");
+                reservation.idempotency_pending = false;
+                continuation = true;
+            } else if record.kind() == AuditKind::WriterAcquired && reservation.writer_pending {
+                reservation.writer_pending = false;
+                continuation = true;
+            } else if record.kind() == AuditKind::TurnIntent {
+                if reservation.identity_pending
+                    && reservation.operation_id.is_some()
+                    && payload_string(record.payload(), "operation_ref") == reservation.operation_id
+                {
+                    reservation.identity_pending = false;
+                    continuation = true;
+                } else if payload_string(record.payload(), "schema").as_deref()
+                    == Some("dolgorae.caller-native-intent/v1")
+                {
+                    match payload_string(record.payload(), "method").as_deref() {
+                        Some("thread/settings/update") if reservation.writer_intent_pending => {
+                            reservation.writer_intent_pending = false;
+                            continuation = true;
+                        }
+                        Some("thread/start")
+                            if reservation.native_pending
+                                && payload_string(record.payload(), "operation_id")
+                                    == reservation.operation_id =>
+                        {
+                            reservation.native_pending = false;
+                            continuation = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if continuation {
+                reservation.bytes = reservation.bytes.saturating_sub(line_bytes);
+            }
+        } else if record.kind() == AuditKind::IdempotencyReserved {
+            current = payload_string(record.payload(), "operation_id")
+                .filter(|id| Uuid::parse_str(id).is_ok())
+                .map(|operation_id| Self {
+                    operation_id: Some(operation_id),
+                    admission_id: None,
+                    idempotency_pending: false,
+                    identity_pending: true,
+                    native_pending: true,
+                    writer_intent_pending: false,
+                    writer_pending: false,
+                    bytes: 2 * MAX_AUDIT_LINE_BYTES as u64,
+                });
+        }
+        (current, continuation)
+    }
 }
 
 impl Ledger<SystemLedgerClock, NoFaults> {
@@ -351,6 +476,21 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         }
         let generation_records = records.len() - generation_start;
         let tail_interaction_revision = interaction_state_revision(&records);
+        let mut submit_admission = None;
+        for record in &records {
+            let line_bytes = if submit_admission.is_some()
+                && matches!(
+                    record.kind(),
+                    AuditKind::IdempotencyReserved
+                        | AuditKind::TurnIntent
+                        | AuditKind::WriterAcquired
+                ) {
+                record.canonical_line()?.len() as u64
+            } else {
+                0
+            };
+            submit_admission = SubmitAdmission::advance(submit_admission, record, line_bytes).0;
+        }
         let mut ledger = Self {
             run_id,
             root,
@@ -374,6 +514,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             scheduler: None,
             event_context: None,
             tail_interaction_revision,
+            submit_admission,
         };
         crate::ledger_generation::retain_activation(&ledger.root, run_id)?;
         if let Some(tail) = tail {
@@ -589,6 +730,18 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             record.kind(),
             AuditKind::TurnIntent | AuditKind::IdempotencyReserved | AuditKind::MutationAdmitted
         );
+        let starting_submit = self.submit_admission.is_none()
+            && (record.kind() == AuditKind::IdempotencyReserved
+                || (record.kind() == AuditKind::MutationAdmitted
+                    && matches!(
+                        payload_string(record.payload(), "operation").as_deref(),
+                        Some("run.submit" | "run.send")
+                    )));
+        let (submit_admission, continuation) =
+            SubmitAdmission::advance(self.submit_admission.clone(), &record, line_bytes);
+        let reserved = submit_admission
+            .as_ref()
+            .map_or(0, SubmitAdmission::remaining);
         check_record_capacity_with_reserve(
             self.ledger_bytes,
             self.generation_records,
@@ -602,7 +755,18 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
                 finalization_record(&record)
             },
             pending,
-            admission,
+            reserved
+                + if admission && !continuation && !starting_submit {
+                    2
+                } else {
+                    0
+                },
+            submit_admission.as_ref().map_or(0, |r| r.bytes)
+                + if admission && !continuation && !starting_submit {
+                    2 * MAX_AUDIT_LINE_BYTES as u64
+                } else {
+                    0
+                },
         )?;
         let candidate_projection = project_next(self.run_id, &self.tail_projection, &record)
             .map_err(|error| {
@@ -629,6 +793,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         }
         self.tail_interaction_revision =
             next_interaction_revision(self.tail_interaction_revision, &record);
+        self.submit_admission = submit_admission;
         self.records.push(record);
         self.generation_records = self.generation_records.saturating_add(1);
         self.ledger_bytes = self.ledger_bytes.saturating_add(line_bytes);
@@ -1515,7 +1680,8 @@ fn check_record_capacity(
         line_bytes,
         finalization,
         0,
-        false,
+        0,
+        0,
     )
 }
 fn check_record_capacity_with_reserve(
@@ -1524,12 +1690,15 @@ fn check_record_capacity_with_reserve(
     line_bytes: u64,
     finalization: bool,
     pending_interactions: usize,
-    admission: bool,
+    admission_reserved_records: usize,
+    admission_reserved_bytes: u64,
 ) -> Result<(), LedgerError> {
     let extra_records = pending_interactions
         .saturating_mul(2)
-        .saturating_add(if admission { 2 } else { 0 });
-    let extra_bytes = (extra_records as u64).saturating_mul(MAX_AUDIT_LINE_BYTES as u64);
+        .saturating_add(admission_reserved_records);
+    let extra_bytes = (pending_interactions.saturating_mul(2) as u64)
+        .saturating_mul(MAX_AUDIT_LINE_BYTES as u64)
+        .saturating_add(admission_reserved_bytes);
     let (byte_limit, record_limit) = if finalization {
         (MAX_LEDGER_BYTES, MAX_LEDGER_RECORDS)
     } else {
@@ -1775,7 +1944,7 @@ pub(crate) struct ObservedPolicyInputs {
 }
 
 const DISPLAY_CACHE_ENTRIES: usize = 16;
-const DISPLAY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+const DISPLAY_CACHE_BYTES: u64 = 512 * 1024 * 1024;
 const DISPLAY_CACHE_LIFETIME: Duration = Duration::from_secs(120);
 static OBSERVATION_FULL_REPLAYS: AtomicU64 = AtomicU64::new(0);
 static OBSERVATION_TAIL_RECORDS: AtomicU64 = AtomicU64::new(0);
@@ -1815,7 +1984,13 @@ struct DisplayPrefix {
 }
 
 type DisplayCacheSlot = Arc<Mutex<Option<DisplayPrefix>>>;
-type DisplayCache = Vec<((PathBuf, Uuid), DisplayCacheSlot)>;
+struct DisplayCacheEntry {
+    key: (PathBuf, Uuid),
+    slot: DisplayCacheSlot,
+    retained_bytes: u64,
+    last_used: Instant,
+}
+type DisplayCache = Vec<DisplayCacheEntry>;
 static DISPLAY_CACHE: OnceLock<Mutex<DisplayCache>> = OnceLock::new();
 
 fn display_slot(root: &Path, run_id: Uuid) -> Result<DisplayCacheSlot, LedgerError> {
@@ -1823,33 +1998,103 @@ fn display_slot(root: &Path, run_id: Uuid) -> Result<DisplayCacheSlot, LedgerErr
     // not become a valid cache alias by canonicalization.
     verify_secure_directory(root, current_uid()).map_err(machine_as_security)?;
     let key = (fs::canonicalize(root)?, run_id);
+    // Drop retired captures only after the registry guard (declared below).
+    // Releasing a large capture must not stall unrelated Run lookups.
+    let mut retired = Vec::new();
     let mut cache = DISPLAY_CACHE
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
         .map_err(|_| LedgerError::Integrity("display cache poisoned".to_owned()))?;
-    cache.retain(|(_, slot)| {
-        // Never block the global registry on another Run's file work.
-        slot.try_lock().map_or(true, |prefix| {
-            prefix
-                .as_ref()
-                .is_none_or(|prefix| prefix.last_used.elapsed() < DISPLAY_CACHE_LIFETIME)
-        })
-    });
-    if let Some(index) = cache.iter().position(|(candidate, _)| candidate == &key) {
-        let entry = cache.remove(index);
-        let slot = Arc::clone(&entry.1);
+    // This registry never takes a Run's slot lock, even for expiration.
+    let mut index = 0;
+    while index < cache.len() {
+        if cache[index].last_used.elapsed() >= DISPLAY_CACHE_LIFETIME {
+            retired.push(cache.remove(index));
+        } else {
+            index += 1;
+        }
+    }
+    if let Some(index) = cache.iter().position(|entry| entry.key == key) {
+        let mut entry = cache.remove(index);
+        entry.last_used = Instant::now();
+        let slot = Arc::clone(&entry.slot);
         cache.push(entry);
         return Ok(slot);
     }
     if cache.len() >= DISPLAY_CACHE_ENTRIES {
-        cache.remove(0);
+        retired.push(cache.remove(0));
     }
     let slot = Arc::new(Mutex::new(None));
-    cache.push((key, Arc::clone(&slot)));
+    cache.push(DisplayCacheEntry {
+        key,
+        slot: Arc::clone(&slot),
+        retained_bytes: 0,
+        last_used: Instant::now(),
+    });
     Ok(slot)
 }
 
+fn account_display_retention(
+    cache: &mut DisplayCache,
+    slot: &DisplayCacheSlot,
+    bytes: u64,
+    budget: u64,
+    retired: &mut Vec<DisplayCacheEntry>,
+) -> bool {
+    let Some(index) = cache
+        .iter()
+        .position(|entry| Arc::ptr_eq(&entry.slot, slot))
+    else {
+        // A capture evicted while doing file work stays private to its reader.
+        return false;
+    };
+    if bytes > budget {
+        cache[index].retained_bytes = 0;
+        return false;
+    }
+    cache[index].retained_bytes = bytes;
+    cache[index].last_used = Instant::now();
+    while cache.iter().map(|entry| entry.retained_bytes).sum::<u64>() > budget {
+        let victim = cache
+            .iter()
+            .position(|entry| !Arc::ptr_eq(&entry.slot, slot))
+            .expect("one fitting capture cannot exceed its budget alone");
+        retired.push(cache.remove(victim));
+    }
+    true
+}
+
+fn retain_display_bytes(slot: &DisplayCacheSlot, bytes: u64) -> Result<bool, LedgerError> {
+    let mut retired = Vec::new();
+    let mut cache = DISPLAY_CACHE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map_err(|_| LedgerError::Integrity("display cache poisoned".to_owned()))?;
+    Ok(account_display_retention(
+        &mut cache,
+        slot,
+        bytes,
+        DISPLAY_CACHE_BYTES,
+        &mut retired,
+    ))
+}
+
+fn clear_display_prefix(
+    slot: &DisplayCacheSlot,
+    prefix: &mut Option<DisplayPrefix>,
+) -> Result<(), LedgerError> {
+    *prefix = None;
+    retain_display_bytes(slot, 0).map(|_| ())
+}
+
 fn display_append_prefix(path: &Path, length: u64) -> Result<String, LedgerError> {
+    Ok(format!(
+        "{:x}",
+        display_append_hasher(path, length)?.finalize()
+    ))
+}
+
+fn display_append_hasher(path: &Path, length: u64) -> Result<Sha256, LedgerError> {
     verify_secure_file(path, current_uid()).map_err(machine_as_security)?;
     let mut file = OpenOptions::new()
         .read(true)
@@ -1869,13 +2114,14 @@ fn display_append_prefix(path: &Path, length: u64) -> Result<String, LedgerError
         hash.update(&buffer[..n]);
         remaining -= n as u64;
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hash)
 }
 
 fn display_extend(
-    prefix: &DisplayPrefix,
+    prefix: &mut DisplayPrefix,
     run_id: Uuid,
     head: u64,
+    mut hash: Sha256,
 ) -> Result<(Arc<Vec<AuditRecord>>, u64, String), LedgerError> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -1890,9 +2136,10 @@ fn display_extend(
     }
     file.seek(SeekFrom::Start(prefix.append_offset))?;
     let mut reader = BufReader::new(file);
-    let mut records = prefix.records.as_ref().clone();
+    let mut records = std::mem::take(&mut prefix.records);
+    let selected = Arc::make_mut(&mut records);
     let mut offset = prefix.append_offset;
-    while records.len() < usize::try_from(head).unwrap_or(usize::MAX) {
+    while selected.len() < usize::try_from(head).unwrap_or(usize::MAX) {
         let Some((mut line, terminated)) = read_bounded_segment(&mut reader)? else {
             return Err(LedgerError::Integrity(
                 "published suffix is below the committed head".to_owned(),
@@ -1904,13 +2151,14 @@ fn display_extend(
             ));
         }
         offset += line.len() as u64;
+        hash.update(&line);
         line.pop();
         let record = AuditRecord::from_canonical_line(&line)
             .map_err(|error| LedgerError::Integrity(error.to_string()))?;
         if record.run_id() != run_id
-            || record.sequence() != records.len() as u64 + 1
+            || record.sequence() != selected.len() as u64 + 1
             || record.previous_hash()
-                != records
+                != selected
                     .last()
                     .map_or(GENESIS_PREVIOUS_HASH, AuditRecord::hash)
         {
@@ -1918,10 +2166,9 @@ fn display_extend(
                 "display suffix does not continue the verified chain".to_owned(),
             ));
         }
-        records.push(record);
+        selected.push(record);
     }
-    let hash = display_append_prefix(&prefix.append_path, offset)?;
-    Ok((Arc::new(records), offset, hash))
+    Ok((records, offset, format!("{:x}", hash.finalize())))
 }
 
 #[cfg(test)]
@@ -1947,8 +2194,8 @@ impl ObservedLedger {
     /// Display-only verified prefix reuse. Never use this to establish absence,
     /// authorize a mutation, release a writer or replace a worker generation.
     pub fn open_display(root: &Path, run_id: Uuid, head: u64) -> Result<Self, LedgerError> {
-        let slot = display_slot(root, run_id)?;
-        let mut slot = slot
+        let cache_slot = display_slot(root, run_id)?;
+        let mut slot = cache_slot
             .lock()
             .map_err(|_| LedgerError::Integrity("display prefix poisoned".to_owned()))?;
         let mut captured_head_hash: Option<String> = None;
@@ -1989,28 +2236,51 @@ impl ObservedLedger {
                                 && new.links == old.links
                                 && new.length >= prefix.append_offset
                         });
-                    if append_only
-                        && head >= prefix.records.len() as u64
-                        && display_append_prefix(&prefix.append_path, prefix.append_offset)?
-                            == prefix.append_hash
+                    let verified_prefix = if append_only && head >= prefix.records.len() as u64 {
+                        Some(display_append_hasher(
+                            &prefix.append_path,
+                            prefix.append_offset,
+                        )?)
+                    } else {
+                        None
+                    };
+                    if let Some(hash) = verified_prefix
+                        && format!("{:x}", hash.clone().finalize()) == prefix.append_hash
                     {
                         let old_len = prefix.records.len();
-                        let (records, offset, hash) = display_extend(prefix, run_id, head)?;
+                        let (records, offset, hash) =
+                            match display_extend(prefix, run_id, head, hash) {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    clear_display_prefix(&cache_slot, &mut slot)?;
+                                    return Err(error);
+                                }
+                            };
                         captured_head_hash = records.last().map(|record| record.hash().to_owned());
                         #[cfg(test)]
                         display_capture_test_fence(run_id);
-                        if crate::ledger_generation::observation_identity(root, &prefix.referenced)?
-                            != sources
-                        {
+                        let final_sources = match crate::ledger_generation::observation_identity(
+                            root,
+                            &prefix.referenced,
+                        ) {
+                            Ok(result) => result,
+                            Err(error) => {
+                                clear_display_prefix(&cache_slot, &mut slot)?;
+                                return Err(error);
+                            }
+                        };
+                        if final_sources != sources {
+                            clear_display_prefix(&cache_slot, &mut slot)?;
                             continue;
                         }
                         OBSERVATION_TAIL_RECORDS
                             .fetch_add((records.len() - old_len) as u64, Ordering::Relaxed);
                         let additional_bytes = offset.saturating_sub(prefix.append_offset);
-                        if prefix.retained_bytes.saturating_add(additional_bytes)
-                            > DISPLAY_CACHE_BYTES
-                        {
-                            *slot = None;
+                        if !retain_display_bytes(
+                            &cache_slot,
+                            prefix.retained_bytes.saturating_add(additional_bytes),
+                        )? {
+                            clear_display_prefix(&cache_slot, &mut slot)?;
                             return Ok(Self {
                                 records,
                                 head,
@@ -2033,7 +2303,7 @@ impl ObservedLedger {
                 }
                 OBSERVATION_INVALIDATIONS.fetch_add(1, Ordering::Relaxed);
             }
-            *slot = None;
+            clear_display_prefix(&cache_slot, &mut slot)?;
             let pin = crate::ledger_generation::pin(root, run_id)?;
             let sources =
                 crate::ledger_generation::observation_identity(root, &pin.observation_paths)?;
@@ -2061,7 +2331,7 @@ impl ObservedLedger {
                 continue;
             }
             let derived = Arc::new(ObservedLedgerDerived::default());
-            if head >= watermark && retained_bytes <= DISPLAY_CACHE_BYTES {
+            if head >= watermark && retain_display_bytes(&cache_slot, retained_bytes)? {
                 *slot = Some(DisplayPrefix {
                     sources,
                     referenced: pin.observation_paths,
@@ -2689,6 +2959,196 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_display_budget_evicts_idle_ownership_and_preserves_existing_readers() {
+        let mut cache = DisplayCache::new();
+        let mut retired = Vec::new();
+        let mut slots = Vec::new();
+        let mut reader = None;
+        let mut size = 0;
+        for _ in 0..3 {
+            let run_id = Uuid::now_v7();
+            let record = AuditRecord::new(
+                1,
+                "2026-10-15T00:00:00.000000Z",
+                run_id,
+                1,
+                AuditKind::RunCreated,
+                parse("{}").unwrap(),
+                GENESIS_PREVIOUS_HASH,
+            )
+            .unwrap();
+            size = record.canonical_line().unwrap().len() as u64;
+            let records = Arc::new(vec![record]);
+            if reader.is_none() {
+                reader = Some(Arc::clone(&records));
+            }
+            let slot = Arc::new(Mutex::new(None));
+            cache.push(DisplayCacheEntry {
+                key: (PathBuf::from("fixture"), run_id),
+                slot: Arc::clone(&slot),
+                retained_bytes: 0,
+                last_used: Instant::now(),
+            });
+            assert!(account_display_retention(
+                &mut cache,
+                &slot,
+                size,
+                2 * size,
+                &mut retired
+            ));
+            *slot.lock().unwrap() = Some(DisplayPrefix {
+                sources: Vec::new(),
+                referenced: Vec::new(),
+                records,
+                derived: Arc::new(ObservedLedgerDerived::default()),
+                append_path: PathBuf::new(),
+                append_offset: size,
+                append_hash: String::new(),
+                retained_bytes: size,
+                base_bytes: 0,
+                watermark: 0,
+                last_used: Instant::now(),
+            });
+            slots.push(slot);
+        }
+        assert_eq!(cache.len(), 2);
+        assert!(
+            !cache
+                .iter()
+                .any(|entry| Arc::ptr_eq(&entry.slot, &slots[0]))
+        );
+        assert!(reader.unwrap()[0].verify_hash());
+        assert_eq!(retired.len(), 1);
+        assert!(Arc::ptr_eq(&retired[0].slot, &slots[0]));
+        drop(retired.pop());
+        // A late capture on an evicted slot cannot reinsert or charge itself.
+        assert!(!account_display_retention(
+            &mut cache,
+            &slots[0],
+            size,
+            2 * size,
+            &mut retired
+        ));
+        assert_eq!(
+            cache.iter().map(|entry| entry.retained_bytes).sum::<u64>(),
+            2 * size
+        );
+        // An oversized capture bypasses reuse without evicting its neighbors.
+        assert!(!account_display_retention(
+            &mut cache,
+            &slots[2],
+            2 * size + 1,
+            2 * size,
+            &mut retired
+        ));
+        *slots[2].lock().unwrap() = None;
+        assert_eq!(cache.len(), 2);
+        assert_eq!(
+            cache.iter().map(|entry| entry.retained_bytes).sum::<u64>(),
+            size
+        );
+        *slots[1].lock().unwrap() = None;
+        assert!(account_display_retention(
+            &mut cache,
+            &slots[1],
+            0,
+            2 * size,
+            &mut retired
+        ));
+        assert_eq!(
+            cache.iter().map(|entry| entry.retained_bytes).sum::<u64>(),
+            0
+        );
+    }
+
+    #[test]
+    #[ignore = "explicit isolated large-history cost probe"]
+    fn large_display_history_reports_reuse_boundary_without_reducing_capacity() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        for mebibytes in [5_u64, 40, 160] {
+            let root =
+                std::env::temp_dir().join(format!("dolgorae-large-display-{}", Uuid::now_v7()));
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let run_id = Uuid::now_v7();
+            let path = root.join("audit.jsonl");
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap();
+            let payload = serde_json::to_vec(
+                &serde_json::json!({"method":"fixture/large","body":"x".repeat(1024 * 1024)}),
+            )
+            .unwrap();
+            let mut previous = GENESIS_PREVIOUS_HASH.to_owned();
+            for sequence in 1..=mebibytes {
+                let record = AuditRecord::new_represented(
+                    sequence,
+                    "2026-10-15T00:00:00.000000Z",
+                    run_id,
+                    1,
+                    AuditKind::AppServerNotification,
+                    &payload,
+                    &previous,
+                )
+                .unwrap();
+                previous = record.hash().to_owned();
+                file.write_all(&record.canonical_line().unwrap()).unwrap();
+            }
+            file.sync_all().unwrap();
+            drop(file);
+            let baseline = observation_counters();
+            let mut millis = Vec::new();
+            for _ in 0..3 {
+                let started = Instant::now();
+                let observed = ObservedLedger::open_display(&root, run_id, mebibytes).unwrap();
+                assert_eq!(observed.records().len() as u64, mebibytes);
+                assert_eq!(observed.records().last().unwrap().hash(), previous);
+                millis.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            let after = observation_counters();
+            let full = after.full_replays - baseline.full_replays;
+            let hits = after.cache_hits - baseline.cache_hits;
+            assert_eq!(full, 1);
+            assert_eq!(hits, 2);
+            let small =
+                serde_json::to_vec(&serde_json::json!({"method":"fixture/tail","body":"delta"}))
+                    .unwrap();
+            let mut writer = OpenOptions::new().append(true).open(&path).unwrap();
+            for sequence in mebibytes + 1..=mebibytes + 10 {
+                let record = AuditRecord::new_represented(
+                    sequence,
+                    "2026-10-15T00:00:00.000001Z",
+                    run_id,
+                    1,
+                    AuditKind::AppServerNotification,
+                    &small,
+                    &previous,
+                )
+                .unwrap();
+                previous = record.hash().to_owned();
+                writer.write_all(&record.canonical_line().unwrap()).unwrap();
+            }
+            writer.sync_all().unwrap();
+            drop(writer);
+            let started = Instant::now();
+            let extended = ObservedLedger::open_display(&root, run_id, mebibytes + 10).unwrap();
+            let extension_ms = started.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(extended.records().last().unwrap().hash(), previous);
+            assert_eq!(observation_counters().full_replays, after.full_replays);
+            assert_eq!(observation_counters().tail_records - after.tail_records, 10);
+            println!(
+                "large_display_probe={}",
+                serde_json::json!({
+                "source_bytes":fs::metadata(&path).unwrap().len(),"sample_ms":millis,
+                "full_replays":full,"cache_hits":hits,"extension_ms":extension_ms,"tail_records":10})
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
     use crate::audit::is_microsecond_utc_timestamp;
 
     #[test]
@@ -2955,6 +3415,190 @@ mod tests {
         assert!(check_append_capacity(MAX_LEDGER_BYTES, MAX_LEDGER_RECORDS - 1, 1).is_err());
         assert!(check_append_capacity(0, MAX_LEDGER_RECORDS, 1).is_err());
     }
+    #[test]
+    fn prepared_submit_reserves_read_and_write_chains_across_reopen() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        for write in [false, true] {
+            for record_bound in [false, true] {
+                for offset in [-1_i64, 0, 1] {
+                    let root = std::env::temp_dir()
+                        .join(format!("dolgorae-prepared-reserve-{}", Uuid::now_v7()));
+                    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+                    fs::DirBuilder::new()
+                        .mode(0o700)
+                        .create(root.join("recovery"))
+                        .unwrap();
+                    OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(root.join("audit.jsonl"))
+                        .unwrap();
+                    let run_id = Uuid::now_v7();
+                    let mut ledger = Ledger::open(&root, run_id).unwrap();
+                    let admission_id = Uuid::now_v7();
+                    let payload = serde_json::json!({"admission_id":admission_id,"operation":"run.submit","allow_writer_acquire":write});
+                    let record = AuditRecord::new(
+                        ledger.next_sequence(),
+                        ledger.clock.timestamp(),
+                        run_id,
+                        1,
+                        AuditKind::MutationAdmitted,
+                        parse(&payload.to_string()).unwrap(),
+                        ledger.previous_hash(),
+                    )
+                    .unwrap();
+                    if record_bound {
+                        ledger.generation_records = ((MAX_LEDGER_RECORDS
+                            - FINALIZATION_RESERVED_RECORDS
+                            - if write { 5 } else { 4 })
+                            as i64
+                            + offset) as usize;
+                    } else {
+                        ledger.ledger_bytes = ((MAX_LEDGER_BYTES
+                            - FINALIZATION_RESERVED_BYTES
+                            - 2 * MAX_AUDIT_LINE_BYTES as u64
+                            - record.canonical_line().unwrap().len() as u64)
+                            as i64
+                            + offset) as u64;
+                    }
+                    let admitted = ledger.append(record, AppendDurability::Required);
+                    if offset == 1 {
+                        assert!(matches!(admitted, Err(LedgerError::Capacity(_))));
+                        assert!(fs::read(root.join("audit.jsonl")).unwrap().is_empty());
+                        drop(ledger);
+                        fs::remove_dir_all(root).unwrap();
+                        continue;
+                    }
+                    admitted.unwrap();
+                    let capacity = (ledger.ledger_bytes, ledger.generation_records);
+                    drop(ledger);
+                    let mut ledger = Ledger::open(&root, run_id).unwrap();
+                    ledger.ledger_bytes = capacity.0;
+                    ledger.generation_records = capacity.1;
+                    assert_eq!(
+                        ledger.submit_admission.as_ref().unwrap().remaining(),
+                        if write { 4 } else { 3 }
+                    );
+                    if write {
+                        ledger.append_required_payload(AuditKind::TurnIntent, &serde_json::json!({
+                            "schema":"dolgorae.caller-native-intent/v1","operation_id":Uuid::now_v7(),"method":"thread/settings/update"}), 1).unwrap();
+                        ledger.append_required_payload(AuditKind::WriterAcquired,
+                            &serde_json::json!({"writer_generation":1,"transaction_id":Uuid::now_v7()}), 1).unwrap();
+                    }
+                    let operation = Uuid::now_v7();
+                    ledger.append_required_payload(AuditKind::IdempotencyReserved,
+                        &serde_json::json!({"operation_id":operation,"idempotency_key":"prepared"}), 1).unwrap();
+                    ledger
+                        .append_required_payload(
+                            AuditKind::TurnIntent,
+                            &serde_json::json!({"operation_ref":operation,"schema_version":2}),
+                            1,
+                        )
+                        .unwrap();
+                    if !write {
+                        ledger.append_required_payload(AuditKind::TurnIntent, &serde_json::json!({
+                            "schema":"dolgorae.caller-native-intent/v1","operation_id":operation,"method":"thread/start"}), 1).unwrap();
+                    }
+                    assert_eq!(ledger.submit_admission.as_ref().unwrap().remaining(), 0);
+                    ledger
+                        .append_required_payload(
+                            AuditKind::TurnStarted,
+                            &serde_json::json!({"operation_id":operation,"turn_id":"accepted"}),
+                            1,
+                        )
+                        .unwrap();
+                    assert!(ledger.submit_admission.is_none());
+                    ledger
+                        .append_required_payload(
+                            AuditKind::TurnTerminal,
+                            &serde_json::json!({"turn_id":"accepted"}),
+                            1,
+                        )
+                        .unwrap();
+                    drop(ledger);
+                    fs::remove_dir_all(root).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn submit_pre_effect_records_consume_one_operation_reservation() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        for record_bound in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("dolgorae-submit-reserve-{}", Uuid::now_v7()));
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(root.join("recovery"))
+                .unwrap();
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(root.join("audit.jsonl"))
+                .unwrap();
+            let mut ledger = Ledger::open(&root, Uuid::now_v7()).unwrap();
+            if record_bound {
+                ledger.generation_records = MAX_LEDGER_RECORDS - FINALIZATION_RESERVED_RECORDS - 3;
+            } else {
+                ledger.ledger_bytes = MAX_LEDGER_BYTES
+                    - FINALIZATION_RESERVED_BYTES
+                    - 2 * MAX_AUDIT_LINE_BYTES as u64
+                    - 1024;
+            }
+            let operation = Uuid::now_v7();
+            ledger
+                .append_required_payload(
+                    AuditKind::IdempotencyReserved,
+                    &serde_json::json!({"operation_id":operation,"idempotency_key":"reserved"}),
+                    1,
+                )
+                .unwrap();
+            let bytes = fs::read(root.join("audit.jsonl")).unwrap();
+            // Another operation cannot spend the original Submit's slots.
+            assert!(matches!(
+                ledger.append_required_payload(
+                    AuditKind::TurnIntent,
+                    &serde_json::json!({"operation_ref":Uuid::now_v7(),"schema_version":2}),
+                    1
+                ),
+                Err(LedgerError::Capacity(_))
+            ));
+            assert_eq!(fs::read(root.join("audit.jsonl")).unwrap(), bytes);
+            ledger
+                .append_required_payload(
+                    AuditKind::TurnIntent,
+                    &serde_json::json!({"operation_ref":operation,"schema_version":2}),
+                    1,
+                )
+                .unwrap();
+            ledger.append_required_payload(AuditKind::TurnIntent,
+                &serde_json::json!({"operation_id":operation,"schema":"dolgorae.caller-native-intent/v1","method":"thread/start"}), 1).unwrap();
+            assert_eq!(ledger.durable_records().unwrap().len(), 3);
+            assert_eq!(ledger.submit_admission.as_ref().unwrap().remaining(), 0);
+            ledger
+                .append_required_payload(
+                    AuditKind::TurnStarted,
+                    &serde_json::json!({"operation_id":operation,"turn_id":"accepted"}),
+                    1,
+                )
+                .unwrap();
+            assert!(ledger.submit_admission.is_none());
+            ledger
+                .append_required_payload(
+                    AuditKind::TurnTerminal,
+                    &serde_json::json!({"turn_id":"accepted"}),
+                    1,
+                )
+                .unwrap();
+            drop(ledger);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[test]
     fn ordinary_exhaustion_preserves_terminal_close_and_cleanup_appends() {
         use std::os::unix::fs::DirBuilderExt as _;

@@ -416,7 +416,9 @@ pub(crate) fn lookup(records: &[AuditRecord], namespace: &Namespace) -> Result<V
                     &namespace.workspace_ref,
                     record.run_id(),
                     &namespace.idempotency_key,
-                )? != *namespace
+                )
+                .map_err(|_| invalid("accepted Controller identity is invalid"))?
+                    != *namespace
                 {
                     return Err(invalid(
                         "accepted Controller differs from original namespace",
@@ -486,7 +488,7 @@ pub(crate) fn lookup(records: &[AuditRecord], namespace: &Namespace) -> Result<V
             .any(|intent| intent.idempotency_key == namespace.idempotency_key)
         {
             return Err(TurnError::InvalidInput(
-                "legacy operation has no retained successor namespace",
+                "operation key exists outside the requested successor namespace",
             ));
         }
         return Ok(
@@ -624,6 +626,46 @@ mod tests {
         let mut invalid = vector["input"].clone();
         invalid["secret"] = json!("forbidden");
         assert!(serde_json::from_value::<Envelope>(invalid).is_err());
+    }
+
+    #[test]
+    fn corrupt_accepted_controller_is_integrity_failure_instead_of_namespace_refusal() {
+        for generation in [0, 9_007_199_254_740_992] {
+            let run = Uuid::now_v7();
+            let mut accepted_controller = controller();
+            let request = request();
+            let namespace = Namespace::submit(
+                &accepted_controller,
+                "workspace",
+                run,
+                &request.idempotency_key,
+            )
+            .unwrap();
+            let identity =
+                SubmitIdentity::prepare(Uuid::now_v7(), namespace.clone(), &request, "medium")
+                    .unwrap();
+            let mut records = Vec::new();
+            reserve(&mut records, run, &identity, &request);
+            record(
+                &mut records,
+                run,
+                AuditKind::ThreadBound,
+                json!({"thread_id":"original-thread"}),
+            );
+            accepted_controller.generation = generation;
+            record(
+                &mut records,
+                run,
+                AuditKind::TurnStarted,
+                json!({
+                "operation_id":identity.operation_ref,"thread_id":"original-thread",
+                "turn_id":"original-turn","effort":"medium","acceptance_controller":accepted_controller}),
+            );
+            assert!(matches!(
+                lookup(&records, &namespace),
+                Err(TurnError::Journal(_))
+            ));
+        }
     }
 
     #[test]

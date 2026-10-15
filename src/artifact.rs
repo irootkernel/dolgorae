@@ -692,6 +692,15 @@ fn read_artifact_range(
 /// Serializes the logical per-Run quota check with artifact publication.
 pub struct ArtifactQuotaLease(std::fs::File);
 impl ArtifactQuotaLease {
+    pub(crate) fn acquire_for_run(directory: &Path, run_id: Uuid) -> Result<Self, MachineError> {
+        Self::acquire(directory).map_err(|mut error| {
+            if error.code == "RUN_BUSY" {
+                error.retryable = true;
+                error.details = json!({"run_id":run_id,"owner_kind":"attachment"});
+            }
+            error
+        })
+    }
     pub fn acquire(directory: &Path) -> Result<Self, MachineError> {
         use std::os::unix::fs::OpenOptionsExt as _;
         let system = crate::darwin::DarwinSystem;
@@ -1152,9 +1161,15 @@ mod tests {
             logical_artifact_bytes(&directory).unwrap(),
             MAX_RUN_ARTIFACT_BYTES + 1
         );
+        let run_id = Uuid::now_v7();
+        let busy = ArtifactQuotaLease::acquire_for_run(&directory, run_id)
+            .err()
+            .unwrap();
+        assert_eq!(busy.code, "RUN_BUSY");
+        assert!(busy.retryable);
         assert_eq!(
-            ArtifactQuotaLease::acquire(&directory).err().unwrap().code,
-            "RUN_BUSY"
+            busy.details,
+            json!({"run_id":run_id,"owner_kind":"attachment"})
         );
         drop(lease);
         std::fs::remove_dir_all(directory).unwrap();

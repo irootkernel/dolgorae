@@ -24,8 +24,14 @@ and accepted identity, including released members. Its checkpoint retains the
 latest facts for each member and the absolute revision and chain head; new
 records continue that head rather than restarting at revision one. Active and
 unknown members remain protected. Compaction performs no content retirement.
+Checkpoint files have a separate 64 MiB bound so distinct retained members do
+not exhaust compaction at the append journal's 8 MiB boundary. Operator
+maintenance can validate a legacy source journal up to 64 MiB and retain its
+complete original bytes; ordinary append admission keeps its 8 MiB ceiling.
 Binding maintenance preserves the immutable name, definition, server and launch
 snapshot identities and retains the original bytes needed for audit and recovery.
+Ordinary binding updates use the same compact representation as maintenance,
+so a subsequent binding does not consume recovered capacity on formatting.
 
 ## Locking and crash recovery
 
@@ -35,12 +41,22 @@ are required. Maintenance excludes competing journal writers without treating
 an active or unknown member as released. Readers pin one checked generation and
 never combine checkpoint and append files from different selections.
 
+Compaction does not require Run quiescence or an exclusive workspace ledger
+lease. The home-root and Profile Server locks stabilize membership and binding
+sources, including active and unknown members. Run ledger heads recorded by a
+plan are observation provenance; unrelated Turn progress does not invalidate a
+membership-preserving plan. Run bindings remain planning provenance. Apply
+revalidates the generation, journal digest and protected references of each
+Profile in the retained plan, plus the complete binding-history digest. An
+unrelated Run publication or removal does not change that operation's scope.
+
 Profile operation sidecars occupy the workspace's `profile-maintenance`
 namespace; ledger operation sidecars retain their separate `maintenance`
 namespace and generation. The [native Profile sidecar schema](../protocol/dolgorae-native-profile-maintenance-v1.schema.json)
 checks their persisted shapes. An operator-approved retained dry-run plan binds
-the complete source, target, operator and original operation identity. Preparation writes and syncs retained
-history, checkpoint, append and manifest files and their directories before
+the complete source, target, operator and original operation identity.
+Preparation writes and syncs retained history, checkpoint, append and manifest
+files and their directories before
 atomic selection. Every selection and completion boundary can resume that
 original operation. An unavailable or damaged namespace cannot establish
 absence. Old reader and recovery files remain; no automatic deletion or pruning
@@ -50,12 +66,12 @@ an accepted identity. Protected-reference retirement remains explicit later work
 Once an immutable owner is retained, Get reports the obligation to resume even
 before progress starts. Completion retains that obligation until the operation's
 global admission marker is durably released. Completed membership remains
-subject to current selection, append, derived
-index and server consistency checks while that admission is retained. After
+subject to current selection, append, derived index and server consistency
+checks while that admission is retained. After
 release, legitimate subsequent generations do not invalidate the retained
 completion receipt. Credential rotation preserves the same operator identity's
-ability to resume an owned operation. Get and Apply
-never recreate a missing operation namespace; a healthy independent global owner
+ability to resume an owned operation. Get and Apply never recreate a missing
+operation namespace; a healthy independent global owner
 preserves the original operation reference when workspace sidecars are damaged.
 While admission remains owned, binding completion verifies the selected compact
 bytes against the retained original source. After admission is released, later
@@ -85,13 +101,20 @@ appends another close transition. Successful durable release clears that
 obligation. Uncertain or corrupt membership continues to block destructive
 Profile lifecycle operations until their existing authority can prove safety.
 
+Display sampling never creates a Profile directory or lock and never waits on
+the home-root or Profile Server lock. It compares the derived member projection
+with the checked selected checkpoint and append, retaining its current head and
+source identities. Unchanged captures may be shared between closed Runs on that
+Profile. A busy or changing source retains the cleanup indication. This display
+capture does not verify historical segment bytes or authorize release; repeated
+Close and destructive lifecycle operations retain their fresh complete proof.
+
 ## Required verification
 
 The native cases cover 10,000 synthetic membership attach/release cycles with
 selected journal growth recorded, each maintenance crash boundary, concurrent
 readers/writers, active and unknown members, malformed and over-cap input, and
-failed membership
-release after a successful Close. The cleanup case preserves terminal bytes and
+failed membership release after a successful Close. The cleanup case preserves terminal bytes and
 receipt/cursor identity across observation and retry. These isolated tests and
 the complete repository gate establish native component behavior; they do not
 qualify an actual Gul consumer or an account-backed Codex runtime.

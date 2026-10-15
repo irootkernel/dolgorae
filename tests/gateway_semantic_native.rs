@@ -3433,6 +3433,206 @@ fn caller_close_cleanup_retains_terminal_history_and_checked_recovery() {
 }
 
 #[test]
+fn native_profile_compaction_preserves_live_and_unknown_members() {
+    use dolgorae::global_runtime::{GlobalMembershipStore, MembershipDisposition};
+    use dolgorae::paths::DolgoraeHome;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = Fixture::new("run_start_model_list.json");
+    let id = fixture.start_run(&[]);
+    let closing = fixture.start_run(&[]);
+    let home = DolgoraeHome::from_canonical_home(fixture.home.clone()).unwrap();
+    let membership =
+        GlobalMembershipStore::new(&home, &fixture.profile, &fixture.server_key).unwrap();
+    let unknown_id = Uuid::now_v7();
+    let mut before = membership
+        .record(&"7".repeat(64), unknown_id, MembershipDisposition::Unknown)
+        .unwrap();
+    let profile_root = home.root().join("profiles").join(&fixture.server_key);
+    let journal = profile_root.join("membership.jsonl");
+    // Blank JSONL separators are valid retained source bytes. Fill the exact
+    // physical boundary without manufacturing thousands of unrelated Runs.
+    let mut bytes = fs::read(&journal).unwrap();
+    bytes.resize(8 * 1024 * 1024, b'\n');
+    fs::write(&journal, &bytes).unwrap();
+    before.journal_sha256 = dolgorae::jcs::sha256_hex(&bytes);
+    fs::write(
+        profile_root.join("members.json"),
+        serde_json::to_vec(&before).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(membership.load().unwrap(), before);
+    let close = [
+        "run",
+        "close",
+        &closing,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--controller-file",
+        fixture.controller.to_str().unwrap(),
+    ];
+    let closed = fixture.cli(&close);
+    assert_eq!(closed["state"], "closed");
+    assert_eq!(
+        closed["recovery"]["reason"],
+        "profile_membership_cleanup_required"
+    );
+    let closed_history = audit(&fixture, &closing);
+    assert_eq!(
+        before.members[&format!("{}:{id}", fixture.workspace_id)].disposition,
+        MembershipDisposition::Active
+    );
+    let run_history = audit(&fixture, &id);
+    let plan = fixture.cli(&[
+        "maintenance",
+        "plan",
+        "--kind",
+        "membership_compaction",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+        "--selected-generation",
+        "1",
+    ])["plan"]
+        .clone();
+    assert!(plan["protected_reference_count"].as_u64().unwrap() >= 3);
+    // A Start retry can publish its Run before membership admission encounters
+    // the full journal. That unrelated publication must not stale compaction.
+    let runs = dolgorae::run::RunStore::new(SystemWorkspacePlatform, &fixture.state_root);
+    let mut retry = runs.load_manifest(Uuid::parse_str(&id).unwrap()).unwrap();
+    retry.run_id = Uuid::now_v7();
+    runs.publish(&retry).unwrap();
+    assert_eq!(
+        membership
+            .record(
+                &fixture.workspace_id,
+                retry.run_id,
+                MembershipDisposition::Active
+            )
+            .unwrap_err()
+            .code,
+        "STORAGE_CAPACITY_EXCEEDED"
+    );
+    assert_eq!(membership.load().unwrap(), before);
+    let path = fixture.root.join("live-profile-plan.json");
+    fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let args = [
+        "maintenance",
+        "apply",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+        "--plan-file",
+        path.to_str().unwrap(),
+        "--approve",
+    ];
+    let applied = fixture.cli(&args);
+    assert_eq!(applied["maintenance"]["state"], "completed");
+    assert_eq!(membership.load().unwrap(), before);
+    assert_eq!(audit(&fixture, &id), run_history);
+    assert_eq!(fixture.cli(&args), applied);
+    // The retry never acquired a worker or membership. Remove only this
+    // test-owned unpublished-start artifact after checking the source boundary.
+    fs::remove_dir_all(
+        fixture
+            .state_root
+            .join("runs")
+            .join(retry.run_id.to_string()),
+    )
+    .unwrap();
+
+    let changed_plan = fixture.cli(&[
+        "maintenance",
+        "plan",
+        "--kind",
+        "membership_compaction",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+        "--selected-generation",
+        "2",
+    ])["plan"]
+        .clone();
+    let changed_path = fixture.root.join("changed-profile-plan.json");
+    fs::write(&changed_path, serde_json::to_vec(&changed_plan).unwrap()).unwrap();
+    fs::set_permissions(&changed_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let changed_member = Uuid::now_v7();
+    membership
+        .record(
+            &"7".repeat(64),
+            changed_member,
+            MembershipDisposition::Unknown,
+        )
+        .unwrap();
+    let refused = fixture.command(&[
+        "maintenance",
+        "apply",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+        "--plan-file",
+        changed_path.to_str().unwrap(),
+        "--approve",
+    ]);
+    assert!(!refused.status.success());
+    let refusal: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refusal["error"]["code"], "MAINTENANCE_PLAN_STALE");
+    assert!(!home.root().join("profile-maintenance-active.json").exists());
+    let replanned = fixture.cli(&[
+        "maintenance",
+        "plan",
+        "--kind",
+        "membership_compaction",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+        "--selected-generation",
+        "2",
+    ]);
+    assert_eq!(replanned["plan"]["kind"], "membership_compaction");
+    membership
+        .record(
+            &"7".repeat(64),
+            changed_member,
+            MembershipDisposition::Released,
+        )
+        .unwrap();
+    let cleanup = fixture.cli(&close);
+    assert_eq!(cleanup["recovery"]["reason"], Value::Null);
+    assert_eq!(cleanup["event_cursor"], closed["event_cursor"]);
+    assert_eq!(audit(&fixture, &closing), closed_history);
+    // The same live worker remains usable after compaction; normal Close can
+    // append its release without discarding the protected unknown member.
+    fixture.cli(&[
+        "run",
+        "close",
+        &id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--controller-file",
+        fixture.controller.to_str().unwrap(),
+    ]);
+    let after = membership.load().unwrap();
+    assert_eq!(
+        after.members[&format!("{}:{id}", fixture.workspace_id)].disposition,
+        MembershipDisposition::Released
+    );
+    assert_eq!(
+        after.members[&format!("{}:{unknown_id}", "7".repeat(64))],
+        before.members[&format!("{}:{unknown_id}", "7".repeat(64))]
+    );
+    membership
+        .record(&"7".repeat(64), unknown_id, MembershipDisposition::Released)
+        .unwrap();
+}
+
+#[test]
 fn native_profile_compaction_retains_original_scope_and_history() {
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = Fixture::new("run_start_model_list.json");

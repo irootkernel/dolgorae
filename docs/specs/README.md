@@ -1518,6 +1518,12 @@ registration without activated process identity MUST remain `unverifiable`;
 a pathname search cannot prove its process absent. An unregistered legacy
 process or an unverifiable registration MUST NOT be signaled by this command.
 Failure to read the current boot UUID MUST be `unverifiable`, not `absent`.
+Enumeration MAY omit a registration that disappears before its no-follow open;
+this MUST NOT classify the process as absent. The inventory directory identity
+MUST remain unchanged during enumeration. Existing unreadable, unsafe or corrupt
+registrations remain unverifiable. Normal retirement follows the same rule for
+unrelated registrations; cleanup retains its fresh selection digest and process
+identity checks before signals.
 After a successful spawn, the launcher MUST retain a provisional registration
 until it verifies that the entire process group is absent, including on start
 failure. `cleanup` MUST require an explicit selector or `--all` and the digest

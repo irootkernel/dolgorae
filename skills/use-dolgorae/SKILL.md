@@ -123,6 +123,8 @@ content retirement, garbage collection, installation or consumer activation.
 For Profile journal maintenance select `--kind membership_compaction` on Plan.
 Its workspace generation is independent from ledger maintenance. The same
 complete-plan, operator, explicit-approval and original-scope lookup rules apply.
+Unlike ledger checkpoints, this compaction preserves active and unknown members
+and does not require closing Runs or stopping their ordinary Turn progress.
 Resume an interrupted global Profile owner before admitting new binding or
 membership changes. Preserve all old journal and binding bytes. A reported
 `profile_membership_cleanup_required` does not retract a successful Close:

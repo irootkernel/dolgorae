@@ -22,6 +22,11 @@ use uuid::Uuid;
 
 const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_MEMBERSHIP_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_MEMBERSHIP_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_LEGACY_MEMBERSHIP_BYTES: u64 = 64 * 1024 * 1024;
+
+#[path = "global_runtime_observation.rs"]
+mod observation;
 
 /// One name resolution from the global registry. The selected name is kept
 /// separately because two names may intentionally describe one launch
@@ -729,8 +734,20 @@ impl GlobalMembershipStore {
         root: &Path,
     ) -> Result<(u64, GlobalMembershipIndex), MachineError> {
         let pinned = pin_membership(root, &self.profile, &self.server_key)?;
-        let records = replay_membership(&pinned, &self.profile, &self.server_key)?;
-        let index = membership_index(&self.profile, &self.server_key, root, &pinned, &records)?;
+        let records = replay_membership_bounded(
+            &pinned,
+            &self.profile,
+            &self.server_key,
+            MAX_LEGACY_MEMBERSHIP_BYTES,
+        )?;
+        let index = membership_index_bounded(
+            &self.profile,
+            &self.server_key,
+            root,
+            &pinned,
+            &records,
+            MAX_LEGACY_MEMBERSHIP_BYTES,
+        )?;
         self.verify_consistency(root, &index)?;
         Ok((pinned.generation, index))
     }
@@ -805,8 +822,20 @@ impl GlobalMembershipStore {
         barrier: &mut impl FnMut(MembershipSwitchBarrier) -> Result<(), MachineError>,
     ) -> Result<GlobalMembershipIndex, MachineError> {
         let pinned = pin_membership(root, &self.profile, &self.server_key)?;
-        let records = replay_membership(&pinned, &self.profile, &self.server_key)?;
-        let index = membership_index(&self.profile, &self.server_key, root, &pinned, &records)?;
+        let records = replay_membership_bounded(
+            &pinned,
+            &self.profile,
+            &self.server_key,
+            MAX_LEGACY_MEMBERSHIP_BYTES,
+        )?;
+        let index = membership_index_bounded(
+            &self.profile,
+            &self.server_key,
+            root,
+            &pinned,
+            &records,
+            MAX_LEGACY_MEMBERSHIP_BYTES,
+        )?;
         self.verify_consistency(root, &index)?;
         let pending = MembershipPending {
             schema: "dolgorae.membership-maintenance/v1".to_owned(),
@@ -878,11 +907,11 @@ impl GlobalMembershipStore {
             ),
         };
         let checkpoint_bytes = serde_json::to_vec(&checkpoint).map_err(internal)?;
-        if checkpoint_bytes.len() as u64 > MAX_MEMBERSHIP_BYTES {
+        if checkpoint_bytes.len() as u64 > MAX_MEMBERSHIP_CHECKPOINT_BYTES {
             return Err(membership_capacity(
                 &self.profile,
                 &self.server_key,
-                "membership checkpoint exceeds 8 MiB",
+                "membership checkpoint exceeds 64 MiB",
             ));
         }
         if pinned.history.len() >= 4096 {
@@ -919,7 +948,7 @@ impl GlobalMembershipStore {
             match open_secure_file_if_present(&pinned.journal, DarwinSystem.current_uid())? {
                 Some(file) => {
                     let mut bytes = Vec::new();
-                    file.take(MAX_MEMBERSHIP_BYTES + 1)
+                    file.take(MAX_LEGACY_MEMBERSHIP_BYTES + 1)
                         .read_to_end(&mut bytes)
                         .map_err(|error| path_error(&pinned.journal, error))?;
                     bytes
@@ -1227,7 +1256,7 @@ fn retain_membership_file(path: &Path, bytes: &[u8]) -> Result<(), MachineError>
     if let Some(mut file) = open_secure_file_if_present(path, DarwinSystem.current_uid())? {
         let mut retained = Vec::new();
         (&mut file)
-            .take(MAX_MEMBERSHIP_BYTES + 1)
+            .take(bytes.len() as u64 + 1)
             .read_to_end(&mut retained)
             .map_err(|error| path_error(path, error))?;
         if retained != bytes {
@@ -1251,11 +1280,19 @@ fn membership_control_bytes(
     let file = open_secure_file_if_present(path, DarwinSystem.current_uid())?.ok_or_else(|| {
         membership_incomplete(profile, server_key, "membership control is missing")
     })?;
+    let maximum = if path
+        .file_name()
+        .is_some_and(|name| name == "checkpoint.json")
+    {
+        MAX_MEMBERSHIP_CHECKPOINT_BYTES
+    } else {
+        MAX_MEMBERSHIP_BYTES
+    };
     let mut bytes = Vec::new();
-    file.take(MAX_MEMBERSHIP_BYTES + 1)
+    file.take(maximum + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| path_error(path, error))?;
-    if bytes.len() as u64 > MAX_MEMBERSHIP_BYTES {
+    if bytes.len() as u64 > maximum {
         return Err(membership_incomplete(
             profile,
             server_key,
@@ -1328,11 +1365,11 @@ fn membership_segment_bytes(
             )
         })?;
     let mut bytes = Vec::new();
-    file.take(MAX_MEMBERSHIP_BYTES + 1)
+    file.take(MAX_LEGACY_MEMBERSHIP_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| path_error(&path, error))?;
     if bytes.len() as u64 != segment.byte_length
-        || bytes.len() as u64 > MAX_MEMBERSHIP_BYTES
+        || bytes.len() as u64 > MAX_LEGACY_MEMBERSHIP_BYTES
         || sha256_hex(&bytes) != segment.sha256
     {
         return Err(membership_incomplete(
@@ -1488,6 +1525,14 @@ fn replay_membership(
     profile: &str,
     server_key: &str,
 ) -> Result<Vec<GlobalMembershipRecord>, MachineError> {
+    replay_membership_bounded(pinned, profile, server_key, MAX_MEMBERSHIP_BYTES)
+}
+fn replay_membership_bounded(
+    pinned: &PinnedMembership,
+    profile: &str,
+    server_key: &str,
+    maximum: u64,
+) -> Result<Vec<GlobalMembershipRecord>, MachineError> {
     if pinned.operation_id.is_some() && !path_present(&pinned.journal)? {
         return Err(membership_incomplete(
             profile,
@@ -1500,7 +1545,14 @@ fn replay_membership(
     let hash = records
         .last()
         .map_or(ZERO_HASH, |record| record.record_sha256.as_str());
-    let tail = replay_tail(&pinned.journal, profile, server_key, revision, hash)?;
+    let tail = replay_tail_bounded(
+        &pinned.journal,
+        profile,
+        server_key,
+        revision,
+        hash,
+        maximum,
+    )?;
     records.extend(tail);
     Ok(records)
 }
@@ -1511,6 +1563,23 @@ fn membership_index(
     root: &Path,
     pinned: &PinnedMembership,
     records: &[GlobalMembershipRecord],
+) -> Result<GlobalMembershipIndex, MachineError> {
+    membership_index_bounded(
+        profile,
+        server_key,
+        root,
+        pinned,
+        records,
+        MAX_MEMBERSHIP_BYTES,
+    )
+}
+fn membership_index_bounded(
+    profile: &str,
+    server_key: &str,
+    root: &Path,
+    pinned: &PinnedMembership,
+    records: &[GlobalMembershipRecord],
+    maximum: u64,
 ) -> Result<GlobalMembershipIndex, MachineError> {
     let mut index = derive_index(server_key, &pinned.journal, records)?;
     if !pinned.history.is_empty() {
@@ -1523,10 +1592,10 @@ fn membership_index(
         let file = open_secure_file_if_present(&pinned.journal, DarwinSystem.current_uid())?
             .ok_or_else(|| internal("selected membership append is missing"))?;
         let mut bytes = Vec::new();
-        file.take(MAX_MEMBERSHIP_BYTES + 1)
+        file.take(maximum + 1)
             .read_to_end(&mut bytes)
             .map_err(|error| path_error(&pinned.journal, error))?;
-        if bytes.len() as u64 > MAX_MEMBERSHIP_BYTES {
+        if bytes.len() as u64 > maximum {
             return Err(membership_capacity(
                 "",
                 server_key,
@@ -1713,6 +1782,7 @@ fn validate_membership_prefix(
     de.end()
 }
 
+#[cfg(test)]
 fn replay_tail(
     path: &Path,
     profile: &str,
@@ -1720,14 +1790,31 @@ fn replay_tail(
     base_revision: u64,
     base_hash: &str,
 ) -> Result<Vec<GlobalMembershipRecord>, MachineError> {
+    replay_tail_bounded(
+        path,
+        profile,
+        server_key,
+        base_revision,
+        base_hash,
+        MAX_MEMBERSHIP_BYTES,
+    )
+}
+fn replay_tail_bounded(
+    path: &Path,
+    profile: &str,
+    server_key: &str,
+    base_revision: u64,
+    base_hash: &str,
+    maximum: u64,
+) -> Result<Vec<GlobalMembershipRecord>, MachineError> {
     let Some(file) = open_secure_file_if_present(path, DarwinSystem.current_uid())? else {
         return Ok(Vec::new());
     };
     let mut bytes = Vec::new();
-    file.take(MAX_MEMBERSHIP_BYTES + 1)
+    file.take(maximum + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| path_error(path, error))?;
-    let over_capacity = bytes.len() as u64 > MAX_MEMBERSHIP_BYTES;
+    let over_capacity = bytes.len() as u64 > maximum;
     if over_capacity {
         let boundary = bytes
             .iter()
@@ -2006,6 +2093,51 @@ mod tests {
         let home = DolgoraeHome::from_canonical_home(parent.clone()).unwrap();
         initialize_generation(&home).unwrap();
         (parent, home)
+    }
+
+    #[test]
+    fn cleanup_display_is_noncreating_nonblocking_and_rechecks_sources() {
+        let (parent, home) = home();
+        let key = "8".repeat(64);
+        let workspace = "7".repeat(64);
+        let run_id = Uuid::now_v7();
+        let store = GlobalMembershipStore::new(&home, "default", &key).unwrap();
+        let root = home.root().join("profiles").join(&key);
+        assert!(store.released_for_display(&workspace, run_id).is_err());
+        assert!(!root.exists());
+        store
+            .record(&workspace, run_id, MembershipDisposition::Released)
+            .unwrap();
+        assert!(store.released_for_display(&workspace, run_id).unwrap());
+        let home_lock = File::open(home.root()).unwrap();
+        DarwinSystem.lock_exclusive(&home_lock).unwrap();
+        assert!(store.released_for_display(&workspace, run_id).unwrap());
+        let server_lock = lock_file(&root.join("server.lock")).unwrap();
+        let started = std::time::Instant::now();
+        assert!(store.released_for_display(&workspace, run_id).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        drop(server_lock);
+        drop(home_lock);
+        let original = store.load().unwrap();
+        let _server = lock_file(&root.join("server.lock")).unwrap();
+        store
+            .compact_under_server_lock(
+                &root,
+                Uuid::now_v7(),
+                1,
+                &original.journal_sha256,
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+        drop(_server);
+        assert!(store.released_for_display(&workspace, run_id).unwrap());
+        let index = root.join("members.json");
+        let bytes = fs::read(&index).unwrap();
+        fs::write(&index, b"{invalid}").unwrap();
+        assert!(store.released_for_display(&workspace, run_id).is_err());
+        fs::write(index, bytes).unwrap();
+        assert!(store.released_for_display(&workspace, run_id).unwrap());
+        fs::remove_dir_all(parent).unwrap();
     }
 
     fn definition(parent: &Path) -> RuntimeProfile {
@@ -3018,6 +3150,111 @@ mod tests {
             assert_eq!(fs::read(root.join("membership.jsonl")).unwrap(), original);
             fs::remove_dir_all(parent).unwrap();
         }
+    }
+
+    #[test]
+    fn distinct_members_and_legacy_over_cap_source_remain_compactable() {
+        let (parent, home) = home();
+        let server = "8".repeat(64);
+        let workspace = "7".repeat(64);
+        let store = GlobalMembershipStore::new(&home, "default", &server).unwrap();
+        let root = store.ensure_root().unwrap();
+        let journal = root.join("membership.jsonl");
+        let mut records = Vec::new();
+        let mut bytes = Vec::new();
+        let mut previous = ZERO_HASH.to_owned();
+        for revision in 1..=10_300 {
+            let mut record = GlobalMembershipRecord {
+                schema_version: 2,
+                revision,
+                workspace_id: workspace.clone(),
+                run_id: Uuid::now_v7(),
+                disposition: MembershipDisposition::Released,
+                controller_id: Some(Uuid::now_v7()),
+                worker_generation: Some(1),
+                thread_id: Some(format!("thread-{}", "a".repeat(256))),
+                connection_id: Some(Uuid::now_v7()),
+                lifecycle: "closed".into(),
+                writer: false,
+                observed_epoch: Some(1),
+                runtime_locator: Some("/tmp/dolgorae-501/s/retained-worker.sock".into()),
+                previous_sha256: previous.clone(),
+                record_sha256: String::new(),
+            };
+            let mut body = serde_json::to_value(&record).unwrap();
+            body.as_object_mut().unwrap().remove("record_sha256");
+            record.record_sha256 = canonical_value_digest(&body).unwrap();
+            previous = record.record_sha256.clone();
+            bytes.extend(serde_json::to_vec(&record).unwrap());
+            bytes.push(b'\n');
+            records.push(record);
+        }
+        assert!(bytes.len() as u64 > MAX_MEMBERSHIP_BYTES);
+        fs::write(&journal, &bytes).unwrap();
+        fs::set_permissions(&journal, fs::Permissions::from_mode(0o600)).unwrap();
+        let original = derive_index(&server, &journal, &records).unwrap();
+        store_index(&root.join("members.json"), &original).unwrap();
+        assert_eq!(store.load().unwrap_err().code, "STORAGE_CAPACITY_EXCEEDED");
+        let lock = lock_file(&root.join("server.lock")).unwrap();
+        assert_eq!(
+            store.maintenance_basis_under_server_lock(&root).unwrap().1,
+            original
+        );
+        let operation = Uuid::now_v7();
+        let failed = store.compact_under_server_lock(
+            &root,
+            operation,
+            1,
+            &original.journal_sha256,
+            &mut |point| {
+                if point == MembershipSwitchBarrier::CheckpointSynced {
+                    Err(internal("injected checkpoint interruption"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(failed.is_err());
+        let checkpoint = root
+            .join("membership-generations")
+            .join(operation.to_string())
+            .join("checkpoint.json");
+        let checkpoint_bytes = fs::metadata(&checkpoint).unwrap().len();
+        assert!(checkpoint_bytes > MAX_MEMBERSHIP_BYTES);
+        assert!(checkpoint_bytes <= MAX_MEMBERSHIP_CHECKPOINT_BYTES);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            store
+                .compact_under_server_lock(
+                    &root,
+                    operation,
+                    1,
+                    &original.journal_sha256,
+                    &mut |_| Ok(())
+                )
+                .unwrap(),
+            original
+        );
+        drop(lock);
+        assert_eq!(store.load().unwrap(), original);
+        assert_eq!(fs::read(&journal).unwrap(), bytes);
+        let member = Uuid::now_v7();
+        store
+            .record(&workspace, member, MembershipDisposition::Active)
+            .unwrap();
+        let after = store
+            .record(&workspace, member, MembershipDisposition::Released)
+            .unwrap();
+        for (key, record) in original.members {
+            assert_eq!(after.members[&key], record);
+        }
+        println!(
+            "distinct_members=10300 legacy_source_bytes={} checkpoint_bytes={} resume_ms={}",
+            bytes.len(),
+            checkpoint_bytes,
+            started.elapsed().as_millis()
+        );
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
