@@ -427,7 +427,10 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("dolgorae-migration-{}", Uuid::now_v7()));
+            let root = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("dolgorae-migration-{}", Uuid::now_v7()));
             let home = DolgoraeHome::from_canonical_home(root.clone()).unwrap();
             let workspace = root.join("workspace");
             for path in [

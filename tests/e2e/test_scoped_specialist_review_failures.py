@@ -295,7 +295,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     diagnostic_schema = validator(protocol_root, "dolgorae-review-output-diagnostic-v1.schema.json")
     schema_source = native_codex.installed_codex()
     with tempfile.TemporaryDirectory(prefix="dolgorae-task015-failures-") as temporary:
-        root = pathlib.Path(temporary)
+        root = pathlib.Path(temporary).resolve()
         home = root / "home"
         workspace = root / "workspace"
         home.mkdir(mode=0o700)
@@ -312,8 +312,11 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         workspace_id = str(initialized["data"]["workspace_id"])  # type: ignore[index]
         targets = home / ".dolgorae" / "workspaces" / workspace_id / "review-targets"
         try:
+            # Cover an aliased fixture parent even with a canonical TMPDIR.
+            profile_alias = root / "profile-alias"
+            profile_alias.symlink_to(root, target_is_directory=True)
             drift_codex = add_profile(
-                binary, home, workspace, root, schema_source, "drift-reviewer", "scoped_specialist_review.json"
+                binary, home, workspace, profile_alias, schema_source, "drift-reviewer", "scoped_specialist_review.json"
             )
             drift = start(binary, home, review_args(workspace, "drift-reviewer"))
             wait_for(targets, lambda path: path.name.startswith(".verify-"), drift)

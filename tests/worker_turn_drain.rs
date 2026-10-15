@@ -473,11 +473,7 @@ impl Run {
         behaviour: Behaviour,
         eager_thread_operation_id: Option<Uuid>,
     ) -> Self {
-        // A short root: the app-server socket lives inside it, and a Unix
-        // socket path is bounded well below what a temporary directory name
-        // on this platform would spend.
-        let root = PathBuf::from("/tmp").join(format!("dg-drain-{}", Uuid::now_v7().simple()));
-        make_dir(&root);
+        let root = socket_fixture_root("dg-drain");
         let state_root = root.join("state");
         make_dir(&state_root);
         make_dir(&state_root.join("runs"));
@@ -1028,8 +1024,7 @@ fn caller_partial_eager_start_preserves_unknown_and_original_thread() {
             true,
         ),
     ] {
-        let root = std::env::temp_dir().join(format!("dg-start-{}", Uuid::now_v7().simple()));
-        make_dir(&root);
+        let root = socket_fixture_root("dg-start");
         let state_root = root.join("state");
         make_dir(&state_root);
         make_dir(&state_root.join("runs"));
@@ -2667,6 +2662,30 @@ fn wait_finds_a_turn_older_than_the_runs_bounded_memory_in_the_durable_ledger() 
 // ---------------------------------------------------------------------------
 // Fixture plumbing
 // ---------------------------------------------------------------------------
+
+fn socket_fixture_root(prefix: &str) -> PathBuf {
+    // Keep app-server socket paths below Darwin's 104-byte bound even when
+    // the enclosing Make invocation has a long TMPDIR.
+    let name = format!("{prefix}-{}", Uuid::now_v7().simple());
+    let mounted = std::process::Command::new("/sbin/mount")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.contains(" on /Volumes/RootKernel ("))
+        });
+    let preferred = Path::new("/Volumes/RootKernel/tmp");
+    if mounted && fs::create_dir_all(preferred).is_ok() {
+        let root = preferred.join(&name);
+        if fs::DirBuilder::new().mode(0o700).create(&root).is_ok() {
+            return root;
+        }
+    }
+    let root = Path::new("/private/tmp").join(name);
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    root
+}
 
 fn make_dir(path: &Path) {
     let mut builder = fs::DirBuilder::new();

@@ -235,6 +235,9 @@ def create_native_codex(
 
 def compile_native_driver(path: pathlib.Path, driver: pathlib.Path) -> None:
     """Keep a fixture Python driver inside its configured native process image."""
+    # Historical fixture admission compares the embedded path with the resolved
+    # executable's sibling driver, including when TMPDIR has a symlink parent.
+    driver = driver.resolve(strict=True)
     compiler = shutil.which("cc")
     if compiler is None:
         raise AssertionError(
