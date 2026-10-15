@@ -3,7 +3,10 @@
 use super::support::Fixture;
 use dolgorae::controller::{CredentialCarrier, OperatorStore};
 use dolgorae::fault::{FaultBarrier, FaultInjected, FaultInjector};
+use dolgorae::machine::{FailureEnvelope, MachineError};
 use dolgorae::maintenance::{MaintenancePlan, apply_checkpoint_with_faults};
+use dolgorae::run::RunStore;
+use dolgorae::workspace::SystemWorkspacePlatform;
 use serde_json::Value;
 use std::fs;
 use std::io::Write as _;
@@ -53,6 +56,115 @@ fn checked_schema(envelope: &Value, schema: &str) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+fn checked_frozen_error(error: MachineError) {
+    let mut envelope = FailureEnvelope::new("run.start", error);
+    for version in [2, 4] {
+        envelope.schema_version = version;
+        checked_schema(
+            &serde_json::to_value(&envelope).unwrap(),
+            &format!("dolgorae-machine-v{version}.schema.json"),
+        );
+    }
+}
+fn publication_candidate(fixture: &Fixture) -> dolgorae::run::RunManifest {
+    let store = RunStore::new(SystemWorkspacePlatform, &fixture.state_root);
+    let run = fs::read_dir(fixture.state_root.join("runs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .find_map(|name| Uuid::parse_str(&name).ok())
+        .unwrap();
+    let mut candidate = store.load_manifest(run).unwrap();
+    assert!(candidate.aggregate_binding.is_none());
+    candidate.run_id = Uuid::now_v7();
+    candidate
+}
+fn assert_admission_refused(fixture: &Fixture, namespace_valid: bool) {
+    let database =
+        dolgorae::engagement::EngagementStore::workspace_database_path(&fixture.state_root);
+    let before_database = fs::read(&database).unwrap();
+    let wal = database.with_extension("sqlite3-wal");
+    let before_wal = fs::read(&wal).ok();
+    let runs = fixture.state_root.join("runs");
+    let before_runs = fs::read_dir(&runs).unwrap().count();
+    let candidate = publication_candidate(fixture);
+    let store = RunStore::new(SystemWorkspacePlatform, &fixture.state_root);
+    let error = store
+        .publish(&candidate)
+        .expect_err("Run publication crossed retained maintenance admission");
+    if namespace_valid {
+        assert_eq!(error.code, "RUN_BUSY");
+        assert!(error.retryable);
+        assert_eq!(
+            error.details,
+            serde_json::json!({"run_id":candidate.run_id,"owner_kind":"startup"})
+        );
+    } else {
+        assert_eq!(error.code, "RUNTIME_PATH_INVALID");
+    }
+    checked_frozen_error(error);
+    assert!(!runs.join(candidate.run_id.to_string()).exists());
+    let original = fs::read_dir(&runs)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .find_map(|name| Uuid::parse_str(&name).ok())
+        .unwrap();
+    let ledger_error = dolgorae::ledger::Ledger::open(runs.join(original.to_string()), original)
+        .err()
+        .expect("ledger writer crossed retained maintenance admission");
+    assert_eq!(
+        matches!(ledger_error, dolgorae::ledger::LedgerError::WriterBusy(_)),
+        namespace_valid
+    );
+    for error in [
+        dolgorae::engagement::EngagementStore::open(&database)
+            .err()
+            .expect("database writer crossed retained maintenance admission"),
+        dolgorae::orchestration::OrchestrationStore::open_observer(&fixture.state_root)
+            .err()
+            .expect("database observer crossed retained maintenance admission"),
+    ] {
+        if namespace_valid {
+            assert_eq!(error.code, "CAPABILITY_UNSUPPORTED");
+            assert_eq!(
+                error.details,
+                serde_json::json!({"profile":null,"capability_name":"dolgorae.workspace-maintenance/v014","support":"recognized_unsupported"})
+            );
+        } else {
+            assert_eq!(error.code, "RUNTIME_PATH_INVALID");
+        }
+        checked_frozen_error(error);
+    }
+    assert_eq!(fs::read(database).unwrap(), before_database);
+    assert_eq!(fs::read(wal).ok(), before_wal);
+    assert_eq!(fs::read_dir(runs).unwrap().count(), before_runs);
+}
+fn assert_admission_open(fixture: &Fixture) {
+    let candidate = publication_candidate(fixture);
+    let store = RunStore::new(SystemWorkspacePlatform, &fixture.state_root);
+    let original = fs::read_dir(fixture.state_root.join("runs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .find_map(|name| Uuid::parse_str(&name).ok())
+        .unwrap();
+    assert!(
+        dolgorae::ledger::Ledger::open(
+            fixture.state_root.join("runs").join(original.to_string()),
+            original
+        )
+        .is_ok()
+    );
+    assert!(
+        dolgorae::orchestration::OrchestrationStore::open_observer(&fixture.state_root).is_ok()
+    );
+    store.publish(&candidate).unwrap();
+    fs::remove_dir_all(
+        fixture
+            .state_root
+            .join("runs")
+            .join(candidate.run_id.to_string()),
+    )
+    .unwrap();
 }
 fn plan(f: &Fixture, generation: u64) -> (MaintenancePlan, std::path::PathBuf) {
     let output = f.command(&[
@@ -163,6 +275,7 @@ pub(super) fn maintenance_recovers_every_switch_boundary_and_preserves_closed_ru
             fixture.workspace.to_str().unwrap(),
         ]);
     }
+    drop(dolgorae::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap());
     let histories = [&first, &second].map(|run| {
         fs::read(
             fixture
@@ -206,11 +319,17 @@ pub(super) fn maintenance_recovers_every_switch_boundary_and_preserves_closed_ru
                 "recovery_needed"
             }
         );
+        if barrier == FaultBarrier::AfterMaintenanceCompletionSync {
+            assert_admission_open(&fixture);
+        } else {
+            assert_admission_refused(&fixture, true);
+        }
         if barrier == FaultBarrier::AfterMaintenanceSelectionReplace {
             let control = fixture.state_root.join("maintenance");
             let progress = control.join(format!("{}.json", original.plan_ref));
             let owner = control.join(format!("{}.owner.json", original.plan_ref));
             let assert_namespace_recovery = || {
+                assert_admission_refused(&fixture, false);
                 for refusal in [
                     apply(&fixture, &path),
                     fixture.command(&[
@@ -247,6 +366,13 @@ pub(super) fn maintenance_recovers_every_switch_boundary_and_preserves_closed_ru
             }
             let original_progress = fs::read(&progress).unwrap();
             let original_owner = fs::read(&owner).unwrap();
+            fs::remove_file(&owner).unwrap();
+            assert_admission_refused(&fixture, false);
+            fs::write(&owner, &original_owner).unwrap();
+            fs::set_permissions(&owner, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(&control, fs::Permissions::from_mode(0o755)).unwrap();
+            assert_admission_refused(&fixture, false);
+            fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
             for (field, invalid) in [
                 ("state", Value::from("unsupported")),
                 (
@@ -284,6 +410,7 @@ pub(super) fn maintenance_recovers_every_switch_boundary_and_preserves_closed_ru
             completed["data"]["maintenance"]["new_generation"],
             index as u64 + 2
         );
+        assert_admission_open(&fixture);
         let repeated = apply(&fixture, &path);
         assert!(repeated.status.success());
         for (run, original_bytes) in [&first, &second].into_iter().zip(&histories) {

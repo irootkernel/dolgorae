@@ -1,0 +1,444 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/native-result-content/v1",
+  "title": "Native immutable result references and explicit content maintenance",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/reference"
+    },
+    {
+      "$ref": "#/$defs/operation"
+    },
+    {
+      "$ref": "#/$defs/owner"
+    },
+    {
+      "$ref": "#/$defs/response"
+    },
+    {
+      "$ref": "#/$defs/error"
+    }
+  ],
+  "$defs": {
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "artifact_id",
+        "sha256",
+        "byte_length"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-result-content-reference/v1"
+        },
+        "artifact_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "content_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner_kind",
+        "owner_id",
+        "representation",
+        "sha256",
+        "byte_length",
+        "retired_operation"
+      ],
+      "properties": {
+        "owner_kind": {
+          "enum": [
+            "brokered_publication",
+            "external_artifact",
+            "legacy_engagement",
+            "brokered_chunk_receipt"
+          ]
+        },
+        "owner_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "representation": {
+          "enum": [
+            "json",
+            "raw"
+          ]
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "retired_operation": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "plan",
+        "operator_id",
+        "operator_generation",
+        "runs",
+        "database",
+        "references",
+        "state",
+        "completed_digests",
+        "targets",
+        "chunk_bindings"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-content-maintenance-operation/v1"
+        },
+        "plan": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/maintenance_plan"
+        },
+        "operator_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "operator_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/native-ledger-maintenance/v1#/$defs/run_basis"
+          },
+          "maxItems": 4096
+        },
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "device",
+            "inode",
+            "schema_version"
+          ],
+          "properties": {
+            "device": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "inode": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "schema_version": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/content_reference"
+          },
+          "maxItems": 4096
+        },
+        "state": {
+          "enum": [
+            "planned",
+            "retiring",
+            "collecting",
+            "completed"
+          ]
+        },
+        "completed_digests": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/content_reference"
+          },
+          "maxItems": 4096
+        },
+        "chunk_bindings": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/chunk_binding"
+          }
+        }
+      }
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_ref",
+        "plan_sha256",
+        "operator_id",
+        "operator_generation",
+        "workspace_ref",
+        "source_generation",
+        "database_sha256",
+        "runs_sha256",
+        "references_sha256",
+        "targets_sha256",
+        "chunk_bindings_sha256"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.native-content-maintenance-owner/v1"
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "plan_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "operator_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "operator_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "workspace_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "source_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "database_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "runs_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "references_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "targets_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "chunk_bindings_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan",
+        "state",
+        "operation_ref",
+        "admission_closed",
+        "effect"
+      ],
+      "properties": {
+        "plan": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/maintenance_plan"
+        },
+        "state": {
+          "enum": [
+            "planned",
+            "retiring",
+            "collecting",
+            "completed"
+          ]
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "admission_closed": {
+          "type": "boolean"
+        },
+        "effect": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "const": "RESULT_CONTENT_UNAVAILABLE"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "retryable": {
+          "const": false
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation_ref",
+            "required_action"
+          ],
+          "properties": {
+            "operation_ref": {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+            },
+            "required_action": {
+              "const": "inspect_retained_identity"
+            }
+          }
+        }
+      }
+    },
+    "chunk_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference_id",
+        "session_id",
+        "source_tool_call_id",
+        "task_id",
+        "offset",
+        "byte_length",
+        "response_sha256"
+      ],
+      "properties": {
+        "reference_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "session_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "source_tool_call_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "task_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "response_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "capacity_failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "target_turn_id",
+        "byte_length",
+        "result_sha256",
+        "result_json_sha256",
+        "created_at_ms"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "target_turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "result_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "result_json_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "created_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "cached_chunk_reference_id": {
+      "description": "Private brokered_tool_results.normalized_chunk_reference_id classification: null is legacy inline; UUIDv7 requires the exact retained chunk binding on replay, including empty EOF and retirement.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        }
+      ]
+    }
+  },
+  "x-exit-status": {
+    "RESULT_CONTENT_UNAVAILABLE": 4
+  }
+}

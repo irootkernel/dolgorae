@@ -5678,3 +5678,5 @@ remains authoritative for Dolgorae.
 
 - [v0.1.4 Ledger Capacity and Maintenance Runtime](dolgorae-v014-ledger-maintenance.md) owns TASK-072 native capacity and checkpoint rollover.
 - [v0.1.4 Profile Journal Maintenance and Close Cleanup](dolgorae-v014-profile-maintenance.md) owns TASK-073 retained membership generations, binding compaction and cleanup recovery.
+
+- [v0.1.4 Observation, Wait and Result Storage Runtime](dolgorae-v014-observation-runtime.md) owns TASK-075 component reuse, bounded waits and explicit result retention.

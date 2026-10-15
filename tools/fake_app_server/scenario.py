@@ -122,22 +122,32 @@ class Scenario:
     def bind(self, name: str, value: str) -> None:
         self.bindings[name] = value
 
-    def match(self, method: str) -> dict[str, Any] | None:
-        """Select the step for this call, honouring per-method occurrence."""
+    def match(self, method: str, params: Any = None) -> dict[str, Any] | None:
+        """Select by method occurrence and optional exact parameter subset."""
         seen = self.counts.get(method, 0) + 1
         self.counts[method] = seen
         fallback = None
+        matched_fallback = None
         for step in self.steps:
             if step["method"] != method:
                 continue
+            selector = step.get("params_match")
+            if selector is not None and (
+                not isinstance(params, dict)
+                or any(name not in params or params[name] != value for name, value in selector.items())
+            ):
+                continue
             occurrence = step.get("occurrence")
             if occurrence is None:
-                if fallback is None:
+                if selector is not None:
+                    if matched_fallback is None:
+                        matched_fallback = step
+                elif fallback is None:
                     fallback = step
                 continue
             if int(occurrence) == seen:
                 return step
-        return fallback
+        return matched_fallback if matched_fallback is not None else fallback
 
     def substitute(self, value: Any) -> Any:
         """Replace `${name}` placeholders with the scenario's live bindings."""

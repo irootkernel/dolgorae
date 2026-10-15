@@ -190,7 +190,14 @@ impl MachineError {
 /// Frozen transports cannot carry successor-only storage vocabulary.
 #[must_use]
 pub fn legacy_transport_error(error: &MachineError) -> MachineError {
-    if error.code == "STORAGE_CAPACITY_EXCEEDED" {
+    if error.code == "RESULT_CONTENT_UNAVAILABLE" {
+        MachineError::new(
+            "CAPABILITY_UNSUPPORTED",
+            "Result content was explicitly retired; inspect its retained identity through the successor contract",
+            false,
+            serde_json::json!({"profile":null,"capability_name":"dolgorae.result-retention/v014","support":"recognized_unsupported"}),
+        )
+    } else if error.code == "STORAGE_CAPACITY_EXCEEDED" {
         MachineError::new(
             "CAPABILITY_UNSUPPORTED",
             "Legacy storage diagnostics require the successor contract; inspect the original operation and use approved native maintenance",
@@ -212,6 +219,7 @@ pub(crate) fn registered_errors() -> &'static BTreeMap<String, u8> {
             include_str!("../docs/protocol/dolgorae-error-contract-v2.json"),
             include_str!("../docs/protocol/dolgorae-error-contract-v3.json"),
             include_str!("../docs/protocol/dolgorae-error-contract-v4.json"),
+            include_str!("../docs/protocol/dolgorae-native-result-content-v1.schema.json"),
         ] {
             let contract: Value = serde_json::from_str(source).expect("checked error contract");
             for (code, status) in contract["x-exit-status"]
@@ -320,6 +328,28 @@ pub fn new_uuid_v7() -> Uuid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_content_keeps_native_identity_and_projects_a_checked_legacy_boundary() {
+        let operation = new_uuid_v7();
+        let error = MachineError::new(
+            "RESULT_CONTENT_UNAVAILABLE",
+            "retired",
+            false,
+            serde_json::json!({"operation_ref":operation,"required_action":"inspect_retained_identity"}),
+        );
+        assert_eq!(error.exit_status(), 4);
+        assert!(registered_errors().contains_key(&error.code));
+        assert_eq!(error.details["operation_ref"], operation.to_string());
+        let legacy = legacy_transport_error(&error);
+        assert_eq!(legacy.code, "CAPABILITY_UNSUPPORTED");
+        assert_eq!(
+            legacy.details["capability_name"],
+            "dolgorae.result-retention/v014"
+        );
+        assert_eq!(legacy.details["support"], "recognized_unsupported");
+        assert!(!legacy.retryable);
+    }
 
     #[test]
     fn success_envelope_is_closed_and_uuid_v7() {

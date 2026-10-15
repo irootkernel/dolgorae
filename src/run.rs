@@ -1502,6 +1502,18 @@ impl<P: WorkspacePlatform> RunStore<P> {
         let runs = self.state_root.join("runs");
         verify_secure_directory(&runs, self.platform.current_uid())?;
         let root = runs.join(manifest.run_id.to_string());
+        let _admission = crate::ledger_generation::WorkspaceLease::for_run(&root).map_err(
+            |error| match error {
+                crate::ledger::LedgerError::SecurityPolicy(error) => error,
+                crate::ledger::LedgerError::WriterBusy(_) => MachineError::new(
+                    "RUN_BUSY",
+                    "workspace maintenance prevents Run publication",
+                    true,
+                    serde_json::json!({"run_id":manifest.run_id,"owner_kind":"startup"}),
+                ),
+                error => run_path_error(&root, error.to_string()),
+            },
+        )?;
         if fs::symlink_metadata(&root).is_ok() {
             // The published Run's own lifecycle, not a guess: a Run whose
             // worker has committed no projection yet reads as `starting`,
@@ -1788,13 +1800,23 @@ impl<P: WorkspacePlatform> RunStore<P> {
 
     pub fn load_controller_binding(&self, run_id: Uuid) -> Result<ControllerBinding, MachineError> {
         let manifest = self.load_manifest(run_id)?;
+        self.load_controller_binding_from_manifest(&manifest)
+    }
+
+    /// Resolve the mutable binding against this capture's freshly validated
+    /// manifest. The public authority reader always loads its own manifest.
+    pub(crate) fn load_controller_binding_from_manifest(
+        &self,
+        manifest: &RunManifest,
+    ) -> Result<ControllerBinding, MachineError> {
+        let run_id = manifest.run_id;
         let path = self
             .state_root
             .join("runs")
             .join(run_id.to_string())
             .join("controller.json");
         if !path.exists() {
-            return Ok(manifest.controller);
+            return Ok(manifest.controller.clone());
         }
         verify_secure_file(&path, self.platform.current_uid())?;
         let bytes = fs::read(&path).map_err(|error| run_path_error(&path, error.to_string()))?;

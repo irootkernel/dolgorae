@@ -15,6 +15,8 @@ use std::os::unix::fs::{
 };
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 const CONFIG_YAML: &[u8] = b"schema_version: 1\nmode: git\n";
 const NON_GIT_CONFIG_YAML: &[u8] = b"schema_version: 1\nmode: non_git\n";
@@ -608,6 +610,7 @@ impl GitRunner for SystemGitRunner {
         } else {
             1024 * 1024
         };
+        WORKSPACE_GIT_SPAWNS.fetch_add(1, Ordering::Relaxed);
         let mut child = Command::new("git")
             .args(arguments)
             .env("GIT_OPTIONAL_LOCKS", "0")
@@ -636,6 +639,161 @@ impl GitRunner for SystemGitRunner {
             stderr: Vec::new(),
         })
     }
+}
+
+static WORKSPACE_GIT_SPAWNS: AtomicU64 = AtomicU64::new(0);
+static WORKSPACE_DISCOVERY_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct WorkspaceObservationCounters {
+    pub git_spawns: u64,
+    pub discovery_cache_hits: u64,
+}
+
+pub fn workspace_observation_counters() -> WorkspaceObservationCounters {
+    WorkspaceObservationCounters {
+        git_spawns: WORKSPACE_GIT_SPAWNS.load(Ordering::Relaxed),
+        discovery_cache_hits: WORKSPACE_DISCOVERY_CACHE_HITS.load(Ordering::Relaxed),
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct GitDiscoveryKey {
+    root: PathBuf,
+    identities: Vec<GitDiscoveryFileStamp>,
+    pointer_bytes: Vec<u8>,
+    git_environment: Vec<(OsString, OsString)>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct GitDiscoveryFileStamp {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+    mode: u32,
+    uid: u32,
+}
+
+struct GitDiscoveryEntry {
+    runner: String,
+    home: PathBuf,
+    key: GitDiscoveryKey,
+    root: PathBuf,
+}
+
+fn git_discovery_key(root: &Path) -> Result<GitDiscoveryKey, std::io::Error> {
+    let mut paths = vec![root.to_owned(), root.join(".git")];
+    let mut pointer_bytes = Vec::new();
+    let git_metadata = fs::symlink_metadata(root.join(".git"))?;
+    let git_dir = if git_metadata.file_type().is_file() {
+        let mut bytes = Vec::new();
+        File::open(root.join(".git"))?
+            .take(4097)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 4096 {
+            return Err(std::io::Error::other("Git pointer exceeds bound"));
+        }
+        let text = std::str::from_utf8(&bytes).map_err(std::io::Error::other)?;
+        let target = text
+            .trim_end()
+            .strip_prefix("gitdir: ")
+            .ok_or_else(|| std::io::Error::other("invalid Git pointer"))?;
+        let result = fs::canonicalize(root.join(target))?;
+        pointer_bytes.extend(bytes);
+        paths.push(result.clone());
+        result
+    } else if git_metadata.file_type().is_dir() {
+        fs::canonicalize(root.join(".git"))?
+    } else {
+        return Err(std::io::Error::other(
+            "Git metadata is not a file or directory",
+        ));
+    };
+    let mut common_dir = None;
+    for name in ["commondir", "gitdir", "config", "config.worktree"] {
+        let path = git_dir.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                paths.push(path.clone());
+                let mut bytes = File::open(&path)?.take(1024 * 1024 + 1);
+                let mut content = Vec::new();
+                bytes.read_to_end(&mut content)?;
+                if content.len() > 1024 * 1024 {
+                    return Err(std::io::Error::other("Git metadata exceeds bound"));
+                }
+                pointer_bytes.extend(name.as_bytes());
+                pointer_bytes.extend(&content);
+                if name == "commondir" {
+                    let relative = std::str::from_utf8(&content)
+                        .map_err(std::io::Error::other)?
+                        .trim_end();
+                    let common = fs::canonicalize(git_dir.join(relative))?;
+                    paths.push(common.clone());
+                    common_dir = Some(common);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if let Some(common) = common_dir {
+        let path = common.join("config");
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                paths.push(path.clone());
+                let mut content = Vec::new();
+                File::open(&path)?
+                    .take(1024 * 1024 + 1)
+                    .read_to_end(&mut content)?;
+                if content.len() > 1024 * 1024 {
+                    return Err(std::io::Error::other("Git config exceeds bound"));
+                }
+                pointer_bytes.extend(b"common-config");
+                pointer_bytes.extend(content);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let executable = std::env::split_paths(&path)
+        .map(|part| part.join("git"))
+        .find(|candidate| {
+            fs::metadata(candidate).is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0)
+        })
+        .ok_or_else(|| std::io::Error::other("Git executable unavailable"))?;
+    paths.push(fs::canonicalize(executable)?);
+    let identities = paths
+        .into_iter()
+        .map(|path| {
+            let metadata = fs::symlink_metadata(&path)?;
+            Ok(GitDiscoveryFileStamp {
+                path,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                length: metadata.len(),
+                modified: (metadata.mtime(), metadata.mtime_nsec()),
+                changed: (metadata.ctime(), metadata.ctime_nsec()),
+                mode: metadata.mode(),
+                uid: metadata.uid(),
+            })
+        })
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
+    // Git's repository-selection environment is part of discovery, never an
+    // authority cache. A changed value requires another actual Git discovery.
+    let mut git_environment: Vec<_> = std::env::vars_os()
+        .filter(|(name, _)| name == "PATH" || name.as_encoded_bytes().starts_with(b"GIT_"))
+        .collect();
+    git_environment.sort();
+    Ok(GitDiscoveryKey {
+        root: root.to_owned(),
+        identities,
+        pointer_bytes,
+        git_environment,
+    })
 }
 
 pub struct WorkspaceService<P = SystemWorkspacePlatform, G = SystemGitRunner> {
@@ -787,7 +945,27 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
     pub fn discover(&self, explicit: Option<&Path>) -> Result<WorkspaceView, MachineError> {
         let current = std::env::current_dir()
             .map_err(|error| MachineError::workspace_not_initialized(error.to_string()))?;
-        self.discover_from_internal(&current, explicit, false)
+        self.discover_from_internal(&current, explicit, false, false)
+    }
+
+    /// Display-only discovery. Policy and state integrity are checked on every
+    /// call; only unchanged Git root discovery is reused. Mutation callers must
+    /// continue using discover/discover_for_run_start.
+    pub fn discover_observed(
+        &self,
+        explicit: Option<&Path>,
+    ) -> Result<WorkspaceView, MachineError> {
+        let current = std::env::current_dir()
+            .map_err(|error| MachineError::workspace_not_initialized(error.to_string()))?;
+        self.discover_from_internal(&current, explicit, false, true)
+    }
+
+    pub fn discover_observed_from(
+        &self,
+        start: &Path,
+        explicit: Option<&Path>,
+    ) -> Result<WorkspaceView, MachineError> {
+        self.discover_from_internal(start, explicit, false, true)
     }
 
     pub fn discover_for_run_start(
@@ -796,7 +974,7 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
     ) -> Result<WorkspaceView, MachineError> {
         let current = std::env::current_dir()
             .map_err(|error| MachineError::workspace_not_initialized(error.to_string()))?;
-        self.discover_from_internal(&current, explicit, true)
+        self.discover_from_internal(&current, explicit, true, false)
     }
 
     /// Capture the working tree exactly when a Run is allocated.
@@ -822,7 +1000,7 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
         start: &Path,
         explicit: Option<&Path>,
     ) -> Result<WorkspaceView, MachineError> {
-        self.discover_from_internal(start, explicit, false)
+        self.discover_from_internal(start, explicit, false, false)
     }
 
     fn discover_from_internal(
@@ -830,6 +1008,7 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
         start: &Path,
         explicit: Option<&Path>,
         validate_profiles: bool,
+        reuse_git: bool,
     ) -> Result<WorkspaceView, MachineError> {
         let selected = match explicit {
             Some(path) => {
@@ -861,9 +1040,12 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
         }
         let canonical = match policy.mode {
             WorkspaceMode::Git => {
-                let git_root = self
-                    .discover_git_root(&selected)
-                    .map_err(|_| MachineError::workspace_not_initialized(&selected))?;
+                let git_root = if reuse_git {
+                    self.discover_git_root_observed(&selected)
+                } else {
+                    self.discover_git_root(&selected)
+                }
+                .map_err(|_| MachineError::workspace_not_initialized(&selected))?;
                 if git_root != selected {
                     return Err(MachineError::workspace_not_initialized(&selected));
                 }
@@ -894,6 +1076,47 @@ impl<P: WorkspacePlatform, G: GitRunner> WorkspaceService<P, G> {
                 }
             })?;
         Ok(view_from_record(record, false))
+    }
+
+    fn discover_git_root_observed(&self, selected: &Path) -> Result<PathBuf, MachineError> {
+        static CACHE: OnceLock<Mutex<Vec<GitDiscoveryEntry>>> = OnceLock::new();
+        let key = match git_discovery_key(selected) {
+            Ok(key) => key,
+            Err(_) => return self.discover_git_root(selected),
+        };
+        let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+        let runner = std::any::type_name::<G>();
+        if let Some(root) = cache
+            .lock()
+            .map_err(|_| {
+                MachineError::workspace_not_initialized("workspace observation cache poisoned")
+            })?
+            .iter()
+            .find(|entry| {
+                entry.runner == runner && entry.home == self.dolgorae_home_root && entry.key == key
+            })
+            .map(|entry| entry.root.clone())
+        {
+            WORKSPACE_DISCOVERY_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            return Ok(root);
+        }
+        let root = self.discover_git_root(selected)?;
+        if git_discovery_key(selected).ok().as_ref() != Some(&key) {
+            return Err(MachineError::workspace_not_initialized(selected));
+        }
+        let mut entries = cache.lock().map_err(|_| {
+            MachineError::workspace_not_initialized("workspace observation cache poisoned")
+        })?;
+        if entries.len() >= 32 {
+            entries.remove(0);
+        }
+        entries.push(GitDiscoveryEntry {
+            runner: runner.to_owned(),
+            home: self.dolgorae_home_root.clone(),
+            key,
+            root: root.clone(),
+        });
+        Ok(root)
     }
 
     fn canonical_workspace(&self, path: &Path) -> Result<PathBuf, MachineError> {

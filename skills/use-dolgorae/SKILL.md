@@ -128,6 +128,25 @@ membership changes. Preserve all old journal and binding bytes. A reported
 `profile_membership_cleanup_required` does not retract a successful Close:
 restore the namespace and repeat its authenticated Close for cleanup only.
 
+For result content, Plan selects `--kind retire_result_content` or
+`--kind garbage_collection` only under explicit authority for that effect. Keep
+the complete original plan, generation and operation ID; Apply requires the
+protected operator and `--approve`. Get the original ID after response loss.
+Active, unknown, prepared, undelivered and live-reader references remain protected.
+Retirement preserves identity/receipts and a tombstone; GC removes only
+unreferenced bytes. The selected ledger generation remains unchanged and
+automatic deletion remains disabled. Frozen result readers may report the
+`dolgorae.result-retention/v014` reporting boundary.
+
+A `dolgorae.workspace-maintenance/v014` reporting boundary means ordinary
+workspace access is excluded by maintenance. Inspect the original operation
+and resume it only with the existing explicit operator approval; do not start a
+replacement operation. Unsafe paths and capacity remain separate refusals.
+
+Observation reuse and response timeouts do not establish mutation authority,
+process absence, writer release, replay eligibility or cancelled effects. Use
+fresh authoritative operation/lifecycle proof for those decisions.
+
 ## Resume retained Close and build recovery
 
 For retained session Close, preserve its operation identity and interrupt

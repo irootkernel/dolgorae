@@ -18,6 +18,14 @@ pub(crate) fn durable_interactions_at(
     head: u64,
 ) -> Result<Vec<(Value, u64)>, MachineError> {
     let ledger = ObservedLedger::open_run(state_root, run_id, head)?;
+    durable_interactions_from_ledger(&ledger, run_id, head)
+}
+
+pub(crate) fn durable_interactions_from_ledger(
+    ledger: &ObservedLedger,
+    run_id: Uuid,
+    head: u64,
+) -> Result<Vec<(Value, u64)>, MachineError> {
     let decisions = ledger
         .payloads_of_kind(AuditKind::ApprovalDecided)
         .map_err(|error| audit_integrity_error(run_id, head, &error.to_string()))?

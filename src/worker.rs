@@ -1919,6 +1919,22 @@ fn dedicated_group_has_only_expected_leader_sample(
 pub fn classify_dedicated_server_identity(
     identity: &DedicatedServerIdentity,
 ) -> ProcessIdentityVerdict {
+    classify_dedicated_server_with_digest(identity, false)
+}
+
+/// Display-only reuse of checked executable bytes. Live process evidence is fresh.
+#[cfg(target_os = "macos")]
+pub(crate) fn classify_dedicated_server_identity_for_display(
+    identity: &DedicatedServerIdentity,
+) -> ProcessIdentityVerdict {
+    classify_dedicated_server_with_digest(identity, true)
+}
+
+#[cfg(target_os = "macos")]
+fn classify_dedicated_server_with_digest(
+    identity: &DedicatedServerIdentity,
+    display: bool,
+) -> ProcessIdentityVerdict {
     if identity.validate().is_err() {
         return ProcessIdentityVerdict::Unverifiable;
     }
@@ -1947,7 +1963,14 @@ pub fn classify_dedicated_server_identity(
         return ProcessIdentityVerdict::Mismatch;
     }
     let live_path = DarwinSystem.live_process_path(identity.pid);
-    let mut executable = match File::open(&identity.executable_path) {
+    let mut executable = match if display {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&identity.executable_path)
+    } else {
+        File::open(&identity.executable_path)
+    } {
         Ok(file) => file,
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
@@ -1955,7 +1978,12 @@ pub fn classify_dedicated_server_identity(
         Ok(metadata) => metadata,
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
-    let digest = match file_sha256_reader(&mut executable) {
+    let digest = match if display {
+        display_executable_digest(&identity.executable_path, &mut executable)
+    } else {
+        AUTHORITATIVE_IDENTITY_HASHES.fetch_add(1, Ordering::Relaxed);
+        file_sha256_reader(&mut executable)
+    } {
         Ok(digest) => digest,
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
@@ -2053,6 +2081,25 @@ pub fn classify_worker_identity(record: &WorkerRuntimeRecord) -> ProcessIdentity
 
 #[cfg(target_os = "macos")]
 fn classify_process_identity(identity: &WorkerIdentity) -> ProcessIdentityVerdict {
+    classify_process_with_digest(identity, false)
+}
+
+/// This path cannot establish mutation, writer or process-absence authority.
+#[cfg(target_os = "macos")]
+pub(crate) fn classify_worker_identity_for_display(
+    record: &WorkerRuntimeRecord,
+) -> ProcessIdentityVerdict {
+    if record.validate().is_err() {
+        return ProcessIdentityVerdict::Unverifiable;
+    }
+    classify_process_with_digest(&record.identity, true)
+}
+
+#[cfg(target_os = "macos")]
+fn classify_process_with_digest(
+    identity: &WorkerIdentity,
+    display: bool,
+) -> ProcessIdentityVerdict {
     if identity.validate().is_err() {
         return ProcessIdentityVerdict::Unverifiable;
     }
@@ -2093,7 +2140,14 @@ fn classify_process_identity(identity: &WorkerIdentity) -> ProcessIdentityVerdic
         return ProcessIdentityVerdict::Mismatch;
     }
     let live_path = DarwinSystem.live_process_path(identity.pid);
-    let mut executable = match File::open(&identity.executable_path) {
+    let mut executable = match if display {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&identity.executable_path)
+    } else {
+        File::open(&identity.executable_path)
+    } {
         Ok(file) => file,
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
@@ -2101,7 +2155,12 @@ fn classify_process_identity(identity: &WorkerIdentity) -> ProcessIdentityVerdic
         Ok(value) => value,
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
-    let digest = match file_sha256_reader(&mut executable) {
+    let digest = match if display {
+        display_executable_digest(&identity.executable_path, &mut executable)
+    } else {
+        AUTHORITATIVE_IDENTITY_HASHES.fetch_add(1, Ordering::Relaxed);
+        file_sha256_reader(&mut executable)
+    } {
         Ok(value) => value,
         Err(_) => return ProcessIdentityVerdict::Unverifiable,
     };
@@ -4122,8 +4181,8 @@ impl WorkerSessionBootstrap {
 
 /// Durable store for a final response too large to carry inline.
 ///
-/// Content addressing keeps a replayed Turn from minting a second copy of a
-/// response the Run has already published.
+/// Artifact identity remains distinct from body equality. The common quota
+/// lease excludes concurrent broker publication while logical bytes are checked.
 #[derive(Clone, Debug)]
 pub struct FileArtifactStore {
     root: PathBuf,
@@ -4155,6 +4214,16 @@ impl FileArtifactStore {
 
 impl ResponseArtifactStore for FileArtifactStore {
     fn store(&mut self, bytes: &[u8]) -> Result<StoredArtifact, TurnError> {
+        let _quota = crate::artifact::ArtifactQuotaLease::acquire(&self.root)
+            .map_err(|error| TurnError::Artifact(error.code))?;
+        let retained = crate::artifact::logical_artifact_bytes(&self.root)
+            .map_err(|error| TurnError::Artifact(error.code))?;
+        if retained
+            .checked_add(bytes.len() as u64)
+            .is_none_or(|total| total > crate::artifact::MAX_RUN_ARTIFACT_BYTES)
+        {
+            return Err(TurnError::ArtifactQuotaExceeded);
+        }
         // Named by its own UUIDv7 rather than by content, because the artifact
         // contract identifies an artifact by identity and creation instant; a
         // content digest cannot carry either.
@@ -8184,13 +8253,30 @@ pub struct ExecutingBuild {
 }
 
 /// This process's own build.
+/// Pin this before entering a long-lived worker/server or dispatching commands.
+/// The executable path may later be atomically replaced; that must not change
+/// the build an already-running process advertises. Process ownership and
+/// signalling continue to use their separate fresh executable identity proof.
 pub fn current_dolgorae_build() -> Result<ExecutingBuild, WorkerProtocolError> {
-    let executable = std::env::current_exe().map_err(|_| WorkerProtocolError::Io)?;
-    Ok(ExecutingBuild {
-        version: env!("CARGO_PKG_VERSION").to_owned(),
-        mutation_protocol_version: WORKER_PROTOCOL_VERSION,
-        binary_sha256: file_sha256(&executable)?,
-    })
+    static BUILD: std::sync::OnceLock<Result<ExecutingBuild, WorkerProtocolError>> =
+        std::sync::OnceLock::new();
+    BUILD
+        .get_or_init(|| {
+            EXECUTING_BUILD_HASHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let executable = std::env::current_exe().map_err(|_| WorkerProtocolError::Io)?;
+            Ok(ExecutingBuild {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+                binary_sha256: file_sha256(&executable)?,
+            })
+        })
+        .clone()
+}
+
+static EXECUTING_BUILD_HASHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn executing_build_hash_count() -> u64 {
+    EXECUTING_BUILD_HASHES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub fn worker_socket_path(
@@ -8999,6 +9085,105 @@ pub fn write_control_request(
         .write_all(b"\n")
         .map_err(|_| WorkerProtocolError::Io)?;
     stream.flush().map_err(|_| WorkerProtocolError::Io)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DisplayExecutableIdentity {
+    device: u64,
+    inode: u64,
+    links: u64,
+    uid: u32,
+    mode: u32,
+    length: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+impl DisplayExecutableIdentity {
+    fn read(metadata: &fs::Metadata) -> Result<Self, WorkerProtocolError> {
+        if !metadata.is_file() {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            links: metadata.nlink(),
+            uid: metadata.uid(),
+            mode: metadata.mode(),
+            length: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct DisplayIdentityCounters {
+    pub executable_hashes: u64,
+    pub executable_reuses: u64,
+    pub authoritative_hashes: u64,
+}
+static DISPLAY_EXECUTABLE_HASHES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static DISPLAY_EXECUTABLE_REUSES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static AUTHORITATIVE_IDENTITY_HASHES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+type DisplayExecutableCache = Vec<(PathBuf, DisplayExecutableIdentity, String)>;
+static DISPLAY_EXECUTABLE_CACHE: std::sync::OnceLock<Mutex<DisplayExecutableCache>> =
+    std::sync::OnceLock::new();
+
+pub fn display_identity_counters() -> DisplayIdentityCounters {
+    DisplayIdentityCounters {
+        executable_hashes: DISPLAY_EXECUTABLE_HASHES.load(Ordering::Relaxed),
+        executable_reuses: DISPLAY_EXECUTABLE_REUSES.load(Ordering::Relaxed),
+        authoritative_hashes: AUTHORITATIVE_IDENTITY_HASHES.load(Ordering::Relaxed),
+    }
+}
+
+fn display_executable_digest(path: &Path, file: &mut File) -> Result<String, WorkerProtocolError> {
+    let identity =
+        DisplayExecutableIdentity::read(&file.metadata().map_err(|_| WorkerProtocolError::Io)?)?;
+    let path_identity = DisplayExecutableIdentity::read(
+        &fs::symlink_metadata(path).map_err(|_| WorkerProtocolError::Io)?,
+    )?;
+    if identity != path_identity {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    let cache = DISPLAY_EXECUTABLE_CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let retained = {
+        let entries = cache
+            .lock()
+            .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+        entries
+            .iter()
+            .find(|(selected, source, _)| selected == path && *source == identity)
+            .map(|(_, _, digest)| digest.clone())
+    };
+    let digest = if let Some(digest) = retained {
+        DISPLAY_EXECUTABLE_REUSES.fetch_add(1, Ordering::Relaxed);
+        digest
+    } else {
+        DISPLAY_EXECUTABLE_HASHES.fetch_add(1, Ordering::Relaxed);
+        file_sha256_reader(file)?
+    };
+    if DisplayExecutableIdentity::read(&file.metadata().map_err(|_| WorkerProtocolError::Io)?)?
+        != identity
+        || DisplayExecutableIdentity::read(
+            &fs::symlink_metadata(path).map_err(|_| WorkerProtocolError::Io)?,
+        )? != identity
+    {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    // No cache/ownership lock spans hashing, process sampling or dispatch.
+    let mut entries = cache
+        .lock()
+        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    entries.retain(|(selected, _, _)| selected != path);
+    if entries.len() >= 16 {
+        entries.remove(0);
+    }
+    entries.push((path.to_owned(), identity, digest.clone()));
+    Ok(digest)
 }
 
 fn file_sha256(path: &Path) -> Result<String, WorkerProtocolError> {
@@ -10041,6 +10226,45 @@ mod tests {
     use std::process::{Command, Stdio};
     #[cfg(target_os = "macos")]
     use std::time::Instant;
+
+    #[test]
+    fn response_artifact_quota_refuses_limit_plus_one_before_creating_a_body() {
+        let root = std::env::temp_dir().join(format!("dolgorae-response-quota-{}", Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        for _ in 0..8 {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(root.join(format!("{}.bin", Uuid::now_v7())))
+                .unwrap();
+            // Sparse files exercise the real logical length limit without allocating 256 MiB.
+            file.set_len(32 * 1024 * 1024).unwrap();
+        }
+        let mut store = FileArtifactStore::open(&root, DarwinSystem.current_uid()).unwrap();
+        assert_eq!(
+            crate::artifact::logical_artifact_bytes(&root).unwrap(),
+            crate::artifact::MAX_RUN_ARTIFACT_BYTES
+        );
+        assert!(matches!(
+            store.store(b"x"),
+            Err(TurnError::ArtifactQuotaExceeded)
+        ));
+        assert_eq!(
+            fs::read_dir(&root)
+                .unwrap()
+                .filter(|entry| entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|value| value == "bin"))
+                .count(),
+            8
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn executable_hash_matches_reference_digests_across_read_boundaries() {
@@ -11556,6 +11780,88 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn display_executable_reuse_revalidates_descriptor_replacement_tampering_and_symlinks() {
+        let mounted = Command::new("/sbin/mount").output().is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.contains(" on /Volumes/RootKernel ("))
+        });
+        let name = format!("dolgorae-display-executable-{}", Uuid::now_v7());
+        let preferred = Path::new("/Volumes/RootKernel/tmp").join(&name);
+        let root = if mounted
+            && fs::create_dir_all("/Volumes/RootKernel/tmp").is_ok()
+            && fs::DirBuilder::new().mode(0o700).create(&preferred).is_ok()
+        {
+            preferred
+        } else {
+            let path = std::env::temp_dir().join(name);
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+            path
+        };
+        let path = root.join("executable");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"first executable bytes").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let read = || {
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&path)
+                .unwrap()
+        };
+        let first = display_executable_digest(&path, &mut read()).unwrap();
+        let before = display_identity_counters();
+        assert_eq!(
+            display_executable_digest(&path, &mut read()).unwrap(),
+            first
+        );
+        assert!(display_identity_counters().executable_reuses > before.executable_reuses);
+        let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all(b"other executable bytes").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let changed = display_executable_digest(&path, &mut read()).unwrap();
+        assert_ne!(changed, first);
+        fs::rename(&path, root.join("old")).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"replaced executable").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        assert_ne!(
+            display_executable_digest(&path, &mut read()).unwrap(),
+            changed
+        );
+        let mut pinned = read();
+        fs::rename(&path, root.join("replaced")).unwrap();
+        std::os::unix::fs::symlink(root.join("old"), &path).unwrap();
+        assert!(display_executable_digest(&path, &mut pinned).is_err());
+        let mut followed = File::open(&path).unwrap();
+        assert!(display_executable_digest(&path, &mut followed).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::rename(root.join("replaced"), &path).unwrap();
+        let prior = DisplayExecutableIdentity::read(&read().metadata().unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let stamp = DisplayExecutableIdentity::read(&read().metadata().unwrap()).unwrap();
+        assert_eq!(stamp.mode & 0o777, 0o600);
+        assert_ne!(stamp, prior);
+        assert!(display_executable_digest(&path, &mut read()).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn four_verdict_identity_matches_current_and_rejects_recorded_reuse() {
         let process = DarwinSystem.current_process().unwrap();
         let sample = DarwinSystem.bsd_process_identity(process.pid).unwrap();
@@ -11598,10 +11904,30 @@ mod tests {
             binary_sha256: current_dolgorae_build().unwrap().binary_sha256,
         };
         assert_eq!(
+            classify_worker_identity_for_display(&record),
+            classify_worker_identity(&record)
+        );
+        assert_eq!(
             classify_worker_identity(&record),
             ProcessIdentityVerdict::Match
         );
+        let before = display_identity_counters();
+        assert_eq!(
+            classify_worker_identity_for_display(&record),
+            ProcessIdentityVerdict::Match
+        );
+        assert!(display_identity_counters().executable_reuses > before.executable_reuses);
+        let before = display_identity_counters();
+        assert_eq!(
+            classify_worker_identity(&record),
+            ProcessIdentityVerdict::Match
+        );
+        assert!(display_identity_counters().authoritative_hashes > before.authoritative_hashes);
         record.identity.start_tvusec = record.identity.start_tvusec.saturating_add(1);
+        assert_eq!(
+            classify_worker_identity_for_display(&record),
+            classify_worker_identity(&record)
+        );
         assert_eq!(
             classify_worker_identity(&record),
             ProcessIdentityVerdict::Mismatch
@@ -11609,11 +11935,19 @@ mod tests {
         record.identity.start_tvusec = sample.start_tvusec;
         record.identity.executable_path = PathBuf::from("/missing/dolgorae-worker");
         assert_eq!(
+            classify_worker_identity_for_display(&record),
+            classify_worker_identity(&record)
+        );
+        assert_eq!(
             classify_worker_identity(&record),
             ProcessIdentityVerdict::Unverifiable
         );
         record.identity.executable_path = executable_path;
         record.identity.boot_uuid = Uuid::now_v7();
+        assert_eq!(
+            classify_worker_identity_for_display(&record),
+            classify_worker_identity(&record)
+        );
         assert_eq!(
             classify_worker_identity(&record),
             ProcessIdentityVerdict::Absent
@@ -11688,8 +12022,16 @@ mod tests {
                 binary_sha256: "a".repeat(64),
             };
             assert_eq!(
+                classify_worker_identity_for_display(&record),
+                classify_worker_identity(&record)
+            );
+            assert_eq!(
                 classify_worker_identity(&record),
                 ProcessIdentityVerdict::Match
+            );
+            assert_eq!(
+                classify_dedicated_server_identity_for_display(&dedicated),
+                classify_dedicated_server_identity(&dedicated)
             );
             assert_eq!(
                 classify_dedicated_server_identity(&dedicated),
@@ -11718,8 +12060,16 @@ mod tests {
                 )
             );
             assert_eq!(
+                classify_worker_identity_for_display(&record),
+                classify_worker_identity(&record)
+            );
+            assert_eq!(
                 classify_worker_identity(&record),
                 ProcessIdentityVerdict::Mismatch
+            );
+            assert_eq!(
+                classify_dedicated_server_identity_for_display(&dedicated),
+                classify_dedicated_server_identity(&dedicated)
             );
             assert_eq!(
                 classify_dedicated_server_identity(&dedicated),

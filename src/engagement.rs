@@ -12,15 +12,12 @@ use crate::specialist::{
     ReviewerRuntimePlan, validate_reviewer_output, validate_reviewer_output_v3,
 };
 use crate::task_request::{STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest};
-use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
-};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -279,7 +276,7 @@ type ExternalOwnerAuthorityRow = (
 );
 
 pub struct EngagementStore {
-    connection: Connection,
+    connection: crate::storage_observation::CheckedConnection,
     faults: Arc<dyn EngagementFaultInjector>,
 }
 
@@ -305,12 +302,33 @@ impl EngagementStore {
                 "orchestration database path must be absolute",
             ));
         }
+        if path.exists() {
+            let mut connection = crate::storage_observation::CheckedConnection::open(path, false)?;
+            let has_metadata:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata')",[],|row|row.get(0)).map_err(internal)?;
+            if has_metadata {
+                let observed: Option<String> = connection
+                    .query_row(
+                        "SELECT value FROM metadata WHERE key='schema_version'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(internal)?;
+                if observed.as_deref() == Some("5") {
+                    crate::storage_observation::initialize_content(&mut connection)?;
+                    return Ok(Self { connection, faults });
+                }
+            }
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(internal)?;
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(internal)?;
         }
+        let _initialization_admission = crate::storage_observation::database_admission(path)?;
         let mut connection = Connection::open(path).map_err(internal)?;
+        crate::storage_observation::install_trace(&connection)?;
+        crate::storage_observation::count_migration();
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(internal)?;
@@ -320,6 +338,7 @@ impl EngagementStore {
                 "PRAGMA journal_mode=WAL;
                  PRAGMA foreign_keys=ON;
                  PRAGMA synchronous=FULL;
+                 BEGIN IMMEDIATE;
                  CREATE TABLE IF NOT EXISTS metadata(
                    key TEXT PRIMARY KEY, value TEXT NOT NULL
                  ) STRICT;
@@ -413,7 +432,9 @@ impl EngagementStore {
                    event_hash TEXT NOT NULL,
                    created_at_ms INTEGER NOT NULL,
                    FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
-                 ) STRICT;",
+                 ) STRICT;
+                 INSERT OR IGNORE INTO metadata(key,value) VALUES('schema_version','5');
+                 COMMIT;",
             )
             .map_err(internal)?;
         connection
@@ -496,7 +517,7 @@ impl EngagementStore {
                     serde_json::json!({"observed":locked_observed}),
                 ));
             }
-            transaction.commit().map_err(internal)?;
+            crate::storage_observation::commit(transaction).map_err(internal)?;
             connection
                 .execute_batch("PRAGMA foreign_keys=ON;")
                 .map_err(internal)?;
@@ -527,7 +548,14 @@ impl EngagementStore {
                    WHERE state IN ('accepted','queued','claimed','dispatching','running');",
             )
             .map_err(internal)?;
+        crate::storage_observation::initialize_content(&mut connection)?;
+        drop(connection);
+        let connection = crate::storage_observation::CheckedConnection::open(path, false)?;
         Ok(Self { connection, faults })
+    }
+
+    pub(crate) fn into_connection(self) -> crate::storage_observation::CheckedConnection {
+        self.connection
     }
 
     /// Observation never creates storage, runs a migration, or replays an operation.
@@ -538,8 +566,7 @@ impl EngagementStore {
                 "orchestration database path must be absolute",
             ));
         }
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(internal)?;
+        let connection = crate::storage_observation::CheckedConnection::open(path, true)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(internal)?;
@@ -592,7 +619,7 @@ impl EngagementStore {
             "INSERT INTO one_shot_operations(request_ref,receipt_json,receipt_sha256,engagement_id) VALUES(?1,?2,?3,NULL)",
             params![input.request_ref.to_string(), value, sha256_hex(value.as_bytes())],
         ).map_err(internal)?;
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         Ok((operation, true))
     }
 
@@ -664,7 +691,7 @@ impl EngagementStore {
         let mut operation = one_shot_in(&transaction, request_ref)?.ok_or_else(not_found)?;
         update(&mut operation)?;
         write_one_shot(&transaction, &operation)?;
-        transaction.commit().map_err(internal)
+        crate::storage_observation::commit(transaction).map_err(internal)
     }
 
     pub(crate) fn observe_one_shot(
@@ -723,7 +750,12 @@ impl EngagementStore {
                     .map(|(id, output)| -> Result<CollectedReview, MachineError> {
                         Ok(CollectedReview {
                             artifact_id: id.parse().map_err(internal)?,
-                            output: serde_json::from_str(&output).map_err(internal)?,
+                            output: serde_json::from_str(&Self::resolve_artifact_json(
+                                &transaction,
+                                &id,
+                                output,
+                            )?)
+                            .map_err(internal)?,
                         })
                     })
                     .transpose()?;
@@ -1210,10 +1242,24 @@ impl EngagementStore {
                 let canonical_json = String::from_utf8(bytes).map_err(internal)?;
                 let faults = Arc::clone(&self.faults);
                 let transaction = self.transaction()?;
+                crate::storage_observation::put_content(
+                    &transaction,
+                    "external_artifact",
+                    &artifact_id.to_string(),
+                    "json",
+                    canonical_json.as_bytes(),
+                )?;
+                crate::storage_observation::put_content(
+                    &transaction,
+                    "legacy_engagement",
+                    &engagement_id.to_string(),
+                    "json",
+                    canonical_json.as_bytes(),
+                )?;
                 transaction
                     .execute(
                         "UPDATE engagements SET state='result_ready',result_sha256=?2,result_json=?3,revision=revision+1 WHERE engagement_id=?1",
-                        params![engagement_id.to_string(), result_sha256, canonical_json],
+                        params![engagement_id.to_string(), result_sha256, ""],
                     )
                     .map_err(internal)?;
                 transaction
@@ -1225,7 +1271,7 @@ impl EngagementStore {
                             artifact_id.to_string(),
                             engagement_id.to_string(),
                             result_sha256,
-                            canonical_json
+                            ""
                         ],
                     )
                     .map_err(internal)?;
@@ -1343,7 +1389,11 @@ impl EngagementStore {
         }
         let task_id = task_id.ok_or_else(|| conflict("result task is missing"))?;
         let artifact_id = artifact_id.ok_or_else(|| conflict("result artifact is missing"))?;
-        let result = result.ok_or_else(|| conflict("result artifact is missing"))?;
+        let result = Self::resolve_artifact_json(
+            &transaction,
+            &artifact_id,
+            result.ok_or_else(|| conflict("result artifact is missing"))?,
+        )?;
         let receipt_exists: bool = transaction
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM delivery_receipts WHERE task_id=?1)",
@@ -1393,6 +1443,8 @@ impl EngagementStore {
         }
         let deadline = std::time::Instant::now() + timeout;
         loop {
+            let observed = crate::storage_observation::epoch()?;
+            self.connection.check_identity()?;
             let snapshot = self.snapshot(engagement_id)?;
             if matches!(
                 snapshot.state.as_str(),
@@ -1414,7 +1466,12 @@ impl EngagementStore {
                     serde_json::json!({"required_action":"cancel_or_await_again"}),
                 ));
             }
-            thread::sleep(Duration::from_millis(10));
+            crate::storage_observation::wait(
+                observed,
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(Duration::from_millis(250)),
+            )?;
         }
     }
 
@@ -2577,10 +2634,17 @@ impl EngagementStore {
                     |row| row.get(0),
                 )
                 .map_err(internal)?;
+            crate::storage_observation::put_content(
+                &transaction,
+                "external_artifact",
+                &artifact_id.to_string(),
+                "json",
+                canonical.as_bytes(),
+            )?;
             transaction.execute(
                 "INSERT INTO artifacts(artifact_id,engagement_id,task_id,specialist_run_id,result_sha256,canonical_json)
                  VALUES(?1,?2,?3,?4,?5,?6)",
-                params![artifact_id.to_string(),engagement_id.to_string(),task_id.to_string(),specialist,digest,canonical],
+                params![artifact_id.to_string(),engagement_id.to_string(),task_id.to_string(),specialist,digest,""],
             ).map_err(internal)?;
             (Some(artifact_id), Some(digest))
         } else {
@@ -2820,6 +2884,40 @@ impl EngagementStore {
                     serde_json::json!({"task_id":task_id}),
                 )
             })
+    }
+
+    fn resolve_artifact_json(
+        connection: &Connection,
+        artifact: &str,
+        stored: String,
+    ) -> Result<String, MachineError> {
+        let (expected, engagement_digest): (String, Option<String>) = connection.query_row(
+            "SELECT a.result_sha256,e.result_sha256 FROM artifacts a JOIN engagements e ON e.engagement_id=a.engagement_id WHERE a.artifact_id=?1",
+            [artifact], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|_| integrity("original artifact result binding is absent"))?;
+        if engagement_digest
+            .as_deref()
+            .is_some_and(|digest| digest != expected)
+        {
+            return Err(integrity("artifact and engagement result digests disagree"));
+        }
+        if !stored.is_empty() {
+            if sha256_hex(stored.as_bytes()) != expected {
+                return Err(integrity(
+                    "legacy artifact JSON differs from its original digest",
+                ));
+            }
+            return Ok(stored);
+        }
+        let bytes = crate::storage_observation::read_bound_content(
+            connection,
+            "external_artifact",
+            artifact,
+            "json",
+            &expected,
+        )?
+        .ok_or_else(|| integrity("normalized artifact reference is absent"))?;
+        String::from_utf8(bytes).map_err(internal)
     }
 
     #[cfg(test)]
@@ -3217,6 +3315,7 @@ impl EngagementStore {
     }
 
     fn transaction(&mut self) -> Result<Transaction<'_>, MachineError> {
+        self.connection.check_identity()?;
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(internal)
@@ -3489,7 +3588,7 @@ fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), MachineError> {
             serde_json::json!({"observed":observed}),
         ));
     }
-    transaction.commit().map_err(internal)?;
+    crate::storage_observation::commit(transaction).map_err(internal)?;
     connection
         .execute_batch("PRAGMA foreign_keys=ON;")
         .map_err(internal)
@@ -3530,7 +3629,7 @@ fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), MachineError> {
             serde_json::json!({"observed":observed}),
         ));
     }
-    transaction.commit().map_err(internal)
+    crate::storage_observation::commit(transaction).map_err(internal)
 }
 
 fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), MachineError> {
@@ -3564,7 +3663,7 @@ fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), MachineError> {
          UPDATE metadata SET value='5' WHERE key='schema_version';",
         )
         .map_err(internal)?;
-    transaction.commit().map_err(internal)
+    crate::storage_observation::commit(transaction).map_err(internal)
 }
 
 fn validate_one_shot_input(input: &OneShotOperationInput) -> Result<(), MachineError> {
@@ -3670,7 +3769,7 @@ fn commit_with(
     after: EngagementBarrier,
 ) -> Result<(), MachineError> {
     faults.check(before).map_err(internal)?;
-    transaction.commit().map_err(internal)?;
+    crate::storage_observation::commit(transaction).map_err(internal)?;
     faults.check(after).map_err(internal)
 }
 
@@ -3897,48 +3996,89 @@ fn external_task_in(
     engagement_id: Uuid,
     task_id: Uuid,
 ) -> Result<ExternalTaskSnapshot, MachineError> {
-    connection
+    let (mut result, expected_digest) = connection
         .query_row(
             "SELECT t.specialist_run_id,t.state,t.turn_id,t.artifact_id,
-                    t.safe_error_code,a.canonical_json,t.diagnostic_json
+                    t.safe_error_code,a.canonical_json,t.diagnostic_json,
+                    t.request_json IS NOT NULL,a.engagement_id,a.task_id,a.specialist_run_id,
+                    EXISTS(SELECT 1 FROM artifacts owned WHERE owned.task_id=t.task_id),
+                    a.result_sha256,t.result_sha256
              FROM tasks t LEFT JOIN artifacts a ON a.artifact_id=t.artifact_id
              WHERE t.engagement_id=?1 AND t.task_id=?2",
             params![engagement_id.to_string(), task_id.to_string()],
             |row| {
                 let specialist: String = row.get(0)?;
                 let artifact: Option<String> = row.get(3)?;
-                Ok(ExternalTaskSnapshot {
-                    task_id,
-                    specialist_run_id: specialist
-                        .parse()
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    state: row.get(1)?,
-                    turn_id: row.get(2)?,
-                    result_artifact_ref: artifact.and_then(|value| value.parse().ok()),
-                    result: row
-                        .get::<_, Option<String>>(5)?
-                        .map(|value| serde_json::from_str(&value))
-                        .transpose()
-                        .map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                5,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?,
-                    safe_error_code: row.get(4)?,
-                    diagnostic: row
-                        .get::<_, Option<String>>(6)?
-                        .map(|value| serde_json::from_str(&value))
-                        .transpose()
-                        .map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                6,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?,
-                })
+                let state: String = row.get(1)?;
+                let json: Option<String> = row.get(5)?;
+                let native_request: bool = row.get(7)?;
+                let artifact_engagement: Option<String> = row.get(8)?;
+                let artifact_task: Option<String> = row.get(9)?;
+                let artifact_specialist: Option<String> = row.get(10)?;
+                let owned_artifact: bool = row.get(11)?;
+                let artifact_digest: Option<String> = row.get(12)?;
+                let task_digest: Option<String> = row.get(13)?;
+                let result_bearing = state == "completed_not_delivered"
+                    || (state == "delivered" && native_request)
+                    || owned_artifact;
+                if result_bearing && (artifact.is_none() || json.is_none()) {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                if artifact.is_some()
+                    && (json.is_none()
+                        || artifact_engagement.as_deref() != Some(&engagement_id.to_string())
+                        || artifact_task
+                            .as_deref()
+                            .is_some_and(|owner| owner != task_id.to_string())
+                        || artifact_specialist
+                            .as_deref()
+                            .is_some_and(|owner| owner != specialist)
+                        || (native_request
+                            && (artifact_task.is_none()
+                                || artifact_specialist.is_none()
+                                || task_digest.is_none()))
+                        || (task_digest.is_some() && task_digest != artifact_digest))
+                {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                Ok((
+                    ExternalTaskSnapshot {
+                        task_id,
+                        specialist_run_id: specialist
+                            .parse()
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        state,
+                        turn_id: row.get(2)?,
+                        result_artifact_ref: artifact
+                            .map(|value| value.parse())
+                            .transpose()
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        result: json
+                            .filter(|value| !value.is_empty())
+                            .map(|value| serde_json::from_str(&value))
+                            .transpose()
+                            .map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    5,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?,
+                        safe_error_code: row.get(4)?,
+                        diagnostic: row
+                            .get::<_, Option<String>>(6)?
+                            .map(|value| serde_json::from_str(&value))
+                            .transpose()
+                            .map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    6,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?,
+                    },
+                    artifact_digest,
+                ))
             },
         )
         .optional()
@@ -3950,9 +4090,39 @@ fn external_task_in(
                 false,
                 serde_json::json!({"task_id":task_id}),
             )
-        })
+        })?;
+    if let Some(value) = &result.result
+        && expected_digest.as_deref() != Some(digest_value(value)?.as_str())
+    {
+        return Err(integrity(
+            "artifact JSON differs from its original result digest",
+        ));
+    }
+    if result.result.is_none()
+        && let Some(artifact) = result.result_artifact_ref
+    {
+        let reference = crate::storage_observation::content_reference(
+            connection,
+            "external_artifact",
+            &artifact.to_string(),
+            "json",
+        )?
+        .ok_or_else(|| integrity("normalized artifact reference is absent"))?;
+        if expected_digest.as_deref() != Some(reference.sha256.as_str()) {
+            return Err(integrity(
+                "artifact reference differs from its original result digest",
+            ));
+        }
+        match crate::storage_observation::read_referenced_content(connection, &reference) {
+            Err(error) if error.code == "RESULT_CONTENT_UNAVAILABLE" => {}
+            result_content => {
+                let bytes = result_content?;
+                result.result = Some(serde_json::from_slice(&bytes).map_err(internal)?);
+            }
+        }
+    }
+    Ok(result)
 }
-
 fn digest_value(value: &Value) -> Result<String, MachineError> {
     Ok(sha256_hex(&canonical_json(value)?))
 }
@@ -4527,6 +4697,81 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_readers_preserve_the_original_json_digest() {
+        for mode in ["reference", "retired_reference", "inline"] {
+            let (mut store, root) = store();
+            let input = one_shot_input(&root);
+            store.reserve_one_shot(&input).unwrap();
+            let opened = store
+                .open_one_shot_engagement(input.request_ref, &"a".repeat(64), "open")
+                .unwrap();
+            let hired = store
+                .hire_reviewer(
+                    opened.engagement_id,
+                    &reviewer_plan("review"),
+                    "hire",
+                    |_, _, _| RuntimeOutcome::Accepted,
+                )
+                .unwrap();
+            store
+                .assign(
+                    opened.engagement_id,
+                    hired.specialist_run_id,
+                    &"b".repeat(64),
+                    None,
+                    "assign",
+                    |_| TaskExecution {
+                        outcome: RuntimeOutcome::Accepted,
+                        value: Some(serde_json::json!({"summary":"alpha"})),
+                        terminal_error: None,
+                    },
+                )
+                .unwrap();
+            let original = store
+                .observe_one_shot(input.request_ref)
+                .unwrap()
+                .unwrap()
+                .artifact
+                .unwrap();
+            let other = canonical_string(&serde_json::json!({"summary":"bravo"})).unwrap();
+            if mode == "inline" {
+                store
+                    .connection
+                    .execute(
+                        "UPDATE artifacts SET canonical_json=?1 WHERE artifact_id=?2",
+                        params![other, original.artifact_id.to_string()],
+                    )
+                    .unwrap();
+            } else {
+                crate::storage_observation::put_content(
+                    &store.connection,
+                    "external_artifact",
+                    &Uuid::now_v7().to_string(),
+                    "json",
+                    other.as_bytes(),
+                )
+                .unwrap();
+                store.connection.execute("UPDATE result_content_refs SET sha256=?1,retired_operation=?2 WHERE owner_kind='external_artifact' AND owner_id=?3",params![sha256_hex(other.as_bytes()), if mode == "retired_reference" {Some(Uuid::now_v7().to_string())} else {None}, original.artifact_id.to_string()]).unwrap();
+            }
+            assert!(
+                store.collect_review(opened.engagement_id).is_err(),
+                "{mode} collected altered JSON"
+            );
+            assert!(store.observe_one_shot(input.request_ref).is_err());
+            assert_eq!(
+                store
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM delivery_receipts", [], |row| row
+                        .get::<_, u64>(0))
+                    .unwrap(),
+                0
+            );
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn one_shot_read_only_legacy_observation_does_not_migrate_or_create_storage() {
         let (mut store, root) = store();
         let existing = store
@@ -4650,6 +4895,232 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn external_snapshot_requires_normalized_reference_and_preserves_legacy_and_retirement() {
+        for mode in [
+            "missing",
+            "retired_missing",
+            "retired",
+            "legacy",
+            "without_result",
+            "null_binding",
+            "malformed_binding",
+            "missing_artifact",
+            "missing_owner",
+            "legacy_owners",
+            "failed_without_result",
+            "delivered",
+            "delivered_null_binding",
+            "retired_null_binding",
+            "changed_content_reference",
+            "changed_legacy_body",
+            "changed_task_digest",
+            "changed_artifact_digest",
+            "retired_changed_reference",
+        ] {
+            let (mut store, root) = store();
+            let opened = external_open(&mut store);
+            let member = external_ready_member(&mut store, opened.engagement_id);
+            let task = external_task_reservation(
+                &mut store,
+                opened.engagement_id,
+                member.specialist_run_id,
+            );
+            if matches!(mode, "without_result" | "failed_without_result") {
+                if mode == "failed_without_result" {
+                    store
+                        .finish_external_task(
+                            opened.engagement_id,
+                            task.task_id,
+                            None,
+                            "failed",
+                            None,
+                        )
+                        .unwrap();
+                }
+                let snapshot = store
+                    .external_task(opened.engagement_id, task.task_id)
+                    .unwrap();
+                assert_eq!(snapshot.task_id, task.task_id);
+                assert!(snapshot.result.is_none());
+                assert!(snapshot.result_artifact_ref.is_none());
+            } else {
+                let value = serde_json::json!({"summary":"retained external identity"});
+                let mut completed = store
+                    .finish_external_task(
+                        opened.engagement_id,
+                        task.task_id,
+                        Some(&value),
+                        "completed_not_delivered",
+                        None,
+                    )
+                    .unwrap();
+                let artifact = completed.result_artifact_ref.unwrap();
+                if mode.starts_with("delivered") {
+                    store
+                        .collect_external_results(opened.engagement_id, 0, 8)
+                        .unwrap();
+                    completed = store
+                        .external_task(opened.engagement_id, task.task_id)
+                        .unwrap();
+                    assert_eq!(completed.state, "delivered");
+                }
+                if mode.starts_with("retired") {
+                    store.connection.execute("UPDATE result_content_refs SET retired_operation=?1 WHERE owner_kind='external_artifact' AND owner_id=?2",params![Uuid::now_v7().to_string(),artifact.to_string()]).unwrap();
+                }
+                if matches!(mode, "missing" | "retired_missing" | "legacy") {
+                    store.connection.execute("DELETE FROM result_content_refs WHERE owner_kind='external_artifact' AND owner_id=?1",[artifact.to_string()]).unwrap();
+                }
+                if matches!(mode, "legacy" | "legacy_owners") {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE artifacts SET canonical_json=?1 WHERE artifact_id=?2",
+                            params![canonical_string(&value).unwrap(), artifact.to_string()],
+                        )
+                        .unwrap();
+                }
+                match mode {
+                    "null_binding" | "delivered_null_binding" | "retired_null_binding" => {
+                        store
+                            .connection
+                            .execute(
+                                "UPDATE tasks SET artifact_id=NULL WHERE task_id=?1",
+                                [task.task_id.to_string()],
+                            )
+                            .unwrap();
+                    }
+                    "malformed_binding" => {
+                        store
+                            .connection
+                            .execute(
+                                "UPDATE tasks SET artifact_id='malformed' WHERE task_id=?1",
+                                [task.task_id.to_string()],
+                            )
+                            .unwrap();
+                    }
+                    "missing_artifact" => {
+                        store
+                            .connection
+                            .execute(
+                                "DELETE FROM artifacts WHERE artifact_id=?1",
+                                [artifact.to_string()],
+                            )
+                            .unwrap();
+                    }
+                    "missing_owner" => {
+                        store.connection.execute("UPDATE artifacts SET task_id=NULL,specialist_run_id=NULL WHERE artifact_id=?1", [artifact.to_string()]).unwrap();
+                    }
+                    "legacy_owners" => {
+                        store
+                            .connection
+                            .execute(
+                                "UPDATE tasks SET request_json=NULL WHERE task_id=?1",
+                                [task.task_id.to_string()],
+                            )
+                            .unwrap();
+                        store.connection.execute("UPDATE artifacts SET task_id=NULL,specialist_run_id=NULL WHERE artifact_id=?1", [artifact.to_string()]).unwrap();
+                    }
+                    "changed_content_reference" | "retired_changed_reference" => {
+                        let original_reference = crate::storage_observation::content_reference(
+                            &store.connection,
+                            "external_artifact",
+                            &artifact.to_string(),
+                            "json",
+                        )
+                        .unwrap()
+                        .unwrap();
+                        let other = canonical_string(
+                            &serde_json::json!({"summary":"replaced external identity"}),
+                        )
+                        .unwrap();
+                        assert_eq!(other.len(), canonical_string(&value).unwrap().len());
+                        crate::storage_observation::put_content(
+                            &store.connection,
+                            "external_artifact",
+                            &Uuid::now_v7().to_string(),
+                            "json",
+                            other.as_bytes(),
+                        )
+                        .unwrap();
+                        store.connection.execute("UPDATE result_content_refs SET sha256=?1 WHERE owner_kind='external_artifact' AND owner_id=?2 AND representation='json'",params![sha256_hex(other.as_bytes()),artifact.to_string()]).unwrap();
+                        if mode == "changed_content_reference" {
+                            assert_eq!(
+                                crate::storage_observation::read_referenced_content(
+                                    &store.connection,
+                                    &original_reference
+                                )
+                                .unwrap(),
+                                canonical_string(&value).unwrap().into_bytes()
+                            );
+                        }
+                    }
+                    "changed_legacy_body" => {
+                        let other = canonical_string(
+                            &serde_json::json!({"summary":"replaced external identity"}),
+                        )
+                        .unwrap();
+                        store
+                            .connection
+                            .execute(
+                                "UPDATE artifacts SET canonical_json=?1 WHERE artifact_id=?2",
+                                params![other, artifact.to_string()],
+                            )
+                            .unwrap();
+                    }
+                    "changed_task_digest" => {
+                        store
+                            .connection
+                            .execute(
+                                "UPDATE tasks SET result_sha256=?1 WHERE task_id=?2",
+                                params!["0".repeat(64), task.task_id.to_string()],
+                            )
+                            .unwrap();
+                    }
+                    "changed_artifact_digest" => {
+                        store
+                            .connection
+                            .execute(
+                                "UPDATE artifacts SET result_sha256=?1 WHERE artifact_id=?2",
+                                params!["0".repeat(64), artifact.to_string()],
+                            )
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+                let observed = store.external_task(opened.engagement_id, task.task_id);
+                if matches!(
+                    mode,
+                    "missing"
+                        | "retired_missing"
+                        | "null_binding"
+                        | "malformed_binding"
+                        | "missing_artifact"
+                        | "missing_owner"
+                        | "delivered_null_binding"
+                        | "retired_null_binding"
+                        | "changed_content_reference"
+                        | "changed_legacy_body"
+                        | "changed_task_digest"
+                        | "changed_artifact_digest"
+                        | "retired_changed_reference"
+                ) {
+                    assert_eq!(observed.unwrap_err().code, "INTERNAL_ERROR");
+                } else {
+                    let observed = observed.unwrap();
+                    assert_eq!(observed.task_id, task.task_id);
+                    assert_eq!(observed.result_artifact_ref, Some(artifact));
+                    assert_eq!(observed.state, completed.state);
+                    assert_eq!(
+                        observed.result,
+                        if mode == "retired" { None } else { Some(value) }
+                    );
+                }
+            }
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
     #[test]
     fn external_member_binding_uses_the_accepted_role_digest_for_its_configuration_generation() {
         let (mut store, root) = store();

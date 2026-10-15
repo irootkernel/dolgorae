@@ -9,6 +9,11 @@ development commits.
 
 ### Added
 
+- Reuse checked display observations and database connections, bound RPC and
+  stream work, and wake task waits from durable commits. Deduplicate result
+  bodies while retaining their identities, with explicit operator-approved
+  retirement and garbage collection.
+
 - Contain worker thread failures, preserve accepted operation recovery, and stop
   failed generations without reusing poisoned journal state.
 

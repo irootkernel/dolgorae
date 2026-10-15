@@ -511,6 +511,48 @@ preserve active/unknown references, accepted identities, receipts and audit
 continuity. Content retirement records a tombstone rather than claiming that
 the accepted operation never existed. Automatic deletion remains disabled.
 
+TASK-075 separates reusable display observation from fresh mutation proof.
+Checked source identities and verified published history bound reuse; database
+connections and commit notifications remain process-local optimizations over
+durable state. Stream sampling has four separate work slots alongside eight unary slots, with
+a twelve-slot blocking executor. Response deadlines bound waiting while admitted
+blocking work retains its permit until completion. Explicit
+result maintenance preserves original identities and protected references. The
+[observation runtime](../specs/dolgorae-v014-observation-runtime.md) owns these
+component invariants and their measurement boundaries. The private
+`global_profile` owner retains registry authority. The Profile module captures
+checked definition lists for display; the gateway projects those observations
+without reading the registry directly. The private
+`storage_observation` module owns checked short database leases, counters and
+commit notification; engagement and orchestration remain the schema and result
+identity owners and use that module without transferring semantic authority.
+`storage_observation` uses `ledger_generation` only for shared workspace
+maintenance leases. While holding a shared lease, `ledger_generation` asks the
+maintenance owner whether a retained checkpoint or content operation still
+closes admission.
+This read-only namespace check acquires no additional lock or database lease;
+maintenance alone validates its retained owner and operation records. The check
+also covers new Run publication, so process exit cannot reopen admission before
+the original operation resumes. Maintenance uses storage observation for checked content
+references and retains exclusive effect ownership; artifact reading uses the
+orchestration owner to verify publication identity before body access. Orchestration
+returns a `ledger_generation` shared maintenance lease to protect a live result
+reader through full body verification and range selection. The artifact module
+owns the common per-Run quota lease and checked logical byte count. Worker
+response storage and brokered publication share that lease; the worker uses the
+artifact quota API without gaining database or retention authority. Orchestration
+also uses the artifact quota lease through preparation and publication; artifact
+observation resolves normalized references through the orchestration store.
+Artifact quota checks reuse workspace secure-file/directory validation.
+Maintenance opens the engagement-owned result schema through its owner and uses
+storage observation for retained content; the storage helper uses Run paths,
+canonical hashes and Darwin file identity for its checked private references.
+The storage helper classifies ledger lease errors without erasing path or
+capacity failures. Its workspace-scoped busy boundary carries no invented Run
+identity; Run publication uses its known identity and registered startup error.
+Orchestration regression tests exercise maintenance-owned protection of cached
+legacy chunks; runtime retention authority remains with maintenance.
+
 These boundaries select future implementation responsibilities. TASK-068
 publishes their checked shapes; later implementation Tasks provide actual
 runtime behavior and artifact-bound three-consumer qualification.
@@ -3126,8 +3168,11 @@ as authority evidence.
 
 One `darwin` module is the only unsafe OS boundary. It wraps `libc` bindings for
 `posix_spawn` attributes, libproc sampling/enumeration, kqueue, byte-range
-fcntl/flock inspection, `fstatfs/MNT_LOCAL/APFS`, and boot-UUID sysctl. Core recovery
-receives safe typed verdicts through injectable monotonic-clock, boot, identity,
+fcntl/flock inspection, `fstatfs/MNT_LOCAL/APFS`, and boot-UUID sysctl.
+The same module wraps bundled SQLite statement-counter registration and its C
+callback. A static atomic counter context outlives every registered connection;
+only query and DDL counts cross this safe boundary, without retained SQL text.
+Core recovery receives safe typed verdicts through injectable monotonic-clock, boot, identity,
 enumeration, and fault-barrier interfaces. RFC 8785 canonicalization is an
 in-repository safe module rather than an unspecified serializer dependency.
 The dependency-free `paths` module is the sole physical Dolgorae-home locator;

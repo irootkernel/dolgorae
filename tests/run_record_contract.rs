@@ -32,6 +32,9 @@ use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+#[path = "run_snapshot_consistency.rs"]
+mod snapshot_consistency;
+
 fn canonical(input: &str) -> String {
     String::from_utf8(canonicalize(&parse(input).unwrap()).unwrap()).unwrap()
 }
@@ -213,6 +216,146 @@ fn run_publication_is_exclusive_canonical_and_permission_safe() {
             .to_string_lossy()
             .starts_with('.')
     }));
+}
+
+#[test]
+fn snapshot_binds_current_controller_and_socket_epoch_to_its_captured_sources() {
+    use dolgorae::snapshot::RunSnapshot;
+    use dolgorae::worker::{SocketIdentity, WorkerIdentity, WorkerRuntimeRecord};
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    for path in [
+        state_root.clone(),
+        state_root.join("runs"),
+        state_root.join("runtime"),
+        state_root.join("runtime/locks"),
+        state_root.join("runtime/runs"),
+    ] {
+        make_dir(&path);
+    }
+    let manifest = sample_manifest();
+    let uid = dolgorae::darwin::DarwinSystem.current_uid();
+    dolgorae::writer::WriterStore::initialize_layout(&state_root, &manifest.workspace_id, uid)
+        .unwrap();
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let directory = store.publish(&manifest).unwrap();
+    let without_runtime = RunSnapshot::load_display(&state_root, manifest.run_id, 999).unwrap();
+    assert_eq!(without_runtime.control_socket_epoch, 1);
+    assert_eq!(
+        without_runtime.controller_authority().unwrap(),
+        &manifest.controller
+    );
+    let mut runtime = WorkerRuntimeRecord {
+        schema_version: 1,
+        identity: WorkerIdentity {
+            workspace_id: manifest.workspace_id.clone(),
+            run_id: manifest.run_id,
+            run_generation: 1,
+            boot_uuid: Uuid::now_v7(),
+            pid: 42,
+            process_group_id: 42,
+            session_id: 42,
+            uid,
+            start_tvsec: 1,
+            start_tvusec: 0,
+            executable_path: PathBuf::from("/isolated-fixture/worker"),
+            executable_device: 1,
+            executable_inode: 1,
+            executable_sha256: "a".repeat(64),
+        },
+        socket_path: dolgorae::worker::worker_socket_path(
+            uid,
+            &manifest.workspace_id,
+            manifest.run_id,
+        )
+        .unwrap(),
+        socket_identity: SocketIdentity {
+            device: 1,
+            inode: 1,
+        },
+        control_socket_epoch: 41,
+        app_server_epoch: None,
+        control_recovery_required: false,
+        startup_scope: None,
+        dedicated_server_identity: None,
+        dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+        mutation_protocol_version: dolgorae::worker::WORKER_PROTOCOL_VERSION,
+        binary_sha256: "a".repeat(64),
+    };
+    // This is a checked observation DTO fixture, not live process or absence evidence.
+    let runtime_path = dolgorae::worker::runtime_record_path(
+        &dolgorae::worker::runtime_root(&state_root),
+        manifest.run_id,
+    )
+    .unwrap();
+    dolgorae::worker::write_runtime_record(&runtime_path, &runtime).unwrap();
+    let first = RunSnapshot::load_display(&state_root, manifest.run_id, 999).unwrap();
+    assert_eq!(
+        first.control_socket_epoch,
+        first.runtime_record.as_ref().unwrap().control_socket_epoch
+    );
+    assert_eq!(first.control_socket_epoch, 41);
+    let binding_path = directory.root.join("controller.json");
+    let mut current_binding = manifest.controller.clone();
+    current_binding.identity.generation += 1;
+    fs::write(&binding_path, serde_json::to_vec(&current_binding).unwrap()).unwrap();
+    runtime.control_socket_epoch = 43;
+    dolgorae::worker::write_runtime_record(&runtime_path, &runtime).unwrap();
+    let second =
+        RunSnapshot::load_display(&state_root, manifest.run_id, first.control_socket_epoch)
+            .unwrap();
+    assert_eq!(second.control_socket_epoch, 43);
+    assert_eq!(second.controller_authority().unwrap(), &current_binding);
+    assert_eq!(
+        store.load_controller_binding(manifest.run_id).unwrap(),
+        current_binding
+    );
+    assert_eq!(second.manifest.controller, manifest.controller);
+    assert_eq!(
+        second.stamp.run_state_revision,
+        first.stamp.run_state_revision
+    );
+    assert!(
+        second
+            .require_revision(second.stamp.run_state_revision, "run.pause")
+            .is_err()
+    );
+    // The ordinary fresh loader keeps the caller-provided epoch contract.
+    assert_eq!(
+        RunSnapshot::load(&state_root, manifest.run_id, 77)
+            .unwrap()
+            .control_socket_epoch,
+        77
+    );
+    let mut regressed = current_binding.clone();
+    regressed.identity.generation = 0;
+    fs::write(&binding_path, serde_json::to_vec(&regressed).unwrap()).unwrap();
+    assert_eq!(
+        store
+            .load_controller_binding(manifest.run_id)
+            .unwrap_err()
+            .code,
+        RunSnapshot::load_display(&state_root, manifest.run_id, 0)
+            .unwrap_err()
+            .code
+    );
+    fs::write(&binding_path, serde_json::to_vec(&current_binding).unwrap()).unwrap();
+    fs::set_permissions(&binding_path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(store.load_controller_binding(manifest.run_id).is_err());
+    assert!(RunSnapshot::load_display(&state_root, manifest.run_id, 0).is_err());
+    fs::set_permissions(&binding_path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::remove_file(binding_path).unwrap();
+    assert_eq!(
+        store.load_controller_binding(manifest.run_id).unwrap(),
+        manifest.controller
+    );
+    assert_eq!(
+        RunSnapshot::load_display(&state_root, manifest.run_id, 0)
+            .unwrap()
+            .controller_authority()
+            .unwrap(),
+        &manifest.controller
+    );
 }
 
 #[test]

@@ -1570,9 +1570,12 @@ fn validate_option_value(command: &str, flag: &str, value: &str) -> Result<(), S
             "access-transition-unavailable",
             "access-transition-unverified",
         ]),
-        "--kind" if command == "plan_maintenance" => {
-            Some(&["ledger_checkpoint", "membership_compaction"])
-        }
+        "--kind" if command == "plan_maintenance" => Some(&[
+            "ledger_checkpoint",
+            "membership_compaction",
+            "retire_result_content",
+            "garbage_collection",
+        ]),
         "--kind" if command == "review-target.capture" => {
             Some(&["workspace", "staged", "dirty", "head", "commit", "range"])
         }

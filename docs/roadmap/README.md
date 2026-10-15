@@ -24,8 +24,8 @@ live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. EPIC-018 is COMPLETE after successor requirements, checked contracts
 and qualified H1 validation. EPIC-019 is ACTIVE; EPIC-020, EPIC-009, EPIC-021, and EPIC-022 remain
 PLANNED for v0.1.4, in that execution order. TASK-067 is COMPLETE;
-TASK-068 through TASK-074 are COMPLETE;
-TASK-075 through TASK-089 remain PLANNED. TASK-027 retains its identity as EPIC-009's
+TASK-068 through TASK-075 are COMPLETE;
+TASK-076 through TASK-089 remain PLANNED. TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
 [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
@@ -2476,7 +2476,7 @@ Handoff: Worker failure containment integrated with TASK-071 lifecycle recovery.
 
 ### TASK-075: Make Observation and Wait Paths Affordable
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-074.
 

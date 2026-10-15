@@ -20,6 +20,8 @@ use std::os::unix::io::AsRawFd as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -31,6 +33,7 @@ const MAX_DIAGNOSTIC_BYTES: u64 = 8 * 1024 * 1024;
 /// consume the journal a whole server key shares.
 const MAX_DIAGNOSTIC_RECORD_BYTES: usize = 4096;
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
+const PROFILE_OBSERVATION_BATCH_SIZE: usize = 4;
 /// How long a freshly spawned app-server has to bind its Unix socket before
 /// the start gives up. Spent entirely outside the home and server locks.
 const SOCKET_BIND_BUDGET: Duration = Duration::from_secs(10);
@@ -2519,6 +2522,128 @@ fn snapshot_for(
     Ok(snapshot)
 }
 
+/// Cumulative process-local work counters for component measurements.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct ProfileObservationCounters {
+    pub registry_loads: u64,
+    pub executable_hashes: u64,
+    pub version_probes: u64,
+    pub schema_probes: u64,
+    pub snapshot_cache_hits: u64,
+}
+static PROFILE_REGISTRY_LOADS: AtomicU64 = AtomicU64::new(0);
+static PROFILE_EXECUTABLE_HASHES: AtomicU64 = AtomicU64::new(0);
+static PROFILE_VERSION_PROBES: AtomicU64 = AtomicU64::new(0);
+static PROFILE_SCHEMA_PROBES: AtomicU64 = AtomicU64::new(0);
+static PROFILE_SNAPSHOT_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+
+pub fn profile_observation_counters() -> ProfileObservationCounters {
+    ProfileObservationCounters {
+        registry_loads: PROFILE_REGISTRY_LOADS.load(Ordering::Relaxed),
+        executable_hashes: PROFILE_EXECUTABLE_HASHES.load(Ordering::Relaxed),
+        version_probes: PROFILE_VERSION_PROBES.load(Ordering::Relaxed),
+        schema_probes: PROFILE_SCHEMA_PROBES.load(Ordering::Relaxed),
+        snapshot_cache_hits: PROFILE_SNAPSHOT_CACHE_HITS.load(Ordering::Relaxed),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ObservationFileStamp {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+    mode: u32,
+    uid: u32,
+}
+
+fn observation_file_stamp(path: &Path) -> Result<ObservationFileStamp, MachineError> {
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    Ok(ObservationFileStamp {
+        path: path.to_owned(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        length: metadata.len(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+        mode: metadata.mode(),
+        uid: metadata.uid(),
+    })
+}
+
+fn observation_snapshot_key(
+    context: &Context,
+    name: &str,
+    profile: &RuntimeProfile,
+) -> Result<String, MachineError> {
+    let executable = fs::canonicalize(&profile.argv[0]).map_err(|error| {
+        MachineError::profile_config_invalid(&context.registry_path, error.to_string())
+    })?;
+    let home = fs::canonicalize(&profile.codex_home).map_err(|error| {
+        MachineError::profile_config_invalid(&context.registry_path, format!("CODEX_HOME: {error}"))
+    })?;
+    // Read and validate configuration even on hits. Invalid permissions, malformed
+    // content and dangling/symlink configuration cannot be hidden by old evidence.
+    let configuration = configuration_snapshot(name, path_utf8(&home)?)?;
+    let config_path = home.join("config.toml");
+    let config_stamp = match fs::symlink_metadata(&config_path) {
+        Ok(_) => Some(observation_file_stamp(&config_path)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(io_error(error)),
+    };
+    let account = DarwinSystem.account_environment().map_err(io_error)?;
+    canonical_sha256(&json!({
+        "context": context.dolgorae_home_root, "name": name, "definition": profile,
+        "executable": observation_file_stamp(&executable)?,
+        "home": observation_file_stamp(&home)?, "config_stamp": config_stamp,
+        "launch": configuration.launch, "observation": configuration.observation,
+        "manifest": sha256_hex(MANIFEST.as_bytes()),
+        "account_home": reserved_path(&account.home, "HOME")?,
+        "account_user": account.user, "account_shell": reserved_path(&account.shell, "SHELL")?,
+        "account_temporary_directory": reserved_path(&account.temporary_directory, "TMPDIR")?,
+    }))
+}
+
+// Only display snapshots use this bounded cache. Launch/bind/lifecycle paths
+// continue calling observe_snapshot directly and establish fresh evidence.
+fn observe_snapshot_reused(
+    context: &Context,
+    name: &str,
+    profile: &RuntimeProfile,
+) -> Result<ProfileSnapshot, MachineError> {
+    static CACHE: OnceLock<Mutex<Vec<(String, ProfileSnapshot)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let key = observation_snapshot_key(context, name, profile)?;
+    if let Some(snapshot) = cache
+        .lock()
+        .map_err(|_| internal("profile observation cache poisoned"))?
+        .iter()
+        .find(|(candidate, _)| candidate == &key)
+        .map(|(_, snapshot)| snapshot.clone())
+    {
+        PROFILE_SNAPSHOT_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Ok(snapshot);
+    }
+    let snapshot = observe_snapshot(context, name, profile)?;
+    // A replacement during external probes does not publish a mixed snapshot.
+    if observation_snapshot_key(context, name, profile)? != key {
+        return Err(MachineError::profile_config_invalid(
+            &context.registry_path,
+            "Profile source changed during observation",
+        ));
+    }
+    let mut entries = cache
+        .lock()
+        .map_err(|_| internal("profile observation cache poisoned"))?;
+    if entries.len() >= 32 {
+        entries.remove(0);
+    }
+    entries.push((key, snapshot.clone()));
+    Ok(snapshot)
+}
+
 fn observe_snapshot(
     context: &Context,
     name: &str,
@@ -2529,6 +2654,7 @@ fn observe_snapshot(
         MachineError::profile_config_invalid(&context.registry_path, error.to_string())
     })?;
     let metadata = fs::metadata(&canonical_executable).map_err(io_error)?;
+    PROFILE_EXECUTABLE_HASHES.fetch_add(1, Ordering::Relaxed);
     let executable_identity = ExecutableIdentity {
         resolved_path: path_utf8(&canonical_executable)?.to_owned(),
         device: metadata.dev(),
@@ -2650,12 +2776,110 @@ pub fn observe_global_profile(
     home: &DolgoraeHome,
     name: &str,
 ) -> Result<ProfileObservation, MachineError> {
+    PROFILE_REGISTRY_LOADS.fetch_add(1, Ordering::Relaxed);
     let definition = crate::global_profile::GlobalProfileStore::new(home).resolve(name)?;
     let context = Context {
         registry_path: home.root().join("profiles.yaml"),
         dolgorae_home_root: home.root().to_path_buf(),
     };
-    let snapshot = observe_snapshot(&context, name, &definition)?;
+    observe_registered_profile(&context, name, &definition)
+}
+
+/// One display-only list uses one checked definition capture. Registry locks
+/// are released before schema probes, process checks or model-catalog RPCs.
+pub fn observe_global_profiles(
+    home: &DolgoraeHome,
+) -> Result<Vec<ProfileObservation>, MachineError> {
+    with_checked_profile_registry(home, |context, registry| {
+        observe_profile_definitions(&registry.profiles, |name, definition| {
+            observe_registered_profile(context, name, definition)
+        })
+    })
+}
+
+fn observe_profile_definitions<T: Send>(
+    profiles: &BTreeMap<String, RuntimeProfile>,
+    observe: impl Fn(&str, &RuntimeProfile) -> Result<T, MachineError> + Sync,
+) -> Result<Vec<T>, MachineError> {
+    let profiles = profiles.iter().collect::<Vec<_>>();
+    let observe = &observe;
+    let mut observations = Vec::with_capacity(profiles.len());
+    for batch in profiles.chunks(PROFILE_OBSERVATION_BATCH_SIZE) {
+        let results = std::thread::scope(|scope| {
+            let pending = batch
+                .iter()
+                .map(|(name, definition)| {
+                    std::thread::Builder::new()
+                        .spawn_scoped(scope, move || observe(name, definition))
+                })
+                .collect::<Vec<_>>();
+            // Join the complete batch before selecting its first error. Neither
+            // failed observation nor a panic may leave background work behind.
+            pending
+                .into_iter()
+                .map(|pending| match pending {
+                    Ok(worker) => worker
+                        .join()
+                        .unwrap_or_else(|_| Err(internal("Profile observation panicked"))),
+                    Err(error) => Err(internal(error)),
+                })
+                .collect::<Vec<_>>()
+        });
+        observations.extend(results.into_iter().collect::<Result<Vec<_>, _>>()?);
+    }
+    Ok(observations)
+}
+
+fn profile_registry_source(context: &Context) -> Result<Vec<ObservationFileStamp>, MachineError> {
+    [
+        context.dolgorae_home_root.clone(),
+        context.dolgorae_home_root.join("state.json"),
+        context.registry_path.clone(),
+    ]
+    .iter()
+    .map(|path| observation_file_stamp(path))
+    .collect()
+}
+
+fn with_checked_profile_registry<T>(
+    home: &DolgoraeHome,
+    observe: impl FnOnce(
+        &Context,
+        &crate::global_profile::GlobalProfileRegistry,
+    ) -> Result<T, MachineError>,
+) -> Result<T, MachineError> {
+    let context = Context {
+        registry_path: home.root().join("profiles.yaml"),
+        dolgorae_home_root: home.root().to_path_buf(),
+    };
+    let source_changed = || {
+        MachineError::profile_config_invalid(
+            &context.registry_path,
+            "Profile registry source changed during list observation",
+        )
+    };
+    let before = profile_registry_source(&context);
+    PROFILE_REGISTRY_LOADS.fetch_add(1, Ordering::Relaxed);
+    // Keep the registry store's original classification for an invalid home,
+    // registry or definition. Source stamps never replace its checked load.
+    let registry = crate::global_profile::GlobalProfileStore::new(home).load()?;
+    let before = before.map_err(|_| source_changed())?;
+    if profile_registry_source(&context).map_err(|_| source_changed())? != before {
+        return Err(source_changed());
+    }
+    let result = observe(&context, &registry)?;
+    if profile_registry_source(&context).map_err(|_| source_changed())? != before {
+        return Err(source_changed());
+    }
+    Ok(result)
+}
+
+fn observe_registered_profile(
+    context: &Context,
+    name: &str,
+    definition: &RuntimeProfile,
+) -> Result<ProfileObservation, MachineError> {
+    let snapshot = observe_snapshot_reused(context, name, definition)?;
     let mut observation = ProfileObservation {
         snapshot,
         server_epoch: None,
@@ -2669,7 +2893,7 @@ pub fn observe_global_profile(
             .push(ProfileObservationBlocker::RuntimeIncompatible);
         return Ok(observation);
     }
-    let state_path = profile_state_path(&context, &observation.snapshot);
+    let state_path = profile_state_path(context, &observation.snapshot);
     let Some(state) = read_state_if_running(&state_path)? else {
         observation
             .blockers
@@ -2677,7 +2901,7 @@ pub fn observe_global_profile(
         return Ok(observation);
     };
     let active_path =
-        home_root(&context, &observation.snapshot.canonical_codex_home)?.join("active.json");
+        home_root(context, &observation.snapshot.canonical_codex_home)?.join("active.json");
     let active = read_home_active(&active_path)?;
     if state.lifecycle != "ready"
         || state.server_key != observation.snapshot.server_key
@@ -2936,10 +3160,13 @@ fn read_toml_table_if_present(
     profile_name: &str,
     path: &Path,
 ) -> Result<toml::map::Map<String, toml::Value>, MachineError> {
-    if !path.exists() {
-        return Ok(toml::map::Map::new());
-    }
-    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(toml::map::Map::new());
+        }
+        Err(error) => return Err(io_error(error)),
+    };
     if !metadata.file_type().is_file()
         || metadata.uid() != DarwinSystem.current_uid()
         || metadata.mode() & 0o777 != 0o600
@@ -2979,6 +3206,7 @@ fn codex_version(
     profile: &RuntimeProfile,
     executable: &Path,
 ) -> Result<String, MachineError> {
+    PROFILE_VERSION_PROBES.fetch_add(1, Ordering::Relaxed);
     let mut command = Command::new(executable);
     command.arg("--version");
     apply_environment(&mut command, &prepared_environment(profile)?);
@@ -3055,6 +3283,7 @@ fn generate_schema(
     let stable = root.join("stable");
     let experimental = root.join("experimental");
     for (destination, include_experimental) in [(&stable, false), (&experimental, true)] {
+        PROFILE_SCHEMA_PROBES.fetch_add(1, Ordering::Relaxed);
         let mut command = Command::new(executable);
         for argument in profile.argv.iter().skip(1) {
             command.arg(argument);
@@ -6693,6 +6922,289 @@ impl ProfileOperation {
 
 #[cfg(test)]
 mod tests {
+    fn profile_list_fixture() -> (
+        std::path::PathBuf,
+        crate::paths::DolgoraeHome,
+        crate::workspace::RuntimeProfile,
+    ) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-profile-list-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let codex_home = root.join("codex-home");
+        std::fs::create_dir(&codex_home).unwrap();
+        let executable = root.join("codex");
+        std::fs::copy("/bin/sh", &executable).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home =
+            crate::paths::DolgoraeHome::from_canonical_home(std::fs::canonicalize(&root).unwrap())
+                .unwrap();
+        crate::global_profile::initialize_generation(&home).unwrap();
+        let definition = crate::workspace::RuntimeProfile {
+            argv: vec![executable.to_str().unwrap().to_owned()],
+            codex_home: codex_home.to_str().unwrap().to_owned(),
+            environment: std::collections::BTreeMap::from([
+                ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+                ("LANG".to_owned(), "C".to_owned()),
+                ("LC_ALL".to_owned(), "C".to_owned()),
+            ]),
+            native_subagents: crate::workspace::NativeSubagents::Enabled,
+        };
+        let store = crate::global_profile::GlobalProfileStore::new(&home);
+        for index in 0..5 {
+            store
+                .add(format!("profile-{index}"), definition.clone())
+                .unwrap();
+        }
+        (root, home, definition)
+    }
+
+    #[test]
+    fn profile_list_observation_is_bounded_parallel_and_registry_ordered() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Barrier, Condvar, Mutex};
+        let (root, home, _) = profile_list_fixture();
+        let registry = crate::global_profile::GlobalProfileStore::new(&home)
+            .load()
+            .unwrap();
+        let entered = Barrier::new(super::PROFILE_OBSERVATION_BATCH_SIZE);
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let completed = Mutex::new(Vec::new());
+        let changed = Condvar::new();
+        let observed = super::observe_profile_definitions(&registry.profiles, |name, _| {
+            let index = name
+                .strip_prefix("profile-")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(current, Ordering::SeqCst);
+            if index < super::PROFILE_OBSERVATION_BATCH_SIZE {
+                entered.wait();
+            }
+            let mut finished = completed.lock().unwrap();
+            if index == 0 {
+                finished = changed.wait_while(finished, |rows| rows.len() < 3).unwrap();
+            }
+            finished.push(index);
+            changed.notify_all();
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok(index)
+        })
+        .unwrap();
+        assert_eq!(observed, [0, 1, 2, 3, 4]);
+        assert_eq!(peak.load(Ordering::SeqCst), 4);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(completed.into_inner().unwrap()[3], 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_list_observation_joins_failed_batches_and_preserves_error_order() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (root, home, _) = profile_list_fixture();
+        let registry = crate::global_profile::GlobalProfileStore::new(&home)
+            .load()
+            .unwrap();
+        for panic in [false, true] {
+            let entered = Barrier::new(super::PROFILE_OBSERVATION_BATCH_SIZE);
+            let finished = AtomicUsize::new(0);
+            let result = super::observe_profile_definitions(&registry.profiles, |name, _| {
+                entered.wait();
+                if panic && name == "profile-2" {
+                    panic!("injected Profile observation failure");
+                }
+                finished.fetch_add(1, Ordering::SeqCst);
+                if !panic && matches!(name, "profile-0" | "profile-1") {
+                    Err(super::internal(name))
+                } else {
+                    Ok(())
+                }
+            });
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "INTERNAL_ERROR");
+            assert_eq!(finished.load(Ordering::SeqCst), if panic { 3 } else { 4 });
+            assert!(
+                error.details["invariant"]
+                    .as_str()
+                    .unwrap()
+                    .contains(if panic { "panicked" } else { "profile-0" })
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_list_capture_keeps_all_five_definitions_in_their_home() {
+        let (first_root, first_home, _) = profile_list_fixture();
+        let (second_root, second_home, _) = profile_list_fixture();
+        let select = |home: &crate::paths::DolgoraeHome| {
+            super::with_checked_profile_registry(home, |context, registry| {
+                assert_eq!(context.dolgorae_home_root, home.root());
+                Ok(registry
+                    .profiles
+                    .iter()
+                    .map(|(name, definition)| {
+                        (
+                            name.clone(),
+                            definition.argv[0].clone(),
+                            definition.codex_home.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .unwrap()
+        };
+        let first = select(&first_home);
+        let second = select(&second_home);
+        assert_eq!(first.len(), 5);
+        assert_eq!(second.len(), 5);
+        for (
+            (first_name, first_executable, first_codex_home),
+            (second_name, second_executable, second_codex_home),
+        ) in first.iter().zip(&second)
+        {
+            assert_eq!(first_name, second_name);
+            assert!(std::path::Path::new(first_executable).starts_with(&first_root));
+            assert!(std::path::Path::new(first_codex_home).starts_with(&first_root));
+            assert!(std::path::Path::new(second_executable).starts_with(&second_root));
+            assert!(std::path::Path::new(second_codex_home).starts_with(&second_root));
+            assert_ne!(first_executable, second_executable);
+        }
+        std::fs::remove_dir_all(first_root).unwrap();
+        std::fs::remove_dir_all(second_root).unwrap();
+    }
+
+    #[test]
+    fn profile_list_capture_refuses_registry_and_home_generation_drift() {
+        let (root, home, definition) = profile_list_fixture();
+        let result = super::with_checked_profile_registry(&home, |_, registry| {
+            assert_eq!(registry.profiles.len(), 5);
+            // This also establishes that list sampling holds no registry lock
+            // over the observation callback or a server request.
+            crate::global_profile::GlobalProfileStore::new(&home)
+                .add("added-during-list".to_owned(), definition)?;
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().code, "PROFILE_CONFIG_INVALID");
+        let result = super::with_checked_profile_registry(&home, |_, _| {
+            std::fs::write(
+                home.root().join("state.json"),
+                b"invalid changed generation",
+            )
+            .unwrap();
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().code, "PROFILE_CONFIG_INVALID");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_list_capture_checks_every_entry_before_observation() {
+        let (root, home, _) = profile_list_fixture();
+        super::with_checked_profile_registry(&home, |_, registry| {
+            assert_eq!(registry.profiles.len(), 5);
+            Ok(())
+        })
+        .unwrap();
+        let mut registry = crate::global_profile::GlobalProfileStore::new(&home)
+            .load()
+            .unwrap();
+        registry.profiles.get_mut("profile-4").unwrap().argv[0] =
+            root.join("absent/codex").to_str().unwrap().to_owned();
+        std::fs::write(
+            home.root().join("profiles.yaml"),
+            serde_yaml_ng::to_string(&registry).unwrap(),
+        )
+        .unwrap();
+        let result = super::with_checked_profile_registry(
+            &home,
+            |_, _| -> Result<(), crate::machine::MachineError> {
+                panic!("an invalid captured entry reached list observation")
+            },
+        );
+        assert_eq!(result.unwrap_err().code, "PROFILE_CONFIG_INVALID");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_observation_identity_rejects_changed_config_and_tracks_replacements() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-profile-reuse-{}", uuid::Uuid::now_v7()));
+        let home = root.join("codex-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let executable = root.join("codex");
+        std::fs::copy("/bin/sh", &executable).unwrap();
+        let profile = crate::workspace::RuntimeProfile {
+            argv: vec![executable.to_str().unwrap().to_owned()],
+            codex_home: home.to_str().unwrap().to_owned(),
+            environment: std::collections::BTreeMap::new(),
+            native_subagents: crate::workspace::NativeSubagents::Enabled,
+        };
+        let context = super::Context {
+            registry_path: root.join("profiles.yaml"),
+            dolgorae_home_root: root.clone(),
+        };
+        let key = || super::observation_snapshot_key(&context, "p", &profile);
+        let initial = key().unwrap();
+        assert_eq!(key().unwrap(), initial);
+        let config = home.join("config.toml");
+        std::fs::write(&config, "model = \"changed\"\n").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let changed = key().unwrap();
+        assert_ne!(changed, initial);
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(key().is_err());
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&config, "not = [valid").unwrap();
+        assert!(key().is_err());
+        std::fs::remove_file(&config).unwrap();
+        symlink(home.join("missing"), &config).unwrap();
+        assert!(key().is_err());
+        std::fs::remove_file(&config).unwrap();
+        let before_replacement = key().unwrap();
+        let replacement = root.join("replacement");
+        std::fs::copy("/bin/sh", &replacement).unwrap();
+        std::fs::rename(&replacement, &executable).unwrap();
+        assert_ne!(key().unwrap(), before_replacement);
+        let alias = root.join("codex-alias");
+        symlink(&executable, &alias).unwrap();
+        let mut aliased_definition = profile.clone();
+        aliased_definition.argv[0] = alias.to_str().unwrap().to_owned();
+        let alias_key =
+            super::observation_snapshot_key(&context, "p", &aliased_definition).unwrap();
+        std::fs::copy("/bin/sh", &replacement).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&replacement, &alias).unwrap();
+        assert_ne!(
+            super::observation_snapshot_key(&context, "p", &aliased_definition).unwrap(),
+            alias_key
+        );
+        let new_home = root.join("new-codex-home");
+        std::fs::create_dir(&new_home).unwrap();
+        let home_alias = root.join("home-alias");
+        symlink(&home, &home_alias).unwrap();
+        aliased_definition.codex_home = home_alias.to_str().unwrap().to_owned();
+        let home_key = super::observation_snapshot_key(&context, "p", &aliased_definition).unwrap();
+        std::fs::remove_file(&home_alias).unwrap();
+        symlink(&new_home, &home_alias).unwrap();
+        assert_ne!(
+            super::observation_snapshot_key(&context, "p", &aliased_definition).unwrap(),
+            home_key
+        );
+        let mut changed_definition = profile.clone();
+        changed_definition.argv.push("--different".to_owned());
+        assert_ne!(
+            super::observation_snapshot_key(&context, "p", &changed_definition).unwrap(),
+            key().unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn observed_models_validate_defaults_and_efforts() {
         let item = serde_json::json!({"model":"m", "isDefault":true,

@@ -131,7 +131,7 @@ class FakeAppServer:
             raise wsframe.ProtocolError("method must be a string")
         request_id = message.get("id")
         self.remember(method, message.get("params"))
-        step = self.scenario.match(method)
+        step = self.scenario.match(method, message.get("params"))
         if step is None:
             if request_id is not None:
                 self.send(

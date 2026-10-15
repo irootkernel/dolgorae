@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
@@ -97,12 +97,19 @@ impl WorkspaceLease {
         };
         result.map_err(|error| {
             if error.kind() == std::io::ErrorKind::WouldBlock {
-                LedgerError::WriterBusy(path)
+                LedgerError::WriterBusy(path.clone())
             } else {
                 LedgerError::Io(error)
             }
         })?;
-        Ok(Self(file))
+        let lease = Self(file);
+        if !exclusive
+            && crate::maintenance::workspace_maintenance_pending(state_root)
+                .map_err(LedgerError::SecurityPolicy)?
+        {
+            return Err(LedgerError::WriterBusy(path));
+        }
+        Ok(lease)
     }
     pub(crate) fn for_run(root: &Path) -> Result<Option<Self>, LedgerError> {
         if root
@@ -136,6 +143,7 @@ pub(crate) struct PinnedGeneration {
     pub checkpoint_projection: Option<RunStateProjection>,
     segments: Vec<Segment>,
     pub base_bytes: u64,
+    pub observation_paths: Vec<PathBuf>,
 }
 
 /// Checks only selection/manifest identity, never accepts a historical prefix.
@@ -254,6 +262,110 @@ fn selected_manifest(
     Ok(selected)
 }
 
+/// Metadata fence for display reuse. This does not prove accepted-operation absence.
+/// Every retained activation witness and selected content file participates, so
+/// deleting a selector or modifying a checkpoint cannot reuse an older prefix.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObservationFileIdentity {
+    pub path: PathBuf,
+    pub device: u64,
+    pub inode: u64,
+    pub mode: u32,
+    pub uid: u32,
+    pub links: u64,
+    pub length: u64,
+    pub modified: (i64, i64),
+    pub changed: (i64, i64),
+}
+
+pub(crate) fn observation_identity(
+    root: &Path,
+    referenced: &[PathBuf],
+) -> Result<Vec<ObservationFileIdentity>, LedgerError> {
+    fn inspect(path: &Path) -> Result<ObservationFileIdentity, LedgerError> {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.is_dir() {
+            verify_secure_directory(path, DarwinSystem.current_uid())
+                .map_err(LedgerError::SecurityPolicy)?;
+        } else {
+            verify_secure_file(path, DarwinSystem.current_uid())
+                .map_err(LedgerError::SecurityPolicy)?;
+        }
+        Ok(ObservationFileIdentity {
+            path: path.to_owned(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mode: metadata.mode(),
+            uid: metadata.uid(),
+            links: metadata.nlink(),
+            length: if metadata.is_dir() { 0 } else { metadata.len() },
+            modified: if metadata.is_dir() {
+                (0, 0)
+            } else {
+                (metadata.mtime(), metadata.mtime_nsec())
+            },
+            changed: if metadata.is_dir() {
+                (0, 0)
+            } else {
+                (metadata.ctime(), metadata.ctime_nsec())
+            },
+        })
+    }
+    let mut sources = vec![inspect(root)?, inspect(&root.join("audit.jsonl"))?];
+    match inspect(&root.join("ledger-selection.json")) {
+        Ok(source) => sources.push(source),
+        Err(LedgerError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let namespace = root.join("ledger-generations");
+    match fs::read_dir(&namespace) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+        Ok(entries) => {
+            sources.push(inspect(&namespace)?);
+            for (index, entry) in entries.enumerate() {
+                if index >= MAX_SEGMENTS {
+                    return Err(integrity("retained generation namespace exceeds its bound"));
+                }
+                let directory = entry?.path();
+                verify_secure_directory(&directory, DarwinSystem.current_uid())
+                    .map_err(LedgerError::SecurityPolicy)?;
+                sources.push(inspect(&directory)?);
+                match read_json::<Selection>(&directory.join("selection.json"), MAX_METADATA_BYTES)
+                {
+                    Ok(witness) => {
+                        sources.push(inspect(&checked_path(root, &witness.manifest.path)?)?)
+                    }
+                    Err(LedgerError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+                for (index, file) in fs::read_dir(&directory)?.enumerate() {
+                    if index >= 16 {
+                        return Err(integrity("generation file namespace exceeds its bound"));
+                    }
+                    sources.push(inspect(&file?.path())?);
+                }
+            }
+        }
+    }
+    for path in referenced {
+        sources.push(inspect(path)?);
+        let mut ancestor = path.parent();
+        while let Some(directory) = ancestor {
+            verify_secure_directory(directory, DarwinSystem.current_uid())
+                .map_err(LedgerError::SecurityPolicy)?;
+            sources.push(inspect(directory)?);
+            if directory == root {
+                break;
+            }
+            ancestor = directory.parent();
+        }
+    }
+    sources.sort_by(|a, b| a.path.cmp(&b.path));
+    sources.dedup_by(|a, b| a.path == b.path);
+    Ok(sources)
+}
+
 /// Caller owns the audit writer lock; retain activation before its first append.
 pub(crate) fn retain_activation(root: &Path, run_id: Uuid) -> Result<(), LedgerError> {
     if let Some((selection, manifest)) = selected_manifest(root, run_id)? {
@@ -280,6 +392,7 @@ pub(crate) fn pin(root: &Path, run_id: Uuid) -> Result<PinnedGeneration, LedgerE
             checkpoint_projection: None,
             segments: Vec::new(),
             base_bytes: 0,
+            observation_paths: Vec::new(),
         });
     };
     let checkpoint: Checkpoint = read_content_json(root, &manifest.checkpoint, MAX_METADATA_BYTES)?;
@@ -350,7 +463,17 @@ pub(crate) fn pin(root: &Path, run_id: Uuid) -> Result<PinnedGeneration, LedgerE
     let append_path = checked_path(root, &manifest.append_path)?;
     verify_secure_file(&append_path, DarwinSystem.current_uid())
         .map_err(LedgerError::SecurityPolicy)?;
+    let mut observation_paths = vec![
+        checked_path(root, &selection.manifest.path)?,
+        checked_path(root, &manifest.checkpoint.path)?,
+        checked_path(root, &manifest.receipt_index.path)?,
+        append_path.clone(),
+    ];
+    for segment in &checkpoint.segments {
+        observation_paths.push(checked_path(root, &segment.content.path)?);
+    }
     Ok(PinnedGeneration {
+        observation_paths,
         manifest: Some(manifest),
         historical,
         append_path,
@@ -770,6 +893,54 @@ mod tests {
     impl Drop for Tree {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn display_prefix_reselects_generation_and_rejects_checkpoint_or_receipt_damage() {
+        for damaged in [
+            "checkpoint.json",
+            "receipts.json",
+            "selection.json",
+            "history.jsonl",
+        ] {
+            let tree = Tree::new();
+            let (records, projection) = tree.seed();
+            let old_display = ObservedLedger::open_display(&tree.root, tree.run_id, 4).unwrap();
+            let old_pin = pin(&tree.root, tree.run_id).unwrap();
+            let operation = Uuid::now_v7();
+            rollover(
+                &tree.root,
+                tree.run_id,
+                operation,
+                &old_pin,
+                &records,
+                &projection,
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+            let display = ObservedLedger::open_display(&tree.root, tree.run_id, 4).unwrap();
+            let mut expected = Vec::new();
+            old_display.write_canonical_history(&mut expected).unwrap();
+            let mut actual = Vec::new();
+            display.write_canonical_history(&mut actual).unwrap();
+            assert_eq!(actual, expected);
+            let path = tree
+                .root
+                .join("ledger-generations")
+                .join(operation.to_string())
+                .join(damaged);
+            let mut bytes = fs::read(&path).unwrap();
+            bytes[0] = b'!';
+            fs::write(path, bytes).unwrap();
+            assert!(
+                ObservedLedger::open_display(&tree.root, tree.run_id, 4).is_err(),
+                "cached {damaged} damage was hidden"
+            );
+            // Already pinned snapshots retain their original coherent bytes.
+            let mut retained = Vec::new();
+            display.write_canonical_history(&mut retained).unwrap();
+            assert_eq!(retained, expected);
         }
     }
 

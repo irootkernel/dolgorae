@@ -1904,11 +1904,7 @@ impl CoreSemanticService {
         ids.sort();
         let mut result = Vec::new();
         for id in ids {
-            let observation = crate::snapshot::RunSnapshot::observe(
-                &root,
-                id,
-                observed_control_socket_epoch(&root, id),
-            )?;
+            let observation = crate::snapshot::RunSnapshot::observe_display(&root, id, 0)?;
             if observation.0.manifest.workspace_id != workspace.workspace_id {
                 return Err(internal("Run list crossed a workspace boundary"));
             }

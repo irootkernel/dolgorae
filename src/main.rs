@@ -39,6 +39,21 @@ fn main() -> ExitCode {
         return render_version(json_output);
     }
 
+    // Pin the executing image before any long-lived service can outlive a
+    // replacement of its executable pathname. Help and version stay cheap.
+    if dolgorae::worker::current_dolgorae_build().is_err() {
+        return render_failure(
+            human,
+            "unknown",
+            MachineError::new(
+                "INTERNAL_ERROR",
+                "executing build cannot be verified",
+                false,
+                json!({"invariant": "executing_build"}),
+            ),
+        );
+    }
+
     match Cli::try_parse_from(&args) {
         Ok(cli) => {
             if matches!(&cli.command, Command::Serve(_)) {

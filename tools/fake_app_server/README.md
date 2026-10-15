@@ -38,12 +38,17 @@ silent no-answer. A scenario is a list of steps keyed by inbound method:
 | --- | --- |
 | `method` | inbound JSON-RPC method this step answers |
 | `occurrence` | match only the *n*-th call of that method |
+| `params_match` | optional object whose top-level keys must exist with equal values in request parameters; extra request keys are allowed |
 | `respond.result` | result value for a request |
 | `respond.error` | error object for a request |
 | `respond.generate` | build a reply too large to hold in one message |
 | `respond.silent` | accept the request and answer nothing |
 | `emit` | notifications, server requests, or a close, sent after the reply |
 | `emit[].await_reply` | hold this emission, and every one after it in the step, until the client answers the request just sent |
+
+A matching `params_match` step takes precedence over an unfiltered fallback.
+Method occurrence counts include every call, and matching occurrence-specific
+steps retain priority. Omitting `params_match` preserves existing selection.
 
 `await_reply` is what keeps an approval honest: a real app-server does not
 finish a Turn while it is still waiting on one, so a scenario that emitted the

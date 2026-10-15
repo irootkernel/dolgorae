@@ -8,6 +8,12 @@ mod support;
 #[path = "support/ledger_maintenance.rs"]
 mod ledger_maintenance;
 
+#[path = "support/observation_cases.rs"]
+mod observation_campaign;
+
+#[path = "support/result_content_cases.rs"]
+mod result_content_cli;
+
 use dolgorae::machine::MachineError;
 use dolgorae::orchestration::{
     AcceptedSpecialistTask, AcceptedTaskContext, AdapterFailure, AssignSpecialistTask,

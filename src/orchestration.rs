@@ -17,18 +17,17 @@ use crate::workspace::{
     sync_directory, verify_secure_directory,
 };
 use base64::Engine as _;
-use rusqlite::{
-    Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior, params,
-};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -74,12 +73,18 @@ impl OrchestrationFaultInjector for NoOrchestrationFaults {
 trait OrchestrationClock: Send + Sync {
     fn now_ms(&self) -> Result<i64, MachineError>;
     fn wait(&self, duration: Duration);
+    fn uses_durable_notifications(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
 struct SystemOrchestrationClock;
 
 impl OrchestrationClock for SystemOrchestrationClock {
+    fn uses_durable_notifications(&self) -> bool {
+        true
+    }
     fn now_ms(&self) -> Result<i64, MachineError> {
         now_ms()
     }
@@ -1145,8 +1150,47 @@ fn ensure_primary_turn_admission_for_binding(
     Ok(())
 }
 
+type EventObservationKey = (PathBuf, u64, u64, u64, Uuid);
+static EVENT_OBSERVATIONS: OnceLock<
+    Mutex<BTreeMap<EventObservationKey, crate::storage_observation::DatabaseObservationStamp>>,
+> = OnceLock::new();
+static EVENT_FULL_READS: AtomicU64 = AtomicU64::new(0);
+static EVENT_FULL_ROWS: AtomicU64 = AtomicU64::new(0);
+static EVENT_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static EVENT_CACHE_INVALIDATIONS: AtomicU64 = AtomicU64::new(0);
+
+#[must_use]
+pub fn observation_counters() -> BTreeMap<&'static str, u64> {
+    BTreeMap::from([
+        (
+            "database_event_full_reads",
+            EVENT_FULL_READS.load(Ordering::Relaxed),
+        ),
+        (
+            "database_event_full_rows",
+            EVENT_FULL_ROWS.load(Ordering::Relaxed),
+        ),
+        (
+            "database_event_cache_hits",
+            EVENT_CACHE_HITS.load(Ordering::Relaxed),
+        ),
+        (
+            "database_event_cache_invalidations",
+            EVENT_CACHE_INVALIDATIONS.load(Ordering::Relaxed),
+        ),
+    ])
+}
+
+pub(crate) struct LogicalResultArtifact {
+    pub byte_length: u64,
+    pub sha256: String,
+    pub retired: bool,
+    pub published: bool,
+    pub normalized: bool,
+}
+
 pub struct OrchestrationStore {
-    connection: Connection,
+    connection: crate::storage_observation::CheckedConnection,
     faults: Arc<dyn OrchestrationFaultInjector>,
     clock: Arc<dyn OrchestrationClock>,
     credential_root: PathBuf,
@@ -1176,38 +1220,108 @@ impl OrchestrationStore {
         clock: Arc<dyn OrchestrationClock>,
     ) -> Result<Self, MachineError> {
         let path = EngagementStore::workspace_database_path(state_root);
-        let _ = EngagementStore::open(&path)?;
-        let connection = Connection::open(&path).map_err(internal)?;
+        let mut connection = EngagementStore::open(&path)?.into_connection();
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(internal)?;
-        connection.execute_batch(SCHEMA).map_err(internal)?;
-        connection
-            .execute(
-                "INSERT OR IGNORE INTO brokered_result_publication_sequence(
-                   task_id,session_id,published_at_ms
-                 )
-                 SELECT task_id,session_id,updated_at_ms
-                 FROM brokered_result_publications
-                 WHERE state='published'
-                 ORDER BY updated_at_ms,task_id",
+        let version: Option<String> = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='orchestration_schema_version'",
                 [],
+                |row| row.get(0),
             )
+            .optional()
             .map_err(internal)?;
-        connection
-            .execute(
-                "UPDATE orchestrated_sessions
-                 SET revision=(
-                   SELECT COUNT(*) FROM orchestration_events e
-                   WHERE e.session_id=orchestrated_sessions.session_id
-                 )
-                 WHERE revision<>(
-                   SELECT COUNT(*) FROM orchestration_events e
-                   WHERE e.session_id=orchestrated_sessions.session_id
-                 )",
-                [],
-            )
-            .map_err(internal)?;
+        if version.as_deref() != Some("3") {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(internal)?;
+            let locked: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='orchestration_schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(internal)?;
+            if locked.is_none() {
+                crate::storage_observation::count_migration();
+                transaction.execute_batch(SCHEMA).map_err(internal)?;
+                transaction.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS prepared_result_publications ON brokered_result_publications(state,task_id);
+                     CREATE INDEX IF NOT EXISTS session_event_sequence ON orchestration_events(session_id,sequence);
+                     CREATE INDEX IF NOT EXISTS observed_members_by_session ON brokered_members(session_id,membership_state);
+                     CREATE INDEX IF NOT EXISTS observed_spawns_by_session ON brokered_spawn_operations(session_id,state);
+                     CREATE INDEX IF NOT EXISTS observed_tasks_by_session ON brokered_tasks(session_id,state);
+                     CREATE INDEX IF NOT EXISTS observed_publications_by_session ON brokered_result_publications(session_id,state);"
+                ).map_err(internal)?;
+                transaction.execute(
+                    "INSERT OR IGNORE INTO brokered_result_publication_sequence(task_id,session_id,published_at_ms)
+                     SELECT task_id,session_id,updated_at_ms FROM brokered_result_publications
+                     WHERE state='published' ORDER BY updated_at_ms,task_id", [],
+                ).map_err(internal)?;
+                transaction.execute(
+                    "UPDATE orchestrated_sessions SET revision=(SELECT COUNT(*) FROM orchestration_events e
+                     WHERE e.session_id=orchestrated_sessions.session_id)", [],
+                ).map_err(internal)?;
+                transaction.execute("INSERT INTO metadata(key,value) VALUES('orchestration_schema_version','1')", []).map_err(internal)?;
+            } else if !matches!(locked.as_deref(), Some("1" | "2" | "3")) {
+                return Err(integrity("orchestration extension schema is unsupported"));
+            }
+            if !matches!(locked.as_deref(), Some("2" | "3")) {
+                if locked.as_deref() == Some("1") {
+                    crate::storage_observation::count_migration();
+                }
+                let has_classification: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('brokered_tool_results') WHERE name='normalized_chunk_reference_id')",
+                    [], |row| row.get(0),
+                ).map_err(internal)?;
+                if !has_classification {
+                    transaction.execute_batch("ALTER TABLE brokered_tool_results ADD COLUMN normalized_chunk_reference_id TEXT;").map_err(internal)?;
+                }
+                transaction.execute_batch(
+                    "UPDATE brokered_tool_results SET normalized_chunk_reference_id=(SELECT reference_id FROM brokered_chunk_bindings b WHERE b.session_id=brokered_tool_results.session_id AND b.source_tool_call_id=brokered_tool_results.source_tool_call_id) WHERE normalized_chunk_reference_id IS NULL AND EXISTS(SELECT 1 FROM brokered_chunk_bindings b WHERE b.session_id=brokered_tool_results.session_id AND b.source_tool_call_id=brokered_tool_results.source_tool_call_id);
+                     UPDATE metadata SET value='2' WHERE key='orchestration_schema_version';"
+                ).map_err(internal)?;
+            }
+            if locked.as_deref() != Some("3") {
+                if locked.as_deref() == Some("2") {
+                    crate::storage_observation::count_migration();
+                }
+                let has_json_digest: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('brokered_result_publications') WHERE name='result_json_sha256')",
+                    [], |row| row.get(0),
+                ).map_err(internal)?;
+                if !has_json_digest {
+                    transaction.execute_batch("ALTER TABLE brokered_result_publications ADD COLUMN result_json_sha256 TEXT;").map_err(internal)?;
+                }
+                let legacy = {
+                    let mut statement = transaction.prepare("SELECT task_id,result_json FROM brokered_result_publications WHERE result_json_sha256 IS NULL").map_err(internal)?;
+                    statement
+                        .query_map([], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })
+                        .map_err(internal)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(internal)?
+                };
+                for (task, json) in legacy {
+                    if json.is_empty() {
+                        return Err(integrity(
+                            "normalized publication lacks its original JSON digest",
+                        ));
+                    }
+                    transaction.execute("UPDATE brokered_result_publications SET result_json_sha256=?1 WHERE task_id=?2", params![sha256_hex(json.as_bytes()),task]).map_err(internal)?;
+                }
+                transaction
+                    .execute(
+                        "UPDATE metadata SET value='3' WHERE key='orchestration_schema_version'",
+                        [],
+                    )
+                    .map_err(internal)?;
+            }
+            crate::storage_observation::commit(transaction).map_err(internal)?;
+        }
         let mut store = Self {
             connection,
             faults,
@@ -1224,11 +1338,20 @@ impl OrchestrationStore {
     /// any other logical write. Public observations use only this boundary.
     pub fn open_observer(state_root: &Path) -> Result<Self, MachineError> {
         let path = EngagementStore::workspace_database_path(state_root);
-        let connection = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|_| integrity("orchestration observation source is unavailable"))?;
+        let connection =
+            crate::storage_observation::CheckedConnection::open(&path, true).map_err(|error| {
+                if matches!(
+                    error.code.as_str(),
+                    "CAPABILITY_UNSUPPORTED"
+                        | "RUNTIME_PATH_INVALID"
+                        | "RUNTIME_PATH_COLLISION"
+                        | "STORAGE_CAPACITY_EXCEEDED"
+                ) {
+                    error
+                } else {
+                    integrity("orchestration observation source is unavailable")
+                }
+            })?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(internal)?;
@@ -1268,6 +1391,143 @@ impl OrchestrationStore {
             )
             .optional()
             .map_err(internal)
+    }
+
+    pub(crate) fn logical_result_artifacts(
+        &self,
+        run_id: Uuid,
+    ) -> Result<BTreeMap<Uuid, LogicalResultArtifact>, MachineError> {
+        self.connection.check_identity()?;
+        let present:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='brokered_result_publications') AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='result_content_refs')",[],|r|r.get(0)).map_err(internal)?;
+        if !present {
+            return Ok(BTreeMap::new());
+        }
+        let mut statement=self.connection.prepare("SELECT p.artifact_id,p.byte_length,p.result_sha256,p.state,p.result_json,r.byte_length,r.sha256,r.retired_operation,j.owner_id,j.retired_operation
+          FROM brokered_result_publications p LEFT JOIN result_content_refs r ON r.owner_kind='brokered_publication' AND r.owner_id=p.task_id AND r.representation='raw'
+          LEFT JOIN result_content_refs j ON j.owner_kind='brokered_publication' AND j.owner_id=p.task_id AND j.representation='json'
+          WHERE p.primary_run_id=?1").map_err(internal)?;
+        let rows = statement
+            .query_map([run_id.to_string()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, u64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, Option<u64>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                ))
+            })
+            .map_err(internal)?;
+        let mut artifacts = BTreeMap::new();
+        for row in rows {
+            let (
+                id,
+                length,
+                sha,
+                state,
+                json,
+                raw_length,
+                raw_sha,
+                retired,
+                json_owner,
+                json_retired,
+            ) = row.map_err(internal)?;
+            let normalized = json.is_empty();
+            if length > MAX_SPECIALIST_RESULT_BYTES as u64
+                || !matches!(state.as_str(), "prepared" | "published")
+            {
+                return Err(integrity("artifact quota publication metadata is invalid"));
+            }
+            if normalized {
+                if raw_length != Some(length)
+                    || raw_sha.as_deref() != Some(sha.as_str())
+                    || json_owner.is_none()
+                    || retired != json_retired
+                {
+                    return Err(integrity(
+                        "normalized artifact quota references are missing or inconsistent",
+                    ));
+                }
+            } else if raw_length.is_some()
+                || raw_sha.is_some()
+                || json_owner.is_some()
+                || serde_json::from_str::<Value>(&json).is_err()
+            {
+                return Err(integrity(
+                    "legacy artifact quota publication has inconsistent representations",
+                ));
+            }
+            digest(&sha, "artifact quota digest")?;
+            if let Some(retired) = &retired {
+                let _ = parse_uuid(retired)?;
+            }
+            artifacts.insert(
+                parse_uuid(&id)?,
+                LogicalResultArtifact {
+                    byte_length: length,
+                    sha256: sha,
+                    retired: retired.is_some(),
+                    published: state == "published",
+                    normalized,
+                },
+            );
+        }
+        Ok(artifacts)
+    }
+    pub(crate) fn result_reader_pin(
+        state_root: &Path,
+    ) -> Result<Option<crate::ledger_generation::WorkspaceLease>, MachineError> {
+        crate::storage_observation::database_admission(&EngagementStore::workspace_database_path(
+            state_root,
+        ))
+    }
+    pub(crate) fn shared_result_artifact(
+        &self,
+        run_id: Uuid,
+        artifact_id: Uuid,
+    ) -> Result<Option<File>, MachineError> {
+        let normalized_namespace:bool=self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='result_content_refs')",[],|row|row.get(0),
+        ).map_err(internal)?;
+        if !normalized_namespace {
+            return Ok(None);
+        }
+        let task:Option<String>=self.connection.query_row(
+            "SELECT task_id FROM brokered_result_publications WHERE primary_run_id=?1 AND artifact_id=?2",
+            params![run_id.to_string(),artifact_id.to_string()],|row|row.get(0),
+        ).optional().map_err(internal)?;
+        let Some(task) = task else {
+            return Ok(None);
+        };
+        let Some(reference) = crate::storage_observation::content_reference(
+            &self.connection,
+            "brokered_publication",
+            &task,
+            "raw",
+        )?
+        else {
+            return Ok(None);
+        };
+        if reference.retired_operation.is_some() {
+            let _ = crate::storage_observation::read_content(
+                &self.connection,
+                "brokered_publication",
+                &task,
+                "raw",
+            )?;
+        }
+        crate::storage_observation::open_shared_artifact(
+            &self.state_root,
+            run_id,
+            artifact_id,
+            &reference.sha256,
+            reference.byte_length,
+        )
+        .map(Some)
     }
 
     fn now_ms(&self) -> Result<i64, MachineError> {
@@ -1556,7 +1816,7 @@ impl OrchestrationStore {
             request_sha256,
             now,
         )?;
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         self.faults
             .check(OrchestrationBarrier::AfterSessionCommit)?;
         self.session(root_run_id)
@@ -1597,7 +1857,7 @@ impl OrchestrationStore {
                 now,
             )?;
         }
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         self.faults.check(OrchestrationBarrier::AfterPrimaryIntent)
     }
 
@@ -1668,7 +1928,7 @@ impl OrchestrationStore {
             &sha256_hex(operation_state.as_bytes()),
             now,
         )?;
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         self.faults
             .check(OrchestrationBarrier::AfterPrimaryPublication)?;
         self.session(session_id)
@@ -1895,9 +2155,9 @@ impl OrchestrationStore {
             }
             None => (None, None, None),
         };
-        validate_event_chain_on(&transaction, session_id)?;
+        self.validate_observed_event_chain(&transaction, session_id)?;
         let captured_at_ms = self.now_ms()?;
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         Ok(OrchestratedSessionObservation {
             session_id,
             bootstrap_operation_id,
@@ -2053,9 +2313,9 @@ impl OrchestrationStore {
         let has_more = items.len() > limit as usize;
         items.truncate(limit as usize);
         drop(statement);
-        validate_event_chain_on(&transaction, session_id)?;
+        self.validate_observed_event_chain(&transaction, session_id)?;
         let captured_at_ms = self.now_ms()?;
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         Ok(PublishedResultPage {
             bootstrap_operation_id,
             specialist_policy_sha256,
@@ -2337,7 +2597,7 @@ impl OrchestrationStore {
                 &sha256_hex(operation_id.as_bytes()),
                 now,
             )?;
-            transaction.commit().map_err(internal)?;
+            crate::storage_observation::commit(transaction).map_err(internal)?;
             return self.spawn(operation_id);
         }
         let (request_json, request_sha256): (String, String) = self
@@ -2641,6 +2901,40 @@ impl OrchestrationStore {
         .collect()
     }
 
+    fn validate_observed_event_chain(
+        &self,
+        connection: &Connection,
+        session_id: Uuid,
+    ) -> Result<(), MachineError> {
+        let (path, device, inode, connection_id) = self.connection.observation_key();
+        let key = (path, device, inode, connection_id, session_id);
+        let before = self.connection.observation_stamp()?;
+        {
+            let observations = EVENT_OBSERVATIONS
+                .get_or_init(|| Mutex::new(BTreeMap::new()))
+                .lock()
+                .map_err(|_| integrity("event observation cache is poisoned"))?;
+            if let Some(previous) = observations.get(&key) {
+                if previous == &before {
+                    EVENT_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+                EVENT_CACHE_INVALIDATIONS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        validate_event_chain_on(connection, session_id)?;
+        if self.connection.observation_stamp()? == before {
+            let mut observations = EVENT_OBSERVATIONS
+                .get_or_init(|| Mutex::new(BTreeMap::new()))
+                .lock()
+                .map_err(|_| integrity("event observation cache is poisoned"))?;
+            if observations.len() >= 256 && !observations.contains_key(&key) {
+                observations.pop_first();
+            }
+            observations.insert(key, before);
+        }
+        Ok(())
+    }
     fn validate_event_chain(&self, session_id: Uuid) -> Result<(), MachineError> {
         validate_event_chain_on(&self.connection, session_id)
     }
@@ -2693,7 +2987,7 @@ impl OrchestrationStore {
                 request_sha256,
                 now,
             )?;
-            transaction.commit().map_err(internal)?;
+            crate::storage_observation::commit(transaction).map_err(internal)?;
             Ok(())
         } else {
             self.insert_spawn(
@@ -2759,7 +3053,7 @@ impl OrchestrationStore {
             &sha256_hex(operation_id.as_bytes()),
             now,
         )?;
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         let agent_configuration_sha256 =
             crate::run::agent_configuration_digest(role.agent_configuration()).map_err(internal)?;
         let member = self.member(context.session_id, run_id)?;
@@ -2836,7 +3130,7 @@ impl OrchestrationStore {
             &sha256_hex(state.as_bytes()),
             now,
         )?;
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         if state == "failed" {
             let credential = BrokerCredential::load(&self.credential_root, self.uid, run_id)?;
             let _ = credential.remove();
@@ -2905,7 +3199,7 @@ impl OrchestrationStore {
                         params![run_id.to_string(), now],
                     )
                     .map_err(internal)?;
-                transaction.commit().map_err(internal)?;
+                crate::storage_observation::commit(transaction).map_err(internal)?;
                 return self.publish_reserved_specialist(
                     context,
                     role,
@@ -2984,7 +3278,7 @@ impl OrchestrationStore {
             &sha256_hex(state.as_bytes()),
             now,
         )?;
-        transaction.commit().map_err(internal)
+        crate::storage_observation::commit(transaction).map_err(internal)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3044,7 +3338,7 @@ impl OrchestrationStore {
             request_sha256,
             now,
         )?;
-        transaction.commit().map_err(internal)
+        crate::storage_observation::commit(transaction).map_err(internal)
     }
 
     pub fn assign_task<A: OrchestrationAdapter>(
@@ -3194,7 +3488,7 @@ impl OrchestrationStore {
                 &accepted_request_sha256,
                 now,
             )?;
-            transaction.commit().map_err(internal)?;
+            crate::storage_observation::commit(transaction).map_err(internal)?;
             (task_id, accepted_task)
         };
         let member = self.member(context.session_id, accepted_task.specialist_run_id)?;
@@ -3230,7 +3524,7 @@ impl OrchestrationStore {
                 now,
             )?;
         }
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         if reserved == 0 {
             return self.task(task_id);
         }
@@ -3339,7 +3633,7 @@ impl OrchestrationStore {
             &event_payload,
             now,
         )?;
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         match terminal_error {
             Some(error) => Err(error),
             None => {
@@ -3374,7 +3668,7 @@ impl OrchestrationStore {
             &sha256_hex(state.as_bytes()),
             now,
         )?;
-        transaction.commit().map_err(internal)
+        crate::storage_observation::commit(transaction).map_err(internal)
     }
 
     pub fn await_tasks(
@@ -3415,6 +3709,8 @@ impl OrchestrationStore {
     ) -> Result<Vec<SpecialistOperationSnapshot>, MachineError> {
         let deadline = checked_deadline_ms(self.now_ms()?, transport_wait_seconds)?;
         loop {
+            let observed = crate::storage_observation::epoch()?;
+            self.connection.check_identity()?;
             let operations = self.specialist_operations(session_id, operation_ids)?;
             let terminal = operations
                 .iter()
@@ -3427,7 +3723,11 @@ impl OrchestrationStore {
             if now >= deadline {
                 return Ok(operations);
             }
-            self.clock.wait(wait_slice(now, deadline));
+            if self.clock.uses_durable_notifications() {
+                crate::storage_observation::wait(observed, wait_slice(now, deadline))?;
+            } else {
+                self.clock.wait(wait_slice(now, deadline));
+            }
         }
     }
 
@@ -3467,6 +3767,8 @@ impl OrchestrationStore {
         adapter: &mut A,
     ) -> Result<Vec<SpecialistTaskSnapshot>, MachineError> {
         loop {
+            let observed = crate::storage_observation::epoch()?;
+            self.connection.check_identity()?;
             let mut tasks = self.await_tasks(session_id, task_ids)?;
             for task in &tasks {
                 if !task_terminal(&task.state) {
@@ -3485,7 +3787,11 @@ impl OrchestrationStore {
             if now >= deadline {
                 return Ok(tasks);
             }
-            self.clock.wait(wait_slice(now, deadline));
+            if self.clock.uses_durable_notifications() {
+                crate::storage_observation::wait(observed, wait_slice(now, deadline))?;
+            } else {
+                self.clock.wait(wait_slice(now, deadline));
+            }
         }
     }
 
@@ -3587,6 +3893,35 @@ impl OrchestrationStore {
             self.fail_result_construction(session_id, task_id, "SPECIALIST_RESULT_INVALID")?;
             return Ok(());
         }
+        let artifact_root = crate::run::run_root(&self.state_root, session_id).join("artifacts");
+        match create_directory(&artifact_root, 0o700) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(internal(error)),
+        }
+        let _quota = crate::artifact::ArtifactQuotaLease::acquire(&artifact_root)?;
+        let retained = crate::artifact::logical_artifact_bytes(&artifact_root)?;
+        let existing: bool = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM brokered_result_publications WHERE task_id=?1)",
+                [task_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if !existing
+            && retained
+                .checked_add(output.bytes.len() as u64)
+                .is_none_or(|bytes| bytes > crate::artifact::MAX_RUN_ARTIFACT_BYTES)
+        {
+            self.record_result_capacity_failure(session_id, task_id, &output)?;
+            return Err(MachineError::new(
+                "STORAGE_CAPACITY_EXCEEDED",
+                "Run artifact logical capacity is exhausted",
+                false,
+                serde_json::json!({"run_id":session_id,"task_id":task_id,"required_action":"inspect_result_retention"}),
+            ));
+        }
         let result_json = canonical_string(&output.value)?;
         let result_sha256 = sha256_hex(&output.bytes);
         let artifact_id = new_uuid_v7();
@@ -3599,22 +3934,39 @@ impl OrchestrationStore {
             .execute(
                 "INSERT OR IGNORE INTO brokered_result_publications(
                    task_id,session_id,primary_run_id,artifact_id,result_json,content_text,
-                   byte_length,result_sha256,created_at,state,created_at_ms,updated_at_ms
-                 ) VALUES(?1,?2,?2,?3,?4,?5,?6,?7,?8,'prepared',?9,?9)",
+                   byte_length,result_sha256,created_at,state,created_at_ms,updated_at_ms,result_json_sha256
+                 ) VALUES(?1,?2,?2,?3,?4,?5,?6,?7,?8,'prepared',?9,?9,?10)",
                 params![
                     task_id.to_string(),
                     session_id.to_string(),
                     artifact_id.to_string(),
-                    result_json,
-                    std::str::from_utf8(&output.bytes).map_err(internal)?,
+                    "",
+                    "",
                     output.bytes.len() as u64,
                     result_sha256,
                     created_at,
                     now,
+                    sha256_hex(result_json.as_bytes()),
                 ],
             )
             .map_err(internal)?;
-        transaction.commit().map_err(internal)?;
+        if inserted == 1 {
+            crate::storage_observation::put_content(
+                &transaction,
+                "brokered_publication",
+                &task_id.to_string(),
+                "json",
+                result_json.as_bytes(),
+            )?;
+            crate::storage_observation::put_content(
+                &transaction,
+                "brokered_publication",
+                &task_id.to_string(),
+                "raw",
+                &output.bytes,
+            )?;
+        }
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         if inserted == 0 {
             let existing = self.result_publication(task_id)?;
             if existing.session_id != session_id
@@ -3626,6 +3978,40 @@ impl OrchestrationStore {
             }
         }
         self.reconcile_result_publication(task_id, true)
+    }
+
+    fn record_result_capacity_failure(
+        &mut self,
+        session_id: Uuid,
+        task_id: Uuid,
+        output: &CompletedTaskOutput,
+    ) -> Result<(), MachineError> {
+        let task = self.task(task_id)?;
+        let turn = task.target_turn_id.ok_or_else(|| {
+            integrity("known result capacity failure has no accepted target Turn")
+        })?;
+        let sha = sha256_hex(&output.bytes);
+        let json_sha = sha256_hex(canonical_string(&output.value)?.as_bytes());
+        let now = self.now_ms()?;
+        let payload = serde_json::json!({"task_id":task_id,"target_turn_id":turn,"byte_length":output.bytes.len(),"result_sha256":sha,"result_json_sha256":json_sha,"safe_error_code":"STORAGE_CAPACITY_EXCEEDED"});
+        let transaction = self.transaction()?;
+        let changed=transaction.execute("UPDATE brokered_tasks SET state='failed',safe_error_code='STORAGE_CAPACITY_EXCEEDED',result_sha256=?2,updated_at_ms=?3 WHERE task_id=?1 AND state='running'",
+            params![task_id.to_string(),sha,now]).map_err(internal)?;
+        if changed != 1 {
+            return Err(integrity(
+                "known result capacity failure cannot replace another task outcome",
+            ));
+        }
+        transaction.execute("INSERT INTO brokered_result_capacity_failures(task_id,target_turn_id,byte_length,result_sha256,result_json_sha256,created_at_ms) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![task_id.to_string(),turn,output.bytes.len() as u64,sha,json_sha,now]).map_err(internal)?;
+        append_event(
+            &transaction,
+            session_id,
+            "specialist_result_capacity_failed",
+            &digest_value(&payload)?,
+            now,
+        )?;
+        crate::storage_observation::commit(transaction).map_err(internal)
     }
 
     fn fail_result_construction(
@@ -3658,7 +4044,22 @@ impl OrchestrationStore {
                 .map_err(internal)?
         };
         for task_id in task_ids {
-            self.reconcile_result_publication(parse_uuid(&task_id)?, false)?;
+            let task_id = parse_uuid(&task_id)?;
+            let publication = self.result_publication(task_id)?;
+            let artifact_root = crate::run::run_root(&self.state_root, publication.primary_run_id)
+                .join("artifacts");
+            let _quota = crate::artifact::ArtifactQuotaLease::acquire(&artifact_root)?;
+            if crate::artifact::logical_artifact_bytes(&artifact_root)?
+                > crate::artifact::MAX_RUN_ARTIFACT_BYTES
+            {
+                return Err(MachineError::new(
+                    "STORAGE_CAPACITY_EXCEEDED",
+                    "prepared artifact capacity cannot be published",
+                    false,
+                    serde_json::json!({"run_id":publication.primary_run_id,"required_action":"inspect_result_retention"}),
+                ));
+            }
+            self.reconcile_result_publication(task_id, false)?;
         }
         Ok(())
     }
@@ -3687,7 +4088,7 @@ impl OrchestrationStore {
                  WHERE task_id=?1 AND state='running'",
                 params![
                     task_id.to_string(),
-                    publication.result_json,
+                    "",
                     publication.sha256,
                     publication.artifact_id.to_string(),
                     now,
@@ -3722,11 +4123,65 @@ impl OrchestrationStore {
                 now,
             )?;
         }
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         if inject_faults {
             self.faults.check(OrchestrationBarrier::AfterResultAppend)?;
         }
         Ok(())
+    }
+
+    fn publication_json_digest(
+        connection: &Connection,
+        task_id: Uuid,
+        legacy_json: &str,
+    ) -> Result<String, MachineError> {
+        let version: Option<String> = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='orchestration_schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        if version.as_deref() == Some("3") {
+            return connection
+                .query_row(
+                    "SELECT result_json_sha256 FROM brokered_result_publications WHERE task_id=?1",
+                    [task_id.to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(internal)?
+                .ok_or_else(|| integrity("original publication JSON digest is absent"));
+        }
+        if matches!(version.as_deref(), None | Some("1" | "2")) && !legacy_json.is_empty() {
+            return Ok(sha256_hex(legacy_json.as_bytes()));
+        }
+        Err(integrity("original publication JSON digest is unavailable"))
+    }
+
+    fn read_publication_json(
+        connection: &Connection,
+        task_id: Uuid,
+        stored: &str,
+        expected: &str,
+    ) -> Result<String, MachineError> {
+        if !stored.is_empty() {
+            if sha256_hex(stored.as_bytes()) != expected {
+                return Err(integrity(
+                    "publication JSON differs from its original digest",
+                ));
+            }
+            return Ok(stored.to_owned());
+        }
+        let bytes = crate::storage_observation::read_bound_content(
+            connection,
+            "brokered_publication",
+            &task_id.to_string(),
+            "json",
+            expected,
+        )?
+        .ok_or_else(|| integrity("normalized publication JSON reference is absent"))?;
+        String::from_utf8(bytes).map_err(internal)
     }
 
     fn result_publication(&self, task_id: Uuid) -> Result<ResultPublication, MachineError> {
@@ -3751,12 +4206,45 @@ impl OrchestrationStore {
                 },
             )
             .map_err(|_| integrity("Specialist result publication evidence is missing"))?;
+        let normalized = row.3.is_empty();
+        let expected_json = Self::publication_json_digest(&self.connection, task_id, &row.3)?;
+        let result_json =
+            Self::read_publication_json(&self.connection, task_id, &row.3, &expected_json)?;
+        let content = if normalized {
+            if !row.4.is_empty() {
+                return Err(integrity(
+                    "normalized publication contains inconsistent inline bytes",
+                ));
+            }
+            String::from_utf8(
+                crate::storage_observation::read_content(
+                    &self.connection,
+                    "brokered_publication",
+                    &task_id.to_string(),
+                    "raw",
+                )?
+                .ok_or_else(|| integrity("normalized publication raw reference is absent"))?,
+            )
+            .map_err(internal)?
+        } else {
+            if row.4.is_empty() && (row.5 != 0 || row.6 != sha256_hex(b"")) {
+                return Err(integrity(
+                    "legacy empty result metadata disagrees with original bytes",
+                ));
+            }
+            row.4
+        };
+        if content.len() as u64 != row.5 || sha256_hex(content.as_bytes()) != row.6 {
+            return Err(integrity(
+                "publication raw bytes differ from their original digest",
+            ));
+        }
         Ok(ResultPublication {
             session_id: parse_uuid(&row.0)?,
             primary_run_id: parse_uuid(&row.1)?,
             artifact_id: parse_uuid(&row.2)?,
-            result_json: row.3,
-            content: row.4,
+            result_json,
+            content,
             byte_length: row.5,
             sha256: row.6,
             created_at: row.7,
@@ -3770,6 +4258,24 @@ impl OrchestrationStore {
             return Err(integrity(
                 "prepared Specialist result bytes failed integrity validation",
             ));
+        }
+        let normalized:bool=self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM result_content_refs r JOIN brokered_result_publications p ON p.task_id=r.owner_id
+             WHERE r.owner_kind='brokered_publication' AND r.representation='raw' AND p.artifact_id=?1)",
+            [publication.artifact_id.to_string()],|row|row.get(0),
+        ).map_err(internal)?;
+        if normalized {
+            verify_secure_directory(
+                &crate::run::run_root(&self.state_root, publication.primary_run_id),
+                self.uid,
+            )?;
+            return crate::storage_observation::write_shared_artifact(
+                &self.state_root,
+                publication.primary_run_id,
+                publication.artifact_id,
+                &publication.sha256,
+                publication.content.as_bytes(),
+            );
         }
         let run_root = crate::run::run_root(&self.state_root, publication.primary_run_id);
         verify_secure_directory(&run_root, self.uid)?;
@@ -3801,6 +4307,48 @@ impl OrchestrationStore {
         &self,
         publication: &ResultPublication,
     ) -> Result<Vec<u8>, MachineError> {
+        if let Some(mut file) = self
+            .shared_result_artifact(publication.primary_run_id, publication.artifact_id)
+            .map_err(|error| {
+                if error.code == "RESULT_CONTENT_UNAVAILABLE" {
+                    error
+                } else {
+                    specialist_result_unreadable(
+                        publication.artifact_id,
+                        "result artifact integrity failed validation",
+                    )
+                }
+            })?
+        {
+            let before = file.metadata().map_err(internal)?;
+            let version = (
+                before.dev(),
+                before.ino(),
+                before.len(),
+                before.ctime(),
+                before.ctime_nsec(),
+            );
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(internal)?;
+            let after = file.metadata().map_err(internal)?;
+            if version
+                != (
+                    after.dev(),
+                    after.ino(),
+                    after.len(),
+                    after.ctime(),
+                    after.ctime_nsec(),
+                )
+                || bytes.len() as u64 != publication.byte_length
+                || sha256_hex(&bytes) != publication.sha256
+            {
+                return Err(specialist_result_unreadable(
+                    publication.artifact_id,
+                    "shared result content changed",
+                ));
+            }
+            return Ok(bytes);
+        }
         let failure = || {
             specialist_result_unreadable(
                 publication.artifact_id,
@@ -3903,9 +4451,13 @@ impl OrchestrationStore {
                 "result is not published",
             ));
         }
-        let publication = self
-            .result_publication(task_id)
-            .map_err(|_| specialist_result_unreadable(task_id, "result is not published"))?;
+        let publication = self.result_publication(task_id).map_err(|error| {
+            if error.code == "RESULT_CONTENT_UNAVAILABLE" {
+                error
+            } else {
+                specialist_result_unreadable(task_id, "result is not published")
+            }
+        })?;
         let bytes = self.read_result_artifact(&publication)?;
         let offset = usize::try_from(offset)
             .map_err(|_| specialist_result_unreadable(task_id, "result offset is invalid"))?;
@@ -3991,10 +4543,18 @@ impl OrchestrationStore {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(internal)?
         };
+        let mut results = already_delivered
+            .iter()
+            .chain(&task_ids)
+            .map(|id| Self::task_on(&transaction, parse_uuid(id)?))
+            .collect::<Result<Vec<_>, _>>()?;
         if !task_ids.is_empty() {
             faults.check(OrchestrationBarrier::BeforeDeliveryReceipt)?;
         }
-        for task_id in &task_ids {
+        for (task_id, result) in task_ids
+            .iter()
+            .zip(results.iter_mut().skip(already_delivered.len()))
+        {
             let now = clock.now_ms()?;
             let inserted = transaction
                 .execute(
@@ -4003,6 +4563,7 @@ impl OrchestrationStore {
                     params![task_id, now],
                 )
                 .map_err(internal)?;
+            let sequence = u64::try_from(transaction.last_insert_rowid()).map_err(internal)?;
             let changed = transaction
                 .execute(
                     "UPDATE brokered_tasks SET state='delivered',updated_at_ms=?2
@@ -4015,6 +4576,8 @@ impl OrchestrationStore {
                     "result delivery receipt disagrees with the pending task",
                 ));
             }
+            result.state = "delivered".to_owned();
+            result.delivery_sequence = Some(sequence);
             append_event(
                 &transaction,
                 session_id,
@@ -4023,31 +4586,11 @@ impl OrchestrationStore {
                 now,
             )?;
         }
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         if !task_ids.is_empty() {
             faults.check(OrchestrationBarrier::AfterDeliveryReceipt)?;
         }
-        let ids = {
-            let mut statement = self
-                .connection
-                .prepare(
-                    "SELECT task_id FROM brokered_delivery_receipts r
-                     JOIN brokered_tasks t USING(task_id)
-                     WHERE t.session_id=?1 AND r.sequence>?2 ORDER BY r.sequence LIMIT ?3",
-                )
-                .map_err(internal)?;
-            statement
-                .query_map(
-                    params![session_id.to_string(), after_sequence, limit as u64],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(internal)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(internal)?
-        };
-        ids.into_iter()
-            .map(|id| self.task(parse_uuid(&id)?))
-            .collect()
+        Ok(results)
     }
 
     pub fn cancel_task<A: OrchestrationAdapter>(
@@ -4095,7 +4638,7 @@ impl OrchestrationStore {
             )
             .map_err(internal)?;
         if recorded_intent != intent {
-            transaction.commit().map_err(internal)?;
+            crate::storage_observation::commit(transaction).map_err(internal)?;
             return Ok("already_requested");
         }
         if task.state == "accepted" {
@@ -4120,11 +4663,11 @@ impl OrchestrationStore {
                     &sha256_hex(format!("{task_id}\0{terminal}").as_bytes()),
                     now,
                 )?;
-                transaction.commit().map_err(internal)?;
+                crate::storage_observation::commit(transaction).map_err(internal)?;
                 return Ok(terminal);
             }
         }
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         let task = self.task(task_id)?;
         if task_terminal(&task.state) {
             return Ok("already_terminal");
@@ -4231,7 +4774,7 @@ impl OrchestrationStore {
                 now,
             )?;
         }
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         Ok(changed == 1)
     }
 
@@ -4282,7 +4825,7 @@ impl OrchestrationStore {
                     &sha256_hex(run_id.as_bytes()),
                     now,
                 )?;
-                transaction.commit().map_err(internal)?;
+                crate::storage_observation::commit(transaction).map_err(internal)?;
                 credential.remove()?;
             }
             Err(AdapterFailure::Rejected(code)) => return Err(adapter_rejected(code)),
@@ -4303,7 +4846,7 @@ impl OrchestrationStore {
                     &sha256_hex(run_id.as_bytes()),
                     now,
                 )?;
-                transaction.commit().map_err(internal)?;
+                crate::storage_observation::commit(transaction).map_err(internal)?;
             }
         }
         self.member(session_id, run_id)
@@ -4331,7 +4874,7 @@ impl OrchestrationStore {
                 now,
             )?;
         }
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         self.session(session_id)
     }
 
@@ -4439,7 +4982,7 @@ impl OrchestrationStore {
                     }),
                 ));
             }
-            transaction.commit().map_err(internal)?;
+            crate::storage_observation::commit(transaction).map_err(internal)?;
             return Ok((Some(existing), false));
         }
         let status: String = transaction
@@ -4452,7 +4995,7 @@ impl OrchestrationStore {
             .map_err(internal)?
             .ok_or_else(|| session_not_found(session_id))?;
         if matches!(status.as_str(), "completed" | "aborted") {
-            transaction.commit().map_err(internal)?;
+            crate::storage_observation::commit(transaction).map_err(internal)?;
             return Ok((None, false));
         }
         if matches!(status.as_str(), "completing" | "aborting") {
@@ -4519,7 +5062,7 @@ impl OrchestrationStore {
             &sha256_hex(format!("{operation_id}\0{interrupt}").as_bytes()),
             now,
         )?;
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         Ok((
             Some(
                 self.session_close(session_id)?
@@ -4567,7 +5110,7 @@ impl OrchestrationStore {
                 now,
             )?;
         }
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         self.session_close(session_id)?
             .ok_or_else(|| integrity("session close record disappeared"))
     }
@@ -4622,7 +5165,7 @@ impl OrchestrationStore {
                     now,
                 )?;
             }
-            transaction.commit().map_err(internal)?;
+            crate::storage_observation::commit(transaction).map_err(internal)?;
             for task in self.session_tasks(session_id)? {
                 if !matches!(
                     task.state.as_str(),
@@ -4754,7 +5297,7 @@ impl OrchestrationStore {
             &sha256_hex(format!("{}\0{terminal}", close.operation_id).as_bytes()),
             now,
         )?;
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         self.session(session_id)
     }
 
@@ -4808,7 +5351,7 @@ impl OrchestrationStore {
                 now,
             )?;
         }
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         for member in self.members(session_id)? {
             if member.membership_state != "retired" {
                 let released = self.release_specialist(session_id, member.run_id, adapter)?;
@@ -4837,7 +5380,7 @@ impl OrchestrationStore {
             &sha256_hex(terminal.as_bytes()),
             now,
         )?;
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         self.session(session_id)
     }
 
@@ -4896,7 +5439,7 @@ impl OrchestrationStore {
                 now,
             )?;
         }
-        transaction.commit().map_err(internal)
+        crate::storage_observation::commit(transaction).map_err(internal)
     }
 
     fn authorize_primary(
@@ -5036,7 +5579,7 @@ impl OrchestrationStore {
         if recorded_sha256 != request_sha256 {
             return Err(idempotency_conflict(idempotency_key));
         }
-        transaction.commit().map_err(internal)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
         let mut operation = self.spawn(parse_uuid(&recorded_operation_id)?)?;
         operation.reused = true;
         Ok(operation)
@@ -5066,8 +5609,14 @@ impl OrchestrationStore {
     }
 
     fn task(&self, task_id: Uuid) -> Result<SpecialistTaskSnapshot, MachineError> {
-        let row = self
-            .connection
+        Self::task_on(&self.connection, task_id)
+    }
+
+    fn task_on(
+        connection: &Connection,
+        task_id: Uuid,
+    ) -> Result<SpecialistTaskSnapshot, MachineError> {
+        let row = connection
             .query_row(
                 "SELECT target_run_id,state,target_turn_id,result_json,result_sha256,
                         result_artifact_id,safe_error_code,
@@ -5091,16 +5640,40 @@ impl OrchestrationStore {
             .optional()
             .map_err(internal)?
             .ok_or_else(|| specialist_task_not_found(task_id))?;
+        if matches!(row.1.as_str(), "completed_not_delivered" | "delivered") && row.3.is_none() {
+            return Err(integrity("completed task JSON binding is absent"));
+        }
+        let result = match row.3.as_deref() {
+            Some(stored) => {
+                let (session, publication_session, artifact, raw_digest, original_json): (String,String,String,String,String) = connection.query_row(
+                    "SELECT t.session_id,p.session_id,p.artifact_id,p.result_sha256,p.result_json FROM brokered_tasks t JOIN brokered_result_publications p ON p.task_id=t.task_id WHERE t.task_id=?1",
+                    [task_id.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+                ).map_err(|_| integrity("task original publication binding is absent"))?;
+                if session != publication_session
+                    || row.4.as_deref() != Some(raw_digest.as_str())
+                    || row.5.as_deref() != Some(artifact.as_str())
+                {
+                    return Err(integrity(
+                        "task and original publication identities disagree",
+                    ));
+                }
+                let expected = Self::publication_json_digest(connection, task_id, &original_json)?;
+                if !original_json.is_empty() && sha256_hex(original_json.as_bytes()) != expected {
+                    return Err(integrity("original publication JSON digest disagrees"));
+                }
+                match Self::read_publication_json(connection, task_id, stored, &expected) {
+                    Err(error) if error.code == "RESULT_CONTENT_UNAVAILABLE" => None,
+                    value => Some(serde_json::from_str(&value?).map_err(internal)?),
+                }
+            }
+            None => None,
+        };
         Ok(SpecialistTaskSnapshot {
             task_id,
             specialist_run_id: parse_uuid(&row.0)?,
             state: row.1,
             target_turn_id: row.2,
-            result: row
-                .3
-                .map(|value| serde_json::from_str(&value))
-                .transpose()
-                .map_err(internal)?,
+            result,
             result_sha256: row.4,
             result_artifact_ref: row.5.as_deref().map(parse_uuid).transpose()?,
             safe_error_code: row.6,
@@ -5276,7 +5849,7 @@ impl OrchestrationStore {
         let row = self
             .connection
             .query_row(
-                "SELECT source_run_id,source_turn_id,idempotency_key,request_sha256,response_json
+                "SELECT source_run_id,source_turn_id,idempotency_key,request_sha256,response_json,normalized_chunk_reference_id
                  FROM brokered_tool_results
                  WHERE session_id=?1 AND source_tool_call_id=?2",
                 params![context.session_id.to_string(), context.source_tool_call_id],
@@ -5287,6 +5860,7 @@ impl OrchestrationStore {
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
                     ))
                 },
             )
@@ -5294,14 +5868,84 @@ impl OrchestrationStore {
             .map_err(internal)?;
         match row {
             None => Ok(None),
-            Some((run, turn, key, observed, response))
+            Some((run, turn, key, observed, response, normalized_reference))
                 if run == context.source_run_id.to_string()
                     && turn == context.source_turn_id
                     && key == context.idempotency_key
                     && observed == request_sha256 =>
             {
-                let stored: BrokeredToolResultV1 = serde_json::from_str(&response)
+                let mut stored: BrokeredToolResultV1 = serde_json::from_str(&response)
                     .map_err(|_| integrity("cached tool result is malformed"))?;
+                let binding = crate::storage_observation::chunk_binding(
+                    &self.connection,
+                    context.session_id,
+                    &context.source_tool_call_id,
+                )?;
+                match (normalized_reference.as_deref(), &binding) {
+                    (Some(reference), Some(binding))
+                        if parse_uuid(reference)? == binding.reference_id => {}
+                    (None, None) => {
+                        if let BrokeredToolResultV1::Ok { value, .. } = &stored
+                            && value["operation"] == "read_specialist_result_result"
+                            && value["content"] == ""
+                            && value["offset"]
+                                .as_u64()
+                                .zip(value["length"].as_u64())
+                                .is_some_and(|(offset, length)| offset < length)
+                        {
+                            return Err(integrity(
+                                "chunk response skeleton has no retained classification",
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(integrity(
+                            "normalized chunk receipt binding is absent or changed",
+                        ));
+                    }
+                }
+                if let Some(binding) = binding {
+                    let BrokeredToolResultV1::Ok {
+                        value,
+                        schema_version,
+                    } = &mut stored
+                    else {
+                        return Err(integrity("chunk receipt response outcome changed"));
+                    };
+                    let (source_length,source_sha):(u64,String)=self.connection.query_row("SELECT byte_length,result_sha256 FROM brokered_result_publications WHERE task_id=?1 AND session_id=?2",params![binding.task_id.to_string(),binding.session_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|_|integrity("chunk original publication binding is absent"))?;
+                    if schema_version != BROKERED_TOOL_RESULT_SCHEMA_V1
+                        || value.as_object().is_none_or(|v| v.len() != 7)
+                        || value["length"] != source_length
+                        || value["sha256"] != source_sha
+                        || value["truncated"]
+                            != binding
+                                .offset
+                                .checked_add(binding.byte_length)
+                                .ok_or_else(|| integrity("chunk range overflow"))?
+                                .lt(&source_length)
+                        || value["operation"] != "read_specialist_result_result"
+                        || value["task_id"] != binding.task_id.to_string()
+                        || value["offset"] != binding.offset
+                        || value["content"] != ""
+                    {
+                        return Err(integrity("chunk receipt response skeleton changed"));
+                    }
+                    let body = crate::storage_observation::read_content(
+                        &self.connection,
+                        "brokered_chunk_receipt",
+                        &binding.reference_id.to_string(),
+                        "raw",
+                    )?
+                    .ok_or_else(|| integrity("chunk receipt bytes reference absent"))?;
+                    if body.len() as u64 != binding.byte_length {
+                        return Err(integrity("chunk receipt byte length changed"));
+                    }
+                    value["content"] = Value::String(String::from_utf8(body).map_err(internal)?);
+                    if sha256_hex(canonical_string(&stored)?.as_bytes()) != binding.response_sha256
+                    {
+                        return Err(integrity("original chunk response receipt digest changed"));
+                    }
+                }
                 Ok(Some(stored.into_result()?))
             }
             Some(_) => Err(idempotency_conflict(&context.source_tool_call_id)),
@@ -5314,29 +5958,68 @@ impl OrchestrationStore {
         request_sha256: &str,
         response: &Result<Value, MachineError>,
     ) -> Result<(), MachineError> {
-        let stored = BrokeredToolResultV1::from_result(response);
-        self.connection
-            .execute(
-                "INSERT INTO brokered_tool_results(
-                   session_id,source_run_id,source_turn_id,source_tool_call_id,idempotency_key,
-                   request_sha256,response_json,created_at_ms
-                 ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![
-                    context.session_id.to_string(),
-                    context.source_run_id.to_string(),
-                    context.source_turn_id,
-                    context.source_tool_call_id,
-                    context.idempotency_key,
-                    request_sha256,
-                    canonical_string(&stored)?,
-                    self.now_ms()?
-                ],
-            )
-            .map_err(internal)?;
-        Ok(())
+        let mut stored = BrokeredToolResultV1::from_result(response);
+        let original_sha = sha256_hex(canonical_string(&stored)?.as_bytes());
+        let chunk = if let BrokeredToolResultV1::Ok { value, .. } = &mut stored
+            && value["operation"] == "read_specialist_result_result"
+        {
+            let task_id = value["task_id"]
+                .as_str()
+                .ok_or_else(|| integrity("chunk response task binding absent"))
+                .and_then(parse_uuid)?;
+            if self.task_session(task_id)? != context.session_id {
+                return Err(integrity("chunk response source session disagrees"));
+            }
+            let offset = value["offset"]
+                .as_u64()
+                .ok_or_else(|| integrity("chunk response offset absent"))?;
+            let body = value["content"]
+                .as_str()
+                .ok_or_else(|| integrity("chunk response bytes absent"))?
+                .as_bytes()
+                .to_vec();
+            if body.len() > 65536 {
+                return Err(integrity("chunk response exceeds bound"));
+            }
+            value["content"] = Value::String(String::new());
+            Some((
+                crate::storage_observation::ChunkBinding {
+                    reference_id: new_uuid_v7(),
+                    session_id: context.session_id,
+                    source_tool_call_id: context.source_tool_call_id.clone(),
+                    task_id,
+                    offset,
+                    byte_length: body.len() as u64,
+                    response_sha256: original_sha,
+                },
+                body,
+            ))
+        } else {
+            None
+        };
+        let now = self.now_ms()?;
+        let transaction = self.transaction()?;
+        transaction.execute(
+            "INSERT INTO brokered_tool_results(session_id,source_run_id,source_turn_id,source_tool_call_id,idempotency_key,request_sha256,response_json,created_at_ms,normalized_chunk_reference_id)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![context.session_id.to_string(),context.source_run_id.to_string(),context.source_turn_id,context.source_tool_call_id,context.idempotency_key,request_sha256,canonical_string(&stored)?,now,chunk.as_ref().map(|(binding, _)| binding.reference_id.to_string())],
+        ).map_err(internal)?;
+        if let Some((binding, body)) = chunk {
+            crate::storage_observation::put_content(
+                &transaction,
+                "brokered_chunk_receipt",
+                &binding.reference_id.to_string(),
+                "raw",
+                &body,
+            )?;
+            transaction.execute("INSERT INTO brokered_chunk_bindings(reference_id,session_id,source_tool_call_id,task_id,offset,byte_length,response_sha256) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![binding.reference_id.to_string(),binding.session_id.to_string(),binding.source_tool_call_id,binding.task_id.to_string(),binding.offset,binding.byte_length,binding.response_sha256]).map_err(internal)?;
+        }
+        crate::storage_observation::commit(transaction).map_err(internal)
     }
 
     fn transaction(&mut self) -> Result<Transaction<'_>, MachineError> {
+        self.connection.check_identity()?;
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(internal)
@@ -5456,8 +6139,6 @@ fn accepted_policy_session_unknown() -> MachineError {
 }
 
 const SCHEMA: &str = "
-PRAGMA foreign_keys=ON;
-PRAGMA synchronous=FULL;
 CREATE TABLE IF NOT EXISTS caller_policy_session_acceptances(
   session_id TEXT PRIMARY KEY,
   root_run_id TEXT NOT NULL UNIQUE,
@@ -5593,6 +6274,7 @@ CREATE TABLE IF NOT EXISTS brokered_result_publications(
   primary_run_id TEXT NOT NULL,
   artifact_id TEXT NOT NULL UNIQUE,
   result_json TEXT NOT NULL,
+  result_json_sha256 TEXT,
   content_text TEXT NOT NULL,
   byte_length INTEGER NOT NULL,
   result_sha256 TEXT NOT NULL,
@@ -5656,6 +6338,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_active_brokered_task_per_member
 ";
 
 fn validate_event_chain_on(connection: &Connection, session_id: Uuid) -> Result<(), MachineError> {
+    EVENT_FULL_READS.fetch_add(1, Ordering::Relaxed);
     let mut statement = connection
         .prepare(
             "SELECT kind,payload_sha256,previous_hash,event_hash,created_at_ms
@@ -5676,6 +6359,7 @@ fn validate_event_chain_on(connection: &Connection, session_id: Uuid) -> Result<
     let mut previous = "0".repeat(64);
     let mut observed = false;
     for row in rows {
+        EVENT_FULL_ROWS.fetch_add(1, Ordering::Relaxed);
         let (kind, payload, stored_previous, event_hash, created_at_ms) = row.map_err(internal)?;
         digest(&payload, "event payload digest")?;
         digest(&stored_previous, "event previous hash")?;
@@ -5952,7 +6636,7 @@ fn checked_deadline_ms(origin_ms: i64, seconds: u64) -> Result<i64, MachineError
 
 fn wait_slice(now_ms: i64, deadline_ms: i64) -> Duration {
     let remaining = deadline_ms.saturating_sub(now_ms).max(1) as u64;
-    Duration::from_millis(remaining.min(25))
+    Duration::from_millis(remaining.min(250))
 }
 
 fn task_summary(task: &SpecialistTaskSnapshot) -> Value {
@@ -8655,10 +9339,14 @@ mod tests {
             higher
         );
         store
-            .connection
-            .execute(
-                "UPDATE brokered_tasks SET state='completed_not_delivered' WHERE task_id=?1",
-                [running.task_id.to_string()],
+            .publish_task_result(
+                session.session_id,
+                running.task_id,
+                CompletedTaskOutput {
+                    value: Value::String("ok".into()),
+                    bytes: b"ok".to_vec(),
+                    created_at: "2026-09-22T00:00:00.000000Z".into(),
+                },
             )
             .unwrap();
         assert_eq!(
@@ -9929,6 +10617,761 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(result["state"], "interrupt_requested");
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn unchanged_observation_reuses_verified_event_source_but_wal_corruption_invalidates() {
+        let root = root();
+        let (store, session) = active_session(&root, "fully_delegated");
+        drop(store);
+        let observer = OrchestrationStore::open_observer(&root).unwrap();
+        observer.observe_session(session.session_id).unwrap();
+        let (path, device, inode, connection_id) = observer.connection.observation_key();
+        let key = (path, device, inode, connection_id, session.session_id);
+        assert!(
+            EVENT_OBSERVATIONS
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .contains_key(&key)
+        );
+        let before = EVENT_CACHE_HITS.load(Ordering::Relaxed);
+        observer.observe_session(session.session_id).unwrap();
+        assert!(EVENT_CACHE_HITS.load(Ordering::Relaxed) > before);
+        let writer = Connection::open(EngagementStore::workspace_database_path(&root)).unwrap();
+        writer.execute("UPDATE orchestration_events SET event_hash=?1 WHERE sequence=(SELECT MIN(sequence) FROM orchestration_events WHERE session_id=?2)",
+            params!["0".repeat(64),session.session_id.to_string()]).unwrap();
+        assert!(observer.observe_session(session.session_id).is_err());
+        drop(writer);
+        drop(observer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn source_replacement_cannot_reuse_verified_event_observation() {
+        let root = root();
+        let (store, session) = active_session(&root, "fully_delegated");
+        drop(store);
+        let observer = OrchestrationStore::open_observer(&root).unwrap();
+        observer.observe_session(session.session_id).unwrap();
+        let path = EngagementStore::workspace_database_path(&root);
+        std::fs::rename(&path, path.with_extension("old")).unwrap();
+        let replacement = Connection::open(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(observer.observe_session(session.session_id).is_err());
+        drop(replacement);
+        drop(observer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn normalized_chunk_receipt_replays_original_bytes_and_retirement_cannot_bypass_lookup() {
+        let root = root();
+        let (mut store, session, child) = active_member(&root);
+        let mut adapter = FakeAdapter::default();
+        let task = store
+            .assign_task(
+                &context(session.session_id, "chunk-task"),
+                &task_request(child, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        store.collect_results(session.session_id, 0, 8).unwrap();
+        let source = context(session.session_id, "opaque-call-not-a-uuid");
+        let payload = serde_json::json!({"operation":"read_specialist_result","task_id":task.task_id,"offset":0,"limit":65536});
+        let first = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        }
+        .dispatch(&source, &payload)
+        .unwrap();
+        assert_eq!(
+            PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter
+            }
+            .dispatch(&source, &payload)
+            .unwrap(),
+            first
+        );
+        let binding = crate::storage_observation::chunk_binding(
+            &store.connection,
+            session.session_id,
+            &source.source_tool_call_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(binding.source_tool_call_id, source.source_tool_call_id);
+        assert_ne!(binding.reference_id, task.task_id);
+        let skeleton:String=store.connection.query_row("SELECT response_json FROM brokered_tool_results WHERE session_id=?1 AND source_tool_call_id=?2",params![session.session_id.to_string(),source.source_tool_call_id],|r|r.get(0)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&skeleton).unwrap()["value"]["content"],
+            ""
+        );
+        let receipt = crate::storage_observation::content_reference(
+            &store.connection,
+            "brokered_chunk_receipt",
+            &binding.reference_id.to_string(),
+            "raw",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(crate::maintenance::content_delivered(&store.connection, &receipt).unwrap());
+        let mut legacy = BrokeredToolResultV1::from_result(&Ok(first.clone()));
+        store.connection.execute("INSERT INTO brokered_tool_results(session_id,source_run_id,source_turn_id,source_tool_call_id,idempotency_key,request_sha256,response_json,created_at_ms) VALUES(?1,?1,'old-turn','legacy-inline','legacy-inline',?2,?3,0)",params![session.session_id.to_string(),"a".repeat(64),canonical_string(&legacy).unwrap()]).unwrap();
+        assert!(!crate::maintenance::content_delivered(&store.connection, &receipt).unwrap());
+        let source_ref = crate::storage_observation::content_reference(
+            &store.connection,
+            "brokered_publication",
+            &task.task_id.to_string(),
+            "raw",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!crate::maintenance::content_delivered(&store.connection, &source_ref).unwrap());
+        store
+            .connection
+            .execute(
+                "DELETE FROM brokered_tool_results WHERE source_tool_call_id='legacy-inline'",
+                [],
+            )
+            .unwrap();
+        store.connection.execute("UPDATE result_content_refs SET retired_operation=?1 WHERE owner_kind='brokered_chunk_receipt'",[new_uuid_v7().to_string()]).unwrap();
+        assert_eq!(
+            PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter
+            }
+            .dispatch(&source, &payload)
+            .unwrap_err()
+            .code,
+            "RESULT_CONTENT_UNAVAILABLE"
+        );
+        // A damaged skeleton is integrity failure even when its body is retired.
+        if let BrokeredToolResultV1::Ok { value, .. } = &mut legacy {
+            value["content"] = Value::String(String::new());
+            value["length"] = Value::from(999);
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE brokered_tool_results SET response_json=?1 WHERE source_tool_call_id=?2",
+                params![
+                    canonical_string(&legacy).unwrap(),
+                    source.source_tool_call_id
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter
+            }
+            .dispatch(&source, &payload)
+            .unwrap_err()
+            .code,
+            "ORCHESTRATION_SCHEMA_UNSUPPORTED"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn normalized_chunk_classification_rejects_deleted_bindings_and_preserves_legacy_and_eof() {
+        for mode in [
+            "missing",
+            "retired_missing",
+            "eof_missing",
+            "legacy",
+            "legacy_eof",
+        ] {
+            let root = root();
+            let (mut store, session, child) = active_member(&root);
+            let mut adapter = FakeAdapter::default();
+            let task = store
+                .assign_task(
+                    &context(session.session_id, "binding-task"),
+                    &task_request(child, "read_only"),
+                    &mut adapter,
+                )
+                .unwrap();
+            store.collect_results(session.session_id, 0, 8).unwrap();
+            let length = store.result_publication(task.task_id).unwrap().byte_length;
+            let source = context(session.session_id, "original-chunk-call");
+            let offset = if mode.contains("eof") { length } else { 0 };
+            let payload = serde_json::json!({"operation":"read_specialist_result","task_id":task.task_id,"offset":offset,"limit":65536});
+            let first = PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter,
+            }
+            .dispatch(&source, &payload)
+            .unwrap();
+            assert_eq!(
+                PrimaryOrchestrationService {
+                    store: &mut store,
+                    adapter: &mut adapter
+                }
+                .dispatch(&source, &payload)
+                .unwrap(),
+                first
+            );
+            if mode.contains("eof") {
+                assert_eq!(first["content"], "");
+            }
+            let binding = crate::storage_observation::chunk_binding(
+                &store.connection,
+                session.session_id,
+                &source.source_tool_call_id,
+            )
+            .unwrap()
+            .unwrap();
+            let stored_identity: (String,String,String,String,String) = store.connection.query_row("SELECT source_run_id,source_turn_id,source_tool_call_id,idempotency_key,request_sha256 FROM brokered_tool_results WHERE session_id=?1 AND source_tool_call_id=?2",params![session.session_id.to_string(),source.source_tool_call_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).unwrap();
+            if mode == "retired_missing" {
+                store.connection.execute("UPDATE result_content_refs SET retired_operation=?1 WHERE owner_kind='brokered_chunk_receipt' AND owner_id=?2",params![new_uuid_v7().to_string(),binding.reference_id.to_string()]).unwrap();
+                assert_eq!(
+                    PrimaryOrchestrationService {
+                        store: &mut store,
+                        adapter: &mut adapter
+                    }
+                    .dispatch(&source, &payload)
+                    .unwrap_err()
+                    .code,
+                    "RESULT_CONTENT_UNAVAILABLE"
+                );
+            }
+            store
+                .connection
+                .execute(
+                    "DELETE FROM brokered_chunk_bindings WHERE reference_id=?1",
+                    [binding.reference_id.to_string()],
+                )
+                .unwrap();
+            if mode.starts_with("legacy") {
+                store.connection.execute("UPDATE brokered_tool_results SET normalized_chunk_reference_id=NULL,response_json=?1 WHERE session_id=?2 AND source_tool_call_id=?3",params![canonical_string(&BrokeredToolResultV1::from_result(&Ok(first.clone()))).unwrap(),session.session_id.to_string(),source.source_tool_call_id]).unwrap();
+                assert_eq!(
+                    PrimaryOrchestrationService {
+                        store: &mut store,
+                        adapter: &mut adapter
+                    }
+                    .dispatch(&source, &payload)
+                    .unwrap(),
+                    first
+                );
+            } else {
+                assert_eq!(
+                    PrimaryOrchestrationService {
+                        store: &mut store,
+                        adapter: &mut adapter
+                    }
+                    .dispatch(&source, &payload)
+                    .unwrap_err()
+                    .code,
+                    "ORCHESTRATION_SCHEMA_UNSUPPORTED"
+                );
+            }
+            let after_identity: (String,String,String,String,String) = store.connection.query_row("SELECT source_run_id,source_turn_id,source_tool_call_id,idempotency_key,request_sha256 FROM brokered_tool_results WHERE session_id=?1 AND source_tool_call_id=?2",params![session.session_id.to_string(),source.source_tool_call_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).unwrap();
+            assert_eq!(stored_identity, after_identity);
+            assert_eq!(store.task(task.task_id).unwrap().task_id, task.task_id);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn receipt_classification_migration_preserves_original_response_and_binding() {
+        let root = root();
+        let (mut store, session, child) = active_member(&root);
+        let mut adapter = FakeAdapter::default();
+        let task = store
+            .assign_task(
+                &context(session.session_id, "migration-task"),
+                &task_request(child, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        let source = context(session.session_id, "migration-chunk");
+        let payload = serde_json::json!({"operation":"read_specialist_result","task_id":task.task_id,"offset":0,"limit":65536});
+        let first = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        }
+        .dispatch(&source, &payload)
+        .unwrap();
+        let binding = crate::storage_observation::chunk_binding(
+            &store.connection,
+            session.session_id,
+            &source.source_tool_call_id,
+        )
+        .unwrap()
+        .unwrap();
+        let response: String = store
+            .connection
+            .query_row(
+                "SELECT response_json FROM brokered_tool_results WHERE source_tool_call_id=?1",
+                [&source.source_tool_call_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        store.connection.execute_batch("ALTER TABLE brokered_tool_results DROP COLUMN normalized_chunk_reference_id; UPDATE metadata SET value='1' WHERE key='orchestration_schema_version';").unwrap();
+        drop(store);
+        let mut store = OrchestrationStore::open(&root).unwrap();
+        let migrated: (String,String) = store.connection.query_row("SELECT response_json,normalized_chunk_reference_id FROM brokered_tool_results WHERE source_tool_call_id=?1",[&source.source_tool_call_id],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(migrated, (response, binding.reference_id.to_string()));
+        assert_eq!(
+            PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter
+            }
+            .dispatch(&source, &payload)
+            .unwrap(),
+            first
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn concurrent_publications_serialize_duplicate_completion_and_exact_quota_admission() {
+        struct HoldPublication {
+            entered: std::sync::mpsc::Sender<()>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl OrchestrationFaultInjector for HoldPublication {
+            fn check(&self, barrier: OrchestrationBarrier) -> Result<(), MachineError> {
+                if barrier == OrchestrationBarrier::BeforeResultAppend {
+                    self.entered.send(()).unwrap();
+                    self.release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(3))
+                        .unwrap();
+                }
+                Ok(())
+            }
+        }
+        for duplicate in [true, false] {
+            let root = root();
+            let (mut first_store, session, child) = active_member(&root);
+            let mut adapter = FakeAdapter {
+                dispatch: Ok(TaskDispatch::Accepted {
+                    turn_id: "concurrent-turn".into(),
+                }),
+                ..FakeAdapter::default()
+            };
+            let first = first_store
+                .assign_task(
+                    &context(session.session_id, "first-completion"),
+                    &task_request(child, "read_only"),
+                    &mut adapter,
+                )
+                .unwrap();
+            let second_id = if duplicate {
+                first.task_id
+            } else {
+                let second_child = first_store
+                    .request_specialist(
+                        &context(session.session_id, "second-member"),
+                        &request("read_only"),
+                        &mut adapter,
+                    )
+                    .unwrap()
+                    .specialist_run_id
+                    .unwrap();
+                first_store
+                    .assign_task(
+                        &context(session.session_id, "second-completion"),
+                        &task_request(second_child, "read_only"),
+                        &mut adapter,
+                    )
+                    .unwrap()
+                    .task_id
+            };
+            let mut second_store = OrchestrationStore::open(&root).unwrap();
+            let artifacts = crate::run::run_root(&root, session.root_run_id).join("artifacts");
+            for index in 0..8 {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(artifacts.join(format!("{}.bin", new_uuid_v7())))
+                    .unwrap()
+                    .set_len(32 * 1024 * 1024 - if index == 0 { 2 } else { 0 })
+                    .unwrap();
+            }
+            let output = || CompletedTaskOutput {
+                value: Value::String("ok".into()),
+                bytes: b"ok".to_vec(),
+                created_at: "2026-09-22T00:00:00.000000Z".into(),
+            };
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            first_store.faults = Arc::new(HoldPublication {
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            });
+            let first_thread = thread::spawn(move || {
+                first_store.publish_task_result(session.session_id, first.task_id, output())
+            });
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+            let second_thread = thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let result =
+                    second_store.publish_task_result(session.session_id, second_id, output());
+                completed_tx.send(()).unwrap();
+                result
+            });
+            started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert!(matches!(
+                completed_rx.recv_timeout(Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            release_tx.send(()).unwrap();
+            first_thread.join().unwrap().unwrap();
+            let second_result = second_thread.join().unwrap();
+            if duplicate {
+                second_result.unwrap();
+            } else {
+                assert_eq!(second_result.unwrap_err().code, "STORAGE_CAPACITY_EXCEEDED");
+            }
+            let store = OrchestrationStore::open(&root).unwrap();
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM brokered_result_publications",
+                        [],
+                        |row| row.get::<_, u64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                crate::artifact::logical_artifact_bytes(&artifacts).unwrap(),
+                crate::artifact::MAX_RUN_ARTIFACT_BYTES
+            );
+            assert_eq!(
+                store.result_publication(first.task_id).unwrap().content,
+                "ok"
+            );
+            if !duplicate {
+                assert_eq!(
+                    store.task(second_id).unwrap().safe_error_code.as_deref(),
+                    Some("STORAGE_CAPACITY_EXCEEDED")
+                );
+            }
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn known_broker_capacity_failure_retains_original_task_turn_and_completion_metadata() {
+        let root = root();
+        let (mut store, session, child) = active_member(&root);
+        let mut adapter = FakeAdapter {
+            dispatch: Ok(TaskDispatch::Accepted {
+                turn_id: "turn-capacity-known".into(),
+            }),
+            ..FakeAdapter::default()
+        };
+        let source = context(session.session_id, "capacity-original");
+        let request = task_request(child, "read_only");
+        let task = store.assign_task(&source, &request, &mut adapter).unwrap();
+        let accepted = store.accepted_task(task.task_id).unwrap();
+        let calls = adapter.calls.clone();
+        let artifacts = crate::run::run_root(&root, session.root_run_id).join("artifacts");
+        for _ in 0..8 {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(artifacts.join(format!("{}.bin", new_uuid_v7())))
+                .unwrap()
+                .set_len(32 * 1024 * 1024)
+                .unwrap();
+        }
+        assert_eq!(
+            crate::artifact::logical_artifact_bytes(&artifacts).unwrap(),
+            crate::artifact::MAX_RUN_ARTIFACT_BYTES
+        );
+        let output = CompletedTaskOutput {
+            value: Value::String("x".into()),
+            bytes: b"x".to_vec(),
+            created_at: "2026-09-22T00:00:00.000000Z".into(),
+        };
+        let failure = store
+            .publish_task_result(session.session_id, task.task_id, output)
+            .unwrap_err();
+        assert_eq!(failure.code, "STORAGE_CAPACITY_EXCEEDED");
+        assert_eq!(failure.details["task_id"], task.task_id.to_string());
+        let retained = store.task(task.task_id).unwrap();
+        assert_eq!(retained.state, "failed");
+        assert_eq!(
+            retained.safe_error_code.as_deref(),
+            Some("STORAGE_CAPACITY_EXCEEDED")
+        );
+        assert_eq!(
+            retained.target_turn_id.as_deref(),
+            Some("turn-capacity-known")
+        );
+        assert_eq!(
+            retained.result_sha256.as_deref(),
+            Some(sha256_hex(b"x").as_str())
+        );
+        assert!(retained.result_artifact_ref.is_none());
+        let row:(String,u64,String)=store.connection.query_row("SELECT target_turn_id,byte_length,result_sha256 FROM brokered_result_capacity_failures WHERE task_id=?1",[task.task_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(row, ("turn-capacity-known".into(), 1, sha256_hex(b"x")));
+        assert_eq!(store.accepted_task(task.task_id).unwrap(), accepted);
+        let _ = store.assign_task(&source, &request, &mut adapter);
+        assert_eq!(adapter.calls, calls);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn legacy_zero_byte_result_remains_readable_and_counts_its_original_length() {
+        let root = root();
+        let (mut store, session, child) = active_member(&root);
+        let mut adapter = FakeAdapter {
+            dispatch: Ok(TaskDispatch::Accepted {
+                turn_id: "legacy-empty-turn".into(),
+            }),
+            ..FakeAdapter::default()
+        };
+        let task = store
+            .assign_task(
+                &context(session.session_id, "legacy-empty"),
+                &task_request(child, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        store
+            .publish_task_result(
+                session.session_id,
+                task.task_id,
+                CompletedTaskOutput {
+                    value: Value::String(String::new()),
+                    bytes: Vec::new(),
+                    created_at: "2026-09-22T00:00:00.000000Z".into(),
+                },
+            )
+            .unwrap();
+        let artifact = store
+            .task(task.task_id)
+            .unwrap()
+            .result_artifact_ref
+            .unwrap();
+        let transaction = store.transaction().unwrap();
+        transaction.execute("UPDATE brokered_result_publications SET result_json=?2,content_text='' WHERE task_id=?1",params![task.task_id.to_string(),"\"\""]).unwrap();
+        transaction
+            .execute(
+                "UPDATE brokered_tasks SET result_json=?2 WHERE task_id=?1",
+                params![task.task_id.to_string(), "\"\""],
+            )
+            .unwrap();
+        transaction.execute("DELETE FROM result_content_refs WHERE owner_kind='brokered_publication' AND owner_id=?1",[task.task_id.to_string()]).unwrap();
+        crate::storage_observation::commit(transaction).unwrap();
+        let artifacts = crate::run::run_root(&root, session.root_run_id).join("artifacts");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(artifacts.join(format!("{artifact}.bin")))
+            .unwrap();
+        assert_eq!(store.result_publication(task.task_id).unwrap().content, "");
+        assert_eq!(
+            store
+                .read_specialist_result(session.session_id, task.task_id, 0, 1)
+                .unwrap()["content"],
+            ""
+        );
+        assert_eq!(
+            crate::artifact::logical_artifact_bytes(&artifacts).unwrap(),
+            0
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE brokered_result_publications SET byte_length=1 WHERE task_id=?1",
+                [task.task_id.to_string()],
+            )
+            .unwrap();
+        assert!(store.result_publication(task.task_id).is_err());
+        assert!(crate::artifact::logical_artifact_bytes(&artifacts).is_err());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn missing_normalized_reference_cannot_reduce_logical_artifact_quota() {
+        let root = root();
+        let (mut store, session, child) = active_member(&root);
+        let mut adapter = FakeAdapter::default();
+        let task = store
+            .assign_task(
+                &context(session.session_id, "missing-normalized"),
+                &task_request(child, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        let artifacts = crate::run::run_root(&root, session.root_run_id).join("artifacts");
+        let publication = store.result_publication(task.task_id).unwrap();
+        assert_eq!(
+            crate::artifact::logical_artifact_bytes(&artifacts).unwrap(),
+            publication.byte_length
+        );
+        store.connection.execute("DELETE FROM result_content_refs WHERE owner_kind='brokered_publication' AND owner_id=?1 AND representation='raw'",[task.task_id.to_string()]).unwrap();
+        assert!(crate::artifact::logical_artifact_bytes(&artifacts).is_err());
+        assert!(store.result_publication(task.task_id).is_err());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn brokered_results_preserve_the_original_json_digest() {
+        for mode in [
+            "reference",
+            "retired_reference",
+            "inline_task",
+            "inline_publication",
+        ] {
+            let root = root();
+            let (mut store, session, child) = active_member(&root);
+            let mut adapter = FakeAdapter {
+                dispatch: Ok(TaskDispatch::Accepted {
+                    turn_id: "json-binding".into(),
+                }),
+                ..FakeAdapter::default()
+            };
+            let task = store
+                .assign_task(
+                    &context(session.session_id, "json-binding"),
+                    &task_request(child, "read_only"),
+                    &mut adapter,
+                )
+                .unwrap();
+            store
+                .publish_task_result(
+                    session.session_id,
+                    task.task_id,
+                    CompletedTaskOutput {
+                        value: Value::String("alpha".into()),
+                        bytes: b"alpha".to_vec(),
+                        created_at: "2026-09-22T00:00:00.000000Z".into(),
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                store.task(task.task_id).unwrap().result,
+                Some(Value::String("alpha".into()))
+            );
+            let other = canonical_string(&Value::String("bravo".into())).unwrap();
+            if mode.starts_with("inline") {
+                let table = if mode == "inline_task" {
+                    "brokered_tasks"
+                } else {
+                    "brokered_result_publications"
+                };
+                store
+                    .connection
+                    .execute(
+                        &format!("UPDATE {table} SET result_json=?1 WHERE task_id=?2"),
+                        params![other, task.task_id.to_string()],
+                    )
+                    .unwrap();
+            } else {
+                crate::storage_observation::put_content(
+                    &store.connection,
+                    "brokered_publication",
+                    &Uuid::now_v7().to_string(),
+                    "json",
+                    other.as_bytes(),
+                )
+                .unwrap();
+                store.connection.execute("UPDATE result_content_refs SET sha256=?1,retired_operation=?2 WHERE owner_kind='brokered_publication' AND owner_id=?3 AND representation='json'",params![sha256_hex(other.as_bytes()), if mode == "retired_reference" { Some(Uuid::now_v7().to_string()) } else { None }, task.task_id.to_string()]).unwrap();
+            }
+            {
+                assert!(
+                    store.task(task.task_id).is_err(),
+                    "{mode} returned altered JSON"
+                );
+                let before = store.session(session.session_id).unwrap();
+                assert!(store.collect_results(session.session_id, 0, 8).is_err());
+                assert_eq!(store.session(session.session_id).unwrap(), before);
+                let (state, receipts, deliveries): (String, u64, u64) = store.connection.query_row(
+                    "SELECT state,(SELECT COUNT(*) FROM brokered_delivery_receipts),
+                        (SELECT COUNT(*) FROM orchestration_events WHERE kind='specialist_result_delivered')
+                     FROM brokered_tasks WHERE task_id=?1",
+                    [task.task_id.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+                ).unwrap();
+                assert_eq!(state, "completed_not_delivered");
+                assert_eq!(receipts, 0);
+                assert_eq!(deliveries, 0);
+            }
+            if mode != "inline_task" {
+                assert!(
+                    store.result_publication(task.task_id).is_err(),
+                    "{mode} recovered altered JSON"
+                );
+            }
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn original_json_digest_migration_preserves_legacy_and_refuses_unbound_normalized_rows() {
+        for legacy in [true, false] {
+            let root = root();
+            let (mut store, session, child) = active_member(&root);
+            let task = store
+                .assign_task(
+                    &context(session.session_id, "json-migration"),
+                    &task_request(child, "read_only"),
+                    &mut FakeAdapter::default(),
+                )
+                .unwrap();
+            if legacy {
+                let publication = store.result_publication(task.task_id).unwrap();
+                store.connection.execute("UPDATE brokered_result_publications SET result_json=?1,content_text=?2 WHERE task_id=?3",params![publication.result_json,publication.content,task.task_id.to_string()]).unwrap();
+                store
+                    .connection
+                    .execute(
+                        "UPDATE brokered_tasks SET result_json=?1 WHERE task_id=?2",
+                        params![publication.result_json, task.task_id.to_string()],
+                    )
+                    .unwrap();
+            }
+            store.connection.execute_batch("ALTER TABLE brokered_result_publications DROP COLUMN result_json_sha256; UPDATE metadata SET value='2' WHERE key='orchestration_schema_version';").unwrap();
+            drop(store);
+            if legacy {
+                let observer = OrchestrationStore::open_observer(&root).unwrap();
+                assert_eq!(observer.task(task.task_id).unwrap(), task);
+                drop(observer);
+                let migrated = OrchestrationStore::open(&root).unwrap();
+                assert_eq!(migrated.task(task.task_id).unwrap(), task);
+                let digest: String = migrated.connection.query_row("SELECT result_json_sha256 FROM brokered_result_publications WHERE task_id=?1",[task.task_id.to_string()],|row|row.get(0)).unwrap();
+                assert_eq!(
+                    digest,
+                    sha256_hex(
+                        canonical_string(task.result.as_ref().unwrap())
+                            .unwrap()
+                            .as_bytes()
+                    )
+                );
+                drop(migrated);
+            } else {
+                assert!(OrchestrationStore::open(&root).is_err());
+                let connection =
+                    rusqlite::Connection::open(EngagementStore::workspace_database_path(&root))
+                        .unwrap();
+                assert_eq!(
+                    connection
+                        .query_row(
+                            "SELECT value FROM metadata WHERE key='orchestration_schema_version'",
+                            [],
+                            |row| row.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    "2"
+                );
+                assert!(!connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('brokered_result_publications') WHERE name='result_json_sha256')",[],|row|row.get::<_,bool>(0)).unwrap());
             }
             std::fs::remove_dir_all(root).unwrap();
         }

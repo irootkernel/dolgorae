@@ -339,6 +339,18 @@ fn control_root_named(state_root: &Path, name: &str) -> Result<PathBuf, MachineE
     Ok(root)
 }
 fn inspect_namespace(root: &Path, except: Option<Uuid>) -> Result<(bool, u64), MachineError> {
+    let content = content_pending(
+        root.parent()
+            .ok_or_else(|| error("RECOVERY_REQUIRED", "maintenance workspace absent"))?,
+        except,
+    )?;
+    let (checkpoint, generation) = inspect_checkpoint_namespace(root, except)?;
+    Ok((content || checkpoint, generation))
+}
+fn inspect_checkpoint_namespace(
+    root: &Path,
+    except: Option<Uuid>,
+) -> Result<(bool, u64), MachineError> {
     let mut pending = false;
     let mut completed_generations = std::collections::BTreeMap::new();
     let mut count = 0;
@@ -1124,6 +1136,74 @@ pub fn execute_native(
             &view.workspace_id,
             &operator,
         );
+    }
+    let content_route = match command {
+        "plan_maintenance" => kind
+            .as_deref()
+            .is_some_and(|kind| matches!(kind, "retire_result_content" | "garbage_collection")),
+        "apply_maintenance" => {
+            let path = crate::cli::option_path(arguments, "--plan-file")
+                .map_err(|e| MachineError::invalid_argument("--plan-file", e))?
+                .ok_or_else(|| {
+                    MachineError::invalid_argument(
+                        "--plan-file",
+                        "complete retained dry-run plan required",
+                    )
+                })?;
+            matches!(
+                read_json_at::<MaintenancePlan>(&path, false)?.kind.as_str(),
+                "retire_result_content" | "garbage_collection"
+            )
+        }
+        "get_maintenance" => {
+            let id = crate::cli::option_path(arguments, "--plan-id")
+                .map_err(|e| MachineError::invalid_argument("--plan-id", e))?
+                .and_then(|p| p.to_str().and_then(|s| Uuid::parse_str(s).ok()))
+                .ok_or_else(|| {
+                    MachineError::invalid_argument("--plan-id", "original plan UUIDv7 required")
+                })?;
+            let root = state_root.join("result-maintenance");
+            fs::symlink_metadata(root.join(format!("{id}.json"))).is_ok()
+                || fs::symlink_metadata(root.join(format!("{id}.owner.json"))).is_ok()
+        }
+        _ => false,
+    };
+    if content_route {
+        let mut data = match command {
+            "plan_maintenance" => {
+                json!({"plan":plan_result_content(&state_root,&view.workspace_id,generation()?,kind.as_deref().unwrap_or_default(),&operator)?})
+            }
+            "apply_maintenance" => {
+                let path = crate::cli::option_path(arguments, "--plan-file")
+                    .map_err(|e| MachineError::invalid_argument("--plan-file", e))?
+                    .ok_or_else(|| {
+                        MachineError::invalid_argument(
+                            "--plan-file",
+                            "complete retained plan required",
+                        )
+                    })?;
+                let plan: MaintenancePlan = read_json_at(&path, false)?;
+                json!({"maintenance":content_facade_observation(apply_result_content(&state_root,&view.workspace_id,&plan,arguments.iter().any(|a|a=="--approve"),&operator)?)?})
+            }
+            "get_maintenance" => {
+                let id = crate::cli::option_path(arguments, "--plan-id")
+                    .map_err(|e| MachineError::invalid_argument("--plan-id", e))?
+                    .and_then(|p| p.to_str().and_then(|s| Uuid::parse_str(s).ok()))
+                    .ok_or_else(|| {
+                        MachineError::invalid_argument("--plan-id", "original plan UUIDv7 required")
+                    })?;
+                json!({"maintenance":content_facade_observation(get_result_content(&state_root,&view.workspace_id,id,generation()?,&operator)?)?})
+            }
+            _ => {
+                return Err(MachineError::invalid_argument(
+                    "command",
+                    "unsupported content maintenance command",
+                ));
+            }
+        };
+        data["schema"] = json!("dolgorae.external-specialist-response/v5");
+        data["operation"] = json!(command);
+        return Ok(data);
     }
     if kind
         .as_deref()
@@ -1940,4 +2020,1509 @@ fn execute_profile_maintenance_at(
     data["schema"] = json!("dolgorae.external-specialist-response/v5");
     data["operation"] = json!(command);
     Ok(data)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContentDatabaseBasis {
+    device: u64,
+    inode: u64,
+    schema_version: i64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContentOperation {
+    schema: String,
+    plan: MaintenancePlan,
+    operator_id: Uuid,
+    operator_generation: u64,
+    runs: Vec<RunBasis>,
+    database: ContentDatabaseBasis,
+    references: Vec<crate::storage_observation::ContentReference>,
+    targets: Vec<crate::storage_observation::ContentReference>,
+    chunk_bindings: Vec<crate::storage_observation::ChunkBinding>,
+    state: String,
+    completed_digests: Vec<String>,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContentOwner {
+    schema: String,
+    operation_ref: Uuid,
+    plan_sha256: String,
+    operator_id: Uuid,
+    operator_generation: u64,
+    workspace_ref: String,
+    source_generation: u64,
+    database_sha256: String,
+    runs_sha256: String,
+    references_sha256: String,
+    targets_sha256: String,
+    chunk_bindings_sha256: String,
+}
+fn content_owner(saved: &ContentOperation) -> Result<ContentOwner, MachineError> {
+    Ok(ContentOwner {
+        schema: "dolgorae.native-content-maintenance-owner/v1".into(),
+        operation_ref: saved.plan.plan_ref,
+        plan_sha256: digest(&saved.plan)?,
+        operator_id: saved.operator_id,
+        operator_generation: saved.operator_generation,
+        workspace_ref: saved.plan.workspace_ref.clone(),
+        source_generation: saved.plan.selected_generation,
+        database_sha256: digest(&saved.database)?,
+        runs_sha256: digest(&saved.runs)?,
+        references_sha256: digest(&saved.references)?,
+        targets_sha256: digest(&saved.targets)?,
+        chunk_bindings_sha256: digest(&saved.chunk_bindings)?,
+    })
+}
+fn content_plan_digest(saved: &ContentOperation) -> Result<String, MachineError> {
+    digest(&(
+        &saved.runs,
+        &saved.database,
+        &saved.references,
+        &saved.targets,
+        &saved.chunk_bindings,
+        &saved.plan.retire_content,
+    ))
+}
+fn content_root(state_root: &Path) -> Result<PathBuf, MachineError> {
+    let root = state_root.join("result-maintenance");
+    match crate::workspace::create_directory(&root, 0o700) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => {
+            return Err(error(
+                "LOOKUP_NAMESPACE_UNAVAILABLE",
+                "content maintenance namespace unavailable",
+            ));
+        }
+    }
+    verify_secure_directory(&root, DarwinSystem.current_uid())?;
+    Ok(root)
+}
+fn content_plan_bytes_ref(value: &Value) -> Result<(&str, u64), MachineError> {
+    let invalid = || {
+        error(
+            "LOOKUP_NAMESPACE_CORRUPT",
+            "content plan byte reference malformed",
+        )
+    };
+    let object = value.as_object().ok_or_else(invalid)?;
+    let byte_length = object
+        .get("byte_length")
+        .and_then(Value::as_u64)
+        .filter(|length| *length <= 9_007_199_254_740_991)
+        .ok_or_else(invalid)?;
+    let sha = object
+        .get("sha256")
+        .and_then(Value::as_str)
+        .and_then(|sha| sha.strip_prefix("sha256:"))
+        .filter(|sha| {
+            sha.len() == 64
+                && sha
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+        .ok_or_else(invalid)?;
+    if object.len() != 2 {
+        return Err(invalid());
+    }
+    Ok((sha, byte_length))
+}
+fn read_content_operation(
+    root: &Path,
+    id: Uuid,
+    workspace: &str,
+    operator: &OperatorAuthorization,
+) -> Result<ContentOperation, MachineError> {
+    let saved: ContentOperation = read_json(&root.join(format!("{id}.json")))?;
+    for value in &saved.plan.retire_content {
+        content_plan_bytes_ref(value)?;
+    }
+    if saved.schema != "dolgorae.native-content-maintenance-operation/v1"
+        || saved.plan.plan_ref != id
+        || saved.plan.workspace_ref != workspace
+        || saved.operator_id != operator.operator_id
+        || saved.operator_generation == 0
+        || !saved.plan.dry_run
+        || !matches!(
+            saved.plan.kind.as_str(),
+            "retire_result_content" | "garbage_collection"
+        )
+        || saved.plan.expected_manifest_digest != content_plan_digest(&saved)?
+        || !matches!(
+            saved.state.as_str(),
+            "planned" | "retiring" | "collecting" | "completed"
+        )
+        || saved.chunk_bindings.len() > 4096
+        || saved.chunk_bindings.iter().any(|b| {
+            !saved.references.iter().any(|r| {
+                r.owner_kind == "brokered_chunk_receipt"
+                    && r.owner_id == b.reference_id.to_string()
+                    && r.representation == "raw"
+                    && r.byte_length == b.byte_length
+            })
+        })
+        || saved.references.len() > 4096
+        || saved.targets.len() > saved.references.len()
+        || saved
+            .targets
+            .iter()
+            .any(|r| r.retired_operation.is_some() || !saved.references.contains(r))
+        || (saved.plan.kind == "garbage_collection" && !saved.targets.is_empty())
+        || saved.completed_digests.len() > saved.plan.retire_content.len()
+        || saved
+            .completed_digests
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != saved.completed_digests.len()
+        || saved.completed_digests.iter().any(|d| {
+            !saved
+                .plan
+                .retire_content
+                .iter()
+                .any(|v| content_plan_bytes_ref(v).is_ok_and(|(sha, _)| sha == d))
+        })
+    {
+        return Err(error(
+            "LOOKUP_NAMESPACE_CORRUPT",
+            "content maintenance original identity is invalid",
+        ));
+    }
+    if saved.state != "planned" {
+        let owner: ContentOwner = read_json(&root.join(format!("{id}.owner.json")))?;
+        if owner != content_owner(&saved)? {
+            return Err(error(
+                "LOOKUP_NAMESPACE_CORRUPT",
+                "content maintenance owner disagrees",
+            ));
+        }
+    }
+    Ok(saved)
+}
+pub(crate) fn workspace_maintenance_pending(state_root: &Path) -> Result<bool, MachineError> {
+    let content_root = state_root.join("result-maintenance");
+    let content = content_pending(state_root, None)
+        .map_err(|error| admission_namespace_error(&content_root, error))?;
+    let checkpoint_root = state_root.join("maintenance");
+    let checkpoint = match fs::symlink_metadata(&checkpoint_root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => {
+            return Err(MachineError::runtime_path_invalid(
+                &checkpoint_root,
+                "workspace maintenance namespace is unavailable",
+            ));
+        }
+        Ok(_) => {
+            verify_secure_directory(&checkpoint_root, DarwinSystem.current_uid())?;
+            inspect_checkpoint_namespace(&checkpoint_root, None)
+                .map_err(|error| admission_namespace_error(&checkpoint_root, error))?
+                .0
+        }
+    };
+    Ok(content || checkpoint)
+}
+fn admission_namespace_error(root: &Path, error: MachineError) -> MachineError {
+    if matches!(
+        error.code.as_str(),
+        "RUNTIME_PATH_INVALID" | "RUNTIME_PATH_COLLISION" | "STORAGE_CAPACITY_EXCEEDED"
+    ) {
+        error
+    } else {
+        MachineError::runtime_path_invalid(
+            root,
+            "workspace maintenance namespace is unavailable or inconsistent",
+        )
+    }
+}
+fn content_pending(state_root: &Path, except: Option<Uuid>) -> Result<bool, MachineError> {
+    let root = state_root.join("result-maintenance");
+    match fs::symlink_metadata(&root) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => {
+            return Err(error(
+                "LOOKUP_NAMESPACE_UNAVAILABLE",
+                "content maintenance namespace unavailable",
+            ));
+        }
+        Ok(_) => {}
+    }
+    verify_secure_directory(&root, DarwinSystem.current_uid())?;
+    let mut pending = false;
+    let mut count = 0;
+    for entry in fs::read_dir(&root).map_err(|_| {
+        error(
+            "LOOKUP_NAMESPACE_UNAVAILABLE",
+            "content maintenance namespace unreadable",
+        )
+    })? {
+        let entry = entry.map_err(|_| {
+            error(
+                "LOOKUP_NAMESPACE_UNAVAILABLE",
+                "content maintenance namespace unreadable",
+            )
+        })?;
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            error(
+                "LOOKUP_NAMESPACE_CORRUPT",
+                "content maintenance name invalid",
+            )
+        })?;
+        if name.ends_with(".tmp") {
+            continue;
+        }
+        if let Some(id) = name
+            .strip_suffix(".owner.json")
+            .and_then(|s| Uuid::parse_str(s).ok())
+        {
+            let owner: ContentOwner = read_json(&entry.path())?;
+            let saved: ContentOperation = read_json(&root.join(format!("{id}.json")))?;
+            if owner != content_owner(&saved)? {
+                return Err(error(
+                    "LOOKUP_NAMESPACE_CORRUPT",
+                    "content owner namespace incomplete",
+                ));
+            }
+            pending |= saved.state != "completed" && Some(id) != except;
+            continue;
+        }
+        let id = name
+            .strip_suffix(".json")
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .filter(|id| id.get_version_num() == 7)
+            .ok_or_else(|| {
+                error(
+                    "LOOKUP_NAMESPACE_CORRUPT",
+                    "content maintenance identity invalid",
+                )
+            })?;
+        let saved: ContentOperation = read_json(&entry.path())?;
+        if saved.plan.plan_ref != id
+            || saved.plan.expected_manifest_digest != content_plan_digest(&saved)?
+        {
+            return Err(error(
+                "LOOKUP_NAMESPACE_CORRUPT",
+                "content maintenance scope invalid",
+            ));
+        }
+        count += 1;
+        if count > 100_000 {
+            return Err(error(
+                "STORAGE_CAPACITY_EXCEEDED",
+                "content maintenance namespace bound reached",
+            ));
+        }
+        if saved.state != "planned" {
+            let owner: ContentOwner = read_json(&root.join(format!("{id}.owner.json")))?;
+            if owner != content_owner(&saved)? {
+                return Err(error(
+                    "LOOKUP_NAMESPACE_CORRUPT",
+                    "content owner namespace incomplete",
+                ));
+            }
+            pending |= saved.state != "completed" && Some(id) != except;
+        }
+    }
+    Ok(pending)
+}
+fn content_database(
+    connection: &rusqlite::Connection,
+    path: &Path,
+) -> Result<ContentDatabaseBasis, MachineError> {
+    use std::os::unix::fs::MetadataExt as _;
+    verify_secure_file(path, DarwinSystem.current_uid())?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| error("RECOVERY_REQUIRED", "content database identity unavailable"))?;
+    let schema_version = connection
+        .pragma_query_value(None, "schema_version", |row| row.get(0))
+        .map_err(|_| error("RECOVERY_REQUIRED", "content database schema unavailable"))?;
+    Ok(ContentDatabaseBasis {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        schema_version,
+    })
+}
+fn verify_chunk_provenance(connection: &rusqlite::Connection) -> Result<(), MachineError> {
+    let exists:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='brokered_tool_results')",[],|r|r.get(0)).map_err(|_|error("RECOVERY_REQUIRED","chunk source namespace unavailable"))?;
+    if !exists {
+        return Ok(());
+    }
+    let malformed:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM brokered_tool_results WHERE NOT json_valid(response_json) OR json_extract(response_json,'$.schema_version') IS NOT 'dolgorae.brokered-tool-result/v1' OR (json_extract(response_json,'$.outcome') IS NOT 'ok' AND json_extract(response_json,'$.outcome') IS NOT 'error'))",[],|r|r.get(0)).map_err(|_|error("RECOVERY_REQUIRED","chunk source namespace corrupt"))?;
+    if malformed {
+        return Err(error(
+            "RECOVERY_REQUIRED",
+            "chunk source receipts cannot establish absence",
+        ));
+    }
+    let unbound:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM brokered_chunk_bindings c LEFT JOIN brokered_tasks t ON t.task_id=c.task_id LEFT JOIN brokered_tool_results b ON b.session_id=c.session_id AND b.source_tool_call_id=c.source_tool_call_id WHERE t.task_id IS NULL OR t.session_id!=c.session_id OR b.response_json IS NULL OR json_extract(b.response_json,'$.value.task_id') IS NOT c.task_id OR json_extract(b.response_json,'$.value.operation') IS NOT 'read_specialist_result_result' OR json_extract(b.response_json,'$.value.offset') IS NOT c.offset OR json_extract(b.response_json,'$.value.content') IS NOT '')",[],|r|r.get(0)).map_err(|_|error("RECOVERY_REQUIRED","chunk source bindings unavailable"))?;
+    if unbound {
+        return Err(error(
+            "RECOVERY_REQUIRED",
+            "chunk source receipt binding is invalid",
+        ));
+    }
+    Ok(())
+}
+fn all_content_references(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<crate::storage_observation::ContentReference>, MachineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT owner_kind,owner_id,representation,sha256,byte_length,retired_operation
+         FROM result_content_refs ORDER BY owner_kind,owner_id,representation LIMIT 4097",
+        )
+        .map_err(|_| {
+            error(
+                "RECOVERY_REQUIRED",
+                "content reference namespace unavailable",
+            )
+        })?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(|_| error("RECOVERY_REQUIRED", "content reference query unavailable"))?;
+    let mut references = Vec::new();
+    for row in rows {
+        let (owner_kind, owner_id, representation, sha256, byte_length, retired) =
+            row.map_err(|_| error("RECOVERY_REQUIRED", "content reference malformed"))?;
+        if Uuid::parse_str(&owner_id)
+            .ok()
+            .is_none_or(|id| id.get_version_num() != 7)
+            || !matches!(
+                owner_kind.as_str(),
+                "brokered_publication"
+                    | "external_artifact"
+                    | "legacy_engagement"
+                    | "brokered_chunk_receipt"
+            )
+            || !matches!(representation.as_str(), "json" | "raw")
+            || sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(error(
+                "RECOVERY_REQUIRED",
+                "content reference identity invalid",
+            ));
+        }
+        references.push(crate::storage_observation::ContentReference {
+            owner_kind,
+            owner_id,
+            representation,
+            sha256,
+            byte_length,
+            retired_operation: retired
+                .map(|s| {
+                    Uuid::parse_str(&s)
+                        .ok()
+                        .filter(|id| id.get_version_num() == 7)
+                        .ok_or_else(|| error("RECOVERY_REQUIRED", "content tombstone malformed"))
+                })
+                .transpose()?,
+        });
+    }
+    if references.len() > 4096 {
+        return Err(error(
+            "STORAGE_CAPACITY_EXCEEDED",
+            "content reference bound reached",
+        ));
+    }
+    Ok(references)
+}
+pub(crate) fn content_delivered(
+    connection: &rusqlite::Connection,
+    r: &crate::storage_observation::ContentReference,
+) -> Result<bool, MachineError> {
+    let sql = match r.owner_kind.as_str() {
+        "brokered_publication" => {
+            "SELECT EXISTS(SELECT 1 FROM brokered_tasks t JOIN brokered_result_publications p ON p.task_id=t.task_id JOIN brokered_delivery_receipts d ON d.task_id=t.task_id WHERE t.task_id=?1 AND t.state='delivered' AND p.state='published')
+          AND NOT EXISTS(SELECT 1 FROM brokered_tool_results b WHERE json_valid(b.response_json) AND json_extract(b.response_json,'$.outcome')='ok'
+          AND json_extract(b.response_json,'$.value.operation')='read_specialist_result_result' AND json_extract(b.response_json,'$.value.task_id')=?1
+          AND NOT EXISTS(SELECT 1 FROM brokered_chunk_bindings c WHERE c.session_id=b.session_id AND c.source_tool_call_id=b.source_tool_call_id))"
+        }
+        "brokered_chunk_receipt" => {
+            "SELECT EXISTS(SELECT 1 FROM brokered_chunk_bindings c JOIN brokered_tasks t ON t.task_id=c.task_id JOIN brokered_delivery_receipts d ON d.task_id=t.task_id
+             WHERE c.reference_id=?1 AND t.state='delivered'
+             AND NOT EXISTS(SELECT 1 FROM brokered_tool_results b WHERE json_valid(b.response_json) AND json_extract(b.response_json,'$.outcome')='ok'
+             AND json_extract(b.response_json,'$.value.operation')='read_specialist_result_result' AND json_extract(b.response_json,'$.value.task_id')=t.task_id
+             AND NOT EXISTS(SELECT 1 FROM brokered_chunk_bindings normalized WHERE normalized.session_id=b.session_id AND normalized.source_tool_call_id=b.source_tool_call_id)))"
+        }
+        "external_artifact" => {
+            "SELECT EXISTS(SELECT 1 FROM artifacts a JOIN delivery_receipts d ON d.artifact_id=a.artifact_id JOIN tasks t ON t.task_id=d.task_id WHERE a.artifact_id=?1 AND t.state='delivered')"
+        }
+        "legacy_engagement" => {
+            "SELECT EXISTS(SELECT 1 FROM artifacts a JOIN delivery_receipts d ON d.artifact_id=a.artifact_id JOIN tasks t ON t.task_id=d.task_id WHERE a.engagement_id=?1 AND t.state='delivered')"
+        }
+        _ => return Err(error("RECOVERY_REQUIRED", "content owner kind invalid")),
+    };
+    connection
+        .query_row(sql, [&r.owner_id], |row| row.get(0))
+        .map_err(|_| error("RECOVERY_REQUIRED", "content delivery proof unavailable"))
+}
+fn content_facade_observation(native: Value) -> Result<Value, MachineError> {
+    let plan: MaintenancePlan = serde_json::from_value(native["plan"].clone())
+        .map_err(|_| error("RECOVERY_REQUIRED", "content observation plan malformed"))?;
+    let state = native["state"]
+        .as_str()
+        .ok_or_else(|| error("RECOVERY_REQUIRED", "content observation state malformed"))?;
+    let active = matches!(state, "retiring" | "collecting");
+    if !matches!(state, "planned" | "retiring" | "collecting" | "completed") {
+        return Err(error(
+            "RECOVERY_REQUIRED",
+            "content observation state invalid",
+        ));
+    }
+    Ok(
+        json!({"operation_ref":plan.plan_ref,"state":if active{"recovery_needed"}else{state},
+        "old_generation":plan.selected_generation,"new_generation":null,"selected_manifest_digest":plan.expected_manifest_digest,
+        "required_action":if active{"resume_maintenance"}else{"none"},"plan":plan}),
+    )
+}
+fn persist_content_operation(path: &Path, saved: &ContentOperation) -> Result<(), MachineError> {
+    let bytes = serde_json::to_vec(saved)
+        .map_err(|_| error("RECOVERY_REQUIRED", "content operation encoding failed"))?;
+    if bytes.len() as u64 > MAX_CONTROL_BYTES {
+        return Err(error(
+            "STORAGE_CAPACITY_EXCEEDED",
+            "content operation metadata bound reached",
+        ));
+    }
+    persist(path, saved)
+}
+fn content_observation(saved: &ContentOperation) -> Value {
+    json!({"plan":saved.plan,"state":saved.state,"operation_ref":saved.plan.plan_ref,
+        "admission_closed":saved.state!="planned"&&saved.state!="completed","effect":if saved.state=="completed"{"content_maintenance_completed"}else{"retained_original_operation"}})
+}
+
+pub fn plan_result_content(
+    state_root: &Path,
+    workspace_id: &str,
+    selected_generation: u64,
+    kind: &str,
+    operator: &OperatorAuthorization,
+) -> Result<MaintenancePlan, MachineError> {
+    if !matches!(kind, "retire_result_content" | "garbage_collection") {
+        return Err(MachineError::invalid_argument(
+            "--kind",
+            "unsupported content maintenance kind",
+        ));
+    }
+    let checkpoint_root = control_root(state_root)?;
+    if inspect_namespace(&checkpoint_root, None)?.0 || content_pending(state_root, None)? {
+        return Err(error(
+            "RUN_BUSY",
+            "resume retained workspace maintenance first",
+        ));
+    }
+    if workspace_generation(&checkpoint_root)? != selected_generation {
+        return Err(error(
+            "MAINTENANCE_PLAN_STALE",
+            "workspace generation changed",
+        ));
+    }
+    let mut runs = Vec::new();
+    let mut active_writers = 0;
+    let mut unknown_workload = 0;
+    let mut retained_receipts = 0;
+    for run in run_ids(state_root)? {
+        let (basis, ledger, projection, _) = observe_basis(state_root, workspace_id, run)?;
+        let (active, unknown) = workload_counts(state_root, run)?;
+        active_writers += active;
+        unknown_workload +=
+            unknown + u64::from(projection.lifecycle == RunLifecycle::OutcomeUnknown);
+        retained_receipts += ledger
+            .records()
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.kind(),
+                    AuditKind::TurnStarted | AuditKind::MutationCompleted
+                )
+            })
+            .count() as u64;
+        runs.push(basis);
+    }
+    let path = crate::engagement::EngagementStore::workspace_database_path(state_root);
+    let connection = crate::storage_observation::CheckedConnection::open(&path, true)?;
+    let database = content_database(&connection, &path)?;
+    verify_chunk_provenance(&connection)?;
+    let references = all_content_references(&connection)?;
+    let chunk_bindings = crate::storage_observation::chunk_bindings(&connection)?;
+    let mut candidates = std::collections::BTreeMap::new();
+    let mut targets = Vec::new();
+    let mut protected = 0;
+    if kind == "retire_result_content" {
+        for r in &references {
+            if r.retired_operation.is_some() {
+                continue;
+            }
+            if content_delivered(&connection, r)? {
+                candidates.insert(r.sha256.clone(), r.byte_length);
+                targets.push(r.clone());
+            } else {
+                protected += 1;
+            }
+        }
+    } else {
+        let mut statement=connection.prepare("SELECT c.sha256,c.bytes FROM result_content c WHERE NOT EXISTS(SELECT 1 FROM result_content_refs r WHERE r.sha256=c.sha256 AND r.retired_operation IS NULL) ORDER BY c.sha256 LIMIT 4097")
+            .map_err(|_|error("RECOVERY_REQUIRED","content GC query unavailable"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|_| error("RECOVERY_REQUIRED", "content GC query unavailable"))?;
+        for row in rows {
+            let (sha, bytes) =
+                row.map_err(|_| error("RECOVERY_REQUIRED", "content GC row invalid"))?;
+            if sha256_hex(&bytes) != sha {
+                return Err(error(
+                    "ARTIFACT_INTEGRITY_FAILURE",
+                    "GC content digest is corrupt",
+                ));
+            }
+            candidates.insert(sha, bytes.len() as u64);
+        }
+        protected = references
+            .iter()
+            .filter(|r| r.retired_operation.is_none())
+            .count() as u64;
+    }
+    if candidates.len() > 4096 {
+        return Err(error(
+            "STORAGE_CAPACITY_EXCEEDED",
+            "content plan bound reached",
+        ));
+    }
+    let plan = MaintenancePlan {
+        plan_ref: Uuid::now_v7(),
+        workspace_ref: workspace_id.into(),
+        selected_generation,
+        dry_run: true,
+        kind: kind.into(),
+        admission_closed: false,
+        active_writers,
+        unknown_workload,
+        protected_reference_count: protected,
+        retire_content: candidates
+            .into_iter()
+            .map(|(sha256, byte_length)| json!({"byte_length":byte_length,"sha256":format!("sha256:{sha256}")}))
+            .collect(),
+        retained_receipt_count: retained_receipts,
+        expected_manifest_digest: String::new(),
+    };
+    let mut saved = ContentOperation {
+        schema: "dolgorae.native-content-maintenance-operation/v1".into(),
+        plan,
+        operator_id: operator.operator_id,
+        operator_generation: operator.operator_generation,
+        runs,
+        database,
+        references,
+        targets,
+        chunk_bindings,
+        state: "planned".into(),
+        completed_digests: Vec::new(),
+    };
+    saved.plan.expected_manifest_digest = content_plan_digest(&saved)?;
+    let root = content_root(state_root)?;
+    persist_content_operation(&root.join(format!("{}.json", saved.plan.plan_ref)), &saved)?;
+    Ok(saved.plan)
+}
+pub fn get_result_content(
+    state_root: &Path,
+    workspace_id: &str,
+    plan_ref: Uuid,
+    selected_generation: u64,
+    operator: &OperatorAuthorization,
+) -> Result<Value, MachineError> {
+    let root = state_root.join("result-maintenance");
+    verify_secure_directory(&root, DarwinSystem.current_uid())?;
+    let mut saved = read_content_operation(&root, plan_ref, workspace_id, operator)?;
+    if saved.plan.selected_generation != selected_generation {
+        return Err(MachineError::invalid_argument(
+            "--selected-generation",
+            "original generation required",
+        ));
+    }
+    if saved.state == "planned"
+        && fs::symlink_metadata(root.join(format!("{plan_ref}.owner.json"))).is_ok()
+    {
+        let owner: ContentOwner = read_json(&root.join(format!("{plan_ref}.owner.json")))?;
+        if owner != content_owner(&saved)? {
+            return Err(error(
+                "LOOKUP_NAMESPACE_CORRUPT",
+                "content owner binding changed",
+            ));
+        }
+        saved.state = if saved.plan.kind == "garbage_collection" {
+            "collecting"
+        } else {
+            "retiring"
+        }
+        .into();
+    }
+    Ok(content_observation(&saved))
+}
+fn apply_result_content_inner(
+    state_root: &Path,
+    workspace_id: &str,
+    plan: &MaintenancePlan,
+    explicit_approval: bool,
+    operator: &OperatorAuthorization,
+    barrier: &mut impl FnMut(ContentMaintenanceBarrier) -> Result<(), MachineError>,
+) -> Result<Value, MachineError> {
+    if !explicit_approval
+        || !plan.dry_run
+        || !matches!(
+            plan.kind.as_str(),
+            "retire_result_content" | "garbage_collection"
+        )
+    {
+        return Err(MachineError::invalid_argument(
+            "--approve",
+            "exact content dry-run plan and explicit approval required",
+        ));
+    }
+    let root = state_root.join("result-maintenance");
+    verify_secure_directory(&root, DarwinSystem.current_uid())?;
+    let mut saved = read_content_operation(&root, plan.plan_ref, workspace_id, operator)?;
+    if saved.plan != *plan {
+        return Err(MachineError::invalid_argument(
+            "--plan-file",
+            "complete unchanged retained plan required",
+        ));
+    }
+    if saved.state == "completed" {
+        return Ok(content_observation(&saved));
+    }
+    let owner_path = root.join(format!("{}.owner.json", plan.plan_ref));
+    let owned = match fs::symlink_metadata(&owner_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => {
+            return Err(error(
+                "LOOKUP_NAMESPACE_UNAVAILABLE",
+                "content owner unavailable",
+            ));
+        }
+        Ok(_) => {
+            let owner: ContentOwner = read_json(&owner_path)?;
+            if owner != content_owner(&saved)? {
+                return Err(error("LOOKUP_NAMESPACE_CORRUPT", "content owner mismatch"));
+            }
+            true
+        }
+    };
+    if !owned && saved.operator_generation != operator.operator_generation {
+        return Err(error("OPERATOR_MISMATCH", "operator generation changed"));
+    }
+    let _workspace = WorkspaceLease::acquire(state_root, true).map_err(ledger_error)?;
+    let checkpoint_root = control_root(state_root)?;
+    if inspect_namespace(&checkpoint_root, Some(plan.plan_ref))?.0
+        || content_pending(state_root, Some(plan.plan_ref))?
+    {
+        return Err(error(
+            "RUN_BUSY",
+            "another retained maintenance owner exists",
+        ));
+    }
+    if workspace_generation(&checkpoint_root)? != plan.selected_generation {
+        return Err(error(
+            "MAINTENANCE_PLAN_STALE",
+            "workspace generation changed",
+        ));
+    }
+    if run_ids(state_root)?
+        != saved
+            .runs
+            .iter()
+            .map(|basis| basis.run_id)
+            .collect::<Vec<_>>()
+    {
+        return Err(error("MAINTENANCE_PLAN_STALE", "workspace Run set changed"));
+    }
+    let mut lifecycle = Vec::new();
+    let mut anchors = Vec::new();
+    let writers =
+        crate::writer::WriterStore::new(state_root, workspace_id, DarwinSystem.current_uid());
+    if writers.load()?.holder.is_some() {
+        return Err(error("RUN_BUSY", "workspace writer remains owned"));
+    }
+    for basis in &saved.runs {
+        lifecycle.push(
+            crate::worker::RunLifecycleLease::acquire(state_root, workspace_id, basis.run_id, 1)
+                .map_err(|_| error("RUN_BUSY", "Run lifecycle remains owned"))?,
+        );
+        let audit = state_root
+            .join("runs")
+            .join(basis.run_id.to_string())
+            .join("audit.jsonl");
+        verify_secure_file(&audit, DarwinSystem.current_uid())?;
+        let anchor = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&audit)
+            .map_err(|_| error("RECOVERY_REQUIRED", "Run audit anchor unavailable"))?;
+        DarwinSystem
+            .lock_exclusive_nonblocking(&anchor)
+            .map_err(|_| error("RUN_BUSY", "Run audit remains owned"))?;
+        anchors.push(anchor);
+        let (current, ledger, projection, _) =
+            observe_basis(state_root, workspace_id, basis.run_id)?;
+        if current != *basis {
+            return Err(error(
+                "MAINTENANCE_PLAN_STALE",
+                "Run manifest or history changed",
+            ));
+        }
+        let (active, unknown) = workload_counts(state_root, basis.run_id)?;
+        if active != 0
+            || unknown != 0
+            || !matches!(
+                projection.lifecycle,
+                RunLifecycle::Idle
+                    | RunLifecycle::Paused
+                    | RunLifecycle::Closed
+                    | RunLifecycle::StartFailed
+            )
+            || projection.active_turn_id.is_some()
+            || !projection.pending_requests.is_empty()
+        {
+            return Err(error("RUN_BUSY", "Run has live or unresolved work"));
+        }
+        let payloads = ledger
+            .records()
+            .iter()
+            .map(|r| r.payload_value().map(|p| (r.kind(), p)))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| error("RECOVERY_REQUIRED", "Run history cannot be verified"))?;
+        if !crate::turn::submit_history_is_quiescent(payloads)
+            .map_err(|_| error("RECOVERY_REQUIRED", "Run intent cannot be verified"))?
+            || crate::mutation_admission::active_mutation_admission_records(
+                ledger.records(),
+                &projection.lifecycle,
+            )
+            .map_err(|_| error("RECOVERY_REQUIRED", "Run admission cannot be verified"))?
+            .is_some()
+        {
+            return Err(error("RUN_BUSY", "Run has accepted unresolved work"));
+        }
+    }
+    let path = crate::engagement::EngagementStore::workspace_database_path(state_root);
+    let mut connection = crate::storage_observation::CheckedConnection::open_maintenance(&path)?;
+    if content_database(&connection, &path)? != saved.database {
+        return Err(error(
+            "MAINTENANCE_PLAN_STALE",
+            "content database replaced or schema changed",
+        ));
+    }
+    verify_chunk_provenance(&connection)?;
+    if crate::storage_observation::chunk_bindings(&connection)? != saved.chunk_bindings {
+        return Err(error(
+            "MAINTENANCE_PLAN_STALE",
+            "chunk provenance bindings changed",
+        ));
+    }
+    let mut current = all_content_references(&connection)?;
+    for reference in &mut current {
+        if reference.retired_operation == Some(plan.plan_ref) {
+            reference.retired_operation = None;
+        }
+    }
+    if current != saved.references {
+        return Err(error(
+            "MAINTENANCE_PLAN_STALE",
+            "content references changed",
+        ));
+    }
+    if !owned {
+        crate::workspace::atomic_create(
+            &SystemWorkspacePlatform,
+            &owner_path,
+            &serde_json::to_vec(&content_owner(&saved)?)
+                .map_err(|_| error("RECOVERY_REQUIRED", "content owner encoding failed"))?,
+            0o600,
+        )
+        .map_err(|_| error("RECOVERY_REQUIRED", "content owner retention failed"))?;
+        barrier(ContentMaintenanceBarrier::OwnerRetained)?;
+    }
+    saved.state = if plan.kind == "garbage_collection" {
+        "collecting"
+    } else {
+        "retiring"
+    }
+    .into();
+    persist_content_operation(&root.join(format!("{}.json", plan.plan_ref)), &saved)?;
+    if plan.kind == "retire_result_content" {
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| error("RECOVERY_REQUIRED", "retirement DB ownership unavailable"))?;
+        for reference in &saved.targets {
+            if !content_delivered(&transaction, reference)? {
+                return Err(error(
+                    "RUN_BUSY",
+                    "approved retirement target is no longer delivered",
+                ));
+            }
+            if !plan.retire_content.iter().any(|v| {
+                content_plan_bytes_ref(v).is_ok_and(|(sha, length)| {
+                    sha == reference.sha256 && length == reference.byte_length
+                })
+            }) {
+                return Err(error(
+                    "MAINTENANCE_PLAN_STALE",
+                    "eligible retirement target changed",
+                ));
+            }
+            transaction.execute("UPDATE result_content_refs SET retired_operation=?4 WHERE owner_kind=?1 AND owner_id=?2 AND representation=?3 AND (retired_operation IS NULL OR retired_operation=?4)",
+                rusqlite::params![reference.owner_kind,reference.owner_id,reference.representation,plan.plan_ref.to_string()]).map_err(|_|error("RECOVERY_REQUIRED","content retirement failed"))?;
+        }
+        crate::storage_observation::commit(transaction)
+            .map_err(|_| error("RECOVERY_REQUIRED", "retirement commit failed"))?;
+        barrier(ContentMaintenanceBarrier::TombstonesCommitted)?;
+        saved.completed_digests = plan
+            .retire_content
+            .iter()
+            .map(|v| content_plan_bytes_ref(v).map(|(sha, _)| sha.to_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+    } else {
+        for value in &plan.retire_content {
+            let (sha, byte_length) = content_plan_bytes_ref(value)?;
+            if saved.completed_digests.iter().any(|d| d == sha) {
+                continue;
+            }
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|_| error("RECOVERY_REQUIRED", "GC DB ownership unavailable"))?;
+            let live:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM result_content_refs WHERE sha256=?1 AND retired_operation IS NULL)",[sha],|row|row.get(0)).map_err(|_|error("RECOVERY_REQUIRED","GC protected reference query failed"))?;
+            if live {
+                return Err(error("RUN_BUSY", "GC content remains protected"));
+            }
+            use rusqlite::OptionalExtension as _;
+            let bytes: Option<Vec<u8>> = transaction
+                .query_row(
+                    "SELECT bytes FROM result_content WHERE sha256=?1",
+                    [sha],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|_| error("RECOVERY_REQUIRED", "GC content read unavailable"))?;
+            if let Some(bytes) = bytes {
+                if sha256_hex(&bytes) != sha || bytes.len() as u64 != byte_length {
+                    return Err(error(
+                        "ARTIFACT_INTEGRITY_FAILURE",
+                        "GC candidate content changed",
+                    ));
+                }
+            } else if !owned {
+                return Err(error(
+                    "MAINTENANCE_PLAN_STALE",
+                    "GC candidate disappeared before approved operation",
+                ));
+            }
+            transaction
+                .execute("DELETE FROM result_content WHERE sha256=?1", [sha])
+                .map_err(|_| error("RECOVERY_REQUIRED", "GC content deletion failed"))?;
+            crate::storage_observation::commit(transaction)
+                .map_err(|_| error("RECOVERY_REQUIRED", "GC deletion commit failed"))?;
+            barrier(ContentMaintenanceBarrier::ContentRowDeleted)?;
+            let body = state_root.join("result-content").join(format!("{sha}.bin"));
+            match fs::symlink_metadata(&body) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => {
+                    return Err(error(
+                        "RECOVERY_REQUIRED",
+                        "GC content identity unavailable",
+                    ));
+                }
+                Ok(_) => {
+                    verify_secure_directory(
+                        &state_root.join("result-content"),
+                        DarwinSystem.current_uid(),
+                    )?;
+                    verify_secure_file(&body, DarwinSystem.current_uid())?;
+                    use std::os::unix::fs::MetadataExt as _;
+                    if fs::symlink_metadata(&body)
+                        .map_err(|_| error("RECOVERY_REQUIRED", "GC content identity unavailable"))?
+                        .nlink()
+                        != 1
+                    {
+                        return Err(error("RECOVERY_REQUIRED", "GC content alias is untrusted"));
+                    }
+                    let mut file = OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                        .open(&body)
+                        .map_err(|_| error("RECOVERY_REQUIRED", "GC body read unavailable"))?;
+                    let metadata = file
+                        .metadata()
+                        .map_err(|_| error("RECOVERY_REQUIRED", "GC body identity unavailable"))?;
+                    if metadata.len() > 32 * 1024 * 1024 {
+                        return Err(error(
+                            "ARTIFACT_INTEGRITY_FAILURE",
+                            "GC body exceeds content bound",
+                        ));
+                    }
+                    let before = (
+                        metadata.dev(),
+                        metadata.ino(),
+                        metadata.len(),
+                        metadata.ctime(),
+                        metadata.ctime_nsec(),
+                    );
+                    let mut body_bytes = Vec::new();
+                    file.read_to_end(&mut body_bytes)
+                        .map_err(|_| error("RECOVERY_REQUIRED", "GC body read unavailable"))?;
+                    let after = file
+                        .metadata()
+                        .map_err(|_| error("RECOVERY_REQUIRED", "GC body identity unavailable"))?;
+                    if before
+                        != (
+                            after.dev(),
+                            after.ino(),
+                            after.len(),
+                            after.ctime(),
+                            after.ctime_nsec(),
+                        )
+                        || sha256_hex(&body_bytes) != sha
+                        || body_bytes.len() as u64 != byte_length
+                    {
+                        return Err(error("ARTIFACT_INTEGRITY_FAILURE", "GC body changed"));
+                    }
+                    fs::remove_file(&body)
+                        .map_err(|_| error("RECOVERY_REQUIRED", "GC content unlink failed"))?;
+                    barrier(ContentMaintenanceBarrier::BodyUnlinked)?;
+                    sync_directory(&state_root.join("result-content"))
+                        .map_err(|_| error("RECOVERY_REQUIRED", "GC content unlink sync failed"))?;
+                }
+            }
+            saved.completed_digests.push(sha.to_owned());
+            persist_content_operation(&root.join(format!("{}.json", plan.plan_ref)), &saved)?;
+            barrier(ContentMaintenanceBarrier::ProgressSynced)?;
+        }
+    }
+    saved.state = "completed".into();
+    persist_content_operation(&root.join(format!("{}.json", plan.plan_ref)), &saved)?;
+    barrier(ContentMaintenanceBarrier::Completed)?;
+    Ok(content_observation(&saved))
+}
+
+pub fn apply_result_content_with_barrier(
+    state_root: &Path,
+    workspace_id: &str,
+    plan: &MaintenancePlan,
+    explicit_approval: bool,
+    operator: &OperatorAuthorization,
+    mut barrier: impl FnMut(ContentMaintenanceBarrier) -> Result<(), MachineError>,
+) -> Result<Value, MachineError> {
+    apply_result_content_inner(
+        state_root,
+        workspace_id,
+        plan,
+        explicit_approval,
+        operator,
+        &mut barrier,
+    )
+    .map_err(|mut failure| {
+        let root = state_root.join("result-maintenance");
+        if let Ok(saved) = read_content_operation(&root, plan.plan_ref, workspace_id, operator)
+            && saved.plan == *plan
+            && let Ok(owner) =
+                read_json::<ContentOwner>(&root.join(format!("{}.owner.json", plan.plan_ref)))
+            && content_owner(&saved).is_ok_and(|expected| expected == owner)
+            && let Some(details) = failure.details.as_object_mut()
+        {
+            details.insert("operation_ref".into(), json!(plan.plan_ref));
+            details.insert("effect".into(), json!("unresolved"));
+            details.insert("required_action".into(), json!("resume_maintenance"));
+        }
+        failure
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContentMaintenanceBarrier {
+    OwnerRetained,
+    TombstonesCommitted,
+    ContentRowDeleted,
+    BodyUnlinked,
+    ProgressSynced,
+    Completed,
+}
+pub fn apply_result_content(
+    state_root: &Path,
+    workspace_id: &str,
+    plan: &MaintenancePlan,
+    explicit_approval: bool,
+    operator: &OperatorAuthorization,
+) -> Result<Value, MachineError> {
+    apply_result_content_with_barrier(
+        state_root,
+        workspace_id,
+        plan,
+        explicit_approval,
+        operator,
+        |_| Ok(()),
+    )
+}
+
+#[cfg(test)]
+mod content_tests {
+    use super::*;
+    use crate::controller::{CredentialCarrier, OperatorStore};
+    const WORKSPACE_ID: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    struct ContentFixture {
+        root: PathBuf,
+        operator: OperatorAuthorization,
+        first: Uuid,
+        second: Uuid,
+        sha: String,
+    }
+    impl ContentFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("dolgorae-content-maintenance-{}", Uuid::now_v7()));
+            for path in [
+                &root,
+                &root.join("runtime"),
+                &root.join("runtime/locks"),
+                &root.join("runs"),
+                &root.join("result-content"),
+            ] {
+                fs::create_dir(path).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            fs::write(root.join("workspace.json"), b"{}").unwrap();
+            fs::set_permissions(
+                root.join("workspace.json"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            crate::writer::WriterStore::initialize_layout(
+                &root,
+                WORKSPACE_ID,
+                DarwinSystem.current_uid(),
+            )
+            .unwrap();
+            let store = OperatorStore::new(root.join("operator"));
+            let credential = root.join("operator.json");
+            store.initialize(&credential).unwrap();
+            let operator = store
+                .authorize(&CredentialCarrier::open_path(&credential).unwrap())
+                .unwrap();
+            let path = crate::engagement::EngagementStore::workspace_database_path(&root);
+            drop(crate::engagement::EngagementStore::open(&path).unwrap());
+            let mut connection =
+                crate::storage_observation::CheckedConnection::open(&path, false).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let body = b"{\"result\":\"same bytes\"}";
+            let sha = sha256_hex(body);
+            let first = Uuid::now_v7();
+            let second = Uuid::now_v7();
+            for artifact in [first, second] {
+                let engagement = Uuid::now_v7();
+                let run = Uuid::now_v7();
+                let task = Uuid::now_v7();
+                let hire = Uuid::now_v7();
+                transaction.execute("INSERT INTO engagements(engagement_id,workspace_id,controller_sha256,state,revision) VALUES(?1,?2,?3,'result_ready',1)",rusqlite::params![engagement.to_string(),WORKSPACE_ID,"a".repeat(64)]).unwrap();
+                transaction.execute("INSERT INTO members(specialist_run_id,engagement_id,hire_operation_id,configuration_sha256,state) VALUES(?1,?2,?3,?4,'ready')",rusqlite::params![run.to_string(),engagement.to_string(),hire.to_string(),"b".repeat(64)]).unwrap();
+                transaction.execute("INSERT INTO tasks(task_id,engagement_id,specialist_run_id,objective_sha256,state,result_sha256) VALUES(?1,?2,?3,?4,'delivered',?5)",rusqlite::params![task.to_string(),engagement.to_string(),run.to_string(),"c".repeat(64),sha]).unwrap();
+                transaction.execute("INSERT INTO artifacts(artifact_id,engagement_id,task_id,specialist_run_id,result_sha256,canonical_json) VALUES(?1,?2,?3,?4,?5,'')",rusqlite::params![artifact.to_string(),engagement.to_string(),task.to_string(),run.to_string(),sha]).unwrap();
+                transaction.execute("INSERT INTO delivery_receipts(task_id,artifact_id,delivered_at_ms) VALUES(?1,?2,1)",rusqlite::params![task.to_string(),artifact.to_string()]).unwrap();
+                crate::storage_observation::put_content(
+                    &transaction,
+                    "external_artifact",
+                    &artifact.to_string(),
+                    "json",
+                    body,
+                )
+                .unwrap();
+            }
+            crate::storage_observation::commit(transaction).unwrap();
+            drop(connection);
+            let shared = root.join("result-content").join(format!("{sha}.bin"));
+            fs::write(&shared, body).unwrap();
+            fs::set_permissions(&shared, fs::Permissions::from_mode(0o600)).unwrap();
+            Self {
+                root,
+                operator,
+                first,
+                second,
+                sha,
+            }
+        }
+        fn plan(&self, kind: &str) -> MaintenancePlan {
+            plan_result_content(&self.root, WORKSPACE_ID, 1, kind, &self.operator).unwrap()
+        }
+        fn apply(&self, plan: &MaintenancePlan) -> Value {
+            apply_result_content(&self.root, WORKSPACE_ID, plan, true, &self.operator).unwrap()
+        }
+        fn database(&self) -> crate::storage_observation::CheckedConnection {
+            crate::storage_observation::CheckedConnection::open(
+                &crate::engagement::EngagementStore::workspace_database_path(&self.root),
+                true,
+            )
+            .unwrap()
+        }
+    }
+    impl Drop for ContentFixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+    #[test]
+    fn retained_content_plan_rejects_malformed_wire_digest_before_effects() {
+        for malformed in ["d".repeat(64), format!("sha256:{}", "D".repeat(64))] {
+            let fixture = ContentFixture::new();
+            let plan = fixture.plan("retire_result_content");
+            assert_eq!(
+                plan.retire_content[0]["sha256"],
+                format!("sha256:{}", fixture.sha)
+            );
+            let root = fixture.root.join("result-maintenance");
+            let path = root.join(format!("{}.json", plan.plan_ref));
+            let mut saved: ContentOperation = read_json(&path).unwrap();
+            saved.plan.retire_content[0]["sha256"] = json!(malformed);
+            saved.plan.expected_manifest_digest = content_plan_digest(&saved).unwrap();
+            persist_content_operation(&path, &saved).unwrap();
+            let failure = apply_result_content(
+                &fixture.root,
+                WORKSPACE_ID,
+                &saved.plan,
+                true,
+                &fixture.operator,
+            )
+            .unwrap_err();
+            assert_eq!(failure.code, "LOOKUP_NAMESPACE_CORRUPT");
+            assert!(!root.join(format!("{}.owner.json", plan.plan_ref)).exists());
+            let connection = fixture.database();
+            assert_eq!(connection.query_row("SELECT COUNT(*) FROM result_content_refs WHERE retired_operation IS NOT NULL", [], |row| row.get::<_, u64>(0)).unwrap(), 0);
+            assert_eq!(
+                crate::storage_observation::read_content(
+                    &connection,
+                    "external_artifact",
+                    &fixture.first.to_string(),
+                    "json"
+                )
+                .unwrap(),
+                Some(b"{\"result\":\"same bytes\"}".to_vec())
+            );
+        }
+    }
+    #[test]
+    fn content_planning_rejects_non_v7_tombstone_identity() {
+        let fixture = ContentFixture::new();
+        let path = crate::engagement::EngagementStore::workspace_database_path(&fixture.root);
+        let connection = crate::storage_observation::CheckedConnection::open(&path, false).unwrap();
+        connection
+            .execute(
+                "UPDATE result_content_refs SET retired_operation=?1 WHERE owner_id=?2",
+                rusqlite::params![
+                    "123e4567-e89b-42d3-a456-426614174000",
+                    fixture.first.to_string()
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        let failure = plan_result_content(
+            &fixture.root,
+            WORKSPACE_ID,
+            1,
+            "garbage_collection",
+            &fixture.operator,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "RECOVERY_REQUIRED");
+        assert!(!fixture.root.join("result-maintenance").exists());
+    }
+    #[test]
+    fn equal_content_keeps_distinct_owners_and_receipts_and_explicit_retirement() {
+        let fixture = ContentFixture::new();
+        let connection = fixture.database();
+        assert_ne!(fixture.first, fixture.second);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM result_content", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM artifacts", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM delivery_receipts", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+        drop(connection);
+        let plan = fixture.plan("retire_result_content");
+        assert_eq!(plan.retire_content.len(), 1);
+        let saved: ContentOperation = read_json(
+            &fixture
+                .root
+                .join("result-maintenance")
+                .join(format!("{}.json", plan.plan_ref)),
+        )
+        .unwrap();
+        assert_eq!(saved.targets.len(), 2);
+        assert_eq!(fixture.apply(&plan)["state"], "completed");
+        let connection = fixture.database();
+        assert_eq!(
+            crate::storage_observation::read_content(
+                &connection,
+                "external_artifact",
+                &fixture.first.to_string(),
+                "json"
+            )
+            .unwrap_err()
+            .code,
+            "RESULT_CONTENT_UNAVAILABLE"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM artifacts", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+        drop(connection);
+        assert!(
+            fixture
+                .root
+                .join("result-content")
+                .join(format!("{}.bin", fixture.sha))
+                .exists()
+        );
+        let gc = fixture.plan("garbage_collection");
+        assert_eq!(gc.retire_content.len(), 1);
+        fixture.apply(&gc);
+        assert!(
+            !fixture
+                .root
+                .join("result-content")
+                .join(format!("{}.bin", fixture.sha))
+                .exists()
+        );
+        let connection = fixture.database();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM result_content", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM result_content_refs", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+    }
+    #[test]
+    fn reader_pin_excludes_retirement_and_plan_does_not_retire_undelivered_equal_body() {
+        let fixture = ContentFixture::new();
+        let connection = crate::storage_observation::CheckedConnection::open(
+            &crate::engagement::EngagementStore::workspace_database_path(&fixture.root),
+            false,
+        )
+        .unwrap();
+        connection.execute("UPDATE tasks SET state='completed_not_delivered' WHERE task_id=(SELECT task_id FROM artifacts WHERE artifact_id=?1)",[fixture.second.to_string()]).unwrap();
+        drop(connection);
+        let plan = fixture.plan("retire_result_content");
+        assert_eq!(plan.protected_reference_count, 1);
+        let reader = fixture.database();
+        assert_eq!(
+            apply_result_content(&fixture.root, WORKSPACE_ID, &plan, true, &fixture.operator)
+                .unwrap_err()
+                .code,
+            "RUN_BUSY"
+        );
+        drop(reader);
+        fixture.apply(&plan);
+        let connection = fixture.database();
+        assert!(
+            crate::storage_observation::read_content(
+                &connection,
+                "external_artifact",
+                &fixture.second.to_string(),
+                "json"
+            )
+            .unwrap()
+            .is_some()
+        );
+        drop(connection);
+        let gc = fixture.plan("garbage_collection");
+        assert!(gc.retire_content.is_empty());
+    }
+    #[test]
+    fn retirement_recovers_original_operation_at_each_durable_boundary() {
+        for barrier in [
+            ContentMaintenanceBarrier::OwnerRetained,
+            ContentMaintenanceBarrier::TombstonesCommitted,
+            ContentMaintenanceBarrier::Completed,
+        ] {
+            let fixture = ContentFixture::new();
+            let plan = fixture.plan("retire_result_content");
+            let mut fired = false;
+            let failure = apply_result_content_with_barrier(
+                &fixture.root,
+                WORKSPACE_ID,
+                &plan,
+                true,
+                &fixture.operator,
+                |observed| {
+                    if observed == barrier && !fired {
+                        fired = true;
+                        Err(error("RECOVERY_REQUIRED", "injected content boundary"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+            assert!(fired);
+            assert_eq!(failure.details["operation_ref"], plan.plan_ref.to_string());
+            let before = get_result_content(
+                &fixture.root,
+                WORKSPACE_ID,
+                plan.plan_ref,
+                1,
+                &fixture.operator,
+            )
+            .unwrap();
+            assert_eq!(before["operation_ref"], plan.plan_ref.to_string());
+            // The process lock has been released by the injected failure, but
+            // ordinary writers and readers must not stale the retained plan.
+            let blocked = barrier != ContentMaintenanceBarrier::Completed;
+            assert_eq!(
+                WorkspaceLease::for_run(
+                    &fixture.root.join("runs").join(Uuid::now_v7().to_string())
+                )
+                .is_err(),
+                blocked
+            );
+            let database =
+                crate::engagement::EngagementStore::workspace_database_path(&fixture.root);
+            for read_only in [false, true] {
+                assert_eq!(
+                    crate::storage_observation::CheckedConnection::open(&database, read_only)
+                        .is_err(),
+                    blocked
+                );
+            }
+            assert_eq!(fixture.apply(&plan)["state"], "completed");
+            assert!(WorkspaceLease::acquire(&fixture.root, false).is_ok());
+            assert_eq!(
+                fixture.apply(&plan)["operation_ref"],
+                plan.plan_ref.to_string()
+            );
+        }
+    }
+    #[test]
+    fn garbage_collection_recovers_after_delete_unlink_and_progress_without_changing_identity() {
+        for barrier in [
+            ContentMaintenanceBarrier::OwnerRetained,
+            ContentMaintenanceBarrier::ContentRowDeleted,
+            ContentMaintenanceBarrier::BodyUnlinked,
+            ContentMaintenanceBarrier::ProgressSynced,
+            ContentMaintenanceBarrier::Completed,
+        ] {
+            let fixture = ContentFixture::new();
+            let retirement = fixture.plan("retire_result_content");
+            fixture.apply(&retirement);
+            let plan = fixture.plan("garbage_collection");
+            let mut fired = false;
+            let failure = apply_result_content_with_barrier(
+                &fixture.root,
+                WORKSPACE_ID,
+                &plan,
+                true,
+                &fixture.operator,
+                |observed| {
+                    if observed == barrier && !fired {
+                        fired = true;
+                        Err(error("RECOVERY_REQUIRED", "injected GC boundary"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+            assert!(fired);
+            assert_eq!(failure.details["operation_ref"], plan.plan_ref.to_string());
+            let blocked = barrier != ContentMaintenanceBarrier::Completed;
+            assert_eq!(
+                WorkspaceLease::acquire(&fixture.root, false).is_err(),
+                blocked
+            );
+            let database =
+                crate::engagement::EngagementStore::workspace_database_path(&fixture.root);
+            assert_eq!(
+                crate::storage_observation::CheckedConnection::open(&database, false).is_err(),
+                blocked
+            );
+            assert_eq!(fixture.apply(&plan)["state"], "completed");
+            let connection = fixture.database();
+            assert_eq!(
+                connection
+                    .query_row("SELECT COUNT(*) FROM artifacts", [], |r| r.get::<_, u64>(0))
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                connection
+                    .query_row("SELECT COUNT(*) FROM delivery_receipts", [], |r| r
+                        .get::<_, u64>(0))
+                    .unwrap(),
+                2
+            );
+        }
+    }
+    #[test]
+    fn changed_exact_owner_set_and_unapproved_apply_prevent_retirement() {
+        let fixture = ContentFixture::new();
+        let plan = fixture.plan("retire_result_content");
+        assert_eq!(
+            apply_result_content(&fixture.root, WORKSPACE_ID, &plan, false, &fixture.operator)
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+        let connection = crate::storage_observation::CheckedConnection::open(
+            &crate::engagement::EngagementStore::workspace_database_path(&fixture.root),
+            false,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "UPDATE result_content_refs SET owner_id=?1 WHERE owner_id=?2",
+                rusqlite::params![Uuid::now_v7().to_string(), fixture.first.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(
+            apply_result_content(&fixture.root, WORKSPACE_ID, &plan, true, &fixture.operator)
+                .unwrap_err()
+                .code,
+            "MAINTENANCE_PLAN_STALE"
+        );
+    }
 }

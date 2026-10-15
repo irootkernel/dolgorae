@@ -12,12 +12,14 @@ use crate::workspace::{
     SystemWorkspacePlatform, WorkspacePlatform, sync_directory, verify_secure_directory,
     verify_secure_file,
 };
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -51,6 +53,7 @@ pub enum LedgerError {
     Fault(FaultInjected),
     SecurityPolicy(crate::machine::MachineError),
     Integrity(String),
+    CaptureConflict,
     Capacity(String),
     InvalidRecord(String),
     InvalidEvent(String),
@@ -80,6 +83,9 @@ impl std::fmt::Display for LedgerError {
             }
             Self::Capacity(reason) => write!(formatter, "storage capacity exceeded: {reason}"),
             Self::Integrity(reason) => write!(formatter, "audit integrity failure: {reason}"),
+            Self::CaptureConflict => {
+                formatter.write_str("display sources changed during verified capture")
+            }
             Self::InvalidRecord(reason) => write!(formatter, "invalid audit record: {reason}"),
             Self::InvalidEvent(reason) => write!(formatter, "invalid client event: {reason}"),
             Self::MissingEventStamp(sequence) => write!(
@@ -1747,12 +1753,359 @@ fn deliveries_after(
 /// the durable prefix a live worker would have served. A torn or unterminated
 /// tail past that head is another process's in-flight append, not corruption,
 /// so it is ignored rather than reported.
+#[derive(Clone, Debug)]
 pub struct ObservedLedger {
-    records: Vec<AuditRecord>,
+    records: Arc<Vec<AuditRecord>>,
     head: u64,
+    derived: Arc<ObservedLedgerDerived>,
+}
+
+/// Derived display views belong to exactly one verified captured head.
+#[derive(Debug, Default)]
+struct ObservedLedgerDerived {
+    interaction_revision: OnceLock<u64>,
+    terminal: OnceLock<Result<Option<serde_json::Value>, String>>,
+    policy: OnceLock<Result<Arc<ObservedPolicyInputs>, String>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ObservedPolicyInputs {
+    pub bindings: Vec<serde_json::Value>,
+    pub policies: Vec<serde_json::Value>,
+}
+
+const DISPLAY_CACHE_ENTRIES: usize = 16;
+const DISPLAY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+const DISPLAY_CACHE_LIFETIME: Duration = Duration::from_secs(120);
+static OBSERVATION_FULL_REPLAYS: AtomicU64 = AtomicU64::new(0);
+static OBSERVATION_TAIL_RECORDS: AtomicU64 = AtomicU64::new(0);
+static OBSERVATION_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static OBSERVATION_INVALIDATIONS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct LedgerObservationCounters {
+    pub full_replays: u64,
+    pub tail_records: u64,
+    pub cache_hits: u64,
+    pub invalidations: u64,
+}
+
+#[must_use]
+pub fn observation_counters() -> LedgerObservationCounters {
+    LedgerObservationCounters {
+        full_replays: OBSERVATION_FULL_REPLAYS.load(Ordering::Relaxed),
+        tail_records: OBSERVATION_TAIL_RECORDS.load(Ordering::Relaxed),
+        cache_hits: OBSERVATION_CACHE_HITS.load(Ordering::Relaxed),
+        invalidations: OBSERVATION_INVALIDATIONS.load(Ordering::Relaxed),
+    }
+}
+
+struct DisplayPrefix {
+    sources: Vec<crate::ledger_generation::ObservationFileIdentity>,
+    referenced: Vec<PathBuf>,
+    records: Arc<Vec<AuditRecord>>,
+    derived: Arc<ObservedLedgerDerived>,
+    append_path: PathBuf,
+    append_offset: u64,
+    append_hash: String,
+    retained_bytes: u64,
+    base_bytes: u64,
+    watermark: u64,
+    last_used: Instant,
+}
+
+type DisplayCacheSlot = Arc<Mutex<Option<DisplayPrefix>>>;
+type DisplayCache = Vec<((PathBuf, Uuid), DisplayCacheSlot)>;
+static DISPLAY_CACHE: OnceLock<Mutex<DisplayCache>> = OnceLock::new();
+
+fn display_slot(root: &Path, run_id: Uuid) -> Result<DisplayCacheSlot, LedgerError> {
+    // Canonicalize only after checking the requested directory: a symlink must
+    // not become a valid cache alias by canonicalization.
+    verify_secure_directory(root, current_uid()).map_err(machine_as_security)?;
+    let key = (fs::canonicalize(root)?, run_id);
+    let mut cache = DISPLAY_CACHE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map_err(|_| LedgerError::Integrity("display cache poisoned".to_owned()))?;
+    cache.retain(|(_, slot)| {
+        // Never block the global registry on another Run's file work.
+        slot.try_lock().map_or(true, |prefix| {
+            prefix
+                .as_ref()
+                .is_none_or(|prefix| prefix.last_used.elapsed() < DISPLAY_CACHE_LIFETIME)
+        })
+    });
+    if let Some(index) = cache.iter().position(|(candidate, _)| candidate == &key) {
+        let entry = cache.remove(index);
+        let slot = Arc::clone(&entry.1);
+        cache.push(entry);
+        return Ok(slot);
+    }
+    if cache.len() >= DISPLAY_CACHE_ENTRIES {
+        cache.remove(0);
+    }
+    let slot = Arc::new(Mutex::new(None));
+    cache.push((key, Arc::clone(&slot)));
+    Ok(slot)
+}
+
+fn display_append_prefix(path: &Path, length: u64) -> Result<String, LedgerError> {
+    verify_secure_file(path, current_uid()).map_err(machine_as_security)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let mut hash = Sha256::new();
+    let mut remaining = length;
+    let mut buffer = [0; 64 * 1024];
+    while remaining != 0 {
+        let amount = remaining.min(buffer.len() as u64) as usize;
+        let n = file.read(&mut buffer[..amount])?;
+        if n == 0 {
+            return Err(LedgerError::Integrity(
+                "verified display prefix was truncated".to_owned(),
+            ));
+        }
+        hash.update(&buffer[..n]);
+        remaining -= n as u64;
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn display_extend(
+    prefix: &DisplayPrefix,
+    run_id: Uuid,
+    head: u64,
+) -> Result<(Arc<Vec<AuditRecord>>, u64, String), LedgerError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&prefix.append_path)?;
+    if file.metadata()?.len().saturating_add(prefix.base_bytes) > MAX_LEDGER_BYTES
+        || head.saturating_sub(prefix.watermark) > MAX_LEDGER_RECORDS as u64
+    {
+        return Err(LedgerError::Capacity(
+            "selected generation exceeds replay bounds".to_owned(),
+        ));
+    }
+    file.seek(SeekFrom::Start(prefix.append_offset))?;
+    let mut reader = BufReader::new(file);
+    let mut records = prefix.records.as_ref().clone();
+    let mut offset = prefix.append_offset;
+    while records.len() < usize::try_from(head).unwrap_or(usize::MAX) {
+        let Some((mut line, terminated)) = read_bounded_segment(&mut reader)? else {
+            return Err(LedgerError::Integrity(
+                "published suffix is below the committed head".to_owned(),
+            ));
+        };
+        if !terminated {
+            return Err(LedgerError::Integrity(
+                "published suffix has a torn record".to_owned(),
+            ));
+        }
+        offset += line.len() as u64;
+        line.pop();
+        let record = AuditRecord::from_canonical_line(&line)
+            .map_err(|error| LedgerError::Integrity(error.to_string()))?;
+        if record.run_id() != run_id
+            || record.sequence() != records.len() as u64 + 1
+            || record.previous_hash()
+                != records
+                    .last()
+                    .map_or(GENESIS_PREVIOUS_HASH, AuditRecord::hash)
+        {
+            return Err(LedgerError::Integrity(
+                "display suffix does not continue the verified chain".to_owned(),
+            ));
+        }
+        records.push(record);
+    }
+    let hash = display_append_prefix(&prefix.append_path, offset)?;
+    Ok((Arc::new(records), offset, hash))
+}
+
+#[cfg(test)]
+type DisplayCaptureFenceHook = Option<(Uuid, Box<dyn FnMut()>)>;
+#[cfg(test)]
+thread_local! {
+    static DISPLAY_CAPTURE_FENCE_HOOK: std::cell::RefCell<DisplayCaptureFenceHook> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn display_capture_test_fence(run_id: Uuid) {
+    DISPLAY_CAPTURE_FENCE_HOOK.with(|selected| {
+        if let Some((selected_run, hook)) = selected.borrow_mut().as_mut()
+            && *selected_run == run_id
+        {
+            hook();
+        }
+    });
 }
 
 impl ObservedLedger {
+    /// Display-only verified prefix reuse. Never use this to establish absence,
+    /// authorize a mutation, release a writer or replace a worker generation.
+    pub fn open_display(root: &Path, run_id: Uuid, head: u64) -> Result<Self, LedgerError> {
+        let slot = display_slot(root, run_id)?;
+        let mut slot = slot
+            .lock()
+            .map_err(|_| LedgerError::Integrity("display prefix poisoned".to_owned()))?;
+        let mut captured_head_hash: Option<String> = None;
+        for _ in 0..3 {
+            let sources = crate::ledger_generation::observation_identity(
+                root,
+                slot.as_ref()
+                    .map_or(&[], |prefix| prefix.referenced.as_slice()),
+            )?;
+            if let Some(prefix) = slot.as_mut() {
+                let same = sources == prefix.sources;
+                if prefix.last_used.elapsed() < DISPLAY_CACHE_LIFETIME {
+                    if same && head <= prefix.records.len() as u64 {
+                        prefix.last_used = Instant::now();
+                        OBSERVATION_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+                        return Ok(Self {
+                            records: Arc::clone(&prefix.records),
+                            head,
+                            derived: if head == prefix.records.len() as u64 {
+                                Arc::clone(&prefix.derived)
+                            } else {
+                                Arc::new(ObservedLedgerDerived::default())
+                            },
+                        });
+                    }
+                    // Only the selected append may change in an extension. File
+                    // replacement, permissions and every immutable source remain fenced.
+                    let append_only = sources.len() == prefix.sources.len()
+                        && sources.iter().zip(&prefix.sources).all(|(new, old)| {
+                            if new.path != prefix.append_path {
+                                return new == old;
+                            }
+                            new.path == old.path
+                                && new.device == old.device
+                                && new.inode == old.inode
+                                && new.mode == old.mode
+                                && new.uid == old.uid
+                                && new.links == old.links
+                                && new.length >= prefix.append_offset
+                        });
+                    if append_only
+                        && head >= prefix.records.len() as u64
+                        && display_append_prefix(&prefix.append_path, prefix.append_offset)?
+                            == prefix.append_hash
+                    {
+                        let old_len = prefix.records.len();
+                        let (records, offset, hash) = display_extend(prefix, run_id, head)?;
+                        captured_head_hash = records.last().map(|record| record.hash().to_owned());
+                        #[cfg(test)]
+                        display_capture_test_fence(run_id);
+                        if crate::ledger_generation::observation_identity(root, &prefix.referenced)?
+                            != sources
+                        {
+                            continue;
+                        }
+                        OBSERVATION_TAIL_RECORDS
+                            .fetch_add((records.len() - old_len) as u64, Ordering::Relaxed);
+                        let additional_bytes = offset.saturating_sub(prefix.append_offset);
+                        if prefix.retained_bytes.saturating_add(additional_bytes)
+                            > DISPLAY_CACHE_BYTES
+                        {
+                            *slot = None;
+                            return Ok(Self {
+                                records,
+                                head,
+                                derived: Arc::new(ObservedLedgerDerived::default()),
+                            });
+                        }
+                        prefix.retained_bytes += additional_bytes;
+                        prefix.sources = sources;
+                        prefix.records = records;
+                        prefix.derived = Arc::new(ObservedLedgerDerived::default());
+                        prefix.append_offset = offset;
+                        prefix.append_hash = hash;
+                        prefix.last_used = Instant::now();
+                        return Ok(Self {
+                            records: Arc::clone(&prefix.records),
+                            head,
+                            derived: Arc::clone(&prefix.derived),
+                        });
+                    }
+                }
+                OBSERVATION_INVALIDATIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            *slot = None;
+            let pin = crate::ledger_generation::pin(root, run_id)?;
+            let sources =
+                crate::ledger_generation::observation_identity(root, &pin.observation_paths)?;
+            let records = Arc::new(observe_records(root, run_id, head, false)?);
+            captured_head_hash = records.last().map(|record| record.hash().to_owned());
+            let watermark = pin
+                .manifest
+                .as_ref()
+                .map_or(0, |manifest| manifest.durable_watermark);
+            let mut offset = 0_u64;
+            let mut retained_bytes = 0_u64;
+            for record in records.iter() {
+                let bytes = record.canonical_line()?.len() as u64;
+                retained_bytes += bytes;
+                if record.sequence() > watermark {
+                    offset += bytes;
+                }
+            }
+            let hash = display_append_prefix(&pin.append_path, offset)?;
+            #[cfg(test)]
+            display_capture_test_fence(run_id);
+            if crate::ledger_generation::observation_identity(root, &pin.observation_paths)?
+                != sources
+            {
+                continue;
+            }
+            let derived = Arc::new(ObservedLedgerDerived::default());
+            if head >= watermark && retained_bytes <= DISPLAY_CACHE_BYTES {
+                *slot = Some(DisplayPrefix {
+                    sources,
+                    referenced: pin.observation_paths,
+                    records: Arc::clone(&records),
+                    derived: Arc::clone(&derived),
+                    append_path: pin.append_path,
+                    append_offset: offset,
+                    append_hash: hash,
+                    retained_bytes,
+                    base_bytes: pin.base_bytes,
+                    watermark,
+                    last_used: Instant::now(),
+                });
+            }
+            return Ok(Self {
+                records,
+                head,
+                derived,
+            });
+        }
+        // Motion at the final fence must not hide damage to the committed
+        // prefix. Revalidate the selected history before reporting a transient;
+        // this never returns a prefix or establishes authoritative absence.
+        let current = observe_records(root, run_id, head, false)?;
+        if current.last().map(AuditRecord::hash) != captured_head_hash.as_deref() {
+            return Err(LedgerError::Integrity(
+                "captured display prefix changed during source motion".to_owned(),
+            ));
+        }
+        Err(LedgerError::CaptureConflict)
+    }
+
+    pub(crate) fn open_run_display(
+        state_root: &Path,
+        run_id: Uuid,
+        head: u64,
+    ) -> Result<Self, LedgerError> {
+        Self::open_display(
+            &state_root.join("runs").join(run_id.to_string()),
+            run_id,
+            head,
+        )
+    }
+
     /// Shared adapter admission for the same committed Run prefix.
     pub(crate) fn open_run(
         state_root: &Path,
@@ -1777,8 +2130,9 @@ impl ObservedLedger {
 
     pub fn open(root: &Path, run_id: Uuid, head: u64) -> Result<Self, LedgerError> {
         Ok(Self {
-            records: observe_records(root, run_id, head, false)?,
+            records: Arc::new(observe_records(root, run_id, head, false)?),
             head,
+            derived: Arc::new(ObservedLedgerDerived::default()),
         })
     }
 
@@ -1786,14 +2140,15 @@ impl ObservedLedger {
     /// absence cannot be inferred from a prefix with an unclassified tail.
     pub fn open_complete(root: &Path, run_id: Uuid, head: u64) -> Result<Self, LedgerError> {
         Ok(Self {
-            records: observe_records(root, run_id, head, true)?,
+            records: Arc::new(observe_records(root, run_id, head, true)?),
             head,
+            derived: Arc::new(ObservedLedgerDerived::default()),
         })
     }
 
     #[must_use]
     pub(crate) fn records(&self) -> &[AuditRecord] {
-        &self.records
+        &self.records[..usize::try_from(self.head).expect("verified head fits usize")]
     }
 
     #[must_use]
@@ -1804,7 +2159,10 @@ impl ObservedLedger {
     /// The durable sequence that last invalidated this Run's Interaction view.
     #[must_use]
     pub fn interaction_state_revision(&self) -> u64 {
-        interaction_state_revision(&self.records)
+        *self
+            .derived
+            .interaction_revision
+            .get_or_init(|| interaction_state_revision(self.records()))
     }
 
     /// Export this already selected, verified prefix without changing sequence or hash bytes.
@@ -1813,7 +2171,7 @@ impl ObservedLedger {
         &self,
         output: &mut impl std::io::Write,
     ) -> Result<(), LedgerError> {
-        for record in &self.records {
+        for record in self.records() {
             output.write_all(&record.canonical_line()?)?;
         }
         Ok(())
@@ -1828,7 +2186,7 @@ impl ObservedLedger {
         let mut events = Vec::new();
         let mut bytes = 0_usize;
         for audit in self
-            .records
+            .records()
             .iter()
             .filter(|record| record.sequence() > after)
         {
@@ -1868,8 +2226,39 @@ impl ObservedLedger {
     /// reconstructs the terminal Turn from the record rather than from a
     /// worker's process memory.
     pub fn last_terminal(&self) -> Result<Option<serde_json::Value>, LedgerError> {
+        self.derived
+            .terminal
+            .get_or_init(|| {
+                self.decode_last_terminal()
+                    .map_err(|error| error.to_string())
+            })
+            .clone()
+            .map_err(LedgerError::Integrity)
+    }
+
+    pub(crate) fn policy_inputs(&self) -> Result<Arc<ObservedPolicyInputs>, LedgerError> {
+        self.derived
+            .policy
+            .get_or_init(|| {
+                let bindings = self
+                    .payloads_of_kind(AuditKind::ThreadBound)
+                    .map_err(|error| error.to_string())?;
+                let mut policies = bindings.clone();
+                for kind in [AuditKind::WriterAcquired, AuditKind::WriterReleased] {
+                    policies.extend(
+                        self.payloads_of_kind(kind)
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                Ok(Arc::new(ObservedPolicyInputs { bindings, policies }))
+            })
+            .clone()
+            .map_err(LedgerError::Integrity)
+    }
+
+    fn decode_last_terminal(&self) -> Result<Option<serde_json::Value>, LedgerError> {
         let Some(record) = self
-            .records
+            .records()
             .iter()
             .rev()
             .find(|record| record.kind() == AuditKind::TurnTerminal)
@@ -1884,7 +2273,7 @@ impl ObservedLedger {
     }
 
     pub fn payloads_of_kind(&self, kind: AuditKind) -> Result<Vec<serde_json::Value>, LedgerError> {
-        self.records
+        self.records()
             .iter()
             .filter(|record| record.kind() == kind)
             .map(|record| {
@@ -1903,7 +2292,13 @@ impl ObservedLedger {
         after: u64,
         projection: EventProjection,
     ) -> Result<Vec<EventDelivery>, LedgerError> {
-        deliveries_after(&self.records, after, projection, true, MAX_EVENT_DELIVERIES)
+        deliveries_after(
+            self.records(),
+            after,
+            projection,
+            true,
+            MAX_EVENT_DELIVERIES,
+        )
     }
 }
 
@@ -1925,6 +2320,29 @@ pub(crate) fn event_cursor_invalid(
         false,
         serde_json::json!({"run_id":run_id,"requested_cursor":requested,"head_cursor":head}),
     )
+}
+
+pub(crate) fn display_observation_error(
+    run_id: Uuid,
+    head: u64,
+    lifecycle: RunLifecycle,
+    error: LedgerError,
+) -> crate::machine::MachineError {
+    match error {
+        LedgerError::CaptureConflict => crate::machine::MachineError::new(
+            "RUN_STATE_CONFLICT",
+            "run state changed",
+            false,
+            serde_json::json!({"run_id":run_id,"state":lifecycle.as_str(),"operation":"capture_snapshot"}),
+        ),
+        LedgerError::Capacity(reason) => crate::machine::MachineError::new(
+            "STORAGE_CAPACITY_EXCEEDED",
+            reason,
+            false,
+            serde_json::json!({"run_id":run_id,"required_action":"operator_checkpoint"}),
+        ),
+        other => audit_integrity_error(run_id, head, &other.to_string()),
+    }
 }
 
 pub(crate) fn audit_integrity_error(
@@ -1984,6 +2402,7 @@ fn observe_records(
     head: u64,
     require_complete: bool,
 ) -> Result<Vec<AuditRecord>, LedgerError> {
+    OBSERVATION_FULL_REPLAYS.fetch_add(1, Ordering::Relaxed);
     if run_id.get_version_num() != 7 {
         return Err(LedgerError::InvalidRecord(
             "run identity must be UUIDv7".to_owned(),
@@ -2271,6 +2690,244 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
 mod tests {
     use super::*;
     use crate::audit::is_microsecond_utc_timestamp;
+
+    #[test]
+    fn display_capture_motion_preserves_intact_prefix_and_reports_capture_conflict() {
+        assert_eq!(
+            injected_display_capture_motion(None).code,
+            "RUN_STATE_CONFLICT"
+        );
+    }
+
+    #[test]
+    fn display_capture_motion_does_not_hide_final_fence_prefix_or_security_damage() {
+        for damage in ["corrupt", "truncate", "security", "rewrite"] {
+            assert_eq!(
+                injected_display_capture_motion(Some(damage)).code,
+                "AUDIT_INTEGRITY_FAILURE",
+                "{damage}"
+            );
+        }
+    }
+
+    fn injected_display_capture_motion(
+        damage: Option<&'static str>,
+    ) -> crate::machine::MachineError {
+        use std::cell::Cell;
+        use std::os::unix::fs::DirBuilderExt as _;
+        use std::rc::Rc;
+        struct OwnedRoot(PathBuf);
+        impl Drop for OwnedRoot {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        struct FenceGuard;
+        impl Drop for FenceGuard {
+            fn drop(&mut self) {
+                DISPLAY_CAPTURE_FENCE_HOOK.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        let mounted = std::process::Command::new("/sbin/mount")
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .any(|line| line.contains(" on /Volumes/RootKernel ("))
+            });
+        let name = format!("dolgorae-capture-motion-{}", Uuid::now_v7());
+        let preferred = Path::new("/Volumes/RootKernel/tmp").join(&name);
+        let owned = if mounted
+            && fs::create_dir_all("/Volumes/RootKernel/tmp").is_ok()
+            && fs::DirBuilder::new().mode(0o700).create(&preferred).is_ok()
+        {
+            OwnedRoot(preferred)
+        } else {
+            let root = std::env::temp_dir().join(name);
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            OwnedRoot(root)
+        };
+        let run_id = Uuid::now_v7();
+        let runs = owned.0.join("runs");
+        let root = runs.join(run_id.to_string());
+        fs::DirBuilder::new().mode(0o700).create(&runs).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let path = root.join("audit.jsonl");
+        let first = AuditRecord::new(
+            1,
+            "2026-10-14T12:00:00.000000Z",
+            run_id,
+            1,
+            AuditKind::RunCreated,
+            parse("{}").unwrap(),
+            GENESIS_PREVIOUS_HASH,
+        )
+        .unwrap();
+        let second = AuditRecord::new(
+            2,
+            "2026-10-14T12:00:00.000001Z",
+            run_id,
+            1,
+            AuditKind::ThreadBound,
+            parse(r#"{"thread_id":"published-next"}"#).unwrap(),
+            first.hash(),
+        )
+        .unwrap();
+        let rewritten = AuditRecord::new(
+            1,
+            "2026-10-14T12:00:00.000000Z",
+            run_id,
+            1,
+            AuditKind::RunCreated,
+            parse(r#"{"tampered":1}"#).unwrap(),
+            GENESIS_PREVIOUS_HASH,
+        )
+        .unwrap()
+        .canonical_line()
+        .unwrap();
+        let first_bytes = first.canonical_line().unwrap();
+        let next_bytes = second.canonical_line().unwrap();
+        let mut writer = OpenOptions::new()
+            .append(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        writer.write_all(&first_bytes).unwrap();
+        writer.sync_all().unwrap();
+        ObservedLedger::open_display(&root, run_id, 1).unwrap();
+        // Record 1 remains the fixed published head. Ordinary record 2 is
+        // appended in four valid canonical-byte fragments and is not published.
+        writer.write_all(&next_bytes[..1]).unwrap();
+        writer.sync_all().unwrap();
+        drop(writer);
+        let split = next_bytes.len() / 3;
+        let chunks = [
+            next_bytes[1..split].to_vec(),
+            next_bytes[split..2 * split].to_vec(),
+            next_bytes[2 * split..].to_vec(),
+        ];
+        let crossings = Rc::new(Cell::new(0));
+        let observed_crossings = Rc::clone(&crossings);
+        DISPLAY_CAPTURE_FENCE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some((
+                run_id,
+                Box::new(move || {
+                    let index = observed_crossings.get();
+                    assert!(
+                        index < chunks.len(),
+                        "capture exceeded its existing three fences"
+                    );
+                    let mut writer = OpenOptions::new().append(true).open(&path).unwrap();
+                    writer.write_all(&chunks[index]).unwrap();
+                    writer.sync_all().unwrap();
+                    drop(writer);
+                    if index == 2 {
+                        match damage {
+                            Some("corrupt") => {
+                                let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+                                file.write_all(b"!").unwrap();
+                                file.sync_all().unwrap();
+                            }
+                            Some("truncate") => {
+                                let file = OpenOptions::new().write(true).open(&path).unwrap();
+                                file.set_len(0).unwrap();
+                                file.sync_all().unwrap();
+                            }
+                            Some("security") => {
+                                use std::os::unix::fs::PermissionsExt as _;
+                                fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+                                    .unwrap();
+                            }
+                            Some("rewrite") => {
+                                fs::write(&path, &rewritten).unwrap();
+                            }
+                            None => {}
+                            _ => unreachable!("closed test damage set"),
+                        }
+                    }
+                    observed_crossings.set(index + 1);
+                }),
+            ));
+        });
+        let guard = FenceGuard;
+        let result = ObservedLedger::open_run_display(&owned.0, run_id, 1)
+            .map_err(|error| display_observation_error(run_id, 1, RunLifecycle::Starting, error));
+        drop(guard);
+        assert_eq!(crossings.get(), 3);
+        if damage.is_none() {
+            let mut fresh = Vec::new();
+            ObservedLedger::open(&root, run_id, 1)
+                .unwrap()
+                .write_canonical_history(&mut fresh)
+                .unwrap();
+            assert_eq!(fresh, first_bytes);
+            assert!(matches!(
+                ObservedLedger::open_complete(&root, run_id, 1),
+                Err(LedgerError::Integrity(_))
+            ));
+            let mut stable = Vec::new();
+            ObservedLedger::open_display(&root, run_id, 1)
+                .unwrap()
+                .write_canonical_history(&mut stable)
+                .unwrap();
+            assert_eq!(stable, fresh);
+        }
+        result.unwrap_err()
+    }
+
+    #[test]
+    fn derived_observations_share_one_verified_head_without_crossing_an_older_boundary() {
+        let run_id = Uuid::now_v7();
+        let mut records = Vec::new();
+        for (kind, value) in [
+            (AuditKind::RunCreated, serde_json::json!({})),
+            (
+                AuditKind::ThreadBound,
+                serde_json::json!({"thread_id":"thread", "thread_generation":1}),
+            ),
+            (
+                AuditKind::TurnTerminal,
+                serde_json::json!({"turn_id":"turn", "status":"completed"}),
+            ),
+        ] {
+            let record = AuditRecord::new(
+                records.len() as u64 + 1,
+                "2026-10-14T12:00:00.000000Z",
+                run_id,
+                1,
+                kind,
+                parse(&value.to_string()).unwrap(),
+                records
+                    .last()
+                    .map_or(GENESIS_PREVIOUS_HASH, AuditRecord::hash),
+            )
+            .unwrap();
+            records.push(record);
+        }
+        let observed = ObservedLedger {
+            records: Arc::new(records),
+            head: 3,
+            derived: Arc::new(ObservedLedgerDerived::default()),
+        };
+        let cloned = observed.clone();
+        let first = observed.policy_inputs().unwrap();
+        assert!(Arc::ptr_eq(&first, &cloned.policy_inputs().unwrap()));
+        assert_eq!(
+            observed.last_terminal().unwrap().unwrap()["turn_id"],
+            "turn"
+        );
+        assert!(cloned.derived.terminal.get().is_some());
+        let older = ObservedLedger {
+            records: Arc::clone(&observed.records),
+            head: 2,
+            derived: Arc::new(ObservedLedgerDerived::default()),
+        };
+        assert!(older.last_terminal().unwrap().is_none());
+        assert_eq!(older.policy_inputs().unwrap().bindings.len(), 1);
+        assert_eq!(cloned.last_terminal().unwrap().unwrap()["turn_id"], "turn");
+    }
 
     #[test]
     fn production_timestamp_formatter_emits_calendar_valid_microsecond_utc() {

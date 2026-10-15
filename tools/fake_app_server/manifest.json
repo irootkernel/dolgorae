@@ -26,6 +26,7 @@
       "properties": {
         "method": {"type": "string", "minLength": 1},
         "occurrence": {"type": "integer", "minimum": 1},
+        "params_match": {"type": "object"},
         "respond": {"$ref": "#/$defs/respond"},
         "emit": {"type": "array", "items": {"$ref": "#/$defs/emission"}}
       }

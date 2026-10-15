@@ -61,14 +61,37 @@ impl CoreGatewayBackend {
         Ok(view)
     }
 
+    pub(crate) fn workspace_observed(
+        &self,
+        reference: &pb::WorkspaceRef,
+    ) -> Result<WorkspaceView, MachineError> {
+        absolute(&reference.absolute_path, "workspace.absolute_path")?;
+        if reference.expected_workspace_id.is_empty() {
+            return Err(invalid(
+                "workspace.expected_workspace_id",
+                "workspace identity is required",
+            ));
+        }
+        let view = WorkspaceService::system()?
+            .discover_observed(Some(Path::new(&reference.absolute_path)))?;
+        if view.workspace_id != reference.expected_workspace_id {
+            return Err(invalid(
+                "workspace.expected_workspace_id",
+                "workspace identity does not match canonical path",
+            ));
+        }
+        Ok(view)
+    }
+
     pub(crate) fn run_snapshot(
         &self,
         reference: &pb::RunRef,
     ) -> Result<(PathBuf, RunSnapshot, ProjectionFacts), MachineError> {
-        let view = self.workspace(required(reference.workspace.as_ref(), "run.workspace")?)?;
+        let view =
+            self.workspace_observed(required(reference.workspace.as_ref(), "run.workspace")?)?;
         let run_id = uuid(&reference.run_id, "run.run_id")?;
         let root = self.home.workspace_root(&view.workspace_id);
-        let (snapshot, observation) = RunSnapshot::observe(&root, run_id, 0)?;
+        let (snapshot, observation) = RunSnapshot::observe_display(&root, run_id, 0)?;
         snapshot.manifest.require_legacy_adapter()?;
         if snapshot.manifest.workspace_id != view.workspace_id {
             return Err(invalid("run.run_id", "Run belongs to another workspace"));
@@ -85,6 +108,23 @@ impl CoreGatewayBackend {
         let view = self.workspace(required(reference.workspace.as_ref(), "run.workspace")?)?;
         let root = self.home.workspace_root(&view.workspace_id);
         let snapshot = RunSnapshot::load(&root, uuid(&reference.run_id, "run.run_id")?, 0)?;
+        snapshot.manifest.require_legacy_adapter()?;
+        if snapshot.manifest.workspace_id != view.workspace_id {
+            return Err(invalid("run.run_id", "Run belongs to another workspace"));
+        }
+        Ok((root, snapshot))
+    }
+
+    /// Event display samples checked workspace discovery and a verified prefix.
+    /// Protected readers and mutation admission continue to use run_state.
+    fn run_display_state(
+        &self,
+        reference: &pb::RunRef,
+    ) -> Result<(PathBuf, RunSnapshot), MachineError> {
+        let view =
+            self.workspace_observed(required(reference.workspace.as_ref(), "run.workspace")?)?;
+        let root = self.home.workspace_root(&view.workspace_id);
+        let snapshot = RunSnapshot::load_display(&root, uuid(&reference.run_id, "run.run_id")?, 0)?;
         snapshot.manifest.require_legacy_adapter()?;
         if snapshot.manifest.workspace_id != view.workspace_id {
             return Err(invalid("run.run_id", "Run belongs to another workspace"));
@@ -239,6 +279,12 @@ impl CoreGatewayBackend {
 
     fn profile(&self, name: &str) -> Result<pb::ProfileProjection, MachineError> {
         let observation = crate::profile::observe_global_profile(&self.home, name)?;
+        Self::profile_projection(observation)
+    }
+
+    fn profile_projection(
+        observation: crate::profile::ProfileObservation,
+    ) -> Result<pb::ProfileProjection, MachineError> {
         let blockers = observation
             .blockers
             .into_iter()
@@ -694,7 +740,7 @@ impl GatewayBackend for CoreGatewayBackend {
         &self,
         request: pb::WatchRunEventsRequest,
     ) -> Result<crate::gateway::EventPage, MachineError> {
-        let (root, snapshot) = self.run_state(required(request.run.as_ref(), "run")?)?;
+        let (root, snapshot) = self.run_display_state(required(request.run.as_ref(), "run")?)?;
         crate::gateway_observation::watch_page(
             &root,
             &snapshot,
@@ -1123,11 +1169,9 @@ impl GatewayBackend for CoreGatewayBackend {
         &self,
         _: pb::ListProfilesRequest,
     ) -> Result<pb::ListProfilesResponse, MachineError> {
-        let registry = crate::global_profile::GlobalProfileStore::new(&self.home).load()?;
-        let items = registry
-            .profiles
-            .keys()
-            .map(|name| self.profile(name))
+        let items = crate::profile::observe_global_profiles(&self.home)?
+            .into_iter()
+            .map(Self::profile_projection)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(pb::ListProfilesResponse {
             context: Some(self.context()),
@@ -1144,7 +1188,7 @@ impl GatewayBackend for CoreGatewayBackend {
         })
     }
     fn list_runs(&self, r: pb::ListRunsRequest) -> Result<pb::ListRunsResponse, MachineError> {
-        let view = self.workspace(required(r.workspace.as_ref(), "workspace")?)?;
+        let view = self.workspace_observed(required(r.workspace.as_ref(), "workspace")?)?;
         let controller = r
             .controller_id
             .as_deref()
@@ -1208,7 +1252,8 @@ impl GatewayBackend for CoreGatewayBackend {
         request: pb::InspectWorkspaceRequest,
     ) -> Result<pb::InspectWorkspaceResponse, MachineError> {
         absolute(&request.absolute_path, "absolute_path")?;
-        let view = WorkspaceService::system()?.discover(Some(Path::new(&request.absolute_path)))?;
+        let view = WorkspaceService::system()?
+            .discover_observed(Some(Path::new(&request.absolute_path)))?;
         if request
             .expected_workspace_id
             .as_ref()

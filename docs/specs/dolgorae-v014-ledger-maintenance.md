@@ -48,6 +48,11 @@ The workspace lifecycle gate excludes new ledger writers. Maintenance holds
 it exclusively before taking Run lifecycle and audit writer locks, proves all
 workloads absent and all Runs quiescent, and rejects pending or unknown work.
 Ordinary ledger writers hold its shared admission lease for their lifetime.
+A retained incomplete checkpoint owner keeps shared admission closed after its
+process locks are released. Ledger writers, database leases and new Run
+publication cannot change its frozen source before the original operation
+resumes. Sidecar inspection and exclusive original-operation Apply remain
+available; completion reopens ordinary admission.
 All locks are nonblocking; a busy workspace requires stopping its writers
 through their existing lifecycle owners before applying maintenance.
 

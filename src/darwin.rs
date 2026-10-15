@@ -11,6 +11,66 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+/// Count-only context whose static lifetime covers every registered connection.
+pub(crate) struct SqliteStatementCounters {
+    queries: std::sync::atomic::AtomicU64,
+    ddl: std::sync::atomic::AtomicU64,
+}
+impl SqliteStatementCounters {
+    pub(crate) const fn new() -> Self {
+        Self {
+            queries: std::sync::atomic::AtomicU64::new(0),
+            ddl: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    pub(crate) fn snapshot(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.queries.load(Relaxed), self.ddl.load(Relaxed))
+    }
+}
+pub(crate) fn install_sqlite_statement_counters(
+    connection: &rusqlite::Connection,
+    counters: &'static SqliteStatementCounters,
+) -> i32 {
+    // SAFETY: Connection owns its live handle. SQLite stores a static callback
+    // and an immutable static context; registration takes ownership of neither.
+    unsafe {
+        rusqlite::ffi::sqlite3_trace_v2(
+            connection.handle(),
+            rusqlite::ffi::SQLITE_TRACE_STMT,
+            Some(count_sqlite_statement),
+            std::ptr::from_ref(counters).cast_mut().cast(),
+        )
+    }
+}
+unsafe extern "C" fn count_sqlite_statement(
+    event: std::ffi::c_uint,
+    context: *mut std::ffi::c_void,
+    _statement: *mut std::ffi::c_void,
+    text: *mut std::ffi::c_void,
+) -> std::ffi::c_int {
+    if event == rusqlite::ffi::SQLITE_TRACE_STMT && !text.is_null() {
+        // SAFETY: registration supplied this immutable static counter context;
+        // SQLite supplies NUL-terminated SQL valid for this statement callback.
+        let counters = unsafe { &*context.cast::<SqliteStatementCounters>() };
+        let statement = unsafe { CStr::from_ptr(text.cast()).to_bytes() };
+        use std::sync::atomic::Ordering::Relaxed;
+        counters.queries.fetch_add(1, Relaxed);
+        let first = statement
+            .split(|byte| byte.is_ascii_whitespace())
+            .find(|word| !word.is_empty())
+            .unwrap_or_default();
+        if first.eq_ignore_ascii_case(b"CREATE")
+            || first.eq_ignore_ascii_case(b"ALTER")
+            || first.eq_ignore_ascii_case(b"DROP")
+        {
+            counters.ddl.fetch_add(1, Relaxed);
+        }
+    }
+    // No allocation, formatting, retained text, or panicking operation crosses C.
+    rusqlite::ffi::SQLITE_OK
+}
+
 pub(crate) struct DeadlineStream {
     stream: UnixStream,
     deadline: std::time::Instant,

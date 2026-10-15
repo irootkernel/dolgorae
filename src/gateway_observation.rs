@@ -34,9 +34,7 @@ fn identity(value: &str, field: &str) -> Result<Uuid, MachineError> {
 }
 
 fn ledger(state_root: &Path, snapshot: &RunSnapshot) -> Result<ObservedLedger, MachineError> {
-    let run_id = snapshot.manifest.run_id;
-    let head = snapshot.stamp.run_state_revision;
-    ObservedLedger::open_run(state_root, run_id, head)
+    snapshot.observed_ledger(state_root)
 }
 
 fn conflict(snapshot: &RunSnapshot, operation: &str) -> MachineError {
@@ -171,8 +169,8 @@ fn interactions(
     state_root: &Path,
     snapshot: &RunSnapshot,
 ) -> Result<Vec<Interaction>, MachineError> {
-    crate::interaction::durable_interactions_at(
-        state_root,
+    crate::interaction::durable_interactions_from_ledger(
+        &ledger(state_root, snapshot)?,
         snapshot.manifest.run_id,
         snapshot.stamp.run_state_revision,
     )?

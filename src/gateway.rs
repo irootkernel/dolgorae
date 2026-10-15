@@ -22,6 +22,8 @@ const STREAM_COUNT: usize = 32;
 const STREAM_BYTES: usize = 4 * 1024 * 1024;
 const STREAM_STALL: Duration = Duration::from_secs(5);
 const SEMANTIC_WORKERS: usize = 8;
+const STREAM_WORKERS: usize = 4;
+const RPC_BUDGET: Duration = Duration::from_secs(30);
 const MAX_CONNECTIONS: usize = 16;
 
 /// A bounded, immediately available projection page. next_cursor may cross
@@ -202,6 +204,7 @@ pub trait GatewayBackend: Send + Sync + 'static {
 pub struct GatewayTransport {
     backend: Arc<dyn GatewayBackend>,
     workers: Arc<Semaphore>,
+    stream_workers: Arc<Semaphore>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -210,6 +213,7 @@ impl GatewayTransport {
         Self {
             backend,
             workers: Arc::new(Semaphore::new(SEMANTIC_WORKERS)),
+            stream_workers: Arc::new(Semaphore::new(STREAM_WORKERS)),
             shutdown,
         }
     }
@@ -217,30 +221,56 @@ impl GatewayTransport {
     async fn execute<T: Send + 'static>(
         &self,
         method: &'static str,
+        deadline: tokio::time::Instant,
+        work: impl FnOnce(Arc<dyn GatewayBackend>) -> Result<T, MachineError> + Send + 'static,
+    ) -> Result<T, Status> {
+        self.execute_in(&self.workers, method, deadline, work).await
+    }
+
+    async fn execute_stream<T: Send + 'static>(
+        &self,
+        method: &'static str,
+        deadline: tokio::time::Instant,
+        work: impl FnOnce(Arc<dyn GatewayBackend>) -> Result<T, MachineError> + Send + 'static,
+    ) -> Result<T, Status> {
+        self.execute_in(&self.stream_workers, method, deadline, work)
+            .await
+    }
+
+    async fn execute_in<T: Send + 'static>(
+        &self,
+        workers: &Arc<Semaphore>,
+        method: &'static str,
+        deadline: tokio::time::Instant,
         work: impl FnOnce(Arc<dyn GatewayBackend>) -> Result<T, MachineError> + Send + 'static,
     ) -> Result<T, Status> {
         if *self.shutdown.borrow() {
             return Err(error_status(&transport_error("SERVER_SHUTDOWN"), method));
         }
-        // The server admits at most 16 connections with 16 streams each;
-        // waiting remains bounded there instead of inventing a Run-level busy
-        // error for process-wide scheduling pressure.
         let mut shutdown = self.shutdown.clone();
         let permit = tokio::select! {
             _ = shutdown.changed() => return Err(error_status(&transport_error("SERVER_SHUTDOWN"), method)),
-            permit = self.workers.clone().acquire_owned() => permit.map_err(|_| error_status(&transport_error("INTERNAL_ERROR"), method))?,
+            _ = tokio::time::sleep_until(deadline) => return Err(error_status(&transport_error("TRANSPORT_FAILURE"), method)),
+            permit = workers.clone().acquire_owned() => permit.map_err(|_| error_status(&transport_error("INTERNAL_ERROR"), method))?,
         };
         if *self.shutdown.borrow() {
             return Err(error_status(&transport_error("SERVER_SHUTDOWN"), method));
         }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(error_status(&transport_error("TRANSPORT_FAILURE"), method));
+        }
         let backend = self.backend.clone();
-        tokio::task::spawn_blocking(move || {
+        let job = tokio::task::spawn_blocking(move || {
+            // Dropping a response waiter does not cancel an accepted mutation.
+            // Keep its physical executor permit until the work really exits.
             let _permit = permit;
             work(backend)
-        })
-        .await
-        .map_err(|_| error_status(&transport_error("INTERNAL_ERROR"), method))?
-        .map_err(|error| error_status(&error, method))
+        });
+        tokio::time::timeout_at(deadline, job)
+            .await
+            .map_err(|_| error_status(&transport_error("TRANSPORT_FAILURE"), method))?
+            .map_err(|_| error_status(&transport_error("INTERNAL_ERROR"), method))?
+            .map_err(|error| error_status(&error, method))
     }
 }
 
@@ -250,6 +280,7 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
         &self,
         request: Request<pb::GetCapabilitiesRequest>,
     ) -> Result<Response<pb::GetCapabilitiesResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RuntimeService.GetCapabilities")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), true)
             .map_err(|error| error_status(&error, "RuntimeService.GetCapabilities"))?;
@@ -259,7 +290,7 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
                 "RuntimeService.GetCapabilities",
             ));
         }
-        self.execute("RuntimeService.GetCapabilities", move |backend| {
+        self.execute("RuntimeService.GetCapabilities", deadline, move |backend| {
             backend.get_capabilities(request)
         })
         .await
@@ -269,12 +300,15 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
         &self,
         request: Request<pb::InspectWorkspaceRequest>,
     ) -> Result<Response<pb::InspectWorkspaceResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RuntimeService.InspectWorkspace")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RuntimeService.InspectWorkspace"))?;
-        self.execute("RuntimeService.InspectWorkspace", move |backend| {
-            backend.inspect_workspace(request)
-        })
+        self.execute(
+            "RuntimeService.InspectWorkspace",
+            deadline,
+            move |backend| backend.inspect_workspace(request),
+        )
         .await
         .map(Response::new)
     }
@@ -282,10 +316,11 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
         &self,
         request: Request<pb::ListProfilesRequest>,
     ) -> Result<Response<pb::ListProfilesResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RuntimeService.ListProfiles")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RuntimeService.ListProfiles"))?;
-        self.execute("RuntimeService.ListProfiles", move |backend| {
+        self.execute("RuntimeService.ListProfiles", deadline, move |backend| {
             backend.list_profiles(request)
         })
         .await
@@ -295,10 +330,11 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
         &self,
         request: Request<pb::GetProfileRequest>,
     ) -> Result<Response<pb::GetProfileResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RuntimeService.GetProfile")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RuntimeService.GetProfile"))?;
-        self.execute("RuntimeService.GetProfile", move |backend| {
+        self.execute("RuntimeService.GetProfile", deadline, move |backend| {
             backend.get_profile(request)
         })
         .await
@@ -308,6 +344,7 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
         &self,
         request: Request<pb::ListProfileDiagnosticsRequest>,
     ) -> Result<Response<pb::ListProfileDiagnosticsResponse>, Status> {
+        let _deadline = rpc_deadline(&request, "RuntimeService.ListProfileDiagnostics")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RuntimeService.ListProfileDiagnostics"))?;
@@ -324,10 +361,11 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::StartRunRequest>,
     ) -> Result<Response<pb::StartRunResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RunService.StartRun")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.StartRun"))?;
-        self.execute("RunService.StartRun", move |backend| {
+        self.execute("RunService.StartRun", deadline, move |backend| {
             backend.start_run(request)
         })
         .await
@@ -337,10 +375,11 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::ListRunsRequest>,
     ) -> Result<Response<pb::ListRunsResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RunService.ListRuns")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.ListRuns"))?;
-        self.execute("RunService.ListRuns", move |backend| {
+        self.execute("RunService.ListRuns", deadline, move |backend| {
             backend.list_runs(request)
         })
         .await
@@ -350,21 +389,25 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::GetRunRequest>,
     ) -> Result<Response<pb::GetRunResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RunService.GetRun")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.GetRun"))?;
-        self.execute("RunService.GetRun", move |backend| backend.get_run(request))
-            .await
-            .map(Response::new)
+        self.execute("RunService.GetRun", deadline, move |backend| {
+            backend.get_run(request)
+        })
+        .await
+        .map(Response::new)
     }
     async fn submit_turn(
         &self,
         request: Request<pb::SubmitTurnRequest>,
     ) -> Result<Response<pb::SubmitTurnAccepted>, Status> {
+        let deadline = rpc_deadline(&request, "RunService.SubmitTurn")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.SubmitTurn"))?;
-        self.execute("RunService.SubmitTurn", move |backend| {
+        self.execute("RunService.SubmitTurn", deadline, move |backend| {
             backend.submit_turn(request)
         })
         .await
@@ -374,10 +417,11 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::InterruptTurnRequest>,
     ) -> Result<Response<pb::RunMutationResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RunService.InterruptTurn")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.InterruptTurn"))?;
-        self.execute("RunService.InterruptTurn", move |backend| {
+        self.execute("RunService.InterruptTurn", deadline, move |backend| {
             backend.interrupt_turn(request)
         })
         .await
@@ -387,6 +431,7 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::SetDefaultEffortRequest>,
     ) -> Result<Response<pb::RunMutationResponse>, Status> {
+        let _deadline = rpc_deadline(&request, "RunService.SetDefaultEffort")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.SetDefaultEffort"))?;
@@ -399,10 +444,11 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::PauseRunRequest>,
     ) -> Result<Response<pb::RunMutationResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RunService.PauseRun")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.PauseRun"))?;
-        self.execute("RunService.PauseRun", move |backend| {
+        self.execute("RunService.PauseRun", deadline, move |backend| {
             backend.pause_run(request)
         })
         .await
@@ -412,10 +458,11 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::ResumeRunRequest>,
     ) -> Result<Response<pb::RunMutationResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RunService.ResumeRun")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.ResumeRun"))?;
-        self.execute("RunService.ResumeRun", move |backend| {
+        self.execute("RunService.ResumeRun", deadline, move |backend| {
             backend.resume_run(request)
         })
         .await
@@ -425,10 +472,11 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::CloseRunRequest>,
     ) -> Result<Response<pb::RunMutationResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RunService.CloseRun")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.CloseRun"))?;
-        self.execute("RunService.CloseRun", move |backend| {
+        self.execute("RunService.CloseRun", deadline, move |backend| {
             backend.close_run(request)
         })
         .await
@@ -438,6 +486,7 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::DeleteRunRequest>,
     ) -> Result<Response<pb::DeleteRunResponse>, Status> {
+        let _deadline = rpc_deadline(&request, "RunService.DeleteRun")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.DeleteRun"))?;
@@ -450,10 +499,11 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::RecoverRunRequest>,
     ) -> Result<Response<pb::RunMutationResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RunService.RecoverRun")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.RecoverRun"))?;
-        self.execute("RunService.RecoverRun", move |backend| {
+        self.execute("RunService.RecoverRun", deadline, move |backend| {
             backend.recover_run(request)
         })
         .await
@@ -463,10 +513,11 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::ReconcileRunRequest>,
     ) -> Result<Response<pb::RunMutationResponse>, Status> {
+        let deadline = rpc_deadline(&request, "RunService.ReconcileRun")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.ReconcileRun"))?;
-        self.execute("RunService.ReconcileRun", move |backend| {
+        self.execute("RunService.ReconcileRun", deadline, move |backend| {
             backend.reconcile_run(request)
         })
         .await
@@ -476,6 +527,7 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::ForkRunRequest>,
     ) -> Result<Response<pb::StartRunResponse>, Status> {
+        let _deadline = rpc_deadline(&request, "RunService.ForkRun")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.ForkRun"))?;
@@ -488,6 +540,7 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::VerifyRunRequest>,
     ) -> Result<Response<pb::VerifyRunResponse>, Status> {
+        let _deadline = rpc_deadline(&request, "RunService.VerifyRun")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.VerifyRun"))?;
@@ -500,6 +553,7 @@ impl pb::run_service_server::RunService for GatewayTransport {
         &self,
         request: Request<pb::CreateWriteContinuationRequest>,
     ) -> Result<Response<pb::CreateWriteContinuationResponse>, Status> {
+        let _deadline = rpc_deadline(&request, "RunService.CreateWriteContinuation")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "RunService.CreateWriteContinuation"))?;
@@ -517,14 +571,17 @@ impl pb::observation_service_server::ObservationService for GatewayTransport {
         &self,
         request: Request<pb::WatchRunEventsRequest>,
     ) -> Result<Response<Self::WatchRunEventsStream>, Status> {
+        let deadline = rpc_deadline(&request, "ObservationService.WatchRunEvents")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "ObservationService.WatchRunEvents"))?;
         let initial = request.clone();
         let page = self
-            .execute("ObservationService.WatchRunEvents", move |backend| {
-                backend.watch_run_events(initial)
-            })
+            .execute_stream(
+                "ObservationService.WatchRunEvents",
+                deadline,
+                move |backend| backend.watch_run_events(initial),
+            )
             .await?;
         let queue = Arc::new(Mutex::new(StreamQueue::default()));
         tokio::spawn(produce_events(self.clone(), request, page, queue.clone()));
@@ -534,12 +591,15 @@ impl pb::observation_service_server::ObservationService for GatewayTransport {
         &self,
         request: Request<pb::ListRunTimelineItemsRequest>,
     ) -> Result<Response<pb::ListRunTimelineItemsResponse>, Status> {
+        let deadline = rpc_deadline(&request, "ObservationService.ListRunTimelineItems")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "ObservationService.ListRunTimelineItems"))?;
-        self.execute("ObservationService.ListRunTimelineItems", move |backend| {
-            backend.list_run_timeline_items(request)
-        })
+        self.execute(
+            "ObservationService.ListRunTimelineItems",
+            deadline,
+            move |backend| backend.list_run_timeline_items(request),
+        )
         .await
         .map(Response::new)
     }
@@ -551,11 +611,13 @@ impl pb::interaction_service_server::InteractionService for GatewayTransport {
         &self,
         request: Request<pb::ListPendingInteractionsRequest>,
     ) -> Result<Response<pb::ListPendingInteractionsResponse>, Status> {
+        let deadline = rpc_deadline(&request, "InteractionService.ListPendingInteractions")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "InteractionService.ListPendingInteractions"))?;
         self.execute(
             "InteractionService.ListPendingInteractions",
+            deadline,
             move |backend| backend.list_pending_interactions(request),
         )
         .await
@@ -565,11 +627,13 @@ impl pb::interaction_service_server::InteractionService for GatewayTransport {
         &self,
         request: Request<pb::GetControllerInteractionRequest>,
     ) -> Result<Response<pb::GetControllerInteractionResponse>, Status> {
+        let deadline = rpc_deadline(&request, "InteractionService.GetControllerInteraction")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "InteractionService.GetControllerInteraction"))?;
         self.execute(
             "InteractionService.GetControllerInteraction",
+            deadline,
             move |backend| backend.get_controller_interaction(request),
         )
         .await
@@ -579,12 +643,15 @@ impl pb::interaction_service_server::InteractionService for GatewayTransport {
         &self,
         request: Request<pb::ResolveInteractionRequest>,
     ) -> Result<Response<pb::ResolveInteractionResponse>, Status> {
+        let deadline = rpc_deadline(&request, "InteractionService.ResolveInteraction")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "InteractionService.ResolveInteraction"))?;
-        self.execute("InteractionService.ResolveInteraction", move |backend| {
-            backend.resolve_interaction(request)
-        })
+        self.execute(
+            "InteractionService.ResolveInteraction",
+            deadline,
+            move |backend| backend.resolve_interaction(request),
+        )
         .await
         .map(Response::new)
     }
@@ -596,12 +663,15 @@ impl pb::writer_service_server::WriterService for GatewayTransport {
         &self,
         request: Request<pb::GetWorkspaceWriterStatusRequest>,
     ) -> Result<Response<pb::GetWorkspaceWriterStatusResponse>, Status> {
+        let deadline = rpc_deadline(&request, "WriterService.GetWorkspaceWriterStatus")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "WriterService.GetWorkspaceWriterStatus"))?;
-        self.execute("WriterService.GetWorkspaceWriterStatus", move |backend| {
-            backend.get_workspace_writer_status(request)
-        })
+        self.execute(
+            "WriterService.GetWorkspaceWriterStatus",
+            deadline,
+            move |backend| backend.get_workspace_writer_status(request),
+        )
         .await
         .map(Response::new)
     }
@@ -609,10 +679,11 @@ impl pb::writer_service_server::WriterService for GatewayTransport {
         &self,
         request: Request<pb::AcquireWriterRequest>,
     ) -> Result<Response<pb::WriterState>, Status> {
+        let deadline = rpc_deadline(&request, "WriterService.AcquireWriter")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "WriterService.AcquireWriter"))?;
-        self.execute("WriterService.AcquireWriter", move |backend| {
+        self.execute("WriterService.AcquireWriter", deadline, move |backend| {
             backend.acquire_writer(request)
         })
         .await
@@ -622,10 +693,11 @@ impl pb::writer_service_server::WriterService for GatewayTransport {
         &self,
         request: Request<pb::ReleaseWriterRequest>,
     ) -> Result<Response<pb::WriterState>, Status> {
+        let deadline = rpc_deadline(&request, "WriterService.ReleaseWriter")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "WriterService.ReleaseWriter"))?;
-        self.execute("WriterService.ReleaseWriter", move |backend| {
+        self.execute("WriterService.ReleaseWriter", deadline, move |backend| {
             backend.release_writer(request)
         })
         .await
@@ -635,6 +707,7 @@ impl pb::writer_service_server::WriterService for GatewayTransport {
         &self,
         request: Request<pb::PrepareWriterHandoffRequest>,
     ) -> Result<Response<pb::WriterHandoffResponse>, Status> {
+        let _deadline = rpc_deadline(&request, "WriterService.PrepareWriterHandoff")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "WriterService.PrepareWriterHandoff"))?;
@@ -647,6 +720,7 @@ impl pb::writer_service_server::WriterService for GatewayTransport {
         &self,
         request: Request<pb::CommitWriterHandoffRequest>,
     ) -> Result<Response<pb::WriterHandoffResponse>, Status> {
+        let _deadline = rpc_deadline(&request, "WriterService.CommitWriterHandoff")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "WriterService.CommitWriterHandoff"))?;
@@ -659,6 +733,7 @@ impl pb::writer_service_server::WriterService for GatewayTransport {
         &self,
         request: Request<pb::CancelWriterHandoffRequest>,
     ) -> Result<Response<pb::WriterHandoffResponse>, Status> {
+        let _deadline = rpc_deadline(&request, "WriterService.CancelWriterHandoff")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "WriterService.CancelWriterHandoff"))?;
@@ -675,12 +750,15 @@ impl pb::controller_service_server::ControllerService for GatewayTransport {
         &self,
         request: Request<pb::VerifyControllerRequest>,
     ) -> Result<Response<pb::VerifyControllerResponse>, Status> {
+        let deadline = rpc_deadline(&request, "ControllerService.VerifyController")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "ControllerService.VerifyController"))?;
-        self.execute("ControllerService.VerifyController", move |backend| {
-            backend.verify_controller(request)
-        })
+        self.execute(
+            "ControllerService.VerifyController",
+            deadline,
+            move |backend| backend.verify_controller(request),
+        )
         .await
         .map(Response::new)
     }
@@ -692,10 +770,11 @@ impl pb::artifact_service_server::ArtifactService for GatewayTransport {
         &self,
         request: Request<pb::GetArtifactRequest>,
     ) -> Result<Response<pb::GetArtifactResponse>, Status> {
+        let deadline = rpc_deadline(&request, "ArtifactService.GetArtifact")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "ArtifactService.GetArtifact"))?;
-        self.execute("ArtifactService.GetArtifact", move |backend| {
+        self.execute("ArtifactService.GetArtifact", deadline, move |backend| {
             backend.get_artifact(request)
         })
         .await
@@ -705,12 +784,15 @@ impl pb::artifact_service_server::ArtifactService for GatewayTransport {
         &self,
         request: Request<pb::ReadArtifactChunkRequest>,
     ) -> Result<Response<pb::ReadArtifactChunkResponse>, Status> {
+        let deadline = rpc_deadline(&request, "ArtifactService.ReadArtifactChunk")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "ArtifactService.ReadArtifactChunk"))?;
-        self.execute("ArtifactService.ReadArtifactChunk", move |backend| {
-            backend.read_artifact_chunk(request)
-        })
+        self.execute(
+            "ArtifactService.ReadArtifactChunk",
+            deadline,
+            move |backend| backend.read_artifact_chunk(request),
+        )
         .await
         .map(Response::new)
     }
@@ -722,11 +804,13 @@ impl pb::orchestration_service_server::OrchestrationService for GatewayTransport
         &self,
         request: Request<pb::GetOrchestratedSessionRequest>,
     ) -> Result<Response<pb::GetOrchestratedSessionResponse>, Status> {
+        let deadline = rpc_deadline(&request, "OrchestrationService.GetOrchestratedSession")?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false)
             .map_err(|error| error_status(&error, "OrchestrationService.GetOrchestratedSession"))?;
         self.execute(
             "OrchestrationService.GetOrchestratedSession",
+            deadline,
             move |backend| backend.get_orchestrated_session(request),
         )
         .await
@@ -737,6 +821,10 @@ impl pb::orchestration_service_server::OrchestrationService for GatewayTransport
         &self,
         request: Request<pb::ListOrchestratedSessionResultsRequest>,
     ) -> Result<Response<pb::ListOrchestratedSessionResultsResponse>, Status> {
+        let deadline = rpc_deadline(
+            &request,
+            "OrchestrationService.ListOrchestratedSessionResults",
+        )?;
         let request = request.into_inner();
         validate_context(request.context.as_ref(), false).map_err(|error| {
             error_status(
@@ -746,11 +834,46 @@ impl pb::orchestration_service_server::OrchestrationService for GatewayTransport
         })?;
         self.execute(
             "OrchestrationService.ListOrchestratedSessionResults",
+            deadline,
             move |backend| backend.list_orchestrated_session_results(request),
         )
         .await
         .map(Response::new)
     }
+}
+
+fn rpc_deadline<T>(request: &Request<T>, method: &str) -> Result<tokio::time::Instant, Status> {
+    let invalid_timeout = || {
+        error_status(
+            &MachineError::invalid_argument("grpc-timeout", "invalid RPC timeout"),
+            method,
+        )
+    };
+    let budget = match request.metadata().get("grpc-timeout") {
+        None => RPC_BUDGET,
+        Some(value) => {
+            let text = value.to_str().map_err(|_| invalid_timeout())?;
+            if !(2..=9).contains(&text.len()) {
+                return Err(invalid_timeout());
+            }
+            let (digits, unit) = text.split_at(text.len() - 1);
+            if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(invalid_timeout());
+            }
+            let amount = digits.parse::<u64>().map_err(|_| invalid_timeout())?;
+            let duration = match unit {
+                "H" => Duration::from_secs(amount * 3600),
+                "M" => Duration::from_secs(amount * 60),
+                "S" => Duration::from_secs(amount),
+                "m" => Duration::from_millis(amount),
+                "u" => Duration::from_micros(amount),
+                "n" => Duration::from_nanos(amount),
+                _ => return Err(invalid_timeout()),
+            };
+            duration.min(RPC_BUDGET)
+        }
+    };
+    Ok(tokio::time::Instant::now() + budget)
 }
 
 fn validate_context(
@@ -899,6 +1022,7 @@ async fn produce_events(
     };
     let mut shutdown = transport.shutdown.clone();
     let mut last_heartbeat = Instant::now();
+    let mut sample_delay = Duration::from_millis(100);
     loop {
         {
             let mut queue = queue.lock().expect("stream queue mutex is not poisoned");
@@ -974,7 +1098,7 @@ async fn produce_events(
                 queue.error = Some(error_status(&transport_error("SERVER_SHUTDOWN"), method));
                 queue.finished = true; queue.wake(); return;
             }
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            _ = tokio::time::sleep(sample_delay) => {}
         }
         {
             let mut queue = queue.lock().expect("stream queue mutex is not poisoned");
@@ -991,10 +1115,21 @@ async fn produce_events(
         }
         let request = request.clone();
         let fetched = transport
-            .execute(method, move |backend| backend.watch_run_events(request))
+            .execute_stream(
+                method,
+                tokio::time::Instant::now() + RPC_BUDGET,
+                move |backend| backend.watch_run_events(request),
+            )
             .await;
         match fetched {
-            Ok(next) => page = next,
+            Ok(next) => {
+                sample_delay = if next.durable_head_cursor == page.durable_head_cursor {
+                    (sample_delay * 2).min(Duration::from_millis(500))
+                } else {
+                    Duration::from_millis(100)
+                };
+                page = next;
+            }
             Err(error) => {
                 queue
                     .lock()
@@ -1197,7 +1332,7 @@ pub fn serve(
         let socket = GatewaySocket::bind(home, socket_path)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .max_blocking_threads(SEMANTIC_WORKERS)
+            .max_blocking_threads(SEMANTIC_WORKERS + STREAM_WORKERS)
             .enable_all()
             .build()
             .map_err(|_| transport_error("INTERNAL_ERROR"))?;
@@ -1456,6 +1591,135 @@ mod tests {
     use pb::runtime_service_server::RuntimeService as _;
     use tokio_stream::StreamExt as _;
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_work_saturation_preserves_unary_admission() {
+        let (_stop, shutdown) = watch::channel(false);
+        let service = GatewayTransport::new(Arc::new(Backend), shutdown);
+        let mut jobs = Vec::new();
+        let mut releases = Vec::new();
+        for _ in 0..STREAM_WORKERS {
+            let (release, wait) = std::sync::mpsc::channel();
+            let (started, entered) = tokio::sync::oneshot::channel();
+            releases.push(release);
+            let copy = service.clone();
+            jobs.push(tokio::spawn(async move {
+                copy.execute_stream(
+                    "ObservationService.WatchRunEvents",
+                    tokio::time::Instant::now() + RPC_BUDGET,
+                    move |_| {
+                        let _ = started.send(());
+                        wait.recv_timeout(Duration::from_secs(2)).unwrap();
+                        Ok(())
+                    },
+                )
+                .await
+            }));
+            entered.await.unwrap();
+        }
+        assert_eq!(service.stream_workers.available_permits(), 0);
+        service
+            .execute(
+                "RuntimeService.GetCapabilities",
+                tokio::time::Instant::now() + Duration::from_millis(100),
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        for job in jobs {
+            job.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn response_deadline_keeps_admitted_effect_and_permit_until_completion() {
+        let (_stop, shutdown) = watch::channel(false);
+        let service = GatewayTransport::new(Arc::new(Backend), shutdown);
+        let (release, wait) = std::sync::mpsc::channel();
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let effect = completed.clone();
+        let status = service
+            .execute(
+                "RunService.SubmitTurn",
+                tokio::time::Instant::now() + Duration::from_millis(50),
+                move |_| {
+                    wait.recv_timeout(Duration::from_secs(2)).unwrap();
+                    effect.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(status.message(), "TRANSPORT_FAILURE");
+        let recovery = detail(&status);
+        assert_eq!(
+            recovery.recovery_classification,
+            pb::RecoveryClassification::SnapshotRequired as i32
+        );
+        assert_eq!(
+            recovery.action,
+            pb::RequiredClientAction::RefreshSnapshot as i32
+        );
+        assert_eq!(
+            recovery.retry_classification,
+            pb::RetryClassification::ExactIdempotencyKey as i32
+        );
+        assert_eq!(service.workers.available_permits(), SEMANTIC_WORKERS - 1);
+        assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while service.workers.available_permits() != SEMANTIC_WORKERS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn rpc_timeout_is_bounded_and_rejects_private_malformed_metadata() {
+        let mut request = Request::new(());
+        let before = tokio::time::Instant::now();
+        request
+            .metadata_mut()
+            .insert("grpc-timeout", "20m".parse().unwrap());
+        assert!(
+            rpc_deadline(&request, "RunService.GetRun").unwrap()
+                <= before + Duration::from_millis(25)
+        );
+        request
+            .metadata_mut()
+            .insert("grpc-timeout", "99999999H".parse().unwrap());
+        assert!(
+            rpc_deadline(&request, "RunService.GetRun").unwrap()
+                <= before + RPC_BUDGET + Duration::from_millis(5)
+        );
+        for value in ["secret-canary", "123456789S", "-1S", "1x", "S"] {
+            request
+                .metadata_mut()
+                .insert("grpc-timeout", value.parse().unwrap());
+            let error = rpc_deadline(&request, "RunService.GetRun").unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(!error.message().contains(value));
+            assert!(
+                !error.details().is_empty(),
+                "checked error details are required"
+            );
+            assert!(!String::from_utf8_lossy(error.details()).contains(value));
+        }
+        let (_stop, shutdown) = watch::channel(false);
+        let status = GatewayTransport::new(Arc::new(Backend), shutdown)
+            .execute::<()>("RunService.SubmitTurn", tokio::time::Instant::now(), |_| {
+                panic!("expired admission must not dispatch")
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(status.message(), "TRANSPORT_FAILURE");
+    }
+
     struct Backend;
     impl GatewayBackend for Backend {
         fn get_capabilities(
@@ -1596,6 +1860,8 @@ mod tests {
                     let detail = detail(&status);
                     let expected = if private_codes.contains(code.as_str()) {
                         "INTERNAL_ERROR"
+                    } else if code == "RESULT_CONTENT_UNAVAILABLE" {
+                        "CAPABILITY_UNSUPPORTED"
                     } else {
                         code
                     };

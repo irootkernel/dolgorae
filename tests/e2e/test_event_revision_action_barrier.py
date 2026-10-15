@@ -3,6 +3,10 @@
 from run_native_gateway_case import run_case
 
 if __name__ == "__main__":
+    run_case("gateway_semantic_native", "observation_campaign::percentile_uses_nearest_rank_and_keeps_each_repetition")
+    run_case("gateway_semantic_native", "observation_campaign::gateway_observation_reuses_sources_in_an_isolated_process")
+    run_case("gateway_semantic_native", "observation_campaign::snapshot_projects_its_exact_captured_history_and_rejects_display_mutation_admission")
+    run_case("gateway_semantic_native", "result_content_cli::native_result_content_cli_preserves_frozen_projection_and_retained_owner")
     run_case("gateway_semantic_native", "caller_close_cleanup_retains_terminal_history_and_checked_recovery")
     run_case("gateway_semantic_native", "native_profile_compaction_retains_original_scope_and_history")
     run_case("gateway_semantic_native", "native_profile_compaction_resumes_each_owned_crash_boundary")

@@ -2,7 +2,7 @@
 
 use crate::darwin::DarwinSystem;
 use crate::domain::RunLifecycle;
-use crate::ledger::ObservedLedger;
+use crate::ledger::{LedgerError, ObservedLedger};
 use crate::machine::MachineError;
 use crate::projection::RunStateProjection;
 use crate::run::{ControllerBinding, RunManifest, RunStore};
@@ -24,6 +24,8 @@ pub struct RunSnapshot {
     pub writer: WriterRecord,
     pub controller: crate::domain::ControllerIdentity,
     controller_authority: Option<ControllerBinding>,
+    captured_ledger: Option<ObservedLedger>,
+    display_only: bool,
     pub runtime_record: Option<WorkerRuntimeRecord>,
     pub stamp: ProjectionStamp,
     pub control_socket_epoch: u64,
@@ -115,6 +117,8 @@ impl RunSnapshot {
             writer: writer.as_ref().clone(),
             controller: controller.clone(),
             controller_authority: None,
+            captured_ledger: None,
+            display_only: false,
             runtime_record: None,
             stamp: stamp.clone(),
             control_socket_epoch: 0,
@@ -128,8 +132,14 @@ impl RunSnapshot {
         run_id: Uuid,
         control_socket_epoch: u64,
     ) -> Result<Self, MachineError> {
-        Self::capture(state_root, run_id, control_socket_epoch, |_, _, _| Ok(()))
-            .map(|(snapshot, ())| snapshot)
+        Self::capture(
+            state_root,
+            run_id,
+            control_socket_epoch,
+            false,
+            |_, _, _| Ok(()),
+        )
+        .map(|(snapshot, ())| snapshot)
     }
 
     /// Capture read-only runtime and durable projection facts at the same boundary.
@@ -142,7 +152,51 @@ impl RunSnapshot {
             state_root,
             run_id,
             control_socket_epoch,
+            false,
             RunObservation::read,
+        )
+    }
+
+    /// Display-only history reuse. All manifest, writer, controller and runtime
+    /// sources are still captured afresh and compared at the same boundary.
+    pub fn load_display(
+        state_root: &Path,
+        run_id: Uuid,
+        control_socket_epoch: u64,
+    ) -> Result<Self, MachineError> {
+        Self::capture(state_root, run_id, control_socket_epoch, true, |_, _, _| {
+            Ok(())
+        })
+        .map(|(snapshot, ())| snapshot)
+    }
+
+    pub fn observe_display(
+        state_root: &Path,
+        run_id: Uuid,
+        control_socket_epoch: u64,
+    ) -> Result<(Self, RunObservation), MachineError> {
+        Self::capture(
+            state_root,
+            run_id,
+            control_socket_epoch,
+            true,
+            RunObservation::read_display,
+        )
+    }
+
+    /// Reuse the exact verified history captured with this snapshot, rather than
+    /// selecting a potentially different ledger generation for each projection.
+    pub(crate) fn observed_ledger(
+        &self,
+        state_root: &Path,
+    ) -> Result<ObservedLedger, MachineError> {
+        if let Some(ledger) = &self.captured_ledger {
+            return Ok(ledger.clone());
+        }
+        ObservedLedger::open_run(
+            state_root,
+            self.manifest.run_id,
+            self.stamp.run_state_revision,
         )
     }
 
@@ -150,6 +204,7 @@ impl RunSnapshot {
         state_root: &Path,
         run_id: Uuid,
         control_socket_epoch: u64,
+        display: bool,
         mut observe: impl FnMut(
             &CaptureSources,
             Option<&ObservedLedger>,
@@ -162,18 +217,43 @@ impl RunSnapshot {
             || CaptureSources::read(&store, state_root, run_id),
             |sources| {
                 let head = sources.projection.ledger_head.sequence;
-                let ledger = (head != 0)
-                    .then(|| ObservedLedger::open_run(state_root, run_id, head))
-                    .transpose()?;
+                let ledger = if head == 0 {
+                    None
+                } else if display {
+                    let Some(ledger) = display_ledger_result(
+                        ObservedLedger::open_run_display(state_root, run_id, head),
+                        run_id,
+                        head,
+                        sources.projection.lifecycle,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    Some(ledger)
+                } else {
+                    Some(ObservedLedger::open_run(state_root, run_id, head)?)
+                };
+                if ledger
+                    .as_ref()
+                    .and_then(|ledger| ledger.records().last())
+                    .is_some_and(|record| record.hash() != sources.projection.ledger_head.hash)
+                {
+                    return Err(state_conflict(
+                        run_id,
+                        sources.projection.lifecycle,
+                        "capture_snapshot",
+                    ));
+                }
                 let revision = ledger
                     .as_ref()
                     .map_or(0, ObservedLedger::interaction_state_revision);
                 let effective_policy = durable_policy(sources, ledger.as_ref())?;
                 let observation = observe(sources, ledger.as_ref(), &effective_policy)?;
-                Ok((revision, effective_policy, observation))
+                Ok(Some((revision, effective_policy, observation, ledger)))
             },
         )?;
-        let Some((sources, (interaction_state_revision, effective_policy, observation))) = captured
+        let Some((sources, (interaction_state_revision, effective_policy, observation, ledger))) =
+            captured
         else {
             return Err(state_conflict(
                 run_id,
@@ -193,12 +273,21 @@ impl RunSnapshot {
                     .runtime_record
                     .as_ref()
                     .and_then(|record| record.app_server_epoch),
-                control_socket_epoch,
+                control_socket_epoch: if display {
+                    sources
+                        .runtime_record
+                        .as_ref()
+                        .map_or(1, |record| record.control_socket_epoch)
+                } else {
+                    control_socket_epoch
+                },
                 manifest: sources.manifest,
                 projection: sources.projection,
                 writer: sources.writer,
                 controller: sources.controller.identity.clone(),
                 controller_authority: Some(sources.controller),
+                captured_ledger: ledger,
+                display_only: display,
                 runtime_record: sources.runtime_record,
                 stamp,
                 captured_effective_policy: effective_policy,
@@ -210,7 +299,7 @@ impl RunSnapshot {
     /// Used by a mutation owner only while its serialization boundary is held.
     /// Exact idempotency replay lookup must precede this new-operation gate.
     pub fn require_revision(&self, expected: u64, operation: &str) -> Result<(), MachineError> {
-        if self.stamp.run_state_revision == expected {
+        if !self.display_only && self.stamp.run_state_revision == expected {
             Ok(())
         } else {
             Err(state_conflict(
@@ -232,7 +321,7 @@ impl CaptureSources {
         let manifest = store.load_manifest(run_id)?;
         let writer = WriterStore::new(state_root, &manifest.workspace_id, uid).load()?;
         let projection = store.load_state_projection(run_id)?;
-        let controller = store.load_controller_binding(run_id)?;
+        let controller = store.load_controller_binding_from_manifest(&manifest)?;
         let path = runtime_record_path(&runtime_root(state_root), run_id)
             .map_err(|error| internal_runtime(format!("{error:?}")))?;
         let runtime_record = match std::fs::symlink_metadata(&path) {
@@ -283,15 +372,34 @@ pub(crate) fn state_conflict(
     )
 }
 
+/// Only the ledger's explicitly classified, freshly verified source motion is
+/// eligible for recapture. Integrity, capacity and security errors pass through.
+fn display_ledger_result(
+    result: Result<ObservedLedger, LedgerError>,
+    run_id: Uuid,
+    head: u64,
+    lifecycle: RunLifecycle,
+) -> Result<Option<ObservedLedger>, MachineError> {
+    match result {
+        Ok(ledger) => Ok(Some(ledger)),
+        Err(LedgerError::CaptureConflict) => Ok(None),
+        Err(error) => Err(crate::ledger::display_observation_error(
+            run_id, head, lifecycle, error,
+        )),
+    }
+}
+
 /// Compare every source field, including observation fields whose revision did not advance.
 fn capture_consistent<S: PartialEq, O, E>(
     attempts: usize,
     mut read: impl FnMut() -> Result<S, E>,
-    mut observe: impl FnMut(&S) -> Result<O, E>,
+    mut observe: impl FnMut(&S) -> Result<Option<O>, E>,
 ) -> Result<Option<(S, O)>, E> {
     for _ in 0..attempts {
         let before = read()?;
-        let observation = observe(&before)?;
+        let Some(observation) = observe(&before)? else {
+            continue;
+        };
         let after = read()?;
         if before == after {
             return Ok(Some((before, observation)));
@@ -331,9 +439,41 @@ impl RunObservation {
         ledger: Option<&ObservedLedger>,
         effective_policy: &crate::domain::EffectivePolicy,
     ) -> Result<Self, MachineError> {
+        Self::read_with_identity(sources, ledger, effective_policy, false)
+    }
+
+    fn read_display(
+        sources: &CaptureSources,
+        ledger: Option<&ObservedLedger>,
+        effective_policy: &crate::domain::EffectivePolicy,
+    ) -> Result<Self, MachineError> {
+        Self::read_with_identity(sources, ledger, effective_policy, true)
+    }
+
+    fn read_with_identity(
+        sources: &CaptureSources,
+        ledger: Option<&ObservedLedger>,
+        effective_policy: &crate::domain::EffectivePolicy,
+        display: bool,
+    ) -> Result<Self, MachineError> {
         use crate::worker::{
             ProcessIdentityVerdict, classify_dedicated_server_identity, classify_worker_identity,
         };
+        let classify_worker_identity = |record: &WorkerRuntimeRecord| {
+            if display {
+                crate::worker::classify_worker_identity_for_display(record)
+            } else {
+                classify_worker_identity(record)
+            }
+        };
+        let classify_dedicated_server_identity =
+            |identity: &crate::worker::DedicatedServerIdentity| {
+                if display {
+                    crate::worker::classify_dedicated_server_identity_for_display(identity)
+                } else {
+                    classify_dedicated_server_identity(identity)
+                }
+            };
         let worker_identity = sources
             .runtime_record
             .as_ref()
@@ -464,10 +604,11 @@ pub(crate) fn policy_at_head(
         });
     }
     let ledger = ledger.ok_or_else(conflict)?;
-    let bindings = ledger
-        .payloads_of_kind(crate::audit::AuditKind::ThreadBound)
+    let inputs = ledger
+        .policy_inputs()
         .map_err(|error| internal_runtime(error.to_string()))?;
-    let generation = bindings
+    let generation = inputs
+        .bindings
         .iter()
         .rev()
         .find(|payload| {
@@ -478,27 +619,17 @@ pub(crate) fn policy_at_head(
         .and_then(serde_json::Value::as_u64)
         .filter(|generation| *generation > 0)
         .ok_or_else(conflict)?;
-    let mut payloads = Vec::new();
-    for kind in [
-        crate::audit::AuditKind::ThreadBound,
-        crate::audit::AuditKind::WriterAcquired,
-        crate::audit::AuditKind::WriterReleased,
-    ] {
-        payloads.extend(
-            ledger
-                .payloads_of_kind(kind)
-                .map_err(|error| internal_runtime(error.to_string()))?,
-        );
-    }
     Ok(
-        policy_from_payloads(generation, payloads)?.unwrap_or(EffectivePolicy {
-            access: Access::Unknown,
-            verification: PolicyVerification::Unverified,
-            policy_epoch: PolicyEpoch(0),
-            thread_generation: Some(generation),
-            server_epoch,
-            writer_generation: None,
-        }),
+        policy_from_payloads(generation, inputs.policies.iter().cloned())?.unwrap_or(
+            EffectivePolicy {
+                access: Access::Unknown,
+                verification: PolicyVerification::Unverified,
+                policy_epoch: PolicyEpoch(0),
+                thread_generation: Some(generation),
+                server_epoch,
+                writer_generation: None,
+            },
+        ),
     )
 }
 
@@ -539,6 +670,114 @@ mod capture_tests {
     use std::cell::Cell;
 
     #[test]
+    fn explicit_source_motion_recaptures_the_current_coherent_head() {
+        use std::cell::RefCell;
+        let run_id = Uuid::now_v7();
+        let mut initial = RunStateProjection::starting(run_id);
+        initial.ledger_head.sequence = 1;
+        initial.ledger_head.hash = "a".repeat(64);
+        let source = RefCell::new(initial);
+        let reads = Cell::new(0);
+        let observations = Cell::new(0);
+        let captured = capture_consistent(
+            CAPTURE_ATTEMPTS,
+            || {
+                reads.set(reads.get() + 1);
+                Ok::<_, MachineError>(source.borrow().clone())
+            },
+            |before| {
+                observations.set(observations.get() + 1);
+                if observations.get() == 1 {
+                    source.borrow_mut().ledger_head.sequence = 2;
+                    source.borrow_mut().ledger_head.hash = "b".repeat(64);
+                    return display_ledger_result(
+                        Err(LedgerError::CaptureConflict),
+                        run_id,
+                        before.ledger_head.sequence,
+                        before.lifecycle,
+                    )
+                    .map(|ledger| ledger.map(|_| before.ledger_head.clone()));
+                }
+                Ok(Some(before.ledger_head.clone()))
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(reads.get(), 3);
+        assert_eq!(observations.get(), 2);
+        assert_eq!(captured.0, *source.borrow());
+        assert_eq!(captured.1, captured.0.ledger_head);
+        assert_eq!(captured.1.sequence, 2);
+    }
+
+    #[test]
+    fn continued_explicit_source_motion_exhausts_only_the_existing_capture_budget() {
+        let run_id = Uuid::now_v7();
+        let reads = Cell::new(0);
+        let observations = Cell::new(0);
+        let captured = capture_consistent(
+            CAPTURE_ATTEMPTS,
+            || {
+                reads.set(reads.get() + 1);
+                Ok::<_, MachineError>(RunStateProjection::starting(run_id))
+            },
+            |before| {
+                observations.set(observations.get() + 1);
+                display_ledger_result(
+                    Err(LedgerError::CaptureConflict),
+                    run_id,
+                    before.ledger_head.sequence,
+                    before.lifecycle,
+                )
+            },
+        )
+        .unwrap();
+        assert!(captured.is_none());
+        assert_eq!(reads.get(), CAPTURE_ATTEMPTS);
+        assert_eq!(observations.get(), CAPTURE_ATTEMPTS);
+        let conflict = state_conflict(run_id, RunLifecycle::Starting, "capture_snapshot");
+        assert_eq!(conflict.code, "RUN_STATE_CONFLICT");
+    }
+
+    #[test]
+    fn integrity_and_security_failures_are_not_source_motion_retries() {
+        for failure in [
+            LedgerError::Integrity("damaged published record".to_owned()),
+            LedgerError::SecurityPolicy(MachineError::new(
+                "RUNTIME_PATH_INVALID",
+                "invalid private source mode",
+                false,
+                serde_json::json!({}),
+            )),
+        ] {
+            let run_id = Uuid::now_v7();
+            let reads = Cell::new(0);
+            let observations = Cell::new(0);
+            let mut failure = Some(failure);
+            let error = capture_consistent(
+                CAPTURE_ATTEMPTS,
+                || {
+                    reads.set(reads.get() + 1);
+                    Ok::<_, MachineError>(RunStateProjection::starting(run_id))
+                },
+                |before| {
+                    observations.set(observations.get() + 1);
+                    display_ledger_result(
+                        Err(failure.take().expect("integrity failure cannot be retried")),
+                        run_id,
+                        before.ledger_head.sequence,
+                        before.lifecycle,
+                    )
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "AUDIT_INTEGRITY_FAILURE");
+            assert_eq!(reads.get(), 1);
+            assert_eq!(observations.get(), 1);
+        }
+    }
+
+    #[test]
     fn same_revision_writer_observation_change_requires_recapture() {
         let mut original = WriterRecord::empty("workspace");
         original.authority_revision = 9;
@@ -568,7 +807,11 @@ mod capture_tests {
                 reads.set(index + 1);
                 Ok::<_, ()>(records[index].clone())
             },
-            |writer| Ok(writer.holder.as_ref().unwrap().pending_interaction_count),
+            |writer| {
+                Ok(Some(
+                    writer.holder.as_ref().unwrap().pending_interaction_count,
+                ))
+            },
         )
         .unwrap()
         .unwrap();
@@ -587,7 +830,7 @@ mod capture_tests {
                 revision.set(current + 1);
                 Ok::<_, ()>(current)
             },
-            |source| Ok(*source),
+            |source| Ok(Some(*source)),
         )
         .unwrap();
         assert!(captured.is_none());

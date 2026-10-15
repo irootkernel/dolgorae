@@ -179,6 +179,7 @@ pub enum TurnError {
     Capacity(String),
     Journal(String),
     Artifact(String),
+    ArtifactQuotaExceeded,
 }
 
 impl TurnError {
@@ -201,6 +202,7 @@ impl TurnError {
             Self::Capacity(_) => "Capacity",
             Self::Journal(_) => "Journal",
             Self::Artifact(_) => "Artifact",
+            Self::ArtifactQuotaExceeded => "ArtifactQuotaExceeded",
         }
     }
 
@@ -284,6 +286,7 @@ impl std::fmt::Display for TurnError {
             Self::Capacity(reason) => write!(formatter, "storage capacity exceeded: {reason}"),
             Self::Journal(reason) => write!(formatter, "durable journal failed: {reason}"),
             Self::Artifact(reason) => write!(formatter, "response artifact failed: {reason}"),
+            Self::ArtifactQuotaExceeded => write!(formatter, "retained artifact quota exceeded"),
         }
     }
 }
@@ -417,6 +420,12 @@ impl TurnError {
                 message,
                 false,
                 serde_json::json!({"invariant": reason}),
+            ),
+            Self::ArtifactQuotaExceeded => MachineError::new(
+                "STORAGE_CAPACITY_EXCEEDED",
+                message,
+                false,
+                serde_json::json!({"run_id":run_id,"reason":"artifact_quota_exceeded","required_action":"operator_result_retention"}),
             ),
             // A response artifact that could not be written is a durable-write
             // invariant failure, not the digest mismatch
@@ -4786,10 +4795,15 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 sha256,
                 created_at: stored.created_at,
             })),
-            Err(_) => Ok(Some(FinalResponse::Unavailable {
+            Err(error) => Ok(Some(FinalResponse::Unavailable {
                 byte_length,
                 sha256,
-                reason: "write_failed".to_owned(),
+                reason: if matches!(error, TurnError::ArtifactQuotaExceeded) {
+                    "quota_exceeded"
+                } else {
+                    "write_failed"
+                }
+                .to_owned(),
             })),
         }
     }
@@ -5650,20 +5664,40 @@ mod tests {
     }
 
     fn coordinator_with_journal<J: DurableTurnJournal>(
-        mut server: FakeServer,
+        server: FakeServer,
         attach: ThreadAttach,
         foreign_diagnostics: Box<dyn ForeignDiagnostics>,
         safety_policy: SessionSafetyPolicy,
         primary_tool: Option<PrimaryToolConfig>,
         journal: J,
     ) -> TurnCoordinator<FakeServer, J, MemoryArtifactStore> {
+        coordinator_with_journal_and_artifacts(
+            server,
+            attach,
+            foreign_diagnostics,
+            safety_policy,
+            primary_tool,
+            journal,
+            MemoryArtifactStore::default(),
+        )
+    }
+
+    fn coordinator_with_journal_and_artifacts<J: DurableTurnJournal, A: ResponseArtifactStore>(
+        mut server: FakeServer,
+        attach: ThreadAttach,
+        foreign_diagnostics: Box<dyn ForeignDiagnostics>,
+        safety_policy: SessionSafetyPolicy,
+        primary_tool: Option<PrimaryToolConfig>,
+        journal: J,
+        artifacts: A,
+    ) -> TurnCoordinator<FakeServer, J, A> {
         server
             .replies
             .push_front(Ok(serde_json::json!({"codexHome":"/tmp/codex-home"})));
         TurnCoordinator::initialize(
             server,
             journal,
-            MemoryArtifactStore::default(),
+            artifacts,
             CoordinatorConfig {
                 attach,
                 foreign_diagnostics,
@@ -8969,6 +9003,72 @@ mod tests {
         assert!(
             created_at.ends_with('Z') && created_at.len() == 27,
             "artifact metadata needs a microsecond UTC instant: {created_at}"
+        );
+    }
+
+    #[test]
+    fn artifact_quota_retains_terminal_status_and_original_response_digest() {
+        struct QuotaStore {
+            failure_sha256: String,
+            inner: MemoryArtifactStore,
+        }
+        impl ResponseArtifactStore for QuotaStore {
+            fn store(&mut self, bytes: &[u8]) -> Result<StoredArtifact, TurnError> {
+                if sha256_hex(bytes) == self.failure_sha256 {
+                    Err(TurnError::ArtifactQuotaExceeded)
+                } else {
+                    self.inner.store(bytes)
+                }
+            }
+        }
+        let text = "x".repeat(MAX_INLINE_FINAL_RESPONSE_BYTES + 1);
+        let expected_hash = sha256_hex(text.as_bytes());
+        let mut server = FakeServer::default();
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+        server.messages.push_back(serde_json::json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"type":"agentMessage","status":"completed","phase":"final_answer","text":text}]}}}));
+        let mut coordinator = coordinator_with_journal_and_artifacts(
+            server,
+            ThreadAttach::Start,
+            Box::new(RecordingDiagnostics::default()),
+            SessionSafetyPolicy::Standard,
+            None,
+            MemoryJournal::default(),
+            QuotaStore {
+                failure_sha256: expected_hash.clone(),
+                inner: MemoryArtifactStore::default(),
+            },
+        );
+        coordinator
+            .start_turn(request("original-quota", DeliveryMode::Submit))
+            .unwrap();
+        let terminal = coordinator.next_event().unwrap().unwrap();
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(
+            terminal.final_response,
+            Some(FinalResponse::Unavailable {
+                byte_length: text.len() as u64,
+                sha256: expected_hash,
+                reason: "quota_exceeded".into(),
+            })
+        );
+        assert!(
+            coordinator
+                .journal
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, JournalEntry::Terminal { .. }))
+        );
+        assert!(
+            !coordinator
+                .journal
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, JournalEntry::OutcomeUnknown { .. }))
         );
     }
 

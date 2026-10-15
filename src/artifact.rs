@@ -482,24 +482,42 @@ fn verified_artifact(
             .map_err(|_| failure())?;
         check_directory(&directory)?;
     }
-    let mut file = system
-        .openat_nofollow(
-            &directory,
-            std::ffi::OsStr::new(&format!("{id}.bin")),
-            false,
-        )
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                artifact_error(
-                    run_id,
-                    id,
-                    "ARTIFACT_NOT_FOUND",
-                    "artifact bytes are unavailable",
-                )
-            } else {
-                failure()
-            }
-        })?;
+    let normalized =
+        if crate::engagement::EngagementStore::workspace_database_path(state_root).exists() {
+            crate::orchestration::OrchestrationStore::open_observer(state_root)?
+                .shared_result_artifact(run_id, id)
+                .map_err(|error| {
+                    if error.code == "RESULT_CONTENT_UNAVAILABLE" {
+                        error
+                    } else {
+                        failure()
+                    }
+                })?
+        } else {
+            None
+        };
+    let mut file = if let Some(file) = normalized {
+        file
+    } else {
+        system
+            .openat_nofollow(
+                &directory,
+                std::ffi::OsStr::new(&format!("{id}.bin")),
+                false,
+            )
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    artifact_error(
+                        run_id,
+                        id,
+                        "ARTIFACT_NOT_FOUND",
+                        "artifact bytes are unavailable",
+                    )
+                } else {
+                    failure()
+                }
+            })?
+    };
     let metadata = file.metadata().map_err(|_| failure())?;
     if !metadata.is_file()
         || metadata.uid() != uid
@@ -541,6 +559,7 @@ pub fn metadata(
     id: &str,
     carrier: Option<&CredentialCarrier>,
 ) -> Result<ArtifactMetadata, MachineError> {
+    let _content_pin = crate::orchestration::OrchestrationStore::result_reader_pin(state_root)?;
     let id = identity(id, "artifact_id")?;
     let reference = artifact_reference(
         state_root,
@@ -564,6 +583,7 @@ pub fn chunk(
     range: (u64, u32),
     carrier: Option<&CredentialCarrier>,
 ) -> Result<ArtifactChunk, MachineError> {
+    let _content_pin = crate::orchestration::OrchestrationStore::result_reader_pin(state_root)?;
     let id = identity(id, "artifact_id")?;
     let run_id = snapshot.manifest.run_id;
     let reference = artifact_reference(state_root, &ledger(state_root, snapshot)?, run_id, id)?;
@@ -641,6 +661,7 @@ fn read_artifact_range(
     reference: &ArtifactReference,
     range: (u64, u32),
 ) -> Result<Vec<u8>, MachineError> {
+    let _content_pin = crate::orchestration::OrchestrationStore::result_reader_pin(state_root)?;
     use std::io::{Read as _, Seek as _};
     let (offset, length) = range;
     if length == 0 || length > MAX_CHUNK_BYTES || offset > reference.byte_length {
@@ -666,6 +687,231 @@ fn read_artifact_range(
         return Err(artifact_integrity(run_id, reference, None));
     }
     Ok(data)
+}
+
+/// Serializes the logical per-Run quota check with artifact publication.
+pub struct ArtifactQuotaLease(std::fs::File);
+impl ArtifactQuotaLease {
+    pub fn acquire(directory: &Path) -> Result<Self, MachineError> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let system = crate::darwin::DarwinSystem;
+        crate::workspace::verify_secure_directory(directory, system.current_uid())?;
+        let path = directory.join(".quota.lock");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|_| quota_integrity("artifact quota lock unavailable"))?;
+        let started = std::time::Instant::now();
+        loop {
+            verify_quota_lock(directory, &path, &file)?;
+            match system.lock_exclusive_nonblocking(&file) {
+                Ok(()) => {
+                    if let Err(error) = verify_quota_lock(directory, &path, &file) {
+                        let _ = system.unlock(&file);
+                        return Err(error);
+                    }
+                    break;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    let Some(remaining) =
+                        std::time::Duration::from_secs(5).checked_sub(started.elapsed())
+                    else {
+                        return Err(MachineError::new(
+                            "RUN_BUSY",
+                            "artifact publication quota has another owner",
+                            false,
+                            json!({}),
+                        ));
+                    };
+                    std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+                }
+                Err(_) => return Err(quota_integrity("artifact quota lock acquisition failed")),
+            }
+        }
+        Ok(Self(file))
+    }
+}
+fn verify_quota_lock(
+    directory: &Path,
+    path: &Path,
+    file: &std::fs::File,
+) -> Result<(), MachineError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let uid = crate::darwin::DarwinSystem.current_uid();
+    crate::workspace::verify_secure_directory(directory, uid)
+        .map_err(|_| quota_integrity("artifact quota directory identity is untrusted"))?;
+    crate::workspace::verify_secure_file(path, uid)
+        .map_err(|_| quota_integrity("artifact quota lock identity is untrusted"))?;
+    let retained = file
+        .metadata()
+        .map_err(|_| quota_integrity("artifact quota lock identity unavailable"))?;
+    let current = std::fs::symlink_metadata(path)
+        .map_err(|_| quota_integrity("artifact quota lock identity unavailable"))?;
+    if retained.dev() != current.dev()
+        || retained.ino() != current.ino()
+        || retained.nlink() != 1
+        || retained.uid() != uid
+        || retained.mode() & 0o777 != 0o600
+    {
+        return Err(quota_integrity(
+            "artifact quota lock changed or has an untrusted alias",
+        ));
+    }
+    Ok(())
+}
+impl Drop for ArtifactQuotaLease {
+    fn drop(&mut self) {
+        let _ = crate::darwin::DarwinSystem.unlock(&self.0);
+    }
+}
+fn quota_integrity(reason: &str) -> MachineError {
+    MachineError::new(
+        "ARTIFACT_INTEGRITY_FAILURE",
+        "artifact quota evidence is untrusted",
+        false,
+        json!({"invariant":reason}),
+    )
+}
+
+pub const MAX_RUN_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
+/// A fresh capacity observation; pointer bytes cannot reduce a retained body's
+/// logical charge. Caller holds `ArtifactQuotaLease` through its publication.
+pub fn logical_artifact_bytes(directory: &Path) -> Result<u64, MachineError> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let uid = crate::darwin::DarwinSystem.current_uid();
+    crate::workspace::verify_secure_directory(directory, uid)?;
+    let mut normalized = BTreeMap::new();
+    if let Some(run_root) = directory.parent()
+        && let Some(run_id) = run_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| Uuid::parse_str(n).ok())
+        && let Some(runs) = run_root
+            .parent()
+            .filter(|p| p.file_name().is_some_and(|n| n == "runs"))
+        && let Some(state_root) = runs.parent()
+    {
+        let database = crate::engagement::EngagementStore::workspace_database_path(state_root);
+        match std::fs::symlink_metadata(&database) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(quota_integrity(
+                    "artifact publication namespace unavailable",
+                ));
+            }
+            Ok(_) => {
+                normalized = crate::orchestration::OrchestrationStore::open_observer(state_root)?
+                    .logical_result_artifacts(run_id)?
+            }
+        }
+    }
+    let mut total = 0_u64;
+    for reference in normalized.values() {
+        if !reference.retired {
+            total = total
+                .checked_add(reference.byte_length)
+                .ok_or_else(|| quota_integrity("artifact logical byte sum overflow"))?;
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for entry in std::fs::read_dir(directory)
+        .map_err(|_| quota_integrity("artifact directory unavailable"))?
+    {
+        let entry = entry.map_err(|_| quota_integrity("artifact directory entry unavailable"))?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| quota_integrity("artifact file name invalid"))?;
+        if name == ".quota.lock" {
+            continue;
+        }
+        let published = name
+            .strip_suffix(".bin")
+            .and_then(|n| Uuid::parse_str(n).ok())
+            .filter(|id| id.get_version_num() == 7);
+        let prepared = name
+            .strip_prefix('.')
+            .and_then(|n| Uuid::parse_str(n).ok())
+            .filter(|id| id.get_version_num() == 7);
+        if published.is_none() && prepared.is_none() {
+            return Err(quota_integrity(
+                "artifact namespace contains an unknown identity",
+            ));
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(entry.path())
+            .map_err(|_| quota_integrity("artifact capacity file unavailable"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| quota_integrity("artifact capacity identity unavailable"))?;
+        if !metadata.is_file()
+            || metadata.uid() != uid
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.nlink() != 1
+            || metadata.len() > 32 * 1024 * 1024
+        {
+            return Err(quota_integrity("artifact capacity file is untrusted"));
+        }
+        if let Some(id) = published
+            && let Some(reference) = normalized.get(&id)
+        {
+            if !reference.normalized {
+                if metadata.len() != reference.byte_length {
+                    return Err(quota_integrity("legacy artifact length changed"));
+                }
+                seen.insert(id);
+                continue;
+            }
+            if metadata.len() > 1024 {
+                return Err(quota_integrity("artifact content reference exceeds bound"));
+            }
+            let before = FileVersion::from(&metadata);
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take(1025)
+                .read_to_end(&mut bytes)
+                .map_err(|_| quota_integrity("artifact content reference unavailable"))?;
+            let pointer: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| quota_integrity("artifact content reference malformed"))?;
+            if pointer.as_object().is_none_or(|value| value.len() != 4)
+                || pointer["schema"] != "dolgorae.native-result-content-reference/v1"
+                || pointer["artifact_id"] != id.to_string()
+                || pointer["sha256"] != reference.sha256
+                || pointer["byte_length"] != reference.byte_length
+                || FileVersion::from(&file.metadata().map_err(|_| {
+                    quota_integrity("artifact content reference identity unavailable")
+                })?) != before
+            {
+                return Err(quota_integrity("artifact content reference changed"));
+            }
+            seen.insert(id);
+        } else {
+            total = total
+                .checked_add(metadata.len())
+                .ok_or_else(|| quota_integrity("artifact logical byte sum overflow"))?;
+        }
+    }
+    if normalized
+        .iter()
+        .any(|(id, reference)| reference.published && !seen.contains(id))
+    {
+        return Err(quota_integrity("published artifact reference is missing"));
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -794,6 +1040,11 @@ mod tests {
             .unwrap();
         let connection =
             rusqlite::Connection::open(orchestration.join("orchestration.sqlite3")).unwrap();
+        std::fs::set_permissions(
+            orchestration.join("orchestration.sqlite3"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE brokered_result_publications(
@@ -828,5 +1079,84 @@ mod tests {
             tree.read((0, reference.byte_length as u32)).unwrap(),
             b"specialist result"
         );
+    }
+    #[test]
+    fn waiting_quota_publisher_rejects_replaced_lock_identity() {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let directory = std::env::temp_dir().join(format!(
+            "dolgorae-artifact-quota-identity-{}",
+            Uuid::now_v7()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lease = ArtifactQuotaLease::acquire(&directory).unwrap();
+        let contender_root = directory.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = ArtifactQuotaLease::acquire(&contender_root);
+            completed_tx.send(()).unwrap();
+            result
+        });
+        started_rx.recv().unwrap();
+        assert!(matches!(
+            completed_rx.recv_timeout(std::time::Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        std::fs::rename(directory.join(".quota.lock"), directory.join("old-lock")).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(directory.join(".quota.lock"))
+            .unwrap();
+        assert_eq!(
+            contender.join().unwrap().err().unwrap().code,
+            "ARTIFACT_INTEGRITY_FAILURE"
+        );
+        drop(lease);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn logical_artifact_quota_counts_exact_limit_and_one_extra_byte() {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let directory =
+            std::env::temp_dir().join(format!("dolgorae-artifact-quota-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lease = ArtifactQuotaLease::acquire(&directory).unwrap();
+        for _ in 0..8 {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(directory.join(format!("{}.bin", Uuid::now_v7())))
+                .unwrap()
+                .set_len(32 * 1024 * 1024)
+                .unwrap();
+        }
+        assert_eq!(
+            logical_artifact_bytes(&directory).unwrap(),
+            MAX_RUN_ARTIFACT_BYTES
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(directory.join(format!(".{}", Uuid::now_v7())))
+            .unwrap()
+            .set_len(1)
+            .unwrap();
+        assert_eq!(
+            logical_artifact_bytes(&directory).unwrap(),
+            MAX_RUN_ARTIFACT_BYTES + 1
+        );
+        assert_eq!(
+            ArtifactQuotaLease::acquire(&directory).err().unwrap().code,
+            "RUN_BUSY"
+        );
+        drop(lease);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -431,3 +431,26 @@ and public recovery projections retain this obligation until release is proven.
 Caller Machine-v4 reports registered recovery with an explicit completed-Close
 reason because its frozen access projection cannot carry the cleanup fields.
 See the [Profile maintenance contract](../specs/dolgorae-v014-profile-maintenance.md).
+
+For delivered result bodies use `maintenance plan --kind retire_result_content`;
+for unreferenced result storage use `--kind garbage_collection`. Use the same
+protected operator, original workspace generation, complete plan, approved Apply
+and original-ID Get rules. These are separate explicit effects; checkpoint or
+Profile maintenance authority does not include either. Active, unknown, prepared,
+undelivered and live-reader references block unsafe effects. Retirement preserves
+identity and receipts and leaves a durable tombstone; garbage collection removes
+only unreferenced shared bytes. Neither operation changes the selected ledger
+generation or enables automatic deletion. Frozen callers report the successor
+result-retention reporting boundary for a retired body. See the
+[observation runtime](../specs/dolgorae-v014-observation-runtime.md).
+
+An incomplete checkpoint or content owner keeps ordinary workspace admission
+closed after interruption. Resume its original operation. A frozen database
+reader may report `dolgorae.workspace-maintenance/v014`; native maintenance Get
+and explicitly approved Apply retain the original recovery path.
+
+Warm display observations reuse checked sources. A changed executable, Profile
+configuration, workspace identity, database or ledger invalidates relevant reuse.
+Use authoritative lifecycle and operation lookup for mutation or recovery proof;
+a display result never proves that uncertain work is absent. Response deadlines
+bound waiting and preserve accepted effects and their original identity.

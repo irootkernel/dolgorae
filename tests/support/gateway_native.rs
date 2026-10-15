@@ -56,7 +56,23 @@ impl Fixture {
     fn prepare(scenario: &str, custom: Option<Value>, compact_binary: bool) -> Self {
         // A short, exclusive directory is required by Darwin's 104-byte UDS
         // bound even when the enclosing Make invocation has a long TMPDIR.
-        let root = PathBuf::from("/private/tmp").join(format!("dgg-{}", Uuid::now_v7().simple()));
+        let root_kernel = Path::new("/Volumes/RootKernel");
+        let mounted = Command::new("/sbin/mount").output().is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.contains(" on /Volumes/RootKernel ("))
+        });
+        let temporary = if mounted && root_kernel.is_dir() {
+            let temporary = root_kernel.join("tmp");
+            fs::create_dir_all(&temporary).ok().map(|()| temporary)
+        } else {
+            None
+        };
+        let identity = Uuid::now_v7().simple().to_string();
+        let root = temporary
+            .unwrap_or_else(|| PathBuf::from("/private/tmp"))
+            .join(format!("dgg-{}", &identity[16..]));
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let source_binary = std::env::var_os("DOLGORAE_BIN")

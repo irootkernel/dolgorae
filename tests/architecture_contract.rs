@@ -138,6 +138,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "review_output",
                 "run",
                 "specialist",
+                "storage_observation",
                 "task_request",
                 "workspace",
             ][..],
@@ -242,7 +243,14 @@ fn source_module_dependencies_match_the_approved_graph() {
         ),
         (
             "ledger_generation",
-            &["audit", "darwin", "jcs", "ledger", "workspace"][..],
+            &[
+                "audit",
+                "darwin",
+                "jcs",
+                "ledger",
+                "maintenance",
+                "workspace",
+            ][..],
         ),
         (
             "maintenance",
@@ -253,6 +261,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "controller",
                 "darwin",
                 "domain",
+                "engagement",
                 "fault",
                 "global_profile",
                 "global_runtime",
@@ -263,6 +272,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "mutation_admission",
                 "paths",
                 "run",
+                "storage_observation",
                 "turn",
                 "worker",
                 "workspace",
@@ -284,19 +294,23 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "orchestration",
             &[
+                "artifact",
                 "audit",
                 "controller",
                 "darwin",
                 "domain",
                 "engagement",
                 "jcs",
+                "ledger_generation",
                 "machine",
+                "maintenance",
                 "markdown_policy",
                 "primary_tool",
                 "run",
                 "semantic",
                 "session_policy",
                 "specialist_policy",
+                "storage_observation",
                 "workspace",
             ][..],
         ),
@@ -400,6 +414,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "global_runtime",
                 "instructions",
                 "jcs",
+                "ledger",
+                "ledger_generation",
                 "machine",
                 "markdown_policy",
                 "projection",
@@ -560,6 +576,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "worker",
             &[
                 "app_server",
+                "artifact",
                 "audit",
                 "codex_socket",
                 "conformance",
@@ -641,7 +658,6 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "gateway_event",
                 "gateway_observation",
                 "gateway_projection",
-                "global_profile",
                 "jcs",
                 "ledger",
                 "machine",
@@ -713,6 +729,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "machine",
                 "orchestration",
                 "snapshot",
+                "workspace",
             ][..],
         ),
         (
@@ -748,6 +765,18 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "session_policy",
             &["machine", "markdown_policy", "run", "specialist_policy"][..],
+        ),
+        (
+            "storage_observation",
+            &[
+                "darwin",
+                "jcs",
+                "ledger",
+                "ledger_generation",
+                "machine",
+                "run",
+                "workspace",
+            ][..],
         ),
     ]);
 
@@ -825,6 +854,8 @@ fn integration_tests_do_not_cross_the_external_system_boundary() {
             "tests/gateway_configuration_native.rs",
             "tests/gateway_interaction_native.rs",
             "tests/support/gateway_native.rs",
+            "tests/support/observation_cases.rs",
+            "tests/support/result_content_cases.rs",
         ]
         .iter()
         .any(|native| relative == Path::new(native))
@@ -976,6 +1007,28 @@ fn every_native_gateway_test_has_exactly_one_e2e_wrapper_reference() {
         let source = fs::read_to_string(root.join("tests").join(format!("{target}.rs"))).unwrap();
         for test in native_test_functions(&source) {
             assert!(declared.insert(format!("{target}::{test}")));
+        }
+    }
+    for (module, file) in [
+        ("observation_campaign", "support/observation_cases.rs"),
+        ("result_content_cli", "support/result_content_cases.rs"),
+    ] {
+        let source = fs::read_to_string(root.join("tests").join(file)).unwrap();
+        for test in native_test_functions(&source) {
+            // Long campaigns are explicit; the isolated child is invoked by a parent.
+            if module == "observation_campaign"
+                && [
+                    "component_observation_campaign",
+                    "baseline_public_gateway_latency",
+                    "eight_task_wait_component",
+                    "warm_read_component",
+                    "isolated_campaign_child",
+                ]
+                .contains(&test.as_str())
+            {
+                continue;
+            }
+            assert!(declared.insert(format!("gateway_semantic_native::{module}::{test}")));
         }
     }
 
