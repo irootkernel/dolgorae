@@ -22,7 +22,7 @@ boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. EPIC-018 is COMPLETE after successor requirements, checked contracts
-and qualified H1 validation. EPIC-019 is ACTIVE; EPIC-020, EPIC-009, EPIC-021, and EPIC-022 remain
+and qualified H1 validation. EPIC-019 is COMPLETE; EPIC-020, EPIC-009, EPIC-021, and EPIC-022 remain
 PLANNED for v0.1.4, in that execution order. TASK-067 is COMPLETE;
 TASK-068 through TASK-075 are COMPLETE;
 TASK-076 through TASK-089 remain PLANNED. TASK-027 retains its identity as EPIC-009's
@@ -2386,9 +2386,15 @@ Epic acceptance: TASK-067 and TASK-068 pass. Both mandatory host routes have pre
 
 ## EPIC-019: Durable Control, Storage, and Observation Corrections
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+Canonical Outcomes: [Gate A acceptance](../specs/dolgorae-v014-gate-a-acceptance.md),
+[durable Submit and operation lookup](../specs/dolgorae-v014-durable-operations.md),
+[retained Close and build recovery](../specs/dolgorae-v014-close-recovery.md),
+[ledger capacity and maintenance](../specs/dolgorae-v014-ledger-maintenance.md),
+[Profile maintenance and cleanup](../specs/dolgorae-v014-profile-maintenance.md),
+[worker authority and failure containment](../specs/README.md#spec-007-access-and-concurrency),
+and [observation, wait and result storage](../specs/dolgorae-v014-observation-runtime.md).
 
 Goal: Accept the completed Gul contract/foundation Epic and record Gate A, then correct control/storage failures and observation costs while preserving authority and process proof.
 
