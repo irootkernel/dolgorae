@@ -22,10 +22,14 @@ boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. EPIC-018 is COMPLETE after successor requirements, checked contracts
-and qualified H1 validation. EPIC-019 is COMPLETE; EPIC-020, EPIC-009, EPIC-021, and EPIC-022 remain
-PLANNED for v0.1.4, in that execution order. TASK-067 is COMPLETE;
+and qualified H1 validation. EPIC-019 is COMPLETE; EPIC-020 remains PLANNED in this planning snapshot.
+Its partial uncommitted TASK-076 implementation is preserved and paused.
+EPIC-023 and TASK-090 through TASK-092 are PLANNED before EPIC-020 resumes.
+EPIC-009, EPIC-021, and EPIC-022 remain PLANNED for v0.1.4, in that execution
+order. TASK-067 is COMPLETE;
 TASK-068 through TASK-075 are COMPLETE;
-TASK-076 through TASK-089 remain PLANNED. TASK-027 retains its identity as EPIC-009's
+TASK-076 through TASK-089 remain PLANNED.
+TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
 [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
@@ -140,6 +144,12 @@ The [dossier dependency graph](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md#e
 defines Gates A through D. EPIC-018 closes without waiting for Gul. Gate A is
 recorded by TASK-069 from completed H2, before provider implementation.
 
+EPIC-023 adds a bounded contract exchange within Phase 3: corrected H1, Gul's
+completed package-adoption unit and delta H2, then independent Gate A delta
+acceptance before EPIC-020 resumes. The original H1/H2 and Gate A keep their
+exact accepted inputs. E16 still waits for complete H3. This registration
+activates no correction Task and changes no checked contract or runtime.
+
 The [three-consumer acceptance matrix](../specs/dolgorae-consumer-acceptance-v014.md)
 requires current Aquarium, Podway and Gul contracts, named external owners and
 accepted work plans before H1 publication. Mandatory host feasibility is
@@ -160,7 +170,7 @@ and affected requalification. Only existing explicitly permitted QA-neutral
 metadata exceptions apply. Neither product may be published before Gate D.
 Separate release workflows and authorization own publication.
 
-The shared dossier remains linked until the last of its six consumer Epics
+The shared dossier remains linked until the last of its seven consumer Epics
 closes. Earlier closeouts promote their own durable outcomes and replace only
 their own Detailed SOT link. Implementation, candidate qualification,
 publication and production installation remain separate facts.
@@ -2494,6 +2504,101 @@ Handoff: Measured performance, bounded read/wait behavior and explicit result-re
 
 Epic acceptance: TASK-069 accepts completed H2 and records Gate A; TASK-070 through TASK-075's correction cases and repository gates pass. Capacity, unknown effects and cleanup remain distinguishable; performance evidence never substitutes for current authority.
 
+## EPIC-023: Release-Proof Contract Correction and Consumer Reacceptance
+
+Status: `PLANNED`
+
+Detailed SOT: [Release-proof correction](../todo/TODO-DOLGORAE-RELEASE-PROOF-CORRECTION.md),
+with the shared [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
+
+Goal: Publish and independently accept a corrected H1 that can represent genuine
+S member release without changing keyed receipts or consumer outer interfaces.
+
+Delivery order: Phase 3, after completed EPIC-019 and before EPIC-020 resumes.
+Assigned release: v0.1.4. Execute TASK-090, TASK-091 and TASK-092 sequentially.
+
+Entry handoff: the preserved uncommitted EPIC-020/TASK-076 work may still own
+the working roadmap's active slot. Before activating this Epic, stop and confirm
+all former writing activity, retain that partial implementation, and, if those
+items remain active, return them to `PLANNED` with their resumable work recorded.
+This explicitly scheduled prerequisite
+handoff releases the slot; it does not complete or discard TASK-076, introduce a
+second active Task, or bypass a `BLOCKED` Task. Planning registration alone does
+not perform that handoff. Do not start TASK-092 while Gul's correction Task is
+active or its delta H2 is unavailable.
+
+### TASK-090: Define the Corrected Release-Proof Contract
+
+Status: `PLANNED`
+
+Depends on: TASK-075 and the entry handoff above.
+
+Outcome: Establish a separate canonical correction specification and accepted
+design decision for S completion proof, retained release state, settlement,
+authority/recovery and individual persistence generations. Freeze compatibility,
+package and consumer responsibilities. Keep original selected H1 bytes unchanged
+during this design Task; TASK-091 synchronizes the changed selected artifacts.
+
+Verification: Independently review both external and managed branches,
+Controller handoff, serialized post-result observation, revision domains,
+Profile retirement and legacy readers. Demonstrate that K receipts and public-v2,
+Machine/facade outer generations and Podway fields retain their agreed scope.
+Run applicable documentation and unchanged-package checks. No runtime proof or
+consumer acceptance is claimed.
+
+Handoff: Exact contract correction and compatibility rules for TASK-091, plus
+runtime requirements assigned to TASK-076/077 and later qualification owners.
+
+### TASK-091: Build and Verify the Corrected H1 Package
+
+Status: `PLANNED`
+
+Depends on: TASK-090.
+
+Outcome: Synchronize affected owning documents, closed schemas, persisted-record
+selection, positive/negative fixtures and executable contract checks, then
+regenerate a new immutable H1 lock and reproducible committed package. Preserve
+original H1 reproduction and exact external source pins. Supply qualified
+validation dependencies and fixture inventory for Gul's contract-only check.
+
+Verification: Exercise full external/managed idle and released JSON examples,
+null/non-null and wrong-kind/scope branches, K-receipt substitution and unchanged
+K regressions. Compare original/corrected inventories, descriptor/admission,
+mutation policies, all eight digest domains and generated outputs. Run applicable
+generator, H1 and repository gates without implementing release runtime or
+changing host behavior. Changed native feasibility inputs require explicit
+impact assessment and separately authorized requalification.
+
+Handoff: Exact new source commit, lock checksum and reproducible package for
+Gul's separately authorized correction unit. Broker transmission requires its
+own explicit scope. Complete this Task before waiting for Gul; no Dolgorae Task
+remains active during Gul's package adoption.
+
+### TASK-092: Independently Accept the Corrected Gul Contract Handoff
+
+Status: `PLANNED`
+
+Depends on: TASK-091 and the completed Gul correction unit's delta H2.
+
+Outcome: Independently qualify Gul's exact corrected H1 selection, artifact
+classification, contract/foundation checks and delta H2. Record a Gate A addendum
+for those exact inputs, including disposition of foundation changes after the
+original accepted `33a0910` baseline. Preserve completed TASK-068/069 and E15
+history without assigning their acceptance to new bytes.
+
+Verification: Verify the completed consumer work unit, committed candidate,
+package and generated identities, actual schema-fixture commands/results,
+dependency pins and affected foundation regressions. Distinguish contract-only
+checks from future runtime/host/account acceptance. A notice, checksum-only check
+or incomplete consumer Task is insufficient.
+
+Handoff: Accepted corrected contract selection for TASK-076 resumption and later
+H3. TASK-087 consumes this prior acceptance; it does not postpone or own it.
+
+Epic acceptance: The corrected H1 is reproducible and Gul's completed delta H2
+has independent Gate A delta acceptance. No Rust/DB release implementation,
+production activation or final three-consumer runtime acceptance is inferred.
+
 ## EPIC-020: Delegation Identity, Access, and Approval Integration
 
 Status: `PLANNED`
@@ -2502,7 +2607,9 @@ Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIG
 
 Goal: Expose accepted delegation evidence and modern public Runs with bounded execution and Controller-owned interactions.
 
-Delivery order: Phase 3, after completed EPIC-019 and before EPIC-009. Assigned release: v0.1.4.
+Delivery order: Phase 3, after completed EPIC-019 and EPIC-023, and before EPIC-009.
+Assigned release: v0.1.4. Preserve partial TASK-076 work across the corrective
+entry handoff; resume only against TASK-092's accepted contract selection.
 Execute the member Tasks in the order below. The dossier maps their requirement
 owners, feedback, external boundaries and acceptance cases; the roadmap owns
 membership, ordering and status.
@@ -2514,6 +2621,10 @@ Status: `PLANNED`
 Depends on: TASK-075.
 
 Outcome: Expose exact Role/configuration/task/result identities and read-by-key recovery. Accept inline Role bodies with dependencies and explicitly selected project guidance under captured-source limits. Define round accounting and membership-proven disposition; preserve task/Role separation and project discovery suppression.
+
+Resumption prerequisite: completed TASK-092/EPIC-023. Implement the shared proof,
+retained state, database migration and both durable release owners here; the
+contract correction Epic does not supply that runtime implementation.
 
 Verification: Changed same-name Role, dependency and configuration drift; exact accepted task versus envelope; complete result versus summary; lost acknowledgement; captured bytes survive source edits; ambient guidance remains separately disclosed.
 

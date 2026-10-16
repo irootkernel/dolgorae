@@ -23,7 +23,10 @@ machine-output contracts from the product specification. The
 [v0.1.4 consumer acceptance specification](specs/dolgorae-consumer-acceptance-v014.md)
 owns mandatory Aquarium, Podway and Gul requirements-to-evidence mappings;
 the [alignment dossier](todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md) supplies
-the five-phase whole-Epic execution graph and four handoffs. Neither establishes
+the five-phase whole-Epic execution graph and four normal handoffs. The
+[release-proof correction dossier](todo/TODO-DOLGORAE-RELEASE-PROOF-CORRECTION.md)
+defines EPIC-023's bounded corrected-H1/delta-H2/Gate-A exchange before
+EPIC-020 resumes. These planning documents establish no
 implemented capabilities or runtime acceptance. The
 [Gate A acceptance](specs/dolgorae-v014-gate-a-acceptance.md) records the later
 independent H2 contract/foundation acceptance and preserves its runtime limits. The

@@ -4,9 +4,9 @@
 
 | Field | Value |
 | --- | --- |
-| Role | Shared execution dossier for six adopted roadmap Epics |
+| Role | Shared execution dossier for seven adopted roadmap Epics |
 | Adopted | 2026-10-10, under Master's approved documentation plan |
-| Consumers | EPIC-018, EPIC-019, EPIC-020, EPIC-009, EPIC-021, EPIC-022 |
+| Consumers | EPIC-018, EPIC-019, EPIC-023, EPIC-020, EPIC-009, EPIC-021, EPIC-022 |
 | Release pair | Dolgorae v0.1.4 and Gul v0.1.0 |
 | Lifecycle owner | [Roadmap](../roadmap/README.md); consult it for current execution status |
 | Starting provider revision | c1edeb17b9046a75bd8d31f67e9de934d89ed05a |
@@ -41,6 +41,14 @@ complete provider implementation. Gul closes its product/qualification Epics
 against the fixed candidate before Dolgorae independently qualifies the final
 combination. Neither release publishes before all three consumers and both
 products' final QA pass. Provider-only tests cannot establish actual Gul acceptance.
+
+EPIC-023 adds the planned contract-correction exchange within Phase 3, before
+EPIC-020 resumes. Its [dedicated dossier](TODO-DOLGORAE-RELEASE-PROOF-CORRECTION.md)
+owns the correction detail. TASK-090 defines the corrected S release-proof
+contract, TASK-091 delivers a qualified new H1, and TASK-092 independently
+accepts Gul's completed adoption delta H2 and records the Gate A delta. Keep
+original package/history and later runtime qualification distinct. This
+registration changes no checked contract or runtime and activates no Task.
 
 Dolgorae remains the durable operational owner of Runs, authorization,
 accepted instructions/tasks, execution identity, results and recovery. The
@@ -176,7 +184,7 @@ the approved release scope. No Task is marked BLOCKED or complete by this plan.
 | --- | --- | --- | --- |
 | 1: Dolgorae contract | EPIC-018: TASK-067, TASK-068 | After completed EPIC-017; qualify both required host mechanisms, pin all consumer requirements/owners and publish checked package. Close without Gul's subsequent Epic or TASK-069 | H1: qualified immutable contract package and acceptance matrix to Gul |
 | 2: Gul foundation | Gul E15 contract/foundation Epic containing permanent E15-T21 and required closeout | Consume H1; complete pin validation, corrections, scenario ownership and scoped foundation checks. Neither entry nor closeout requires TASK-069 | H2: completed consumer Epic result, validated pin and evidence to Dolgorae |
-| 3: Dolgorae implementation | EPIC-019: TASK-069, TASK-070..075; EPIC-020: TASK-076..079; EPIC-009: TASK-080..083, TASK-027; EPIC-021: TASK-084..087 | TASK-069 consumes H2/Gate A. Execute and close the four separate Epics in order. Required Aquarium/Podway implementation and runtime qualification are explicit prerequisites of their named Tasks; TASK-087 qualifies the post-cleanup intended-version artifact | H3: fixed runnable Dolgorae candidate and applicable consumer evidence to Gul |
+| 3: Dolgorae implementation | EPIC-019: TASK-069, TASK-070..075; EPIC-023: TASK-090..092; EPIC-020: TASK-076..079; EPIC-009: TASK-080..083, TASK-027; EPIC-021: TASK-084..087 | Original TASK-069 consumes H2/Gate A. Before EPIC-020 resumes, EPIC-023 completes corrected H1, Gul adoption/delta H2 and independent Gate A delta. Execute the remaining provider Epics in order. Required Aquarium/Podway runtime qualification remains with its named Tasks; TASK-087 qualifies the post-cleanup artifact | H3: fixed runnable Dolgorae candidate and applicable consumer evidence to Gul |
 | 4: Gul product | Gul E16 product/qualification Epic: E16-T1..T16 inherit the complete historical E15-T5..T20 scope | Use completed provider capabilities and H3 throughout; build intended Gul v0.1.0 artifact, run own complete QA/native campaign, real-account smoke, devices/soak and final recovery rehearsal. Close on own complete acceptance without TASK-088/089 | H4: completed Gul artifact and reproducible qualification evidence to Dolgorae |
 | 5: Dolgorae final | EPIC-022: TASK-088, TASK-089 | Consume H4; independently reproduce required actual-client/provider cases and verify/revalidate Aquarium/Podway evidence against unchanged H3. Consume the complete accepted three-consumer matrix, repository gates/final QA and exact provenance | Gate D handoff to separate release workflows; no automatic publication |
 
@@ -184,7 +192,10 @@ the approved release scope. No Task is marked BLOCKED or complete by this plan.
 flowchart LR
   P1["Phase 1: EPIC-018 / 067, 068"] -->|H1| P2["Phase 2: Gul contract Epic"]
   P2 -->|H2| D19["Phase 3: EPIC-019 / 069 first"]
-  D19 --> D20["EPIC-020"] --> D9["EPIC-009"] --> D21["EPIC-021 / final candidate"]
+  D19 --> C23["EPIC-023 / 090, 091"]
+  C23 -->|Corrected H1| GC["Gul correction unit / delta H2"]
+  GC --> A23["TASK-092 / independent Gate A delta"]
+  A23 --> D20["EPIC-020 resumes"] --> D9["EPIC-009"] --> D21["EPIC-021 / final candidate"]
   D21 -->|H3| P4["Phase 4: Gul product Epics"]
   P4 -->|H4| P5["Phase 5: EPIC-022 / 088, 089"]
   P5 --> R["Separate release workflows after Gate D"]
@@ -194,12 +205,20 @@ flowchart LR
   C3["Final-artifact evidence applicability"] -.-> P5
 ```
 
-Each epic-handler receives one Epic and retains the shared dossier. Dolgorae
+Each Epic execution receives one Epic and retains the shared dossier. Dolgorae
 keeps one active Epic and one active Task. A blocked prerequisite occupies its
 normal slot; later work cannot bypass it. Whole-Epic closeout, supported runtime
 acceptance, Git/publication and consumer activation remain separate authorities.
 
-The four handoffs count Dolgorae/Gul switching only. Necessary Aquarium/Podway
+The four normal handoffs count Dolgorae/Gul switching only; EPIC-023's bounded
+contract exchange is an explicit exception. Gul registers and authorizes its
+correction work before repinning, completes its own checks and delta H2, then
+returns control. TASK-091 completes before waiting; TASK-092 starts after that
+completed consumer handoff. No Gul Task remains active while awaiting producer
+acceptance. Gul E16 still waits for complete H3. The roadmap owns the explicit
+active-slot handoff that preserves unfinished TASK-076 work at correction entry.
+
+Necessary Aquarium/Podway
 owner work is explicitly scheduled by TASK-067 in the
 [external prerequisite register](../specs/dolgorae-consumer-acceptance-v014.md#external-implementation-and-decisions).
 Those teams own their implementation and qualification. The five phases do not
@@ -211,6 +230,7 @@ make that work disappear or permit undocumented extra consumer dependencies.
 | --- | --- | --- |
 | H1: Phase 1 to 2 | Canonical requirements; exact contract-source/schema/descriptor revisions and digests, generated surfaces, policies/error/effect/bounds, known answers and immutable lock; two-host feasibility result and tested host/adapter versions; immutable three-consumer requirements matrix, named owners/scenarios and accepted external work plans; later runtime-record contents/owners/handoffs, with future final implementation/artifact pins explicitly pending | Gul validates the package and closes its contract/foundation Epic; Dolgorae EPIC-018 already closed. H1 requires no final artifact scheduled for later phases |
 | H2: Phase 2 to 3 | Consumer Epic closeout, exact validated package pin, completed T21 corrections/foundation checks, scenario/harness ownership, retained runtime obligations assigned to product Epics | TASK-069 validates complete output and records Gate A; partial active-Task acknowledgement is insufficient |
+| Corrected H1 / delta H2 within Phase 3 | TASK-091's new committed package/lock, unchanged external source pins, classified artifact/generator differences and qualified JSON fixtures/dependencies; completed Gul correction unit, exact selected H1 and validated Gul candidate, schema/foundation checks and later foundation-change disposition | TASK-092 independently records Gate A delta before EPIC-020 resumes; old TASK-068/069 and E15 acceptance is not rewritten |
 | H3: Phase 3 to 4 | Intended v0.1.4 artifact prepared after relevant packaging; source revision and binary/package checksums; actual Aquarium/Podway consumer and adapter implementation revisions/artifact identities used for qualification; immutable H1 contract/manifest digests, applicable host/runtime/adapter pins and relevant configuration; runnable setup/harness instructions; required repository gate and applicable Aquarium/Podway actual-path evidence after TASK-087 | Gul admits this exact isolated candidate for all product Epics; no unqualified rebuild or silent runtime/configuration change |
 | H4: Phase 4 to 5 | Final Gul implementation revision and intended v0.1.0 artifact/package checksums bound to unchanged H3 and immutable H1; product Epic closeout and own gates/QA; reproducible actual-client native faults/load/latency/recovery, separately authorized real-account functionality, devices/soak and final packaging/recovery results | TASK-088 independently verifies H3/H4 against H1 and reproduces necessary cases; TASK-089 consumes all accepted consumer rows and final provenance |
 

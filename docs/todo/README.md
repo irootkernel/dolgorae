@@ -53,7 +53,11 @@ replaces the roadmap link with `Canonical Outcomes`.
 ### v0.1.4 release alignment
 
 - Dossier: [Dolgorae v0.1.4 release alignment](TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
-- Consumers: EPIC-018, EPIC-019, EPIC-020, EPIC-009, EPIC-021 and EPIC-022.
+- Correction dossier: [Delegation release proof](TODO-DOLGORAE-RELEASE-PROOF-CORRECTION.md),
+  owned by PLANNED EPIC-023 and TASK-090..092. It preserves original H1 and
+  requires a new package plus Gul delta H2 and independent Gate A before
+  EPIC-020 resumes; runtime implementation remains in TASK-076/077.
+- Consumers: EPIC-018, EPIC-019, EPIC-023, EPIC-020, EPIC-009, EPIC-021 and EPIC-022.
 - Work: modern public/Gul contracts, reviewed corrections, durable delegation,
   complete internal collaboration, findings/groups, and mandatory Aquarium,
   Podway and Gul acceptance on the exact Dolgorae v0.1.4 artifact. The
@@ -61,7 +65,8 @@ replaces the roadmap link with `Canonical Outcomes`.
   evidence and external prerequisites.
 - Execution: five phases and four Dolgorae/Gul whole-Epic handoffs. EPIC-018
   contains TASK-067/068; TASK-069 opens EPIC-019 after Gul contract Epic closeout.
-  Phase 3 closes EPIC-019/020/009/021 with a runnable candidate; Phase 4 closes
+  Phase 3 includes EPIC-023's bounded contract exchange before EPIC-020 resumes
+  and closes EPIC-019/023/020/009/021 with a runnable candidate; Phase 4 closes
   Gul product qualification; Phase 5 runs EPIC-022 independently.
 - Lifecycle: all new work remains PLANNED in the roadmap. Each consumer links
   the same dossier through Detailed SOT. Retain it through earlier closeouts until
