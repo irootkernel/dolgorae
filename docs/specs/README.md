@@ -46,6 +46,12 @@ The [retained Close and build recovery specification](dolgorae-v014-close-recove
 owns TASK-071's live close owner, resumed settlement and explicit build handoff.
 Later public-v2 activation and actual consumer qualification retain their owners.
 
+The [release-proof contract correction specification](dolgorae-v014-release-proof-correction.md)
+defines EPIC-023/TASK-090's state-based member release proof, retained release
+operation record, durable release admission and membership revision semantics,
+and Engagement store generation `6` erratum (with decision rationale in
+ADR-042) before TASK-091 rebuilds H1 and TASK-092 accepts Gul's delta H2.
+
 The [v0.1.4 successor requirements reconciliation](dolgorae-v014-successor-requirements.md)
 maps retained behavior, failure/recovery rules and adopted feedback to their
 acceptance owners. Its [method and digest contract](dolgorae-v014-method-and-digest-contract.md)

@@ -1,12 +1,17 @@
 # Delegation release proof correction
 
-Status: planning dossier for EPIC-023, with TASK-090 through TASK-092 `PLANNED`.
-Independent design review is complete. The
-[roadmap](../roadmap/README.md#epic-023-release-proof-contract-correction-and-consumer-reacceptance)
+Status: supplementary planning dossier for EPIC-023 (`EPIC-023` `ACTIVE`;
+`TASK-090` `COMPLETE`; `TASK-091` and `TASK-092` `PLANNED`). Adopted normative
+behavior is owned by the
+[release-proof contract correction specification](../specs/dolgorae-v014-release-proof-correction.md),
+and accepted decision rationale is recorded in
+[ADR-042](../architecture-decision-records/README.md#adr-042-replace-keyed-release-receipts-with-state-based-member-release-proofs).
+The [roadmap](../roadmap/README.md#epic-023-release-proof-contract-correction-and-consumer-reacceptance)
 owns registration, status and the active-slot handoff. This supplements the
 [v0.1.4 alignment dossier](TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
-Registration does not amend H1, accept a consumer package or complete a Task.
-EPIC-020 implementation is paused while this correction is decided.
+`TASK-090` contract adoption does not amend H1 bytes or accept a consumer
+package. EPIC-020 and TASK-076 remain parked at `PLANNED` with preserved
+partial uncommitted work until TASK-092 completes.
 
 ## Recommendation
 

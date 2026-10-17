@@ -2811,3 +2811,132 @@ Existing supported paths and their evidence keep their original scope.
   protected pre-dispatch binding and exact input match.
 - Treat hook success or a documentation promise as qualification: actual
   two-host admission, restart and loss tests remain mandatory.
+
+## ADR-042: Replace Keyed Release Receipts with State-Based Member Release Proofs
+
+Status: Accepted
+
+### Context
+
+In [`dolgorae-v014-identities-v1.schema.json`](../protocol/dolgorae-v014-identities-v1.schema.json),
+`$defs/disposition_proof.properties.release_receipt` requires
+`dolgorae.operation-receipt/v1` when `state` is `"released"`. That receipt
+schema admits only the 14 keyed (`K`) operations, whereas
+`release_external_specialist` and `release_specialist` are state-based (`S`)
+lifecycle operations without an `idempotency_key`. A real `S` member release
+cannot produce a `K` receipt, and substituting a hire, spawn, or assignment
+receipt satisfies the old schema without proving member release. In addition,
+`$defs/external_delegation_identity` and `$defs/managed_delegation_identity`
+reference shared `$defs/disposition_proof` without finite schema branches tying
+`worker_disposition` to `disposition_proof.state` or tying identity kind to
+`release_receipt` operation and scope kinds, and prior `v0.1.4` specifications
+left the revision domain of release `expected_revision` unspecified.
+
+Inspection of [`src/engagement.rs`](../../src/engagement.rs),
+[`src/orchestration.rs`](../../src/orchestration.rs), and
+[`src/semantic.rs`](../../src/semantic.rs) shows that the workspace Engagement
+database is at `schema_version = "5"` with orchestration extension
+`orchestration_schema_version = "3"`. In existing binaries,
+`EngagementStore::open_with_faults` first opens existing database files via
+`storage_observation::CheckedConnection::open(path, false)`, acquiring
+`database_admission`, opening SQLite with `SQLITE_OPEN_READ_WRITE`, and setting
+`PRAGMA foreign_keys = ON` and `PRAGMA synchronous = FULL` before comparing
+`metadata.schema_version` against `"5"`, and when `schema_version` is `"6"` it
+falls through directory/file `chmod`, `PRAGMA journal_mode = WAL`, and
+`CREATE TABLE IF NOT EXISTS` / `INSERT OR IGNORE` DDL before rejecting `"6"`
+with `ORCHESTRATION_SCHEMA_UNSUPPORTED`. While
+`EngagementStore::open_read_only` checks `schema_version` read-only against
+`"1"` through `"5"`, `OrchestrationStore::open_observer` opens read-only without
+validating either `schema_version` or `orchestration_schema_version` today. In
+addition, the current managed `release_specialist` adapter in
+[`src/semantic.rs`](../../src/semantic.rs) returns `Ok(())` when the Run
+projection is already `RunLifecycle::Closed` without verifying or completing
+global Profile membership retirement (`closed_membership_released` /
+`release_global_run_membership`).
+
+### Decision
+
+Adopt [EPIC-023](../roadmap/README.md#epic-023-release-proof-contract-correction-and-consumer-reacceptance)
+and the [release-proof contract correction specification](../specs/dolgorae-v014-release-proof-correction.md)
+before resuming `EPIC-020` / `TASK-076`. Keep `release_external_specialist` and
+`release_specialist` as `S` lifecycle operations and keep
+`dolgorae.operation-receipt/v1` closed at its 14 keyed operations.
+
+Replace `disposition_proof.release_receipt`'s non-null target with a closed
+`dolgorae.member-release-proof/v1` object backed by a durable
+`dolgorae.member-release-operation/v1` record in a new
+`member_release_operations` table of the workspace Engagement database. Advance
+the base Engagement database generation from `5` to `6` in an atomic SQLite
+migration that owns both `member_release_operations` and a durable monotonic
+membership revision counter keyed by `(workspace_ref, scope_kind, scope_ref)`
+(distinct from per-member revisions and generic `append_event` revisions, and
+never derived from `orchestrated_sessions.revision`), while keeping
+`orchestration_schema_version` at `3` unchanged. Clarify as a new normative
+clarification that release `expected_revision` checks that
+`(workspace_ref, scope_kind, scope_ref)` membership revision, persisted at
+durable release admission as `admitted_membership_revision` before any
+settlement effect under the same owning serialization boundary as member task
+assignment, fencing additional assignments to releasing or released members
+through atomic terminal commit. Clarify that `facade-v5` `member.revision`,
+`public-v2` `DelegationIdentity.source_revision`, and
+`disposition_proof.membership_revision` carry this scoped membership revision
+domain while `OrchestratedSessionProjection.source_revision` and
+`ListOrchestratedSessionResultsResponse.source_revision` remain aggregate. Keep
+membership and workload revision domains strictly separate.
+
+Require finite JSON Schema branches in `TASK-091` binding `"idle"` to `null`
+proof, `"released"` to non-null `dolgorae.member-release-proof/v1`, external
+identities to `"release_external_specialist"` + `"external_engagement"`, and
+managed identities to `"release_specialist"` + `"orchestrated_session"`. Keep
+the 28-operation `successor-facade-v5-methods.valid.json` suite at 28 cases
+(repairing its two pre-existing managed receipt namespace `scope_kind`/`scope_ref`
+mismatches in `TASK-091` under the existing closed receipt contract) and add a
+separate bounded release-proof fixture inventory. Require `RunLifecycle::Closed`
+and verified settlement of that Run's exact owned runtime generation (including
+termination and cleanup of its Worker, any Run-owned Dedicated Lane Server
+generation and descendants, owned Turn and background execution activity, and
+its private connection to a shared Profile Server) before verified global
+Profile membership retirement (`disposition = "released"`) and atomic terminal
+workspace commit on both external and managed release paths, including retry or
+recovery when the Run is already `Closed`, without terminating, restarting, or
+replacing shared Profile Servers. Require a fresh disposition observation under
+owning serialization after final collection of the already committed
+`complete_result` and `result_digest`
+(`observed_after_result_digest == result_digest`), and require `TASK-076` to add
+pre-effect version checks to all supported writable and read-only openers
+(including `OrchestrationStore::open_observer`).
+
+### Consequences
+
+`TASK-090` freezes the contract correction without modifying original `H1`
+artifacts. `TASK-091` updates the owning specifications, schemas, fixtures,
+validators, and lock to publish a reproducible corrected `H1` package while
+preserving original `H1` (`55ba623fce231192226d29ba718153e18b6644a3`)
+reproduction and the 11 external consumer source pins. `TASK-092` independently
+qualifies Gul's delta `H2` and records a `Gate A` addendum before `TASK-076`
+resumes runtime implementation (including synchronizing the preserved
+uncommitted `src/delegation_identity.rs`).
+Outer `public-v2`, `Machine v5`, `facade-v5`, Podway mapping contracts, and all
+eight digest domains remain unchanged, while the nested `release_receipt` schema
+change is explicitly selected by package lock. Downgrading a migrated generation
+`6` workspace database to pre-`TASK-076` binaries is unsupported.
+
+### Rejected alternatives
+
+- Reclassify member release as a keyed (`K`) operation or add release kinds to
+  `dolgorae.operation-receipt/v1`: release settles current membership and Run
+  state without a caller idempotency key, and altering `K` receipts widens the
+  blast radius across unrelated keyed operations and `public-v2`.
+- Accept a hire, spawn, or task assignment receipt as `release_receipt`, or make
+  `release_receipt` optional when `released`: neither proves that release
+  settled or that global Profile membership was retired.
+- Reuse `dolgorae.lifecycle-operation/v1` for member release: Run close state
+  lacks `scope_kind`, `scope_ref`, `member_ref`, initiating Controller identity,
+  and membership/workload completion revisions.
+- Collapse membership, workload, and aggregate revisions into one counter or
+  assert `terminal_membership_revision == admitted_membership_revision + 1`:
+  concurrent activity by other members in the same scope can advance the
+  membership revision before a member's release finishes settling.
+- Mutate `H1` in place under the historical `TASK-068` / `TASK-069` acceptance:
+  changed schema and lock bytes require a distinct reproducible package and a
+  delta `H2` / `Gate A` addendum.
