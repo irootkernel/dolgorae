@@ -180,6 +180,15 @@ struct ScheduledCommit<C, F> {
     faults: Arc<F>,
 }
 
+struct LedgerAnchorLock(File);
+
+impl Drop for LedgerAnchorLock {
+    fn drop(&mut self) {
+        // Closing alone leaves the lock held if a concurrent fork retained a descriptor.
+        let _ = DarwinSystem.unlock(&self.0);
+    }
+}
+
 pub struct Ledger<C: LedgerClock = SystemLedgerClock, F: FaultInjector = NoFaults> {
     run_id: Uuid,
     root: PathBuf,
@@ -189,7 +198,7 @@ pub struct Ledger<C: LedgerClock = SystemLedgerClock, F: FaultInjector = NoFault
     records: Vec<AuditRecord>,
     ledger_bytes: u64,
     generation_records: usize,
-    _anchor_file: File,
+    _anchor_file: LedgerAnchorLock,
     _workspace_lease: Option<crate::ledger_generation::WorkspaceLease>,
     durable_len: usize,
     projection: RunStateProjection,
@@ -368,7 +377,7 @@ impl<C: LedgerClock, F: FaultInjector> Drop for Ledger<C, F> {
             }
         }
         if let Some(scheduler) = self.scheduler.take() {
-            // Its duplicated descriptor must release the writer lock before reopen.
+            // Stop pending commits before the anchor guard releases writer ownership.
             let _ = scheduler.join();
         }
     }
@@ -416,6 +425,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
                     io_at("lock audit ledger", &audit_path, error)
                 }
             })?;
+        let anchor_file = LedgerAnchorLock(anchor_file);
         let replay_started = clock.monotonic_millis();
         let mut pin = crate::ledger_generation::pin(&root, run_id)?;
         let mut records = Vec::new();
@@ -2959,6 +2969,48 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_ledger_releases_anchor_while_duplicated_descriptor_survives() {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        let root = std::env::temp_dir().join(format!("dolgorae-ledger-anchor-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join("recovery"))
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("audit.jsonl"))
+            .unwrap();
+        let run_id = Uuid::now_v7();
+        let ledger = Ledger::open(&root, run_id).unwrap();
+        // A fork before exec retains the same open file description as this dup.
+        let inherited_anchor = ledger._anchor_file.0.try_clone().unwrap();
+        assert!(matches!(
+            Ledger::open(&root, run_id),
+            Err(LedgerError::WriterBusy(_))
+        ));
+        drop(ledger);
+
+        let reopened = Ledger::open(&root, run_id)
+            .expect("dropped ledger must release its anchor despite the surviving duplicate");
+        assert!(matches!(
+            Ledger::open(&root, run_id),
+            Err(LedgerError::WriterBusy(_))
+        ));
+        drop(inherited_anchor);
+        assert!(matches!(
+            Ledger::open(&root, run_id),
+            Err(LedgerError::WriterBusy(_))
+        ));
+        drop(reopened);
+        assert!(Ledger::open(&root, run_id).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn shared_display_budget_evicts_idle_ownership_and_preserves_existing_readers() {

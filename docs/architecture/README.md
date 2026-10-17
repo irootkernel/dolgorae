@@ -2805,7 +2805,10 @@ OS-crash durability after these barriers, not power-loss durability.
 
 The writable audit handle also owns a nonblocking exclusive BSD `flock(2)` for
 its lifetime, so a second local writer fails before it can replay, repair, or
-append a competing successor. Replay is a pure projection operation separated
+append a competing successor. The audit anchor lock is explicitly released after
+the final pending flush and scheduler join, even if forked or duplicated
+descriptors survive. A guard acquired immediately after flock also releases it
+on later constructor errors. Replay is a pure projection operation separated
 from file durability and consumes at most 512 MiB, 1,000,000 records, and the
 normative five-minute worker budget. Append advances a checked projection with
 only the candidate record, rejects the first byte or record that would cross
