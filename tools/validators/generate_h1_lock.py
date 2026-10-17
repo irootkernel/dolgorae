@@ -35,6 +35,8 @@ def inventory():
         "docs/specs/dolgorae-v014-contract-coordination.md",
         "docs/specs/dolgorae-v014-host-contract-qualification.md",
         "docs/specs/dolgorae-v014-h1-package.md",
+        "docs/specs/dolgorae-v014-release-proof-correction.md",
+        "docs/architecture-decision-records/README.md",
         "examples/host_invocation_contract.rs",
         "tests/e2e/run_native_host_invocation_fixture.py",
         "tests/e2e/host_invocation_fault_proxy.py",
@@ -50,6 +52,8 @@ def inventory():
         "tools/validators/generate_h1_lock.py",
         "tools/validators/validate_h1_contract.py",
         "tools/validators/package_h1.py",
+        "tests/e2e/test_h1_package.py",
+        "tests/e2e/test_h1_selected_registry.py",
     ])
     # Include every checked schema reached by the selected successor shapes.
     registry = {}
@@ -92,7 +96,8 @@ def main():
     state = json.loads((PROTOCOL / "dolgorae-successor-state-v1.schema.json").read_text())
     value = {
         "contract_id": "dolgorae.h1-contract-lock/v1", "schema_version": 1,
-        "producer": {"epic": "EPIC-018", "task": "TASK-068", "requirements_commit": "063d96c97f633cc6cbb611319c19da5a4fbacb82"},
+        "producer": {"epic": "EPIC-023", "task": "TASK-091", "requirements_commit": "664c6648ec5c69f78733a58d5c46e88b335459ba"},
+        "ancestry": {"original_h1_commit": "55ba623fce231192226d29ba718153e18b6644a3", "original_h1_lock_sha256": "4af0ff5ee310d25564541004a4a45ffd600e4a1ca1c0bacfa986ba8cac80f049", "correction_design_commit": "664c6648ec5c69f78733a58d5c46e88b335459ba"},
         "package_generation": "H1/public-v2/gul-consumer-v2/machine-v5/facade-v5",
         "identity": "raw SHA-256 of this lock plus every enumerated artifact; containing completion commit supplies Git revision",
         "toolchain": {"rust": "1.97.1", "buf": "1.69.0", "go": "1.26.6", "protoc": "36.2", "protoc_gen_go": "1.36.11", "protoc_gen_go_grpc": "1.6.1"},
@@ -100,13 +105,15 @@ def main():
         "persisted_generations": state["x-generationSelection"],
         "artifacts": artifacts, "frozen_v1_artifacts": frozen_artifacts,
         "selected_external_sources": sources,
-        "external_selection": {"authority": "Master-approved source and responsibility decision", "consumer_source_change_identified": False, "prepared_podway_is_released_support": False,
+        "external_selection": {"authority": "Master-approved source and responsibility decision", "historical_external_source_pins": "preserved; corrected Gul package adoption and affected verification pending", "prepared_podway_is_released_support": False,
             "provider_implementation_owners": ["TASK-076", "TASK-077", "TASK-086"], "independent_final_acceptance": "TASK-088", "release_binding": "TASK-089"},
         "native_feasibility": {"qualification": "docs/specs/dolgorae-v014-host-contract-qualification.md", "scope": "account-free actual native host contract prototype, not production facade/consumer acceptance", "hosts": [
             {"product": "Codex CLI", "version": "0.160.0", "sha256": "112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8adac6c4dbf1b4b"},
             {"product": "Claude Code", "version": "2.1.295", "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"}],
             "tested_prototype_sha256": "d95cee443673088a75e57ba4ef67c0c245a435bc065ad0fb4473325d2f94399c", "historical_0_149_mcp_unavailable": "unchanged"},
-        "later_handoffs": {"H2": {"producer": "Gul E15 including E15-T21 and whole-Epic closeout", "consumer": "TASK-069/EPIC-019", "status": "not_started"},
+        "later_handoffs": {"H2": {
+            "historical": {"producer": "Gul E15 including E15-T21 and whole-Epic closeout", "consumer": "TASK-069/EPIC-019", "status": "accepted_for_original_package", "package_commit": "55ba623fce231192226d29ba718153e18b6644a3"},
+            "corrected_delta": {"producer": "Gul separately authorized correction unit", "consumer": "TASK-092/EPIC-023", "status": "pending", "package_selection": "this lock and its containing completion commit"}},
             "H3": {"producer": "TASK-087/EPIC-021", "consumer": "Gul E16", "status": "future_runtime_qualification"},
             "H4": {"producer": "Gul E16 including E16-T16 and whole-Epic closeout", "consumer": "TASK-088/089", "status": "future_final_campaign"}},
         "runtime_availability": "unavailable_until_explicit_negotiated_implementation", "release_acceptance": False}

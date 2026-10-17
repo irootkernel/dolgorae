@@ -110,6 +110,20 @@ def repaired_negative_example(
     example_name: str, instance: dict[str, object]
 ) -> dict[str, object]:
     repaired = copy.deepcopy(instance)
+    if example_name.startswith(("v014-identity-release-", "v014-state-release-", "successor-facade-v5-release-", "successor-machine-v5-release-")):
+        inventory = json.loads((PROTOCOL / "dolgorae-v014-release-proof-fixtures-v1.json").read_text())
+        matches = [case for case in inventory["cases"] if Path(case["path"]).name == example_name and case["valid"] is False]
+        if len(matches) != 1:
+            raise ValueError(f"missing unique release repair for {example_name}")
+        repair = matches[0]["repair"]
+        parent = repaired
+        for component in repair["path"][:-1]:
+            parent = parent[component]
+        if repair.get("remove"):
+            del parent[repair["path"][-1]]
+        else:
+            parent[repair["path"][-1]] = repair["value"]
+        return repaired
     if example_name == "successor-machine-v5-normalized.invalid-protected-answer.json":
         del repaired["cases"][4]["input"]["protected_answer_sha256"]
         return repaired
@@ -596,6 +610,9 @@ def validate_v014_method_cases(registry: Registry, errors: list[str]) -> int:
             namespace = case["response"]["receipt"]["namespace"]
             if namespace["operation_kind"] != operation or namespace["idempotency_key"] != case["request"]["idempotency_key"]:
                 errors.append(f"v014 method {operation}: original-key receipt identity differs")
+            for field in ("scope_kind", "scope_ref"):
+                if field in case["request"] and namespace[field] != case["request"][field]:
+                    errors.append(f"v014 method {operation}: receipt {field} differs from request")
         normalized_schema = (
             f"https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/{operation}_normalized_body"
         )

@@ -78,6 +78,8 @@ test-prepare:
 	$(PYTHON_BIN) tools/validators/validate_schema_examples.py
 	$(PYTHON_BIN) tools/validators/validate_public_descriptor.py
 	$(PYTHON_BIN) tools/validators/validate_h1_contract.py
+	$(PYTHON_BIN) tests/e2e/test_h1_selected_registry.py
+	$(PYTHON_BIN) tests/e2e/test_h1_package.py
 	$(PYTHON_BIN) tools/validators/generate_public_v2.py
 	cd docs/protocol/generated/gul-consumer-v2/go && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...
 	cd docs/protocol/generated/gul-consumer-v1/go && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...

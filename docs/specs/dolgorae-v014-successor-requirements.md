@@ -425,3 +425,27 @@ responsibilities are adopted in the specification, architecture and ADR owners.
 The historical Codex 0.149.0 negative MCP disposition and frozen public-v1
 artifacts remain unchanged. At TASK-067 acceptance, TASK-068 freeze, Epic
 validation and H1 delivery were pending. The roadmap owns their current status.
+
+## Corrected DELEG release contract
+
+The [release-proof correction](dolgorae-v014-release-proof-correction.md) and
+ADR-042 select a new H1 erratum. DELEG uses the closed state-based member proof,
+not a keyed receipt, for released disposition. Idle requires null proof; released
+requires non-null proof with the matching external or managed operation and
+scope. All quiescence counters are zero and interaction/cleanup flags are false.
+
+The workspace Engagement store advances atomically from base generation 5 to 6,
+adding retained member release operations and the durable scoped membership
+counter; orchestration extension generation 3 is unchanged. Old persisted
+selections retain their readers. New readers check versions before writable
+open effects, and downgrade after migration is unsupported. No historical
+release receives a fabricated state-based proof.
+
+Schema fixtures check closed shapes and finite branches. Rust contract vectors
+join complete identities to retained records for subject, digest, authority and
+revision comparisons, including strict admission-before-terminal ordering.
+Production storage, locking, admission fencing, closure/cleanup, Profile
+retirement and post-collection observation remain TASK-076/077/086 work.
+The original H1 and its historical H2/Gate A do not qualify corrected bytes;
+TASK-092 must independently accept Gul's completed delta H2 before EPIC-020
+resumes. Outer protocols, consumer mappings and eight digest domains are unchanged.

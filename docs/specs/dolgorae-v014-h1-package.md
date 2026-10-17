@@ -1,8 +1,8 @@
 # Dolgorae H1 contract package
 
 Scope: Checked successor contracts. The roadmap records Task and whole-Epic
-acceptance and EPIC-018 handoff status. Capability negotiation governs runtime
-admission.
+acceptance. Original EPIC-018 delivery and the EPIC-023 erratum remain separate.
+Capability negotiation governs runtime admission.
 
 The [immutable H1 lock](../protocol/dolgorae-gul-consumer-v2.lock.json) binds
 the public-v2 source and descriptor, Gul consumer-v2 profile and Go module,
@@ -101,24 +101,31 @@ bytes. External consumer sources are identified by their selected repository
 commit, path and raw SHA-256 in the lock. Their runtime acceptance stays with
 the named consumer owners.
 The archive's `delivery.json` binds the resolved committed package revision
-and lock checksum. The packager refuses bytes that differ from that commit;
-use `--revision <package-commit>` when reproducing a previously delivered H1.
+and lock checksum. Explicit `--revision <package-commit>` reads the lock and
+every selected regular Git blob from that exact commit, independent of the
+working tree. Omitting `--revision` selects HEAD and additionally requires all
+selected working-tree files and the lock to be unchanged regular files before
+creating output. Unrelated working changes are allowed. Explicit `--revision
+HEAD` also selects committed bytes without inspecting the working tree.
+Archive metadata is fixed; reproducing a historical package preserves its
+original delivery bytes. Corrected delivery provenance comes from its lock.
 
-## Handoff to Gul
+## Original H1 handoff to Gul
 
-Master delivers the qualified lock, all its repository-relative artifacts,
-checked matrix and accepted external prerequisite decisions to Gul E15.
-Aquarium and Podway require no new source change identified by this selection.
+The original handoff to Gul E15 comprised the qualified lock, all its
+repository-relative artifacts, checked matrix and accepted external prerequisite
+decisions. That selection identified no new Aquarium or Podway source change.
 Dolgorae's TASK-076/077/086 own executor and adapter implementation;
 consumer workflow agents retain their existing Primary/Judge, structural
 admission and acceptance responsibilities. Prepared Podway contract bytes do
 not claim released runtime support. Applicable corrections require assessment
 before a changed contract selection is admitted.
 
-Gul E15 returns H2 only after the whole contract/foundation Epic, including
-E15-T21 G4-1..7, its assigned corrections and closeout. H2 binds this exact H1
-and the completed foundation checks. EPIC-019/TASK-069 then independently
-accepts H2 and Gate A. Neither starts during this execution.
+Gul E15's H2 covered the whole contract/foundation Epic, including E15-T21
+G4-1..7, its assigned corrections and closeout. H2 bound original H1 and the
+completed foundation checks. EPIC-019/TASK-069 then independently
+accepted H2 and Gate A for original H1 only. That historical acceptance does not
+qualify the corrected package.
 
 H3 follows Dolgorae EPIC-021/TASK-087 and binds the intended runnable artifact,
 production adapters and mandatory Aquarium/Podway qualification. Gul E16
@@ -126,3 +133,39 @@ returns H4 after its whole product/qualification Epic, including E16-T16,
 actual runtime/account/device/soak/packaging cases. TASK-088/089 independently
 accept the final combination and release provenance. Those future records
 remain explicit obligations; they are not substitutes for H1 requirements.
+
+## Release-proof erratum selection
+
+EPIC-023/TASK-091 prepares the package-bound
+[member release correction](dolgorae-v014-release-proof-correction.md) adopted
+by TASK-090 at `664c6648ec5c69f78733a58d5c46e88b335459ba`.
+Its contract fixtures cover closed member release proof and retained operation
+records without implementing production release. The lock names EPIC-023 and
+TASK-091 as producer, the accepted design commit and original H1 ancestry, and
+includes the correction specification and ADR-042. The containing source commit
+and lock checksum identify the corrected selection; no self-referential Git
+commit value is embedded in its lock. Official committed-package reproduction
+remains required after the separately authorized TASK-091 commit.
+
+Original H1 `55ba623fce231192226d29ba718153e18b6644a3` and its eleven external
+source pins remain reproducible with their original bytes. Its native
+feasibility inputs and qualification scope remain unchanged. Corrected artifacts
+require a distinct lock, committed selection and Gul delta H2; TASK-092 owns
+the independent Gate A addendum. Historical E15/H2 acceptance applies only to
+the original package. Schema and contract-vector success does not establish
+release runtime, host support or consumer acceptance.
+
+The lock records original H2/Gate A as accepted only for original H1 and records
+the corrected delta H2 as pending, with Gul's separately authorized correction
+unit as producer and TASK-092 as consumer. H3 and runtime owners remain
+unchanged. The nested proof change requires corrected package adoption even
+though outer consumer protocols and native feasibility inputs are unchanged.
+
+After extracting a selected corrected archive, install the exact dependencies
+from `tools/validation/requirements.txt` in a consumer-owned environment and run
+`python -B tools/validators/validate_h1_contract.py` from its `dolgorae-h1` root.
+This check needs only verified selected bytes and local Python dependencies;
+it uses no Git repository, producer checkout or network resolver. Its closed
+schema cases and fixed outcomes include malformed proof, keyed-receipt
+substitution and missing coverage refusals. Rust contract vectors qualify
+dynamic joins separately; neither check establishes production release effects.

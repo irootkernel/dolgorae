@@ -3037,7 +3037,7 @@
         "release_receipt": {
           "anyOf": [
             {
-              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/member_release_proof"
             },
             {
               "type": "null"
@@ -3057,7 +3057,7 @@
           "then": {
             "properties": {
               "release_receipt": {
-                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/member_release_proof"
               }
             }
           },
@@ -3202,7 +3202,69 @@
         "disposition_proof": {
           "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/disposition_proof"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "worker_disposition": {
+                "const": "idle"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "disposition_proof": {
+                "properties": {
+                  "state": {
+                    "const": "idle"
+                  },
+                  "release_receipt": {
+                    "const": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "worker_disposition": {
+                "const": "released"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "disposition_proof": {
+                "properties": {
+                  "state": {
+                    "const": "released"
+                  },
+                  "release_receipt": {
+                    "allOf": [
+                      {
+                        "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/member_release_proof"
+                      },
+                      {
+                        "properties": {
+                          "operation_kind": {
+                            "const": "release_external_specialist"
+                          },
+                          "scope_kind": {
+                            "const": "external_engagement"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "managed_delegation_identity": {
       "type": "object",
@@ -3335,7 +3397,69 @@
         "disposition_proof": {
           "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/disposition_proof"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "worker_disposition": {
+                "const": "idle"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "disposition_proof": {
+                "properties": {
+                  "state": {
+                    "const": "idle"
+                  },
+                  "release_receipt": {
+                    "const": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "worker_disposition": {
+                "const": "released"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "disposition_proof": {
+                "properties": {
+                  "state": {
+                    "const": "released"
+                  },
+                  "release_receipt": {
+                    "allOf": [
+                      {
+                        "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/member_release_proof"
+                      },
+                      {
+                        "properties": {
+                          "operation_kind": {
+                            "const": "release_specialist"
+                          },
+                          "scope_kind": {
+                            "const": "orchestrated_session"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "delegation_identity": {
       "oneOf": [
@@ -4000,6 +4124,108 @@
       },
       "x-invariants": [
         "The accepted task_body BytesRef binds complete JCS public StructuredTaskBody bytes, including ordered context, criteria and constraints. Accepted contexts match the complete public context references; merged_input binds the immutable merged findings. Normalization does not change task bytes or discard unknown fields."
+      ]
+    },
+    "member_release_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_ref",
+        "operation_kind",
+        "workspace_ref",
+        "scope_kind",
+        "scope_ref",
+        "member_ref",
+        "run_ref",
+        "controller_principal",
+        "controller_generation",
+        "terminal_membership_revision",
+        "settled_workload_revision"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.member-release-proof/v1"
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "operation_kind": {
+          "enum": [
+            "release_external_specialist",
+            "release_specialist"
+          ]
+        },
+        "workspace_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "scope_kind": {
+          "enum": [
+            "external_engagement",
+            "orchestrated_session"
+          ]
+        },
+        "scope_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "member_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "run_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "controller_principal": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "controller_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "terminal_membership_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "settled_workload_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "release_external_specialist"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scope_kind": {
+                "const": "external_engagement"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "release_specialist"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scope_kind": {
+                "const": "orchestrated_session"
+              }
+            }
+          }
+        }
       ]
     }
   },

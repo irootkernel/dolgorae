@@ -478,7 +478,13 @@ fn corrected_mutation_receipts_bind_normalized_group_merge_and_synthesis_inputs(
         cases["assign_synthesis"]["request"]["merged_findings_digest"],
         merge["merged_digest"]
     );
-    for operation in ["assign_group", "merge_group_results", "assign_synthesis"] {
+    for operation in [
+        "assign_group",
+        "merge_group_results",
+        "assign_synthesis",
+        "spawn_specialist",
+        "assign_specialist_task",
+    ] {
         let case = cases[operation];
         let receipt = &case["response"]["receipt"];
         let namespace = &receipt["namespace"];
@@ -1337,6 +1343,326 @@ fn limits(name: &str) -> (u64, u64) {
     }
 }
 
+// Contract-only joins over complete checked fixtures. Runtime admission, locking,
+// cleanup and Profile authority remain with their production owners.
+fn release_revision(value: &Value) -> Result<u64, &'static str> {
+    value
+        .as_u64()
+        .filter(|n| *n <= MAX_SAFE_INTEGER)
+        .ok_or("invalid_revision")
+}
+
+fn checked_disposition(input: &Value) -> Check {
+    let identity = &input["identity"];
+    let disposition = &identity["disposition_proof"];
+    let observation = &input["observation"];
+    let (scope, operation, mapping) = match identity["primary_host"].as_str() {
+        Some("external") => (
+            "external_engagement",
+            "release_external_specialist",
+            "dolgorae.podway-external/v1",
+        ),
+        Some("managed") => (
+            "orchestrated_session",
+            "release_specialist",
+            "dolgorae.podway-managed/v1",
+        ),
+        _ => return Err("invalid_host"),
+    };
+    if identity["schema"] != "dolgorae.delegation-identity/v1"
+        || identity["scope_kind"] != scope
+        || identity["mapping_contract"] != mapping
+        || observation["observed_after_collection"] != true
+        || observation["observed_under_serialization"] != true
+    {
+        return Err("invalid_observation");
+    }
+    let source = &identity["complete_result"]["source"];
+    for field in [
+        "scope_kind",
+        "scope_ref",
+        "worker_ref",
+        "task_ref",
+        "role_snapshot_digest",
+        "agent_configuration_digest",
+        "accepted_task_digest",
+    ] {
+        if source[field] != identity[field] || source[field].is_null() {
+            return Err("result_subject_mismatch");
+        }
+    }
+    let (digest, _) = checked_digest(
+        "dolgorae.complete-result/v1",
+        &identity["complete_result"].to_string(),
+    )?;
+    if identity["result_digest"] != digest
+        || disposition["observed_after_result_digest"] != digest
+        || observation["collected_result_digest"] != digest
+    {
+        return Err("result_digest_mismatch");
+    }
+    let membership = release_revision(&disposition["membership_revision"])?;
+    let workload = release_revision(&disposition["workload_revision"])?;
+    for field in ["running", "queued", "claimed", "dispatching", "unresolved"] {
+        if disposition[field] != 0 {
+            return Err("unsettled_work");
+        }
+    }
+    if disposition["pending_interaction"] != false
+        || disposition["cleanup_pending"] != false
+        || identity["worker_disposition"] != disposition["state"]
+    {
+        return Err("unsettled_disposition");
+    }
+    let proof = &disposition["release_receipt"];
+    if identity["worker_disposition"] == "idle" {
+        return if proof.is_null()
+            && input["retained_operation"].is_null()
+            && observation["membership_state"] == "accepted"
+        {
+            Ok(())
+        } else {
+            Err("invalid_idle")
+        };
+    }
+    if identity["worker_disposition"] != "released"
+        || proof["schema"] != "dolgorae.member-release-proof/v1"
+    {
+        return Err("missing_release_proof");
+    }
+    let proof_fields = [
+        "schema",
+        "operation_ref",
+        "operation_kind",
+        "workspace_ref",
+        "scope_kind",
+        "scope_ref",
+        "member_ref",
+        "run_ref",
+        "controller_principal",
+        "controller_generation",
+        "terminal_membership_revision",
+        "settled_workload_revision",
+    ];
+    closed(proof, &proof_fields)?;
+    let retained = &input["retained_operation"];
+    closed(
+        retained,
+        &[
+            "schema",
+            "operation_ref",
+            "operation_kind",
+            "workspace_ref",
+            "scope_kind",
+            "scope_ref",
+            "member_ref",
+            "run_ref",
+            "controller_principal",
+            "controller_generation",
+            "admitted_membership_revision",
+            "owner_ref",
+            "progress",
+            "safe_failure_code",
+            "required_action",
+            "terminal_membership_revision",
+            "settled_workload_revision",
+        ],
+    )?;
+    if retained["schema"] != "dolgorae.member-release-operation/v1"
+        || retained["progress"] != "terminal"
+        || !retained["safe_failure_code"].is_null()
+        || retained["required_action"] != "none"
+    {
+        return Err("unfinished_release");
+    }
+    for field in proof_fields.iter().filter(|field| **field != "schema") {
+        if retained[*field] != proof[*field] {
+            return Err("retained_proof_mismatch");
+        }
+    }
+    let operation_ref = string(&proof["operation_ref"])?;
+    if !uuid::Uuid::parse_str(operation_ref)
+        .is_ok_and(|id| id.get_version_num() == 7 && id.get_variant() == uuid::Variant::RFC4122)
+    {
+        return Err("invalid_release_operation");
+    }
+    for field in [
+        "workspace_ref",
+        "scope_ref",
+        "member_ref",
+        "run_ref",
+        "controller_principal",
+    ] {
+        let value = string(&proof[field])?;
+        if value.is_empty()
+            || value.len() > 512
+            || value.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}')
+        {
+            return Err("invalid_release_subject");
+        }
+    }
+    let generation = release_revision(&proof["controller_generation"])?;
+    if generation == 0
+        || proof["scope_kind"] != scope
+        || proof["operation_kind"] != operation
+        || proof["scope_ref"] != identity["scope_ref"]
+        || proof["member_ref"] != identity["worker_ref"]
+        || proof["run_ref"] != observation["run_ref"]
+        || proof["workspace_ref"] != observation["workspace_ref"]
+    {
+        return Err("release_subject_mismatch");
+    }
+    let admitted = release_revision(&retained["admitted_membership_revision"])?;
+    let terminal = release_revision(&proof["terminal_membership_revision"])?;
+    let settled = release_revision(&proof["settled_workload_revision"])?;
+    if !(admitted < terminal && terminal <= membership && settled <= workload) {
+        return Err("release_revision_order");
+    }
+    if observation["current_controller_principal"]
+        .as_str()
+        .is_none()
+        || release_revision(&observation["current_controller_generation"])? == 0
+        || ((observation["current_controller_principal"] != proof["controller_principal"]
+            || observation["current_controller_generation"] != proof["controller_generation"])
+            && observation["handoff_verified"] != true)
+    {
+        return Err("unverified_controller_handoff");
+    }
+    if observation["membership_state"] != "released"
+        || observation["run_lifecycle"] != "Closed"
+        || observation["owned_generation_settled"] != true
+        || observation["writer_settled"] != true
+        || observation["profile_disposition"] != "released"
+    {
+        return Err("release_not_settled");
+    }
+    Ok(())
+}
+
+fn same_release_admission(original: &Value, resumed: &Value) -> Check {
+    for field in [
+        "schema",
+        "operation_ref",
+        "operation_kind",
+        "workspace_ref",
+        "scope_kind",
+        "scope_ref",
+        "member_ref",
+        "run_ref",
+        "controller_principal",
+        "controller_generation",
+        "admitted_membership_revision",
+    ] {
+        if original[field].is_null() || original[field] != resumed[field] {
+            return Err("release_admission_changed");
+        }
+    }
+    Ok(())
+}
+
+fn checked_release_owner(record: &Value, action: &Value) -> Check {
+    if record["owner_ref"].as_str().is_none_or(str::is_empty)
+        || action["lock_held"] != true
+        || action["witness_synced"] != true
+        || action["owner_ref"] != record["owner_ref"]
+        || action["witness_owner_ref"] != record["owner_ref"]
+    {
+        return Err("release_owner_unverified");
+    }
+    Ok(())
+}
+
+// A bounded contract trace: full retained records model admission and recovery;
+// no runtime effect, storage implementation or generic execution service runs.
+fn checked_release_lifecycle(input: &Value) -> Check {
+    let mut retained = input["initial_record"].clone();
+    for action in array(&input["actions"])? {
+        let kind = string(&action["action"])?;
+        // A terminal observation reads the original proof without a live owner.
+        if kind == "terminal_reread" {
+            let mut observation = input.clone();
+            observation["retained_operation"] = retained.clone();
+            checked_disposition(&observation)?;
+            continue;
+        }
+        if action["serialization_ref"] != input["assignment_serialization_ref"]
+            || action["serialization_ref"]
+                .as_str()
+                .is_none_or(str::is_empty)
+        {
+            return Err("release_serialization_mismatch");
+        }
+        match kind {
+            "admit" => {
+                let proposed = &action["record"];
+                if !retained.is_null() {
+                    same_release_admission(&retained, proposed)?;
+                    continue; // Retry retains the admitted operation and revisions.
+                }
+                checked_release_owner(proposed, action)?;
+                if action["durably_committed"] != true {
+                    return Err("release_admission_not_durable");
+                }
+                let expected = release_revision(&action["expected_revision"])?;
+                if expected != release_revision(&input["membership_revision"])?
+                    || expected != release_revision(&proposed["admitted_membership_revision"])?
+                    || proposed["schema"] != "dolgorae.member-release-operation/v1"
+                    || proposed["progress"] != "requested"
+                    || !proposed["terminal_membership_revision"].is_null()
+                    || !proposed["settled_workload_revision"].is_null()
+                {
+                    return Err("release_admission_invalid");
+                }
+                retained = proposed.clone();
+            }
+            "assign" => {
+                if !retained.is_null() {
+                    return Err("release_assignment_fenced");
+                }
+            }
+            "recover" => {
+                if retained.is_null()
+                    || retained["progress"] == "terminal"
+                    || action["former_owner_stopped"] != true
+                {
+                    return Err("release_recovery_owner_unsettled");
+                }
+                let resumed = &action["record"];
+                same_release_admission(&retained, resumed)?;
+                checked_release_owner(resumed, action)?;
+                if resumed["progress"] != "settling"
+                    || !resumed["safe_failure_code"].is_null()
+                    || resumed["required_action"] != "none"
+                {
+                    return Err("release_recovery_invalid");
+                }
+                retained = resumed.clone();
+            }
+            "effect" => {
+                if retained.is_null() {
+                    return Err("release_effect_before_admission");
+                }
+                if retained["progress"] == "terminal" {
+                    continue;
+                }
+                if ![Some("requested"), Some("settling")].contains(&retained["progress"].as_str()) {
+                    return Err("release_recovery_required");
+                }
+                checked_release_owner(&retained, action)?;
+                same_release_admission(&retained, &action["record"])?;
+                let mut observation = input.clone();
+                observation["retained_operation"] = action["record"].clone();
+                checked_disposition(&observation)?;
+                retained = action["record"].clone();
+            }
+            _ => return Err("unknown_release_action"),
+        }
+    }
+    let mut observation = input.clone();
+    observation["retained_operation"] = retained;
+    checked_disposition(&observation)
+}
+
 fn execute_case(case: &Value) -> Value {
     let input = &case["input"];
     match case["scenario"].as_str().unwrap() {
@@ -1383,11 +1709,8 @@ fn execute_case(case: &Value) -> Value {
                 .count();
             json!({"rounds_used": count, "next_admission": (count as u64) < input["max_rounds"].as_u64().unwrap()})
         }
-        "disposition" => json!(
-            [Some("idle"), Some("released")].contains(&input["state"].as_str())
-                && input["fresh_after_result"] == true
-                && input["outstanding"] == 0
-        ),
+        "disposition" => json!(checked_disposition(input).is_ok()),
+        "release_lifecycle" => json!(checked_release_lifecycle(input).is_ok()),
         "merge" => {
             let mut keys: BTreeMap<String, BTreeSet<Vec<u8>>> = BTreeMap::new();
             let mut coverage = BTreeSet::new();
@@ -2339,4 +2662,423 @@ fn public_task_constraints_have_utf8_count_and_complete_encoded_bounds() {
     task["criteria"] = json!((0..64).map(|index| json!({"criterion_id":format!("{index:02}{}", "\0".repeat(126)), "text":"\0".repeat(8192), "context_ids":(0..64).map(|id| format!("{id:02}{}", "\0".repeat(126))).collect::<Vec<_>>()})).collect::<Vec<_>>());
     public_task_constraints(&task).unwrap();
     assert!(fixture_canonical_bytes(&task).len() < encoded_upper);
+}
+
+#[test]
+fn release_contract_cases_keep_required_outcomes_and_reject_schema_refusals() {
+    let acceptance: Value = serde_json::from_str(ACCEPTANCE).unwrap();
+    let cases: BTreeMap<_, _> = acceptance["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| case["scenario"] == "disposition")
+        .map(|case| (case["id"].as_str().unwrap(), case))
+        .collect();
+    let required = BTreeMap::from([
+        ("release-external-idle", true),
+        ("release-external-idle-stale-result", false),
+        ("release-external-idle-pre-collection", false),
+        ("release-external-idle-unserialized", false),
+        ("release-external-idle-result-source", false),
+        ("release-external-idle-result-digest", false),
+        ("release-external-idle-unresolved", false),
+        ("release-external-released", true),
+        ("release-external-released-stale-result", false),
+        ("release-external-released-pre-collection", false),
+        ("release-external-released-unserialized", false),
+        ("release-external-released-result-source", false),
+        ("release-external-released-result-digest", false),
+        ("release-external-subject-member", false),
+        ("release-external-subject-scope", false),
+        ("release-external-subject-run", false),
+        ("release-external-subject-workspace", false),
+        ("release-external-admitted-equal", false),
+        ("release-external-admitted-later", false),
+        ("release-external-terminal-future", false),
+        ("release-external-workload-future", false),
+        ("release-external-initiator-relabel", false),
+        ("release-external-generation-relabel", false),
+        ("release-external-operation-rebind", false),
+        ("release-external-unfinished-record", false),
+        ("release-external-profile-active", false),
+        ("release-external-profile-unknown", false),
+        ("release-external-open-run", false),
+        ("release-external-owned-cleanup", false),
+        ("release-external-writer-uncertain", false),
+        ("release-external-unverified-handoff", false),
+        ("release-external-missing-record", false),
+        ("release-external-later-observation", true),
+        ("release-managed-idle", true),
+        ("release-managed-idle-stale-result", false),
+        ("release-managed-idle-pre-collection", false),
+        ("release-managed-idle-unserialized", false),
+        ("release-managed-idle-result-source", false),
+        ("release-managed-idle-result-digest", false),
+        ("release-managed-idle-unresolved", false),
+        ("release-managed-released", true),
+        ("release-managed-released-stale-result", false),
+        ("release-managed-released-pre-collection", false),
+        ("release-managed-released-unserialized", false),
+        ("release-managed-released-result-source", false),
+        ("release-managed-released-result-digest", false),
+        ("release-managed-subject-member", false),
+        ("release-managed-subject-scope", false),
+        ("release-managed-subject-run", false),
+        ("release-managed-subject-workspace", false),
+        ("release-managed-admitted-equal", false),
+        ("release-managed-admitted-later", false),
+        ("release-managed-terminal-future", false),
+        ("release-managed-workload-future", false),
+        ("release-managed-initiator-relabel", false),
+        ("release-managed-generation-relabel", false),
+        ("release-managed-operation-rebind", false),
+        ("release-managed-unfinished-record", false),
+        ("release-managed-profile-active", false),
+        ("release-managed-profile-unknown", false),
+        ("release-managed-open-run", false),
+        ("release-managed-owned-cleanup", false),
+        ("release-managed-writer-uncertain", false),
+        ("release-managed-unverified-handoff", false),
+        ("release-managed-missing-record", false),
+        ("release-managed-later-observation", true),
+        ("release-external-settled-zero", true),
+        ("release-external-no-handoff-needed", true),
+        ("release-external-admitted-negative", false),
+        ("release-external-admitted-overflow", false),
+        ("release-external-missing-observation", false),
+        ("release-external-terminal-membership", false),
+        ("release-managed-settled-zero", true),
+        ("release-managed-no-handoff-needed", true),
+        ("release-managed-admitted-negative", false),
+        ("release-managed-admitted-overflow", false),
+        ("release-managed-missing-observation", false),
+        ("release-managed-terminal-membership", false),
+    ]);
+    assert_eq!(
+        cases.len(),
+        required.len(),
+        "release semantic coverage drift"
+    );
+    for (id, expected) in required {
+        let case = cases.get(id).expect("missing release semantic case");
+        assert_eq!(case["expected"], expected, "outcome changed: {id}");
+        assert_eq!(
+            checked_disposition(&case["input"]).is_ok(),
+            expected,
+            "{id}"
+        );
+    }
+    let inventory: Value = serde_json::from_str(include_str!(
+        "../docs/protocol/dolgorae-v014-release-proof-fixtures-v1.json"
+    ))
+    .unwrap();
+    let mut checked = 0;
+    for case in inventory["cases"].as_array().unwrap() {
+        let path = case["path"].as_str().unwrap();
+        if case["valid"] != false
+            || !path.starts_with("docs/protocol/examples/v014-identity-release-")
+        {
+            continue;
+        }
+        let host = if path.contains("-external.") {
+            "external"
+        } else {
+            "managed"
+        };
+        let id = format!("release-{host}-released");
+        let mut input = cases[id.as_str()]["input"].clone();
+        input["identity"] = serde_json::from_str(
+            &std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            checked_disposition(&input).is_err(),
+            "schema refusal admitted: {path}"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 42);
+}
+
+#[test]
+fn release_lifecycle_admission_fences_and_verified_owners_keep_original_proof() {
+    let acceptance: Value = serde_json::from_str(ACCEPTANCE).unwrap();
+    let cases: BTreeMap<_, _> = acceptance["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| case["scenario"] == "release_lifecycle")
+        .map(|case| (case["id"].as_str().unwrap(), case))
+        .collect();
+    let required = BTreeMap::from([
+        ("release-lifecycle-external-normal-admission", true),
+        ("release-lifecycle-external-retry-original-operation", true),
+        (
+            "release-lifecycle-external-terminal-reread-without-lock",
+            true,
+        ),
+        ("release-lifecycle-external-admission-not-durable", false),
+        ("release-lifecycle-external-different-serialization", false),
+        ("release-lifecycle-external-stale-admission", false),
+        ("release-lifecycle-external-owner-ref-alone", false),
+        ("release-lifecycle-external-witness-unsynced", false),
+        ("release-lifecycle-external-witness-wrong-owner", false),
+        ("release-lifecycle-external-effect-before-admission", false),
+        (
+            "release-lifecycle-external-assignment-fenced-requested",
+            false,
+        ),
+        (
+            "release-lifecycle-external-assignment-fenced-settling",
+            false,
+        ),
+        (
+            "release-lifecycle-external-assignment-fenced-cleanup_failed",
+            false,
+        ),
+        (
+            "release-lifecycle-external-assignment-fenced-recovery_needed",
+            false,
+        ),
+        (
+            "release-lifecycle-external-assignment-fenced-terminal",
+            false,
+        ),
+        ("release-lifecycle-external-authorized-recovery", true),
+        (
+            "release-lifecycle-external-recovery-immutable-operation",
+            false,
+        ),
+        (
+            "release-lifecycle-external-retry-immutable-operation",
+            false,
+        ),
+        (
+            "release-lifecycle-external-recovery-immutable-principal",
+            false,
+        ),
+        (
+            "release-lifecycle-external-retry-immutable-principal",
+            false,
+        ),
+        (
+            "release-lifecycle-external-recovery-immutable-generation",
+            false,
+        ),
+        (
+            "release-lifecycle-external-retry-immutable-generation",
+            false,
+        ),
+        (
+            "release-lifecycle-external-recovery-immutable-admitted",
+            false,
+        ),
+        ("release-lifecycle-external-retry-immutable-admitted", false),
+        ("release-lifecycle-external-former-owner-active", false),
+        ("release-lifecycle-external-former-owner-unknown", false),
+        ("release-lifecycle-managed-normal-admission", true),
+        ("release-lifecycle-managed-retry-original-operation", true),
+        (
+            "release-lifecycle-managed-terminal-reread-without-lock",
+            true,
+        ),
+        ("release-lifecycle-managed-admission-not-durable", false),
+        ("release-lifecycle-managed-different-serialization", false),
+        ("release-lifecycle-managed-stale-admission", false),
+        ("release-lifecycle-managed-owner-ref-alone", false),
+        ("release-lifecycle-managed-witness-unsynced", false),
+        ("release-lifecycle-managed-witness-wrong-owner", false),
+        ("release-lifecycle-managed-effect-before-admission", false),
+        (
+            "release-lifecycle-managed-assignment-fenced-requested",
+            false,
+        ),
+        (
+            "release-lifecycle-managed-assignment-fenced-settling",
+            false,
+        ),
+        (
+            "release-lifecycle-managed-assignment-fenced-cleanup_failed",
+            false,
+        ),
+        (
+            "release-lifecycle-managed-assignment-fenced-recovery_needed",
+            false,
+        ),
+        (
+            "release-lifecycle-managed-assignment-fenced-terminal",
+            false,
+        ),
+        ("release-lifecycle-managed-authorized-recovery", true),
+        (
+            "release-lifecycle-managed-recovery-immutable-operation",
+            false,
+        ),
+        ("release-lifecycle-managed-retry-immutable-operation", false),
+        (
+            "release-lifecycle-managed-recovery-immutable-principal",
+            false,
+        ),
+        ("release-lifecycle-managed-retry-immutable-principal", false),
+        (
+            "release-lifecycle-managed-recovery-immutable-generation",
+            false,
+        ),
+        (
+            "release-lifecycle-managed-retry-immutable-generation",
+            false,
+        ),
+        (
+            "release-lifecycle-managed-recovery-immutable-admitted",
+            false,
+        ),
+        ("release-lifecycle-managed-retry-immutable-admitted", false),
+        ("release-lifecycle-managed-former-owner-active", false),
+        ("release-lifecycle-managed-former-owner-unknown", false),
+    ]);
+    assert_eq!(
+        cases.len(),
+        required.len(),
+        "release lifecycle coverage drift"
+    );
+    for (id, expected) in required {
+        let case = cases.get(id).expect("missing release lifecycle case");
+        assert_eq!(
+            case["expected"], expected,
+            "lifecycle outcome changed: {id}"
+        );
+        assert_eq!(
+            checked_release_lifecycle(&case["input"]).is_ok(),
+            expected,
+            "{id}"
+        );
+        if expected {
+            let original = &case["input"]["identity"]["disposition_proof"]["release_receipt"];
+            for action in case["input"]["actions"].as_array().unwrap() {
+                if action["record"]["progress"] == "terminal" {
+                    for (field, value) in original.as_object().unwrap() {
+                        if field != "schema" {
+                            assert_eq!(&action["record"][field], value, "{id}: {field}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn release_lifecycle_fence_and_recovery_fail_at_the_transition() {
+    let acceptance: Value = serde_json::from_str(ACCEPTANCE).unwrap();
+    let mut fenced = 0;
+    let mut immutable_recoveries = 0;
+    for case in acceptance["cases"].as_array().unwrap() {
+        if case["scenario"] != "release_lifecycle" {
+            continue;
+        }
+        let id = case["id"].as_str().unwrap();
+        if id.contains("-assignment-fenced-") {
+            assert_eq!(
+                checked_release_lifecycle(&case["input"]),
+                Err("release_assignment_fenced"),
+                "{id}: assignment must fail at its fence"
+            );
+            fenced += 1;
+        } else if id.contains("-recovery-immutable-") {
+            let mut prefix = case["input"].clone();
+            let actions = prefix["actions"].as_array_mut().unwrap();
+            let recovery = actions
+                .iter()
+                .position(|action| action["action"] == "recover")
+                .unwrap();
+            actions.truncate(recovery + 1);
+            assert_eq!(
+                checked_release_lifecycle(&prefix),
+                Err("release_admission_changed"),
+                "{id}: recovery must fail before any later effect"
+            );
+            immutable_recoveries += 1;
+        }
+    }
+    assert_eq!(fenced, 10);
+    assert_eq!(immutable_recoveries, 8);
+}
+
+#[test]
+fn release_semantic_negatives_reach_authoritative_subject_and_source_joins() {
+    let acceptance: Value = serde_json::from_str(ACCEPTANCE).unwrap();
+    let mut checked = 0;
+    for case in acceptance["cases"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        if case["scenario"] != "disposition" {
+            continue;
+        }
+        let input = &case["input"];
+        let mut repaired = input.clone();
+        if let Some(field) = [
+            ("subject-member", "member_ref"),
+            ("subject-scope", "scope_ref"),
+            ("subject-run", "run_ref"),
+            ("subject-workspace", "workspace_ref"),
+        ]
+        .iter()
+        .find_map(|(suffix, field)| id.ends_with(suffix).then_some(*field))
+        {
+            assert_eq!(
+                input["identity"]["disposition_proof"]["release_receipt"][field],
+                input["retained_operation"][field],
+                "{id}: retained equality masks join"
+            );
+            assert_eq!(
+                checked_disposition(input),
+                Err("release_subject_mismatch"),
+                "{id}"
+            );
+            let authoritative = match field {
+                "member_ref" => &input["identity"]["worker_ref"],
+                "scope_ref" => &input["identity"]["scope_ref"],
+                _ => &input["observation"][field],
+            };
+            repaired["identity"]["disposition_proof"]["release_receipt"][field] =
+                authoritative.clone();
+            repaired["retained_operation"][field] = authoritative.clone();
+        } else if id.ends_with("-result-source") {
+            let (digest, _) = checked_digest(
+                "dolgorae.complete-result/v1",
+                &input["identity"]["complete_result"].to_string(),
+            )
+            .unwrap();
+            assert_eq!(input["identity"]["result_digest"], digest, "{id}");
+            assert_eq!(
+                input["identity"]["disposition_proof"]["observed_after_result_digest"], digest,
+                "{id}"
+            );
+            assert_eq!(
+                input["observation"]["collected_result_digest"], digest,
+                "{id}"
+            );
+            assert_eq!(
+                checked_disposition(input),
+                Err("result_subject_mismatch"),
+                "{id}"
+            );
+            repaired["identity"]["complete_result"]["source"]["task_ref"] =
+                input["identity"]["task_ref"].clone();
+            let digest = fixture_digest(&repaired["identity"]["complete_result"]);
+            repaired["identity"]["result_digest"] = digest.clone();
+            repaired["identity"]["disposition_proof"]["observed_after_result_digest"] =
+                digest.clone();
+            repaired["observation"]["collected_result_digest"] = digest;
+        } else {
+            continue;
+        }
+        assert_eq!(
+            checked_disposition(&repaired),
+            Ok(()),
+            "{id}: single join repair"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 12);
 }

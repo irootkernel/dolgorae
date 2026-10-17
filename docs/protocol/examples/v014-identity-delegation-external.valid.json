@@ -17,7 +17,7 @@
   "instruction_identity_digest": "sha256:22bcd0acb32f5ab59a185a64240b0be873bf2a22a1676ba92f41dce22458ecd6",
   "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
   "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
-  "result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+  "result_digest": "sha256:0784fa934931ce05187ea824033618b958633b76af04aca49512df0757468b54",
   "complete_result": {
     "schema": "dolgorae.complete-result/v1",
     "source": {
@@ -54,7 +54,7 @@
   "worker_disposition": "idle",
   "disposition_proof": {
     "state": "idle",
-    "observed_after_result_digest": "sha256:a8bda969ede988f3ba9ddd815b8802a9da95a871ac8dadf4e222c666a7a8e179",
+    "observed_after_result_digest": "sha256:0784fa934931ce05187ea824033618b958633b76af04aca49512df0757468b54",
     "membership_revision": 2,
     "workload_revision": 3,
     "running": 0,

@@ -684,3 +684,35 @@ pre-contract replay/conflict/concurrency/reconnect/restart/loss scenarios.
 Static vectors cannot establish that qualification. ADR-031 or an explicitly
 accepted successor must resolve protected logical invocation creation,
 retention and carrier ownership before H1 can qualify.
+
+## State-based member release correction
+
+The [release-proof correction](dolgorae-v014-release-proof-correction.md) owns
+member release and its checked JSON branches. Both release operations remain
+`S`, without an idempotency key. `release_receipt` is null for idle membership
+and a closed `dolgorae.member-release-proof/v1` for released membership; a
+`dolgorae.operation-receipt/v1` cannot prove release. The fourteen `K` operations
+and all eight digest domains retain their existing contracts.
+
+Release `expected_revision`, facade `member.revision`, delegation
+`source_revision`, and disposition `membership_revision` use the scoped
+`(workspace_ref, scope_kind, scope_ref)` membership counter. Session aggregate,
+Run, Profile and workload revisions remain separate. Durable admission retains
+`admitted_membership_revision` in `dolgorae.member-release-operation/v1` before
+settlement effects and fences further assignment under the same serialization.
+A released observation joins that record to the immutable proof and requires
+`admitted_membership_revision < terminal_membership_revision <= membership_revision`
+and `settled_workload_revision <= workload_revision`; there is no `+1` rule.
+
+Initiating Controller authority stays immutable across authorized handoff;
+recovery changes only the active owner after lock and witness verification.
+Run closure and exact owned cleanup precede Profile membership retirement and
+atomic terminal commit. Collection and identity getters remain read-only and
+observe fresh disposition after collecting the already committed complete
+result. Release-before-collect preserves the original operation and proof.
+Runtime enforcement remains assigned to TASK-076/077/086 after TASK-092.
+
+The corrected H1 lock selects these proof branches and preserves the original
+package ancestry and all eight digest-domain inputs. Receipt namespace fixture
+repairs use the existing `dolgorae.mutation-envelope/v1` JCS binding; this erratum
+introduces no `receipt_digest` algorithm or additional digest domain.

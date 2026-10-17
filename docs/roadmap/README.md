@@ -25,8 +25,8 @@ integration. EPIC-018 is COMPLETE after successor requirements, checked contract
 and qualified H1 validation. EPIC-019 is COMPLETE; EPIC-020 is PLANNED with
 partial uncommitted TASK-076 work preserved across the EPIC-023 entry handoff,
 resuming only after TASK-092 completes.
-EPIC-023 is ACTIVE; TASK-090 is COMPLETE, and TASK-091 and TASK-092 are PLANNED
-before EPIC-020 resumes.
+EPIC-023 is ACTIVE; TASK-090 is COMPLETE, TASK-091 is COMPLETE, and TASK-092 is
+PLANNED before EPIC-020 resumes.
 EPIC-009, EPIC-021, and EPIC-022 remain PLANNED for v0.1.4, in that execution
 order. TASK-067 is COMPLETE;
 TASK-068 through TASK-075 are COMPLETE;
@@ -2553,12 +2553,12 @@ runtime requirements assigned to TASK-076/077 and later qualification owners.
 Delegated Main acceptance under EPIC-023 adopts the
 [release-proof contract correction specification](../specs/dolgorae-v014-release-proof-correction.md)
 and [ADR-042](../architecture-decision-records/README.md#adr-042-replace-keyed-release-receipts-with-state-based-member-release-proofs)
-with original selected H1 bytes unchanged; TASK-091 and TASK-092 remain
-`PLANNED`.
+with original selected H1 bytes unchanged. At that design acceptance,
+TASK-091 and TASK-092 remained `PLANNED`.
 
 ### TASK-091: Build and Verify the Corrected H1 Package
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-090.
 
@@ -2580,6 +2580,19 @@ Handoff: Exact new source commit, lock checksum and reproducible package for
 Gul's separately authorized correction unit. Broker transmission requires its
 own explicit scope. Complete this Task before waiting for Gul; no Dolgorae Task
 remains active during Gul's package adoption.
+
+Delegated Main acceptance under Master's EPIC-023 authority completes TASK-091
+after independent milestone and final correction reviews. All default gate cases
+passed across scoped isolated runs; no single final full make run exited zero.
+The cause of the initial external lifecycle identity-guard failure remains
+unknown; its focused rerun passed. Final delivery requires reproducing the exact
+official committed package. The selected lock, original H1, external pins and
+native feasibility inputs are unchanged by this lifecycle closeout.
+
+No Dolgorae Task is active while Gul adopts the correction. TASK-092 remains
+`PLANNED` until Gul's separately authorized correction unit is complete and its
+delta H2 is available. EPIC-023 remains `ACTIVE`; EPIC-020 and TASK-076 remain
+parked at `PLANNED`.
 
 ### TASK-092: Independently Accept the Corrected Gul Contract Handoff
 

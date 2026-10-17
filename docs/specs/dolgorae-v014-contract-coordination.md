@@ -336,3 +336,22 @@ completes E15, including E15-T21 and foundation closeout, and returns accepted
 H2 bound to H1. Preserve E15-T1..T4 history and the retired E15-T5..T20 to
 E16-T1..T16 mapping. These prerequisite requests do not ask Gul to start E15
 against an unqualified package.
+
+## Corrected release-proof package coordination
+
+EPIC-023/TASK-091 selects the
+[release-proof erratum](dolgorae-v014-release-proof-correction.md) adopted at
+`664c6648ec5c69f78733a58d5c46e88b335459ba`. Preserve the eleven historical
+external source pins above and native feasibility inputs without repinning to
+current consumer checkouts. The original H1
+`55ba623fce231192226d29ba718153e18b6644a3` and its H2/Gate A acceptance retain
+their historical scope.
+
+The corrected lock identifies its own producer and original ancestry, and
+separates that accepted historical handoff from the pending Gul delta H2.
+Gul's separately authorized correction unit owns package mirror/pin adoption
+and affected foundation checks. TASK-092 independently accepts the completed
+delta H2 before EPIC-020 resumes. Unchanged outer protocols do not imply
+acceptance of changed nested proof bytes. No current Gul package acceptance,
+consumer product qualification or broker transmission follows from publication
+of the corrected contract archive.

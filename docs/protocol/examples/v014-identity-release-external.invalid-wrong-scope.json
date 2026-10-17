@@ -1,0 +1,82 @@
+{
+  "schema": "dolgorae.delegation-identity/v1",
+  "mapping_contract": "dolgorae.podway-external/v1",
+  "adapter_id": "fixture-adapter",
+  "adapter_version": "unpublished-contract-fixture",
+  "binding_ref": "binding:fixture",
+  "primary_host": "external",
+  "scope_kind": "external_engagement",
+  "scope_ref": "engagement:fixture",
+  "supervisor_ref": "controller:fixture",
+  "worker_ref": "member:fixture",
+  "task_ref": "task:fixture",
+  "role_ref": "reviewer",
+  "role_body_sha256": "95d04f18cfa23937df28bf77bb1d9ba3f910783cf3f7477d2bb67e5011e8ae06",
+  "role_body_byte_length": 22,
+  "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+  "instruction_identity_digest": "sha256:22bcd0acb32f5ab59a185a64240b0be873bf2a22a1676ba92f41dce22458ecd6",
+  "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+  "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144",
+  "result_digest": "sha256:0784fa934931ce05187ea824033618b958633b76af04aca49512df0757468b54",
+  "complete_result": {
+    "schema": "dolgorae.complete-result/v1",
+    "source": {
+      "scope_kind": "external_engagement",
+      "scope_ref": "engagement:fixture",
+      "worker_ref": "member:fixture",
+      "task_ref": "task:fixture",
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "agent_configuration_digest": "sha256:cb222d5dd262ca59ba220e83829703fb1059287b9c1225d70f26451c50abb0e3",
+      "accepted_task_digest": "sha256:af0ef3dd9183575199dedce2d958d44eb57f482170788ed38559083868e92144"
+    },
+    "terminal_outcome": "completed",
+    "final_response": {
+      "byte_length": 17,
+      "sha256": "sha256:12e0cad55f8f6dcc7e51479bb427008bb707d8ca6c95146a2691fbba9c4bac8a"
+    },
+    "structured_output_schema": null,
+    "structured_output": null,
+    "changes": [],
+    "attachments": [],
+    "safe_failure_code": null
+  },
+  "caller_scope": {
+    "binding_ref": "binding:fixture",
+    "podway_workspace_ref": "podway-workspace:fixture",
+    "podway_session_ref": "podway-session:fixture",
+    "podway_attempt_ref": "podway-attempt:fixture",
+    "delegated_placement_ref": "placement:fixture",
+    "max_rounds": 32
+  },
+  "rounds_used": 1,
+  "accepted_assignments": 1,
+  "unresolved_assignments": 0,
+  "worker_disposition": "released",
+  "disposition_proof": {
+    "state": "released",
+    "observed_after_result_digest": "sha256:0784fa934931ce05187ea824033618b958633b76af04aca49512df0757468b54",
+    "membership_revision": 9,
+    "workload_revision": 3,
+    "running": 0,
+    "queued": 0,
+    "claimed": 0,
+    "dispatching": 0,
+    "unresolved": 0,
+    "pending_interaction": false,
+    "cleanup_pending": false,
+    "release_receipt": {
+      "schema": "dolgorae.member-release-proof/v1",
+      "operation_ref": "01900000-0000-7000-8000-000000000091",
+      "operation_kind": "release_external_specialist",
+      "workspace_ref": "workspace:fixture",
+      "scope_kind": "workspace",
+      "scope_ref": "engagement:fixture",
+      "member_ref": "member:fixture",
+      "run_ref": "run:fixture",
+      "controller_principal": "controller:initiator",
+      "controller_generation": 1,
+      "terminal_membership_revision": 7,
+      "settled_workload_revision": 3
+    }
+  }
+}

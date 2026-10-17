@@ -1,7 +1,7 @@
 # Delegation release proof correction
 
 Status: supplementary planning dossier for EPIC-023 (`EPIC-023` `ACTIVE`;
-`TASK-090` `COMPLETE`; `TASK-091` and `TASK-092` `PLANNED`). Adopted normative
+`TASK-090` `COMPLETE`; `TASK-091` `COMPLETE`; `TASK-092` `PLANNED`). Adopted normative
 behavior is owned by the
 [release-proof contract correction specification](../specs/dolgorae-v014-release-proof-correction.md),
 and accepted decision rationale is recorded in
@@ -12,6 +12,16 @@ owns registration, status and the active-slot handoff. This supplements the
 `TASK-090` contract adoption does not amend H1 bytes or accept a consumer
 package. EPIC-020 and TASK-076 remain parked at `PLANNED` with preserved
 partial uncommitted work until TASK-092 completes.
+
+Main accepted TASK-091 under Master's EPIC-023 delegation after independent
+milestone and final correction reviews. All default gate cases passed across
+scoped isolated runs; no single final full make run exited zero. The initial
+external lifecycle identity-guard failure has no established cause; its focused
+rerun passed. Final delivery requires exact official-commit package reproduction.
+This lifecycle closeout preserves the accepted selected lock and original H1,
+external pins and native feasibility inputs. No Dolgorae Task is active while Gul
+adopts the correction. TASK-092 stays `PLANNED` until the separately authorized
+Gul correction unit completes and delta H2 is available.
 
 ## Recommendation
 
@@ -324,4 +334,5 @@ revision and a four-field proof without explicit subject binding. Review added
 Profile retirement, repeated-request behavior and explicit storage/migration
 ownership. The later planning decision separates contract correction into
 EPIC-023 and requires delta Gate A before EPIC-020 resumes, matching Gul's
-2026-10-16 plan. Implementation and package acceptance remain pending.
+2026-10-16 plan. At that planning decision, implementation and package acceptance
+remained pending.

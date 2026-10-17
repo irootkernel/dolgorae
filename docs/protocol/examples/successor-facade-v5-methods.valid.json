@@ -1282,12 +1282,12 @@
             "controller_principal": "controller:fixture",
             "controller_generation": 1,
             "workspace_ref": "workspace:fixture",
-            "scope_kind": "external_engagement",
-            "scope_ref": "engagement:fixture",
+            "scope_kind": "orchestrated_session",
+            "scope_ref": "session:fixture",
             "operation_kind": "spawn_specialist",
             "idempotency_key": "spawn_specialist-original-key"
           },
-          "accepted_input_digest": "sha256:d48cbe7c3d233368ac3acc2a49176db8a671ae1b6ca173d94e8281e5cc6d4c76",
+          "accepted_input_digest": "sha256:4d3389da260a10be0636fc2d91236ac440458049f0f4c8ed86b5d94f0c6e37b6",
           "accepted_subjects": {
             "run_ref": "run:fixture",
             "member_ref": "member:fixture",
@@ -1435,12 +1435,12 @@
             "controller_principal": "controller:fixture",
             "controller_generation": 1,
             "workspace_ref": "workspace:fixture",
-            "scope_kind": "external_engagement",
-            "scope_ref": "engagement:fixture",
+            "scope_kind": "orchestrated_session",
+            "scope_ref": "session:fixture",
             "operation_kind": "assign_specialist_task",
             "idempotency_key": "assign_specialist_task-original-key"
           },
-          "accepted_input_digest": "sha256:63092f577b255c080b45ff925ce6e041dd90dd0ff5f7998f683b6f58c7be3f03",
+          "accepted_input_digest": "sha256:629f2bc6c3785409e78a9e8d9fe04b191f9870f298cdf48812c6cd3306f80b96",
           "accepted_subjects": {
             "run_ref": "run:fixture",
             "member_ref": "member:fixture",

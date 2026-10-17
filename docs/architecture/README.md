@@ -3333,3 +3333,23 @@ Successful Run and session Close receipts remain authoritative when membership
 cleanup fails; existing recovery projections report the independent obligation.
 The [Profile maintenance contract](../specs/dolgorae-v014-profile-maintenance.md)
 owns these bounds and recovery semantics.
+
+## Member release proof ownership
+
+The [release-proof correction](../specs/dolgorae-v014-release-proof-correction.md)
+and ADR-042 assign both external and managed release owners a bounded shared
+repository in the workspace Engagement database. Base generation 6 retains
+`dolgorae.member-release-operation/v1` and a scoped membership counter;
+orchestration extension 3 remains unchanged. Durable release admission and
+assignment use the same serialization boundary. Lock plus synced witness
+establish active ownership; a stored owner reference alone grants no authority.
+
+The initiating Controller and original operation remain immutable across
+handoff and recovery. Settlement verifies Run closure, exact owned execution
+cleanup and writer settlement before Profile authority retires membership and
+the workspace commits terminal membership and completion revisions atomically.
+A shared Profile Server remains available to other members. Authorized reads
+project an immutable `dolgorae.member-release-proof/v1` only from that settled
+record, observing current disposition after collection of the committed result.
+TASK-091 publishes checked contracts; TASK-076/077/086 implement these runtime
+owners after TASK-092 accepts the corrected consumer selection.

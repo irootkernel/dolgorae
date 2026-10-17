@@ -215,3 +215,19 @@ exceptions apply. A substantive change triggers an impact assessment across all
 three consumers and affected runtime requalification before acceptance/release.
 Corrective implementation requires a recorded blocker and explicit scheduled
 work; never mark an incomplete Epic complete to retain the preferred sequence.
+
+## Corrected H1 consumer selection
+
+The [release-proof correction](dolgorae-v014-release-proof-correction.md)
+requires an independently selected EPIC-023/TASK-091 package. Completed
+TASK-068/069 and Gul E15/H2 qualify only original H1
+`55ba623fce231192226d29ba718153e18b6644a3`. Preserve that history and all eleven
+external source pins. Gul's separately authorized correction unit adopts the
+new committed package and returns completed delta H2; TASK-092 independently
+accepts that exact selection and the affected foundation checks before
+EPIC-020 resumes. TASK-087 consumes this acceptance when producing H3.
+
+The nested JSON release proof changes; public-v2 methods and generated wire,
+Machine/facade-v5 outer envelopes and Podway fields remain unchanged. Dolgorae
+validates the release proof before projection. Contract fixture checks do not
+qualify runtime settlement, host/account paths or consumer product behavior.
