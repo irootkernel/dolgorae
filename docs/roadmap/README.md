@@ -26,7 +26,7 @@ and qualified H1 validation. EPIC-019 is COMPLETE; EPIC-020 is PLANNED with
 partial uncommitted TASK-076 work preserved across the EPIC-023 entry handoff,
 resuming only after TASK-092 completes.
 EPIC-023 is ACTIVE; TASK-090 is COMPLETE, TASK-091 is COMPLETE, and TASK-092 is
-PLANNED before EPIC-020 resumes.
+COMPLETE. Whole-Epic acceptance remains pending before EPIC-020 resumes.
 EPIC-009, EPIC-021, and EPIC-022 remain PLANNED for v0.1.4, in that execution
 order. TASK-067 is COMPLETE;
 TASK-068 through TASK-075 are COMPLETE;
@@ -2589,14 +2589,14 @@ unknown; its focused rerun passed. Final delivery requires reproducing the exact
 official committed package. The selected lock, original H1, external pins and
 native feasibility inputs are unchanged by this lifecycle closeout.
 
-No Dolgorae Task is active while Gul adopts the correction. TASK-092 remains
-`PLANNED` until Gul's separately authorized correction unit is complete and its
-delta H2 is available. EPIC-023 remains `ACTIVE`; EPIC-020 and TASK-076 remain
-parked at `PLANNED`.
+No Dolgorae Task remained active during Gul's correction adoption. Gul has now
+completed its correction unit and supplied delta H2; TASK-092 independently
+accepted that handoff under Main's delegation. EPIC-023 remains `ACTIVE` pending
+Master's whole-Epic acceptance; EPIC-020 and TASK-076 remain parked at `PLANNED`.
 
 ### TASK-092: Independently Accept the Corrected Gul Contract Handoff
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-091 and the completed Gul correction unit's delta H2.
 
@@ -2614,6 +2614,16 @@ or incomplete consumer Task is insufficient.
 
 Handoff: Accepted corrected contract selection for TASK-076 resumption and later
 H3. TASK-087 consumes this prior acceptance; it does not postpone or own it.
+
+Current qualification: Gul `bf6f4e7` supplied the revised completed correction handoff.
+The [Gate A addendum](../specs/dolgorae-v014-gate-a-acceptance.md#task-092-corrected-gate-a-candidate)
+records four passing export cases from the actual clean delivery commit, resolved
+consumer-fixture P2, revised native JSON/archive verification and H1/schema checks.
+Prior scoped contract/foundation results carry forward on byte-identical inputs;
+Gul's same-tree full gate remains supplied evidence. Main accepted TASK-092 under
+Master's EPIC-023 delegation after independent milestone and Task reviews and
+isolated contract checks. EPIC-023 stays `ACTIVE` pending Master's whole-Epic
+acceptance, with EPIC-020 and TASK-076 parked at `PLANNED`. No new Task is active.
 
 Epic acceptance: The corrected H1 is reproducible and Gul's completed delta H2
 has independent Gate A delta acceptance. No Rust/DB release implementation,

@@ -40,7 +40,8 @@ development commits.
 
 ### Fixed
 
-- Define state-based member release proofs and retained release operations in a separately selected H1 contract erratum, pending Gul delta acceptance and runtime implementation.
+- Define state-based member release proofs and retained release operations in a
+  separately selected H1 contract erratum, pending runtime implementation.
 
 - Resume retained session Close after gateway or worker loss, preserve failure
   causes, and recover quiescent worker generations across executable changes

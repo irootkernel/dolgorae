@@ -1,7 +1,7 @@
 # Delegation release proof correction
 
 Status: supplementary planning dossier for EPIC-023 (`EPIC-023` `ACTIVE`;
-`TASK-090` `COMPLETE`; `TASK-091` `COMPLETE`; `TASK-092` `PLANNED`). Adopted normative
+`TASK-090` `COMPLETE`; `TASK-091` `COMPLETE`; `TASK-092` `COMPLETE`). Adopted normative
 behavior is owned by the
 [release-proof contract correction specification](../specs/dolgorae-v014-release-proof-correction.md),
 and accepted decision rationale is recorded in
@@ -11,7 +11,7 @@ owns registration, status and the active-slot handoff. This supplements the
 [v0.1.4 alignment dossier](TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
 `TASK-090` contract adoption does not amend H1 bytes or accept a consumer
 package. EPIC-020 and TASK-076 remain parked at `PLANNED` with preserved
-partial uncommitted work until TASK-092 completes.
+partial uncommitted work pending Master's whole-Epic acceptance.
 
 Main accepted TASK-091 under Master's EPIC-023 delegation after independent
 milestone and final correction reviews. All default gate cases passed across
@@ -19,9 +19,21 @@ scoped isolated runs; no single final full make run exited zero. The initial
 external lifecycle identity-guard failure has no established cause; its focused
 rerun passed. Final delivery requires exact official-commit package reproduction.
 This lifecycle closeout preserves the accepted selected lock and original H1,
-external pins and native feasibility inputs. No Dolgorae Task is active while Gul
-adopts the correction. TASK-092 stays `PLANNED` until the separately authorized
-Gul correction unit completes and delta H2 is available.
+external pins and native feasibility inputs. No Dolgorae Task remained active
+during Gul's correction adoption. Gul's completed correction unit has supplied
+delta H2; TASK-092 independently accepted that exact handoff under Main's
+delegation. EPIC-020 and TASK-076 remain parked at `PLANNED` pending Master's
+whole-Epic acceptance.
+
+The [TASK-092 Gate A addendum](../specs/dolgorae-v014-gate-a-acceptance.md#task-092-corrected-gate-a-candidate)
+binds Gul `bf6f4e7` to corrected H1 `0927cbf`. Its four export cases pass from the
+actual clean delivery commit, resolving consumer-fixture P2. The revised native
+JSON/archive and H1/schema checks pass; prior contract/foundation results carry
+forward on unchanged inputs. Gul's same-tree full gate is supplied evidence.
+Main accepted TASK-092 under Master's EPIC-023 delegation after independent
+milestone and Task reviews and isolated contract checks. TASK-092 is `COMPLETE`;
+EPIC-023 remains `ACTIVE` pending Master's whole-Epic acceptance. No new Task
+is active and no runtime resumption is recorded here.
 
 ## Recommendation
 

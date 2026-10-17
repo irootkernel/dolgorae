@@ -129,3 +129,98 @@ Planned until completed EPIC-019, EPIC-020, EPIC-009 and EPIC-021/TASK-087 suppl
 the complete runnable H3 and required Aquarium/Podway runtime evidence.
 EPIC-019 completion alone does not complete Phase 3. Master retains broker
 transmission, final Epic acceptance and separate release/installation authority.
+
+## TASK-092 corrected Gate A candidate
+
+Status: `ACCEPTED` by Main under Master's EPIC-023 delegation after independent
+milestone and Task reviews and isolated contract checks. TASK-092 is `COMPLETE`.
+EPIC-023 remains `ACTIVE` pending Master's whole-Epic acceptance; EPIC-020 and
+TASK-076 remain `PLANNED`, with no new Task activated.
+
+### Exact inputs
+
+| Input | Accepted identity |
+| --- | --- |
+| Corrected Dolgorae H1 source | `0927cbf87b0a3ba37c8509016c99f14c3f9f3c29` |
+| Raw H1 lock SHA-256 | `5900393481ed200c6ef4eadab96b034d679f3e4cc6b0d42b764c4211c94a862a` |
+| Reproduced H1 archive SHA-256 | `9b8427b6958b6ef9323dfcea1a512ee3ba070a9e594076613abfc98849012e3c` (966,685 bytes; 295 files) |
+| Gul completed candidate | `bf6f4e7657d3094a0d007ff34ea7a8fcecb928a7` |
+| Gul Git tree | `93dc9a1c8e3a6d0789a3cb5d73021506a7ba7ba7` |
+| Gul native Git archive SHA-256 | `3f5d6c431c1784bbf8804447d6401f010291e0953b27e9f5a86b41c06a4bb756` |
+| Complete native correction-export JSON SHA-256 | `87eae83dc58eccfc76198ca607ae3303a82f0a7a441a4224a34b9d763a5a39fe` |
+| Gul canonical `docs/handoffs/E17-H2.md` SHA-256 | `685b1c14ecb2993d257307342a9d738da6b203b0ef340951a2469a83681b886f` |
+
+The native `gul.h2-correction-export/v1` verification recomputed and compared
+the entire received JSON against the exact committed Gul candidate. Original
+Gate A remains bound to Gul `33a0910e85ca547a136fd6158600c45bf0298b92` and H1
+`55ba623fce231192226d29ba718153e18b6644a3`; the preceding acceptance text and
+its historical scope are unchanged.
+
+### Artifact and foundation classification
+
+The corrected H1 adds 117 artifacts, changes 17, removes none and preserves
+137 existing entries. All 271 selected artifacts and 23 frozen-v1 entries
+retain their bound producer bytes. The eleven external pins, native feasibility
+inputs, public-v2 Proto/descriptor and bindings, 64 public methods, 45 Gul
+methods, 14 keyed methods and eight digest domains/vectors are unchanged by
+consumer adoption.
+
+The export's `generated_delta` covers only `contract/generated`: its file
+inventory changes `policy/h1-source.json` and preserves the other 25 outputs;
+`contract/generated/generated-lock.json` records that selection. Separately,
+Gul `a0a6ac54037342610f06d7ac40d4f434e5c4cb8e` adds `SESSION_MODE_UNKNOWN` to
+Gul's own `api/proto/gul/v2/gul.proto`, its generated Go/TypeScript clients and
+the shared web bundle. Those Gul API/frontend changes are not Dolgorae public-v2
+wire changes. Unknown creation provenance maps to Gul's explicit unknown mode.
+Legacy history reduces an oversized page at the same
+cursor within the original deadline, preserving the single-item refusal bound.
+
+Gul `2ed2abdb6f5e2d47f9e7757f40ee5ccf41ee4bb5` settles retained image inputs
+from the single engine's checked snapshots, retaining uncertain submissions
+through ordinary idle observations. The focused foundation checks include image
+settlement, unknown-mode presentation and bounded legacy-history regressions.
+
+### Independent checks and inherited evidence
+
+The following checks ran from a clean isolated clone of the actual `bf6f4e7`
+delivery commit with the selected Python dependencies. All 294 unique selected
+files, including the lock, matched committed Dolgorae `0927cbf` bytes.
+
+| Check | Actual result |
+| --- | --- |
+| `python -I -B scripts/export-e15-h2.py --revision bf6f4e7657d3094a0d007ff34ea7a8fcecb928a7 --verify <received-json>` | Entire native export and native archive identity matched |
+| `python -I -B scripts/test-export-h2.py` | All four cases passed from clean committed inputs |
+| `scripts/h1-schema-check.sh check` and `scripts/h1-schema-check.sh test` | 112 fixed release cases and five integration cases passed |
+| Direct calls to the delivered fixture's `ExportTests.commit` helper | Unchanged and repeated snapshots retained the delivery HEAD; a changed snapshot committed once and remained clean; an actual Git index-lock failure propagated |
+
+Required P2 is resolved by Gul `bf6f4e7`. Its parent `8eebc625` failed before
+any of the four export cases ran because setup attempted an empty commit.
+The correction commits only when staged inputs differ. Direct Git comparison
+confirmed that `scripts/test-export-h2.py` is the only changed file. The revised
+native JSON differs only in `target` and `target_encoding`; its contract payload
+and canonical `docs/handoffs/E17-H2.md` are unchanged. No Gul source was patched
+during this independent qualification.
+
+The following independent results carry forward from exact parent
+`8eebc6254cdd34e4d8c826bd7b4bfa6bc454186a`. Their source and generated inputs
+are byte-identical in `bf6f4e7`. They used Go 1.27.1, Node 26.7.0 and Bun 1.4.2
+without dependency installation.
+
+| Check | Actual result on the unchanged parent inputs |
+| --- | --- |
+| `make contract-check` | Generation drift, contract race tests and typed fixtures passed |
+| `bash scripts/check-sot.sh` and `node scripts/test-sot.mjs` | SOT integrity and 55 negative cases passed |
+| TESTING.md's nine foundation packages plus `internal/files`, with `go test -race -count=1` | All ten packages passed |
+| `bun test frontend/src/read.test.tsx` and `bun run typecheck` | Five read tests and frontend/API typechecking passed |
+| `node api/scripts/api-command.mjs check`, `node contract/port/generate-errors.mjs check` and `node frontend/scripts/check-bundle.mjs` | Gul API, error catalog and shared bundle drift checks passed |
+
+Gul supplies a full serial `make test` exit-zero result from a committed snapshot
+with the same `93dc9a1` tracked tree, before creation of the delivery commit.
+That full gate was not independently repeated here. The previous three consumer
+reviews predate the fixture correction. Subsequent independent TASK-092 reviews
+and isolated contract checks support Main's delegated acceptance of this selection;
+that member-Task acceptance does not establish final Epic acceptance. The dependency
+remains Gul consuming the already delivered Dolgorae H1. Runtime release
+settlement, Rust/DB implementation, H3/H4,
+consumer hosts, accounts, devices, soak and production activation retain their
+existing owners and qualification gates.
