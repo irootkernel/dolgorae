@@ -134,7 +134,7 @@ transmission, final Epic acceptance and separate release/installation authority.
 
 Status: `ACCEPTED` by Main under Master's EPIC-023 delegation after independent
 milestone and Task reviews and isolated contract checks. TASK-092 is `COMPLETE`.
-EPIC-023 remains `ACTIVE` pending Master's whole-Epic acceptance; EPIC-020 and
+Master accepted the whole EPIC-023 result, completing the Epic. EPIC-020 and
 TASK-076 remain `PLANNED`, with no new Task activated.
 
 ### Exact inputs
@@ -219,7 +219,7 @@ with the same `93dc9a1` tracked tree, before creation of the delivery commit.
 That full gate was not independently repeated here. The previous three consumer
 reviews predate the fixture correction. Subsequent independent TASK-092 reviews
 and isolated contract checks support Main's delegated acceptance of this selection;
-that member-Task acceptance does not establish final Epic acceptance. The dependency
+Master separately accepted the whole EPIC-023 result. The dependency
 remains Gul consuming the already delivered Dolgorae H1. Runtime release
 settlement, Rust/DB implementation, H3/H4,
 consumer hosts, accounts, devices, soak and production activation retain their

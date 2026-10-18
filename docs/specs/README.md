@@ -44,7 +44,7 @@ The [TASK-092 Gate A addendum](dolgorae-v014-gate-a-acceptance.md#task-092-corre
 binds corrected H1 `0927cbf` and Gul `bf6f4e7`. The corrected clean-commit export
 fixture and revised delta H2 passed scoped independent checks. Main accepted the
 addendum under Master's EPIC-023 delegation, completing TASK-092; the original
-Gate A selection retains its historical scope. Whole-Epic acceptance remains pending.
+Gate A selection retains its historical scope. Master accepted the whole EPIC-023 result.
 
 The [durable Submit and operation lookup specification](dolgorae-v014-durable-operations.md)
 owns TASK-070's retained operation identity, definitive refusal and native lookup.
