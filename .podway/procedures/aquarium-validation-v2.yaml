@@ -1,6 +1,6 @@
 schema: podway.procedure/v2
 id: aquarium-validation-v2
-version: "30"
+version: "36"
 name: Aquarium Validation
 purpose: Audit one completed epic through bounded remediation, confirmation, and explicit finding disposition.
 description: A bounded Podway procedure for three whole-Epic work-unit assessments, one remediation confirmation, user-directed follow-up, and validation closeout.
@@ -13,6 +13,7 @@ node_definitions:
     instructions:
       - Use the invoking validation handler to bind the exact committed epic, scope, checks, and approved remediation and review envelope.
       - Do not mutate source, install assets, replace sessions, commit, or publish while recording the baseline.
+      - Use the review strategy contract to recommend a route from the original goal, scope, difficulty, impact and uncertainty; preserve an explicit choice and record selection and UI relevance in the existing approved plan or envelope.
     items:
       - id: workflow-owner
         type: choice
@@ -30,16 +31,16 @@ node_definitions:
         multiline: true
       - id: review-route
         type: choice
-        prompt: Record the approved whole-Epic review route, or Mulgae when no alternative was selected.
+        prompt: Record the approved whole-Epic review route, as selected through the approved plan or envelope.
         required: true
         choices:
           - mulgae
           - herdr
-          - independent-review
+          - subagent-review
           - waived
       - id: review-target-scope
         type: text
-        prompt: Record the exact Epic goal and acceptance authority, committed candidate identity, relevant correction commits or captured delta, changed paths and artifacts, verification evidence, and excluded state supplied to the route.
+        prompt: Record the exact Epic goal and acceptance authority, committed candidate identity, relevant correction commits or exact source delta, changed paths and artifacts, verification evidence, and excluded state supplied to the route.
         required: true
         min_length: 1
         max_length: 2000
@@ -62,16 +63,18 @@ node_definitions:
     title: Audit the epic
     intent: Record a fresh requirement matrix, checks, review evidence, and confirmed gaps.
     instructions:
+      - Before dispatch, the Coordinator or an authorized Executor executes the due repository-authoritative checks and supplies their actual results and current candidate evidence. The report-only Evaluator does not run checks.
       - Audit the exact current candidate without source mutation and adjudicate gaps against canonical requirements.
       - Separate blockers, eligible Low gaps, unresolved confirmation, and operational result; total confirmed count is descriptive only.
       - Run the complete Epic audit on the current target. After correction, use the current prepared pass and completed remediation as provenance; this audit does not reset review ordinals or restore consumed authority.
-      - Deliver a complete aquarium.worker-handoff/v1 with the exact target, original criteria, current checks, evidence gaps and authentic native result bindings. This Action delivers a candidate; the separate Judge assesses it.
-      - Preserve the baseline workflow owner. Cold epic-validator uses a fresh Judge reading all original criteria and artifacts directly; continuing epic-handler retains its logical Epic Judge and complete lifetime and history. Required placements remain inactive until combined qualification.
+      - Preserve the baseline workflow owner. Cold epic-validator uses a fresh independent Evaluator reading original criteria and artifacts directly; internal epic-handler validation retains its logical Evaluator when supported. Recover available public handles, current evidence and authority without requiring private history.
       - The audit-result describes completed faithful audit execution, not Epic success. Retain actual unmet and unverified original criterion rows and gap classifications, including member integration seams. A complete negative audit must remain routable through decide-gaps without changing its rows to satisfied.
+      - Assign the report-only native Evaluator directly to read original requirements and current artifacts. Return the audit facts and aquarium.evaluator-assessment/v3 together; no Executor audit is evaluated recursively. Preserve actual negative criterion rows and original gap routing.
+      - The Coordinator records the aggregate audit-result from the completed Evaluator audit and supplied check results; neither report completeness nor this recording proves Epic success.
     items:
       - id: audit-result
         type: check_result
-        prompt: Record the caller-supplied result for aquarium-epic-audit; Podway does not execute or attest the operation.
+        prompt: Record the aggregate result of the completed direct Evaluator audit and actual caller-executed repository checks for aquarium-epic-audit; Podway does not execute or attest the operation.
         help: The declared operation is "Run the complete Aquarium epic audit and repository-authoritative checks for the current validation candidate in the recorded input basis." The matching digest identifies only this abstract slot contract and does not prove that any operation ran.
         required: true
         operation_id: aquarium-epic-audit
@@ -114,26 +117,75 @@ node_definitions:
         choices:
           - current-envelope
           - user-direction
-      - id: worker-handoff
+      - id: evaluator-assessment
         type: artifact
-        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        prompt: Reference the complete aquarium.evaluator-assessment/v3 report and its exact digest; Podway stores metadata only.
         required: true
         allowed_media_types:
           - application/json
+      - id: evaluator-verdict
+        type: choice
+        prompt: Record the Evaluator verdict.
+        required: true
+        choices:
+          - pass
+          - rework
+          - evidence-needed
+      - id: evaluator-unmet-criteria
+        type: integer
+        prompt: Count mandatory unmet criteria, including omitted original criteria.
+        required: true
+        minimum: 0
+      - id: evaluator-unverified-criteria
+        type: integer
+        prompt: Count mandatory unverified criteria, including incomplete compound criteria.
+        required: true
+        minimum: 0
+      - id: evaluator-applicability
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-validation-evaluator-applicability against its complete declared operation. Podway does not execute or attest this check.
+        help: Verify every original criterion and all due phase obligations against direct original evidence, exact current candidate, requirements, checks, authority and available public native handles. Unknown telemetry is not a product gap. Preserve original negative rows and truthful verdicts/counts.
+        required: true
+        operation_id: aquarium-validation-evaluator-applicability
+        operation_digest: sha256:14d0db832e2b5992b309c058497f2e9fe6600c1e8f25be615dc5a0f50f64cca1
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+      - id: evaluator-summary
+        type: text
+        prompt: Record criterion rows, original sources, evidence gaps, applicable parent constraints, technical-review limitations, remaining authority, and proposed correction or evidence owner.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: evaluator-checkpoint-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-validation-faithful-audit-checkpoint against its complete declared operation. Podway does not execute or attest this check.
+        help: Verify that the audit is complete and faithful for its admitted full or frozen scope, every original criterion row and actual unmet/unverified gap is preserved, and original audit gap counts, identities, classifications and correction authority agree with direct evidence. This scoped checkpoint does not require Epic achievement or zero original outcome gaps.
+        required: true
+        operation_id: aquarium-validation-faithful-audit-checkpoint
+        operation_digest: sha256:b69aa94a7acf13238ba1a5d5c94fa307ea3be584ef2c1a049bfcdb5e2a9ce7e5
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
   remediation-confirmation-audit-record:
     type: action
     title: Confirm one Validation remediation
     intent: Confirm only the frozen correction set and its directly affected regression surface after one remediation pass.
     instructions:
+      - Before dispatch, the Coordinator or an authorized Executor executes the due repository-authoritative checks and supplies their actual results and current candidate evidence. The report-only Evaluator does not run checks.
       - Check only the frozen finding IDs, correction delta, invalidated criteria, directly affected callers, contracts, and tests, and correction-caused regressions.
       - Do not reopen the whole Epic, admit unrelated findings into this correction loop, or authorize another correction pass.
-      - Deliver a complete aquarium.worker-handoff/v1 with the exact target, original criteria, current checks, evidence gaps and authentic native result bindings. This Action delivers a candidate; the separate Judge assesses it.
-      - Preserve the baseline workflow owner. Cold epic-validator uses a fresh Judge reading all original criteria and artifacts directly; continuing epic-handler retains its logical Epic Judge and complete lifetime and history. Required placements remain inactive until combined qualification.
+      - Preserve the baseline workflow owner. Cold epic-validator uses a fresh independent Evaluator reading original criteria and artifacts directly; internal epic-handler validation retains its logical Evaluator when supported. Recover available public handles, current evidence and authority without requiring private history.
       - Preserve the original frozen obligations and actual negative rows. Audit execution completeness does not establish corrected Epic success or grant another correction pass.
+      - Assign the report-only native Evaluator directly to read original requirements and current artifacts. Return the audit facts and aquarium.evaluator-assessment/v3 together; no Executor audit is evaluated recursively. Preserve actual negative criterion rows and original gap routing.
+      - The Coordinator records the aggregate audit-result from the completed Evaluator audit and supplied check results; neither report completeness nor this recording proves Epic success.
     items:
       - id: audit-result
         type: check_result
-        prompt: Record the caller-supplied result for aquarium-validation-remediation-confirmation-audit; Podway does not execute or attest the operation.
+        prompt: Record the aggregate result of the completed direct Evaluator audit and actual caller-executed repository checks for aquarium-validation-remediation-confirmation-audit; Podway does not execute or attest the operation.
         help: The declared operation is "Confirm only the frozen Validation finding IDs, correction delta, invalidated criteria, directly affected callers, contracts, and tests, and correction-caused regressions without reopening unrelated Epic scope." The matching digest identifies only this abstract slot contract and does not prove that any operation ran.
         required: true
         operation_id: aquarium-validation-remediation-confirmation-audit
@@ -181,12 +233,59 @@ node_definitions:
         choices:
           - current-envelope
           - user-direction
-      - id: worker-handoff
+      - id: evaluator-assessment
         type: artifact
-        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        prompt: Reference the complete aquarium.evaluator-assessment/v3 report and its exact digest; Podway stores metadata only.
         required: true
         allowed_media_types:
           - application/json
+      - id: evaluator-verdict
+        type: choice
+        prompt: Record the Evaluator verdict.
+        required: true
+        choices:
+          - pass
+          - rework
+          - evidence-needed
+      - id: evaluator-unmet-criteria
+        type: integer
+        prompt: Count mandatory unmet criteria, including omitted original criteria.
+        required: true
+        minimum: 0
+      - id: evaluator-unverified-criteria
+        type: integer
+        prompt: Count mandatory unverified criteria, including incomplete compound criteria.
+        required: true
+        minimum: 0
+      - id: evaluator-applicability
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-validation-evaluator-applicability against its complete declared operation. Podway does not execute or attest this check.
+        help: Verify every original criterion and all due phase obligations against direct original evidence, exact current candidate, requirements, checks, authority and available public native handles. Unknown telemetry is not a product gap. Preserve original negative rows and truthful verdicts/counts.
+        required: true
+        operation_id: aquarium-validation-evaluator-applicability
+        operation_digest: sha256:14d0db832e2b5992b309c058497f2e9fe6600c1e8f25be615dc5a0f50f64cca1
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
+      - id: evaluator-summary
+        type: text
+        prompt: Record criterion rows, original sources, evidence gaps, applicable parent constraints, technical-review limitations, remaining authority, and proposed correction or evidence owner.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
+      - id: evaluator-checkpoint-result
+        type: check_result
+        prompt: Record the caller-supplied result for aquarium-validation-faithful-audit-checkpoint against its complete declared operation. Podway does not execute or attest this check.
+        help: Verify that the audit is complete and faithful for its admitted full or frozen scope, every original criterion row and actual unmet/unverified gap is preserved, and original audit gap counts, identities, classifications and correction authority agree with direct evidence. This scoped checkpoint does not require Epic achievement or zero original outcome gaps.
+        required: true
+        operation_id: aquarium-validation-faithful-audit-checkpoint
+        operation_digest: sha256:b69aa94a7acf13238ba1a5d5c94fa307ea3be584ef2c1a049bfcdb5e2a9ce7e5
+        accepted_outcomes:
+          - pass
+          - fail
+          - inconclusive
   gap-decision:
     type: decision
     title: Evaluate audit gaps
@@ -385,13 +484,13 @@ node_definitions:
       - Read the required prepare-validation-pass summary before correction. Its source attempt and native rework reason identify the admitted trigger and authority; record the completed correction against that fresh preparation basis.
       - Reconstruct completed assessment ordinals and the exact current-envelope or one-shot user authority from native history and source review references before work. Preserve them across rework without treating a stale review as a current assessment.
       - After this correction, use a complete Epic audit before the first, second, or third work-unit assessment. After the third completed assessment, or a separately authorized one-shot correction, restrict confirmation to the frozen correction set and direct regression surface.
-      - Deliver a complete aquarium.worker-handoff/v1 with the exact target, original criteria, current checks, evidence gaps and authentic native result bindings. This Action delivers a candidate; the separate Judge assesses it.
-      - Preserve the baseline workflow owner. Cold epic-validator uses a fresh Judge reading all original criteria and artifacts directly; continuing epic-handler retains its logical Epic Judge and complete lifetime and history. Required placements remain inactive until combined qualification.
-      - Implement only one owned correction group at a time. Workers cannot accept, stage or commit; the Primary settles the exact applicable group after its Judge assessment, then serializes the next group in this same Validation session. Do not create per-group Goal sessions or provider reviews.
+      - Deliver a complete aquarium.executor-handoff/v3 with the exact target, original criteria, current checks, evidence gaps and actual results and available public native handles. This Action delivers a candidate; the separate Evaluator assesses it.
+      - Preserve the baseline workflow owner. Cold epic-validator uses a fresh independent Evaluator reading original criteria and artifacts directly; internal epic-handler validation retains its logical Evaluator when supported. Recover available public handles, current evidence and authority without requiring private history.
+      - Implement only one owned correction group at a time. Executors cannot accept, stage or commit; the Coordinator settles the exact applicable group after its Evaluator assessment, then serializes the next group in this same Validation session. Do not create per-group Goal sessions or provider reviews.
     items:
       - id: remediation-candidate-summary
         type: text
-        prompt: Record this single admitted group, original owner and source finding IDs, exact candidate bytes, authorized checks, remaining gaps and carried prior Primary-verified group settlements. Do not claim a commit.
+        prompt: Record this single admitted group, original owner and source finding IDs, exact candidate bytes, authorized checks, remaining gaps and carried prior Coordinator-verified group settlements. Do not claim a commit.
         required: true
         min_length: 1
         max_length: 8000
@@ -408,9 +507,9 @@ node_definitions:
         choices:
           - current-envelope
           - one-shot
-      - id: worker-handoff
+      - id: executor-handoff
         type: artifact
-        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        prompt: Reference the complete aquarium.executor-handoff/v3 candidate, exact target, requirement basis, checks, authority, gaps and actual results and available public native handles.
         required: true
         allowed_media_types:
           - application/json
@@ -462,12 +561,15 @@ node_definitions:
     title: Record final validation evidence
     intent: Record the latest audit and route-specific whole-Epic assessment, including every confirmation finding that requires user direction.
     instructions:
+      - new-review-current-route preserves the selected route authorization basis; record the separate explicit one-root execution grant in route-change-authority-reference and route-binding evidence. It is neither a route change nor resumed provider execution.
+      - New Mulgae roots use live_source v1 and project binding only; keep workspace/index unchanged through terminal completion. Terminal failure permits no rerun or compose; a fresh root needs explicit new-review-current-route authority after settlement and preserves the pending ordinal.
       - Dispatch only the approved whole-Epic route and preserve its exact target, operation, evidence reference, provenance, optional backend check, and assurance limits.
       - Do not launch another provider root solely because Low findings or their accepted local delta remain.
       - Compose the current obligation summary from the selected audit basis and provider findings under separate namespaces; provider counts never erase an applicable audit Low set.
       - Use the selected current-audit-basis-summary and its matching resolved audit source. A stale earlier audit cannot supply current target evidence.
-      - Deliver a complete aquarium.worker-handoff/v1 with the exact target, original criteria, current checks, evidence gaps and authentic native result bindings. This Action delivers a candidate; the separate Judge assesses it.
-      - Preserve the baseline workflow owner. Cold epic-validator uses a fresh Judge reading all original criteria and artifacts directly; continuing epic-handler retains its logical Epic Judge and complete lifetime and history. Required placements remain inactive until combined qualification.
+      - Deliver a complete aquarium.executor-handoff/v3 with the exact target, original criteria, current checks, evidence gaps and actual results and available public native handles. This Action delivers a candidate; the separate Evaluator assesses it.
+      - Preserve the baseline workflow owner. Cold epic-validator uses a fresh independent Evaluator reading original criteria and artifacts directly; internal epic-handler validation retains its logical Evaluator when supported. Recover available public handles, current evidence and authority without requiring private history.
+      - Use the review result handoff contract to collect every expected report through its actual native surface, record producer and receiver observations, and recover the same operation before considering fresh review; carry prior finding decisions and correction reasons in the Brief.
     items:
       - id: review-route
         type: choice
@@ -476,7 +578,7 @@ node_definitions:
         choices:
           - mulgae
           - herdr
-          - independent-review
+          - subagent-review
           - waived
       - id: review-operation
         type: choice
@@ -522,9 +624,24 @@ node_definitions:
           - pass
           - fail
           - inconclusive
+      - id: review-source-contract
+        type: choice
+        prompt: Record live-source-v1 for new Mulgae execution, historical-capture for an existing captured result, or not-applicable for another route or closeout substitute.
+        required: true
+        choices:
+          - mulgae-live-source-v1
+          - mulgae-historical-capture
+          - not-applicable
+      - id: review-source-binding
+        type: text
+        prompt: Preserve the public preflight target and digest, receipt-bound run digest, scope-derived consistency, applicable staged content binding and caller observation when available; state pending or unavailable facts explicitly. Metadata is not source content. Other routes record not-applicable.
+        required: true
+        min_length: 1
+        max_length: 4000
+        multiline: true
       - id: review-evidence-reference
         type: text
-        prompt: Record bounded native lifecycle, all three Independent Review delegation references and statuses when selected, preflight-failure, or waiver evidence for this checkpoint.
+        prompt: Record bounded native lifecycle, all expected Subagent base and UI reviewer references or Herdr main and child references, production, submission and actual recipient readback when selected, preflight-failure, or waiver evidence for this checkpoint.
         required: true
         min_length: 1
         max_length: 2000
@@ -599,6 +716,7 @@ node_definitions:
           - mulgae
           - orca
           - herdr
+          - subagent-review
           - independent-review
           - waived
       - id: prior-review-operation
@@ -633,6 +751,7 @@ node_definitions:
         required: false
         choices:
           - resume-current
+          - new-review-current-route
           - switch-route
           - waive
           - stop
@@ -660,10 +779,10 @@ node_definitions:
       - id: route-binding-result
         type: check_result
         prompt: Record the caller-supplied result for aquarium-validation-review-route-binding; Podway does not execute or attest the operation.
-        help: The declared operation is "Verify that the effective whole-Epic review route preserves the immediately preceding review route and operation, lifecycle state, findings, goal revision, assessment ordinal, and remaining authority, and matches the approved validation envelope or the user's explicit lifecycle-safe resume, route-change, or waiver direction without reusing incompatible authority." The matching digest identifies only this abstract slot contract and does not prove that the check ran.
+        help: The declared operation is "Verify the whole-Epic validation route against its approved envelope or explicit direction, preceding route and operation, lifecycle, findings, goal revision, ordinal and remaining authority. Same-route resume after proven not-started repeats preflight and first execution under the unused grant; otherwise it continues existing native work or publication. A new-review-current-route grant admits one full Mulgae root only after terminal incomplete or failed settlement, retaining findings and the pending ordinal and refreshing current-source preflight. Preserve accepted scope; resume grants no replay or replacement." The matching digest identifies only this abstract slot contract and does not prove that the check ran.
         required: true
         operation_id: aquarium-validation-review-route-binding
-        operation_digest: sha256:231042f4ce3156ba7b9a770e23960766ebe5cf3167b774d01b1365970f2c8792
+        operation_digest: sha256:f059142871216eda78b34715a428a28a47b75ba59b5b0f72e25112249e97fa75
         accepted_outcomes:
           - pass
           - fail
@@ -809,9 +928,9 @@ node_definitions:
         prompt: Record every unverified completion criterion, unresolved confirmation, invalidated required audit basis, or another missing mandatory verification prerequisite.
         required: true
         minimum: 0
-      - id: worker-handoff
+      - id: executor-handoff
         type: artifact
-        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        prompt: Reference the complete aquarium.executor-handoff/v3 candidate, exact target, requirement basis, checks, authority, gaps and actual results and available public native handles.
         required: true
         allowed_media_types:
           - application/json
@@ -1030,7 +1149,7 @@ node_definitions:
             equals: mulgae
       - id: not-required
         label: Backend not required
-        criteria: The admitted Herdr, Independent Review, or waiver assessment legitimately has no backend result.
+        criteria: The admitted Herdr, Subagent Review, or waiver assessment legitimately has no backend result.
         guards:
           - evidence:
               node: final-review
@@ -1146,6 +1265,10 @@ node_definitions:
             not_equals: stop
           - evidence:
               node: final-review
+              item: route-direction
+            not_equals: new-review-current-route
+          - evidence:
+              node: final-review
               item: route-change-readiness
             equals: safe-to-change
       - id: stop
@@ -1156,6 +1279,26 @@ node_definitions:
               node: final-review
               item: route-direction
             equals: stop
+      - id: new-review-current-route
+        label: Start one newly authorized Mulgae review
+        criteria: Explicit user intent authorizes a fresh current-source root after terminal settlement, retaining earlier findings and the pending ordinal.
+        guards:
+          - evidence:
+              node: final-review
+              item: route-direction
+            equals: new-review-current-route
+          - evidence:
+              node: final-review
+              item: review-route
+            equals: mulgae
+          - evidence:
+              node: final-review
+              item: prior-route-lifecycle-state
+            equals: terminal-incomplete-or-failed
+          - evidence:
+              node: final-review
+              item: route-change-readiness
+            equals: safe-to-change
     reason:
       required: true
       prompt: Record the explicit recovery direction and authoritative safe-settlement state.
@@ -1361,7 +1504,7 @@ node_definitions:
       - Freeze the source finding set, priorities, criterion rows and reviewed basis. Apply only admitted local-verified-fix corrections and ordinary Low dispositions under existing effect authority.
       - Run every affected required check on the final target and reassess affected criteria under coordinator provenance. Preserve unaffected rows only with current applicability evidence; never rewrite the source reviewer assessment.
       - Bind exact before and after targets, permitted delta, zero pending local corrections and Low dispositions, current blockers and criterion gaps. A failed or inconclusive check remains incomplete; use its owner rather than dispatching a cleaner review.
-      - The required final Judge reads every original criterion and the complete settlement composition. Another provider operation or ordinal is not required solely for eligible local settlement.
+      - The required final Evaluator reads every original criterion and the complete settlement composition. Another provider operation or ordinal is not required solely for eligible local settlement.
     items:
       - id: source-review-basis
         type: text
@@ -1602,7 +1745,7 @@ node_definitions:
       - On the direct validated path, require the current final-review pending disposition, blocker, and evidence-gap counts to be zero.
       - On the completed Low-settlement path, require the latest record-low-disposition zero pending and blocker counts, passing verification, and exact accepted final target.
       - Treat the earlier positive final-review pending count as historical; it does not require another review after complete Low settlement.
-      - Use the applicable final Judge outcome and complete original native criterion assessments without repeating its assessment.
+      - Use the applicable final Evaluator outcome and complete original native criterion assessments without repeating its assessment.
       - Completed members, inherited verdicts or clean provider counts cannot erase integration or manual-verification gaps.
     options:
       - id: achieved
@@ -1610,36 +1753,36 @@ node_definitions:
         criteria: This assessment was reached from validated with zero current final-review pending dispositions, blockers, and evidence gaps, or from completed record-low-disposition with zero pending dispositions and current blockers, a passing Low-disposition verification result, and the exact accepted final target; required audit and review evidence is operationally complete, and every historical finding remains recorded under its source namespace.
         guards:
           - evidence:
-              node: judge-validation
-              item: judge-goal-outcome
+              node: evaluator-validation
+              item: evaluator-goal-outcome
             equals: achieved
           - evidence:
-              node: judge-validation
-              item: judge-verdict
+              node: evaluator-validation
+              item: evaluator-verdict
             equals: pass
           - evidence:
-              node: judge-validation
-              item: judge-unmet-criteria
+              node: evaluator-validation
+              item: evaluator-unmet-criteria
             equals: 0
           - evidence:
-              node: judge-validation
-              item: judge-unverified-criteria
+              node: evaluator-validation
+              item: evaluator-unverified-criteria
             equals: 0
       - id: not-achieved
         label: Goal not achieved
         criteria: Fresh evidence does not support the current validation goal, including every path reached from record-stopped, record-incomplete, or record-review-operation-incomplete; those dispositions can never select achieved.
         guards:
           - evidence:
-              node: judge-validation
-              item: judge-goal-outcome
+              node: evaluator-validation
+              item: evaluator-goal-outcome
             equals: not-achieved
       - id: superseded
         label: Goal superseded
         criteria: The current validation goal is no longer desired.
         guards:
           - evidence:
-              node: judge-validation
-              item: judge-goal-outcome
+              node: evaluator-validation
+              item: evaluator-goal-outcome
             equals: superseded
     reason:
       required: true
@@ -1658,7 +1801,7 @@ node_definitions:
     evidence_guidance:
       - Read the path-bound disposition, available final review, Low settlement, and core validation evidence.
       - A stopped or incomplete path cannot select achieved.
-      - Use the applicable final Judge outcome and complete original native criterion assessments without repeating its assessment.
+      - Use the applicable final Evaluator outcome and complete original native criterion assessments without repeating its assessment.
       - Completed members, inherited verdicts or clean provider counts cannot erase integration or manual-verification gaps.
     options:
       - id: achieved
@@ -1674,24 +1817,24 @@ node_definitions:
         criteria: The stop or incomplete disposition leaves the validation goal unsupported.
         guards:
           - evidence:
-              node: judge-stopped-validation
-              item: judge-goal-outcome
+              node: evaluator-stopped-validation
+              item: evaluator-goal-outcome
             equals: not-achieved
       - id: superseded
         label: Goal superseded
         criteria: The validation goal is no longer desired.
         guards:
           - evidence:
-              node: judge-stopped-validation
-              item: judge-goal-outcome
+              node: evaluator-stopped-validation
+              item: evaluator-goal-outcome
             equals: superseded
       - id: stopped
         label: Validation stopped
-        criteria: The exact stopped boundary and applicable Judge leave the original Epic outcome unachieved.
+        criteria: The exact stopped boundary and applicable Evaluator leave the original Epic outcome unachieved.
         guards:
           - evidence:
-              node: judge-stopped-validation
-              item: judge-goal-outcome
+              node: evaluator-stopped-validation
+              item: evaluator-goal-outcome
             equals: stopped
     reason:
       required: true
@@ -1812,7 +1955,7 @@ node_definitions:
         multiline: true
       - id: promoted-evidence-references
         type: list
-        prompt: Record each committed aquarium.promoted-evidence/v1 manifest as its repository-relative path followed by exactly one sha256-prefixed 64-hex manifest digest; leave absent when no package applies.
+        prompt: Record each committed aquarium.promoted-evidence/v1 or v2 manifest as its repository-relative path followed by exactly one sha256-prefixed 64-hex manifest digest; leave absent when no package applies.
         required: false
         min_items: 0
         max_items: 50
@@ -1931,61 +2074,61 @@ node_definitions:
         min_length: 1
         max_length: 5000
         multiline: true
-  judge-assessment-record:
+  evaluator-assessment-record:
     type: action
     title: Assess the current candidate
-    intent: Obtain the retained report-only Judge assessment of original criteria and exact evidence.
+    intent: Obtain the retained report-only Evaluator assessment of original criteria and exact evidence.
     instructions:
-      - Supply all original Epic exit criteria, member obligations, integration seams, purpose and original artifacts directly to the fresh cold Judge or retained internal Epic Judge. A Worker summary and inherited verdict never replace direct evidence.
+      - Supply all original Epic exit criteria, member obligations, integration seams, purpose and original artifacts directly to the fresh cold Evaluator or retained internal Epic Evaluator. An Executor summary and inherited verdict never replace direct evidence.
       - Preserve every original criterion row, actual global verdict and unmet/unverified count. Separately assess all obligations due at this current phase and applicable parent constraints from direct evidence; unfinished later work remains a global gap, not a fabricated pass or non-applicability claim.
       - A passing checkpoint verifies actual current work, required checks and authority. For review evidence, preserve faithful negative provider rows and their original routing; report completeness alone cannot establish correction, implementation or verification success.
-      - Accept a complete applicable native report without reassessing it or recursively judging the Judge. Record its distinct semantic fields after retaining technical evidence unchanged.
-      - Missing original criteria, changed targets, unsupported bindings or unreadable evidence prevent a pass; a negative verdict grants no correction or provider authority.
-      - Record all final items, establish retained idle state, accept the native result through Podway, then complete separately with fresh fences.
+      - Record the complete applicable aquarium.evaluator-assessment/v3 from the independent native Evaluator, check coverage and current candidate applicability, then complete this ordinary Action with current fences. Do not recursively evaluate the report or fabricate native receipts.
+      - Missing original criteria, changed targets, missing required result or authority evidence, or unreadable evidence prevent a pass; a negative verdict grants no correction or provider authority.
+      - Assess the coherent assigned phase from original artifacts, not report fidelity alone. Preserve due obligations, future global gaps and the original negative-result router. Use current native harness agents with available public handles, without private executor or model/configuration qualification.
     items:
-      - id: judge-assessment
+      - id: evaluator-assessment
         type: artifact
-        prompt: Reference the complete aquarium.judge-assessment/v1 report and its exact digest; Podway stores metadata only.
+        prompt: Reference the complete aquarium.evaluator-assessment/v3 report and its exact digest; Podway stores metadata only.
         required: true
         allowed_media_types:
           - application/json
-      - id: judge-verdict
+      - id: evaluator-verdict
         type: choice
-        prompt: Record the Judge verdict.
+        prompt: Record the Evaluator verdict.
         required: true
         choices:
           - pass
           - rework
           - evidence-needed
-      - id: judge-unmet-criteria
+      - id: evaluator-unmet-criteria
         type: integer
         prompt: Count mandatory unmet criteria, including omitted original criteria.
         required: true
         minimum: 0
-      - id: judge-unverified-criteria
+      - id: evaluator-unverified-criteria
         type: integer
         prompt: Count mandatory unverified criteria, including incomplete compound criteria.
         required: true
         minimum: 0
-      - id: judge-applicability
+      - id: evaluator-applicability
         type: check_result
-        prompt: Record the caller-supplied result for aquarium-validation-judge-applicability against its complete declared operation. Podway does not execute or attest this check.
-        help: Verify complete original Epic criterion coverage and direct evidence, exact current target, requirement basis, goal revision, placement and attempt, Worker result, fresh cold or retained internal logical Judge identity and full history, and authentic acknowledged role/configuration/task/result bindings.
+        prompt: Record the caller-supplied result for aquarium-validation-evaluator-applicability against its complete declared operation. Podway does not execute or attest this check.
+        help: Verify every original criterion and all due phase obligations against direct original evidence, exact current candidate, requirements, checks, authority and available public native handles. Unknown telemetry is not a product gap. Preserve original negative rows and truthful verdicts/counts.
         required: true
-        operation_id: aquarium-validation-judge-applicability
-        operation_digest: sha256:ad3371ef8a2d6a4bb4bafac1e33ed131f1b9d46fbd8be4781d0e898b4b8ac776
+        operation_id: aquarium-validation-evaluator-applicability
+        operation_digest: sha256:14d0db832e2b5992b309c058497f2e9fe6600c1e8f25be615dc5a0f50f64cca1
         accepted_outcomes:
           - pass
           - fail
           - inconclusive
-      - id: judge-summary
+      - id: evaluator-summary
         type: text
         prompt: Record criterion rows, original sources, evidence gaps, applicable parent constraints, technical-review limitations, remaining authority, and proposed correction or evidence owner.
         required: true
         min_length: 1
         max_length: 4000
         multiline: true
-      - id: judge-checkpoint-result
+      - id: evaluator-checkpoint-result
         type: check_result
         prompt: Record the caller-supplied result for aquarium-validation-phase-checkpoint; Podway does not execute or attest this check.
         help: Verify actual satisfaction of all current phase obligations and applicable parent constraints from direct original evidence and exact candidate bytes, authorized checks and current authority. Preserve the complete original workflow rows, global verdict and remaining unmet/unverified counts; report completeness alone is insufficient.
@@ -1996,124 +2139,60 @@ node_definitions:
           - pass
           - fail
           - inconclusive
-  audit-judge-assessment-record:
+  remediation-evaluator-assessment-record:
     type: action
     title: Assess the current candidate
-    intent: Obtain the retained report-only Judge assessment of original criteria and exact evidence.
+    intent: Obtain the retained report-only Evaluator assessment of original criteria and exact evidence.
     instructions:
-      - Supply all original Epic exit criteria, member obligations, integration seams, purpose and original artifacts directly to the fresh cold Judge or retained internal Epic Judge. A Worker summary and inherited verdict never replace direct evidence.
-      - Accept a complete applicable native report without reassessing it or recursively judging the Judge. Record its distinct semantic fields after retaining technical evidence unchanged.
-      - Missing original criteria, changed targets, unsupported bindings or unreadable evidence prevent a pass; a negative verdict grants no correction or provider authority.
-      - Record all final items, establish retained idle state, accept the native result through Podway, then complete separately with fresh fences.
-      - Preserve the actual original Epic verdict and unmet/unverified rows. A complete faithful negative audit passes the separate checkpoint-result and reaches its original gap router; never report Epic pass or zero gaps merely to advance. Incomplete or inconsistent audit evidence needs bounded evidence repair, not invented gap classifications.
+      - Supply all original Epic exit criteria, member obligations, integration seams, purpose and original artifacts directly to the fresh cold Evaluator or retained internal Epic Evaluator. An Executor summary and inherited verdict never replace direct evidence.
+      - Record the complete applicable aquarium.evaluator-assessment/v3 from the independent native Evaluator, check coverage and current candidate applicability, then complete this ordinary Action with current fences. Do not recursively evaluate the report or fabricate native receipts.
+      - Missing original criteria, changed targets, missing required result or authority evidence, or unreadable evidence prevent a pass; a negative verdict grants no correction or provider authority.
+      - Keep evaluator-verdict and unmet/unverified counts faithful to the full original Epic outcome. Record the distinct evaluator-group-result only from actual current group repair and required checks; other Epic gaps remain negative. A group checkpoint pass admits only existing Coordinator acceptance and commit settlement, not Epic achievement.
+      - Assess the coherent assigned phase from original artifacts, not report fidelity alone. Preserve due obligations, future global gaps and the original negative-result router. Use current native harness agents with available public handles, without private executor or model/configuration qualification.
     items:
-      - id: judge-assessment
+      - id: evaluator-assessment
         type: artifact
-        prompt: Reference the complete aquarium.judge-assessment/v1 report and its exact digest; Podway stores metadata only.
+        prompt: Reference the complete aquarium.evaluator-assessment/v3 report and its exact digest; Podway stores metadata only.
         required: true
         allowed_media_types:
           - application/json
-      - id: judge-verdict
+      - id: evaluator-verdict
         type: choice
-        prompt: Record the Judge verdict.
+        prompt: Record the Evaluator verdict.
         required: true
         choices:
           - pass
           - rework
           - evidence-needed
-      - id: judge-unmet-criteria
+      - id: evaluator-unmet-criteria
         type: integer
         prompt: Count mandatory unmet criteria, including omitted original criteria.
         required: true
         minimum: 0
-      - id: judge-unverified-criteria
+      - id: evaluator-unverified-criteria
         type: integer
         prompt: Count mandatory unverified criteria, including incomplete compound criteria.
         required: true
         minimum: 0
-      - id: judge-applicability
+      - id: evaluator-applicability
         type: check_result
-        prompt: Record the caller-supplied result for aquarium-validation-judge-applicability against its complete declared operation. Podway does not execute or attest this check.
-        help: Verify complete original Epic criterion coverage and direct evidence, exact current target, requirement basis, goal revision, placement and attempt, Worker result, fresh cold or retained internal logical Judge identity and full history, and authentic acknowledged role/configuration/task/result bindings.
+        prompt: Record the caller-supplied result for aquarium-validation-evaluator-applicability against its complete declared operation. Podway does not execute or attest this check.
+        help: Verify every original criterion and all due phase obligations against direct original evidence, exact current candidate, requirements, checks, authority and available public native handles. Unknown telemetry is not a product gap. Preserve original negative rows and truthful verdicts/counts.
         required: true
-        operation_id: aquarium-validation-judge-applicability
-        operation_digest: sha256:ad3371ef8a2d6a4bb4bafac1e33ed131f1b9d46fbd8be4781d0e898b4b8ac776
+        operation_id: aquarium-validation-evaluator-applicability
+        operation_digest: sha256:14d0db832e2b5992b309c058497f2e9fe6600c1e8f25be615dc5a0f50f64cca1
         accepted_outcomes:
           - pass
           - fail
           - inconclusive
-      - id: judge-summary
+      - id: evaluator-summary
         type: text
         prompt: Record criterion rows, original sources, evidence gaps, applicable parent constraints, technical-review limitations, remaining authority, and proposed correction or evidence owner.
         required: true
         min_length: 1
         max_length: 4000
         multiline: true
-      - id: judge-checkpoint-result
-        type: check_result
-        prompt: Record the caller-supplied result for aquarium-validation-faithful-audit-checkpoint against its complete declared operation. Podway does not execute or attest this check.
-        help: Verify that the audit is complete and faithful for its admitted full or frozen scope, every original criterion row and actual unmet/unverified gap is preserved, and original audit gap counts, identities, classifications and correction authority agree with direct evidence. This scoped checkpoint does not require Epic achievement or zero original outcome gaps.
-        required: true
-        operation_id: aquarium-validation-faithful-audit-checkpoint
-        operation_digest: sha256:b69aa94a7acf13238ba1a5d5c94fa307ea3be584ef2c1a049bfcdb5e2a9ce7e5
-        accepted_outcomes:
-          - pass
-          - fail
-          - inconclusive
-  remediation-judge-assessment-record:
-    type: action
-    title: Assess the current candidate
-    intent: Obtain the retained report-only Judge assessment of original criteria and exact evidence.
-    instructions:
-      - Supply all original Epic exit criteria, member obligations, integration seams, purpose and original artifacts directly to the fresh cold Judge or retained internal Epic Judge. A Worker summary and inherited verdict never replace direct evidence.
-      - Accept a complete applicable native report without reassessing it or recursively judging the Judge. Record its distinct semantic fields after retaining technical evidence unchanged.
-      - Missing original criteria, changed targets, unsupported bindings or unreadable evidence prevent a pass; a negative verdict grants no correction or provider authority.
-      - Record all final items, establish retained idle state, accept the native result through Podway, then complete separately with fresh fences.
-      - Keep judge-verdict and unmet/unverified counts faithful to the full original Epic outcome. Record the distinct judge-group-result only from actual current group repair and required checks; other Epic gaps remain negative. A group checkpoint pass admits only existing Primary acceptance and commit settlement, not Epic achievement.
-    items:
-      - id: judge-assessment
-        type: artifact
-        prompt: Reference the complete aquarium.judge-assessment/v1 report and its exact digest; Podway stores metadata only.
-        required: true
-        allowed_media_types:
-          - application/json
-      - id: judge-verdict
-        type: choice
-        prompt: Record the Judge verdict.
-        required: true
-        choices:
-          - pass
-          - rework
-          - evidence-needed
-      - id: judge-unmet-criteria
-        type: integer
-        prompt: Count mandatory unmet criteria, including omitted original criteria.
-        required: true
-        minimum: 0
-      - id: judge-unverified-criteria
-        type: integer
-        prompt: Count mandatory unverified criteria, including incomplete compound criteria.
-        required: true
-        minimum: 0
-      - id: judge-applicability
-        type: check_result
-        prompt: Record the caller-supplied result for aquarium-validation-judge-applicability against its complete declared operation. Podway does not execute or attest this check.
-        help: Verify complete original Epic criterion coverage and direct evidence, exact current target, requirement basis, goal revision, placement and attempt, Worker result, fresh cold or retained internal logical Judge identity and full history, and authentic acknowledged role/configuration/task/result bindings.
-        required: true
-        operation_id: aquarium-validation-judge-applicability
-        operation_digest: sha256:ad3371ef8a2d6a4bb4bafac1e33ed131f1b9d46fbd8be4781d0e898b4b8ac776
-        accepted_outcomes:
-          - pass
-          - fail
-          - inconclusive
-      - id: judge-summary
-        type: text
-        prompt: Record criterion rows, original sources, evidence gaps, applicable parent constraints, technical-review limitations, remaining authority, and proposed correction or evidence owner.
-        required: true
-        min_length: 1
-        max_length: 4000
-        multiline: true
-      - id: judge-group-result
+      - id: evaluator-group-result
         type: check_result
         prompt: Record the caller-supplied result for aquarium-validation-correction-group-checkpoint against its complete declared operation. Podway does not execute or attest this check.
         help: Verify actual repair of the exact current original finding IDs and owned correction-group criteria, authorized required checks and applicable parent constraints on current candidate bytes. Preserve every original Epic row, full outcome verdict and remaining unmet/unverified gaps; report completeness alone is not correction success.
@@ -2124,59 +2203,60 @@ node_definitions:
           - pass
           - fail
           - inconclusive
-  final-judge-assessment-record:
+  final-evaluator-assessment-record:
     type: action
     title: Assess the current candidate
-    intent: Obtain the retained report-only Judge assessment of original criteria and exact evidence.
+    intent: Obtain the retained report-only Evaluator assessment of original criteria and exact evidence.
     instructions:
-      - Supply all original Epic exit criteria, member obligations, integration seams, purpose and original artifacts directly to the fresh cold Judge or retained internal Epic Judge. A Worker summary and inherited verdict never replace direct evidence.
-      - Accept a complete applicable native report without reassessing it or recursively judging the Judge. Record its distinct semantic fields after retaining technical evidence unchanged.
-      - Missing original criteria, changed targets, unsupported bindings or unreadable evidence prevent a pass; a negative verdict grants no correction or provider authority.
-      - Record all final items, establish retained idle state, accept the native result through Podway, then complete separately with fresh fences.
+      - Supply all original Epic exit criteria, member obligations, integration seams, purpose and original artifacts directly to the fresh cold Evaluator or retained internal Epic Evaluator. An Executor summary and inherited verdict never replace direct evidence.
+      - Record the complete applicable aquarium.evaluator-assessment/v3 from the independent native Evaluator, check coverage and current candidate applicability, then complete this ordinary Action with current fences. Do not recursively evaluate the report or fabricate native receipts.
+      - Missing original criteria, changed targets, missing required result or authority evidence, or unreadable evidence prevent a pass; a negative verdict grants no correction or provider authority.
+      - Reuse an existing complete final assessment only when its actual checkpoint coverage, candidate, original criteria, required checks and authority remain applicable. The Coordinator records that applicability without another Evaluator dispatch. Otherwise obtain a fresh independent assessment; never relabel a phase-only report as final or reuse a negative report as pass after correction.
+      - Assess the coherent assigned phase from original artifacts, not report fidelity alone. Preserve due obligations, future global gaps and the original negative-result router. Use current native harness agents with available public handles, without private executor or model/configuration qualification.
     items:
-      - id: judge-assessment
+      - id: evaluator-assessment
         type: artifact
-        prompt: Reference the complete aquarium.judge-assessment/v1 report and its exact digest; Podway stores metadata only.
+        prompt: Reference the complete aquarium.evaluator-assessment/v3 report and its exact digest; Podway stores metadata only.
         required: true
         allowed_media_types:
           - application/json
-      - id: judge-verdict
+      - id: evaluator-verdict
         type: choice
-        prompt: Record the Judge verdict.
+        prompt: Record the Evaluator verdict.
         required: true
         choices:
           - pass
           - rework
           - evidence-needed
-      - id: judge-unmet-criteria
+      - id: evaluator-unmet-criteria
         type: integer
         prompt: Count mandatory unmet criteria, including omitted original criteria.
         required: true
         minimum: 0
-      - id: judge-unverified-criteria
+      - id: evaluator-unverified-criteria
         type: integer
         prompt: Count mandatory unverified criteria, including incomplete compound criteria.
         required: true
         minimum: 0
-      - id: judge-applicability
+      - id: evaluator-applicability
         type: check_result
-        prompt: Record the caller-supplied result for aquarium-validation-judge-applicability against its complete declared operation. Podway does not execute or attest this check.
-        help: Verify complete original Epic criterion coverage and direct evidence, exact current target, requirement basis, goal revision, placement and attempt, Worker result, fresh cold or retained internal logical Judge identity and full history, and authentic acknowledged role/configuration/task/result bindings.
+        prompt: Record the caller-supplied result for aquarium-validation-evaluator-applicability against its complete declared operation. Podway does not execute or attest this check.
+        help: Verify every original criterion and all due phase obligations against direct original evidence, exact current candidate, requirements, checks, authority and available public native handles. Unknown telemetry is not a product gap. Preserve original negative rows and truthful verdicts/counts.
         required: true
-        operation_id: aquarium-validation-judge-applicability
-        operation_digest: sha256:ad3371ef8a2d6a4bb4bafac1e33ed131f1b9d46fbd8be4781d0e898b4b8ac776
+        operation_id: aquarium-validation-evaluator-applicability
+        operation_digest: sha256:14d0db832e2b5992b309c058497f2e9fe6600c1e8f25be615dc5a0f50f64cca1
         accepted_outcomes:
           - pass
           - fail
           - inconclusive
-      - id: judge-summary
+      - id: evaluator-summary
         type: text
         prompt: Record criterion rows, original sources, evidence gaps, applicable parent constraints, technical-review limitations, remaining authority, and proposed correction or evidence owner.
         required: true
         min_length: 1
         max_length: 4000
         multiline: true
-      - id: judge-goal-outcome
+      - id: evaluator-goal-outcome
         type: choice
         prompt: Record the exact final goal outcome; explicit stopped paths cannot be achieved.
         required: true
@@ -2196,22 +2276,22 @@ node_definitions:
         criteria: The applicable complete audit preserves its real original negative rows and classifications for the existing gap router.
         guards:
           - evidence:
-              node: judge-audit
-              item: judge-applicability
+              node: audit
+              item: evaluator-applicability
             field: outcome
             equals: pass
           - evidence:
-              node: judge-audit
-              item: judge-checkpoint-result
+              node: audit
+              item: evaluator-checkpoint-result
             field: outcome
             equals: pass
       - id: inapplicable
         label: Report inapplicable
-        criteria: Repair current original evidence or native binding without relabeling the report.
+        criteria: Repair current original evidence or candidate applicability without relabeling the report.
         guards:
           - evidence:
-              node: judge-audit
-              item: judge-applicability
+              node: audit
+              item: evaluator-applicability
             field: outcome
             not_equals: pass
       - id: evidence-needed
@@ -2219,13 +2299,13 @@ node_definitions:
         criteria: The applicable report identifies incomplete or inconsistent audit evidence; bounded repair needs existing effect authority.
         guards:
           - evidence:
-              node: judge-audit
-              item: judge-applicability
+              node: audit
+              item: evaluator-applicability
             field: outcome
             equals: pass
           - evidence:
-              node: judge-audit
-              item: judge-checkpoint-result
+              node: audit
+              item: evaluator-checkpoint-result
             field: outcome
             not_equals: pass
     reason:
@@ -2242,22 +2322,22 @@ node_definitions:
         criteria: The applicable complete audit preserves its real original negative rows and classifications for the existing gap router.
         guards:
           - evidence:
-              node: judge-re-audit
-              item: judge-applicability
+              node: re-audit
+              item: evaluator-applicability
             field: outcome
             equals: pass
           - evidence:
-              node: judge-re-audit
-              item: judge-checkpoint-result
+              node: re-audit
+              item: evaluator-checkpoint-result
             field: outcome
             equals: pass
       - id: inapplicable
         label: Report inapplicable
-        criteria: Repair current original evidence or native binding without relabeling the report.
+        criteria: Repair current original evidence or candidate applicability without relabeling the report.
         guards:
           - evidence:
-              node: judge-re-audit
-              item: judge-applicability
+              node: re-audit
+              item: evaluator-applicability
             field: outcome
             not_equals: pass
       - id: evidence-needed
@@ -2265,13 +2345,13 @@ node_definitions:
         criteria: The applicable report identifies incomplete or inconsistent audit evidence; bounded repair needs existing effect authority.
         guards:
           - evidence:
-              node: judge-re-audit
-              item: judge-applicability
+              node: re-audit
+              item: evaluator-applicability
             field: outcome
             equals: pass
           - evidence:
-              node: judge-re-audit
-              item: judge-checkpoint-result
+              node: re-audit
+              item: evaluator-checkpoint-result
             field: outcome
             not_equals: pass
     reason:
@@ -2288,13 +2368,13 @@ node_definitions:
         criteria: The applicable report verifies true repair of this exact group and its parent constraints; retain full original Epic gaps for final assessment.
         guards:
           - evidence:
-              node: judge-remediation
-              item: judge-applicability
+              node: evaluator-remediation
+              item: evaluator-applicability
             field: outcome
             equals: pass
           - evidence:
-              node: judge-remediation
-              item: judge-group-result
+              node: evaluator-remediation
+              item: evaluator-group-result
             field: outcome
             equals: pass
       - id: inapplicable
@@ -2302,8 +2382,8 @@ node_definitions:
         criteria: The complete original report is not current or applicable.
         guards:
           - evidence:
-              node: judge-remediation
-              item: judge-applicability
+              node: evaluator-remediation
+              item: evaluator-applicability
             field: outcome
             not_equals: pass
       - id: rework
@@ -2311,13 +2391,13 @@ node_definitions:
         criteria: The current group repair or required checks failed. Retain all original gaps and require actual correction authority.
         guards:
           - evidence:
-              node: judge-remediation
-              item: judge-applicability
+              node: evaluator-remediation
+              item: evaluator-applicability
             field: outcome
             equals: pass
           - evidence:
-              node: judge-remediation
-              item: judge-group-result
+              node: evaluator-remediation
+              item: evaluator-group-result
             field: outcome
             equals: fail
       - id: evidence-needed
@@ -2325,13 +2405,13 @@ node_definitions:
         criteria: Actual current group repair or required checks remain unverified; completeness alone cannot authorize settlement.
         guards:
           - evidence:
-              node: judge-remediation
-              item: judge-applicability
+              node: evaluator-remediation
+              item: evaluator-applicability
             field: outcome
             equals: pass
           - evidence:
-              node: judge-remediation
-              item: judge-group-result
+              node: evaluator-remediation
+              item: evaluator-group-result
             field: outcome
             equals: inconclusive
     reason:
@@ -2342,13 +2422,13 @@ node_definitions:
     title: Settle one accepted correction group
     intent: Settle one accepted correction group
     instructions:
-      - The Primary accepts only the exact applicable Worker/Judge group candidate under existing correction authority and invokes aquarium:task-commit for that single actual diff. Workers cannot accept, stage or commit.
+      - The Coordinator accepts only the exact applicable Executor/Evaluator group candidate under existing correction authority and invokes aquarium:task-commit for that single actual diff. Executors cannot accept, stage or commit.
       - Verify actual post-hook commit bytes and residue before recording success. Carry every earlier verified group from native history and original commit evidence, then serialize the next group in dependency order within this same Validation session.
       - Never create an empty correction commit, per-group Goal session or provider review. Whole-Epic selected-route review of the corrected committed bytes remains pending; settlement does not restore a consumed budget.
     items:
       - id: group-accepted-target
         type: text
-        prompt: Record the exact Judge-assessed group candidate, source finding IDs, original owner and accepted bytes.
+        prompt: Record the exact Evaluator-assessed group candidate, source finding IDs, original owner and accepted bytes.
         required: true
         min_length: 1
         max_length: 4000
@@ -2363,17 +2443,17 @@ node_definitions:
       - id: group-settlement-result
         type: check_result
         prompt: Record the caller-supplied result for aquarium-validation-remediation-group-settlement against its complete declared operation. Podway does not execute or attest this check.
-        help: Verify exact accepted current group scope and applicable unconsumed grant, authorized task-commit handoff, actual post-hook commit bytes equal the accepted candidate, commit identity and owner attribution, required checks, residue and prior verified groups. No Worker acceptance or commit assertion suffices.
+        help: Verify exact accepted current group scope and applicable unconsumed grant, authorized task-commit handoff, actual post-hook commit bytes equal the accepted candidate, commit identity and owner attribution, required checks, residue and prior verified groups. No Executor acceptance or commit assertion suffices.
         required: true
         operation_id: aquarium-validation-remediation-group-settlement
-        operation_digest: sha256:7fec73c8beb3eb4dbf6d3ce1028b88ad6fbb1508c847036cde15cda1a8dc0094
+        operation_digest: sha256:e2c1abf2e36ffdb8b9b38e0ae903daf8f5ceee86a8bc9b8f1811304a6347b3e7
         accepted_outcomes:
           - pass
           - fail
           - inconclusive
       - id: remediation-summary
         type: text
-        prompt: Record the cumulative Primary-verified serialized group settlements, actual commits and bytes, owners, findings, checks, remaining external blockers and pending whole-Epic review of corrected committed bytes.
+        prompt: Record the cumulative Coordinator-verified serialized group settlements, actual commits and bytes, owners, findings, checks, remaining external blockers and pending whole-Epic review of corrected committed bytes.
         required: true
         min_length: 1
         max_length: 8000
@@ -2397,9 +2477,9 @@ node_definitions:
           - one-shot
   confirm-remediation-group-settlement:
     type: decision
-    title: Verify Primary group settlement
-    objective: Verify Primary group settlement
-    prompt: Verify Primary group settlement?
+    title: Verify Coordinator group settlement
+    objective: Verify Coordinator group settlement
+    prompt: Verify Coordinator group settlement?
     options:
       - id: verified
         label: Group settlement verified
@@ -2412,7 +2492,7 @@ node_definitions:
             equals: pass
       - id: incomplete
         label: Settlement incomplete
-        criteria: Keep pending acceptance, commit or byte reconciliation at the Primary owner; no re-audit or next group.
+        criteria: Keep pending acceptance, commit or byte reconciliation at the Coordinator owner; no re-audit or next group.
         guards:
           - evidence:
               node: settle-remediation-group
@@ -2430,7 +2510,7 @@ node_definitions:
     options:
       - id: complete
         label: Correction set settled
-        criteria: Every exact admitted group has a verified Primary settlement.
+        criteria: Every exact admitted group has a verified Coordinator settlement.
         guards:
           - evidence:
               node: settle-remediation-group
@@ -2438,7 +2518,7 @@ node_definitions:
             equals: 0
       - id: next-group
         label: Next admitted group
-        criteria: A group remains under the same exact grant set; serialize its bounded Worker candidate without another session or review.
+        criteria: A group remains under the same exact grant set; serialize its bounded Executor candidate without another session or review.
         guards:
           - evidence:
               node: settle-remediation-group
@@ -2449,22 +2529,22 @@ node_definitions:
       prompt: Record exact current evidence, source attempt and target, remaining authority and the next owner.
   decide-validation-evidence-assessment:
     type: decision
-    title: Use the current judge-validation-evidence assessment
-    objective: Use the current judge-validation-evidence assessment
-    prompt: Use the current judge-validation-evidence assessment?
+    title: Use the current evaluator-validation-evidence assessment
+    objective: Use the current evaluator-validation-evidence assessment
+    prompt: Use the current evaluator-validation-evidence assessment?
     options:
       - id: passed
         label: Assessment passed
         criteria: All actual current phase obligations and applicable parent constraints are satisfied. Preserve global gaps and original negative-result routing without claiming whole-goal achievement.
         guards:
           - evidence:
-              node: judge-validation-evidence
-              item: judge-applicability
+              node: evaluator-validation-evidence
+              item: evaluator-applicability
             field: outcome
             equals: pass
           - evidence:
-              node: judge-validation-evidence
-              item: judge-checkpoint-result
+              node: evaluator-validation-evidence
+              item: evaluator-checkpoint-result
             field: outcome
             equals: pass
       - id: inapplicable
@@ -2472,8 +2552,8 @@ node_definitions:
         criteria: The complete original report is not currently applicable.
         guards:
           - evidence:
-              node: judge-validation-evidence
-              item: judge-applicability
+              node: evaluator-validation-evidence
+              item: evaluator-applicability
             field: outcome
             not_equals: pass
       - id: rework
@@ -2481,13 +2561,13 @@ node_definitions:
         criteria: An actual current phase obligation or applicable parent constraint failed. Preserve original gaps and require the existing exact correction authority before rework.
         guards:
           - evidence:
-              node: judge-validation-evidence
-              item: judge-applicability
+              node: evaluator-validation-evidence
+              item: evaluator-applicability
             field: outcome
             equals: pass
           - evidence:
-              node: judge-validation-evidence
-              item: judge-checkpoint-result
+              node: evaluator-validation-evidence
+              item: evaluator-checkpoint-result
             field: outcome
             equals: fail
       - id: evidence-needed
@@ -2495,13 +2575,13 @@ node_definitions:
         criteria: Actual current phase work or its required evidence remains unverified. Preserve original gaps and use the existing evidence owner and authority without redispatching uncertain work.
         guards:
           - evidence:
-              node: judge-validation-evidence
-              item: judge-applicability
+              node: evaluator-validation-evidence
+              item: evaluator-applicability
             field: outcome
             equals: pass
           - evidence:
-              node: judge-validation-evidence
-              item: judge-checkpoint-result
+              node: evaluator-validation-evidence
+              item: evaluator-checkpoint-result
             field: outcome
             equals: inconclusive
     reason:
@@ -2512,7 +2592,7 @@ node_definitions:
     title: Bind audit followup authority
     intent: Bind audit followup authority
     instructions:
-      - Read the complete triggering Judge report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
+      - Read the complete triggering Evaluator report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
       - Before any followup, verify the exact remaining original or actual one-shot authority. Reconcile an existing provider operation before any new dispatch; never reset a review ordinal or frozen set.
       - For audit and remediation evidence before provider admission, use the baseline and prepared pass authority, not a future final-review record. Stop with authority unset or blocked when uncovered.
     items:
@@ -2571,7 +2651,7 @@ node_definitions:
     title: Bind re-audit followup authority
     intent: Bind re-audit followup authority
     instructions:
-      - Read the complete triggering Judge report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
+      - Read the complete triggering Evaluator report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
       - Before any followup, verify the exact remaining original or actual one-shot authority. Reconcile an existing provider operation before any new dispatch; never reset a review ordinal or frozen set.
       - For audit and remediation evidence before provider admission, use the baseline and prepared pass authority, not a future final-review record. Stop with authority unset or blocked when uncovered.
     items:
@@ -2630,7 +2710,7 @@ node_definitions:
     title: Bind remediation followup authority
     intent: Bind remediation followup authority
     instructions:
-      - Read the complete triggering Judge report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
+      - Read the complete triggering Evaluator report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
       - Before any followup, verify the exact remaining original or actual one-shot authority. Reconcile an existing provider operation before any new dispatch; never reset a review ordinal or frozen set.
       - For audit and remediation evidence before provider admission, use the baseline and prepared pass authority, not a future final-review record. Stop with authority unset or blocked when uncovered.
     items:
@@ -2689,7 +2769,7 @@ node_definitions:
     title: Bind remediation-evidence followup authority
     intent: Bind remediation-evidence followup authority
     instructions:
-      - Read the complete triggering Judge report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
+      - Read the complete triggering Evaluator report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
       - Before any followup, verify the exact remaining original or actual one-shot authority. Reconcile an existing provider operation before any new dispatch; never reset a review ordinal or frozen set.
       - For audit and remediation evidence before provider admission, use the baseline and prepared pass authority, not a future final-review record. Stop with authority unset or blocked when uncovered.
     items:
@@ -2748,7 +2828,7 @@ node_definitions:
     title: Bind validation-evidence followup authority
     intent: Bind validation-evidence followup authority
     instructions:
-      - Read the complete triggering Judge report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
+      - Read the complete triggering Evaluator report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
       - Before any followup, verify the exact remaining original or actual one-shot authority. Reconcile an existing provider operation before any new dispatch; never reset a review ordinal or frozen set.
       - For audit and remediation evidence before provider admission, use the baseline and prepared pass authority, not a future final-review record. Stop with authority unset or blocked when uncovered.
     items:
@@ -2807,7 +2887,7 @@ node_definitions:
     title: Bind validation-evidence followup authority
     intent: Bind validation-evidence followup authority
     instructions:
-      - Read the complete triggering Judge report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
+      - Read the complete triggering Evaluator report and original evidence. A negative verdict grants no correction, check, provider, install or commit effect.
       - Before any followup, verify the exact remaining original or actual one-shot authority. Reconcile an existing provider operation before any new dispatch; never reset a review ordinal or frozen set.
       - For audit and remediation evidence before provider admission, use the baseline and prepared pass authority, not a future final-review record. Stop with authority unset or blocked when uncovered.
       - Read current settlement alongside source rows. A settlement blocker or criterion gap is a current trigger; preserve the original source assessment.
@@ -2867,7 +2947,7 @@ node_definitions:
     title: Record stopped core evidence gaps
     intent: Preserve the core evidence repair request within the confirmed stopped boundary.
     instructions:
-      - Record the missing, stale or incoherent evidence identified by the core Decision and include this record in the stopped final Worker assignment.
+      - Record the missing, stale or incoherent evidence identified by the core Decision and include this record in the stopped final Coordinator evidence assembly and Evaluator assignment.
       - Reconcile only available evidence; preserve unresolved gaps and the stopped boundary without implementation, provider review or renewed acceptance.
     items:
       - id: stopped-core-gaps
@@ -2882,11 +2962,7 @@ node_definitions:
     title: Assemble the final validation candidate
     intent: Assemble the final validation candidate
     instructions:
-      - Read complete canonical original criteria and evidence directly. Passing member labels, inherited verdicts, zero provider findings or a Worker-only summary cannot establish Epic achievement.
-      - Compose every applicable selected audit, provider and Judge report, verified group commit, local reviewed-basis/permitted-delta/after-target composition and current checks without starting implementation or a provider.
-      - Cold epic-validator has a fresh Judge with direct source access; internal epic-handler retains its existing logical Epic Judge and full lifetime and history.
-      - For stopped assembly require the baseline and exact current stopped boundary. Include every available audit, re-audit, correction, Low, provider/Judge and disposition record, including confirmation-incomplete, review-operation-incomplete and actual direction or route-stop evidence; legitimately bypassed phases stay optional. Supply original full artifacts and stopped-core-gaps in the complete assignment beyond bounded selectors.
-      - After a confirmed stopped boundary, reconcile only available evidence, preserve unresolved gaps and retain a fresh stopped Worker and Judge. No ordinary work, provider admission, achievement or renewed acceptance is authorized.
+      - The Coordinator assembles existing original evidence and current applicability; perform no new implementation, broad audit or provider review. Preserve actual reports, remaining gaps and stopped-work boundaries.
     items:
       - id: validation-assessment-summary
         type: text
@@ -2895,13 +2971,13 @@ node_definitions:
         min_length: 1
         max_length: 8000
         multiline: true
-      - id: worker-handoff
+      - id: candidate-evidence
         type: artifact
-        prompt: Reference the complete aquarium.worker-handoff/v1 candidate, exact target, requirement basis, checks, authority, gaps and authentic native result bindings.
+        prompt: Attach the Coordinator evidence index with original artifact references, current candidate and authority; this is bookkeeping and supplies no Executor or Evaluator claim.
         required: true
         allowed_media_types:
           - application/json
-  confirm-judge-validation-applicability:
+  confirm-evaluator-validation-applicability:
     type: decision
     title: Confirm current final validation applicability
     objective: Confirm current final validation applicability
@@ -2909,11 +2985,11 @@ node_definitions:
     options:
       - id: current
         label: Report current
-        criteria: Complete original coverage, direct artifacts and exact target and native bindings are applicable.
+        criteria: Complete original coverage, direct artifacts and exact target and available result references are applicable.
         guards:
           - evidence:
-              node: judge-validation
-              item: judge-applicability
+              node: evaluator-validation
+              item: evaluator-applicability
             field: outcome
             equals: pass
       - id: invalid
@@ -2921,14 +2997,14 @@ node_definitions:
         criteria: Reassess the fresh original artifacts without relaxing the requirement.
         guards:
           - evidence:
-              node: judge-validation
-              item: judge-applicability
+              node: evaluator-validation
+              item: evaluator-applicability
             field: outcome
             not_equals: pass
     reason:
       required: true
       prompt: Record exact current evidence, source attempt and target, remaining authority and the next owner.
-  confirm-judge-stopped-validation-applicability:
+  confirm-evaluator-stopped-validation-applicability:
     type: decision
     title: Confirm current final validation applicability
     objective: Confirm current final validation applicability
@@ -2936,11 +3012,11 @@ node_definitions:
     options:
       - id: current
         label: Report current
-        criteria: Complete original coverage, direct artifacts and exact target and native bindings are applicable.
+        criteria: Complete original coverage, direct artifacts and exact target and available result references are applicable.
         guards:
           - evidence:
-              node: judge-stopped-validation
-              item: judge-applicability
+              node: evaluator-stopped-validation
+              item: evaluator-applicability
             field: outcome
             equals: pass
       - id: invalid
@@ -2948,8 +3024,8 @@ node_definitions:
         criteria: Reassess the fresh original artifacts without relaxing the requirement.
         guards:
           - evidence:
-              node: judge-stopped-validation
-              item: judge-applicability
+              node: evaluator-stopped-validation
+              item: evaluator-applicability
             field: outcome
             not_equals: pass
     reason:
@@ -2962,7 +3038,7 @@ node_definitions:
     prompt: Can the current correction set be settled locally under existing authority?
     evidence_guidance:
       - Preserve source severity, negative criterion rows and the consumed ordinal. Eligibility covers every current blocker; new judgment, missing reviewer coverage or uncovered effects use ordinary routing.
-      - Reconcile provisional eligibility with the latest Judge report. A new nonlocal obligation requires ordinary routing even after a source pass; preserve the source record.
+      - Reconcile provisional eligibility with the latest Evaluator report. A new nonlocal obligation requires ordinary routing even after a source pass; preserve the source record.
     options:
       - id: local
         label: Settle locally
@@ -2979,7 +3055,7 @@ node_definitions:
             equals: pass
       - id: ordinary
         label: Keep ordinary rework or evidence routing
-        criteria: The latest Judge or current evidence establishes a nonlocal or unproven obligation, including one discovered after a provisional passing eligibility record.
+        criteria: The latest Evaluator or current evidence establishes a nonlocal or unproven obligation, including one discovered after a provisional passing eligibility record.
         guards:
           - evidence:
               node: final-review
@@ -3108,6 +3184,38 @@ node_definitions:
     reason:
       required: true
       prompt: Name the current evidence basis or missing prerequisite.
+  new-live-review-admission-decision:
+    type: decision
+    title: Admit one fresh Mulgae root
+    objective: Separate explicit new execution from pending invocation resume and retired source replay.
+    prompt: Does explicit authority admit a fresh current-source review after terminal settlement?
+    options:
+      - id: start
+        label: Prepare the newly authorized root
+        criteria: Explicit user intent covers one fresh current-source root and all selected roles, with prior findings and the pending ordinal preserved; refresh the Brief, source preflight and affected verification before execution.
+        guards:
+          - evidence:
+              node: final-review
+              item: review-route
+            equals: mulgae
+          - evidence:
+              node: final-review
+              item: route-direction
+            equals: new-review-current-route
+          - evidence:
+              node: final-review
+              item: prior-route-lifecycle-state
+            equals: terminal-incomplete-or-failed
+          - evidence:
+              node: final-review
+              item: route-change-readiness
+            equals: safe-to-change
+      - id: stop
+        label: Stop without starting another review
+        criteria: Current source, explicit authority or terminal settlement is not established; preserve the prior operation and evidence.
+    reason:
+      required: true
+      prompt: Bind the user's exact new-execution authority, current source and retained pending ordinal, or explain the stopped boundary.
 graph:
   entry: capture-baseline
   nodes:
@@ -3146,13 +3254,13 @@ graph:
             - remediation-summary
             - completed-review-assessments
             - remediation-authority
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-worker/v1
-        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
-        max_rounds: 32
-        after_accept: retain
-      next: judge-audit
+        - node: capture-baseline
+          required: true
+          items:
+            - workflow-owner
+            - baseline-summary
+            - review-target-scope
+      next: confirm-audit-checkpoint
     - id: decide-gaps
       use: gap-decision
       evidence_from:
@@ -3193,13 +3301,7 @@ graph:
           items:
             - pass-kind
             - pass-basis-summary
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-worker/v1
-        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
-        max_rounds: 32
-        after_accept: retain
-      next: judge-remediation
+      next: evaluator-remediation
     - id: decide-remediation-audit-authority
       use: remediation-audit-authority-decision
       evidence_from:
@@ -3240,13 +3342,13 @@ graph:
             - remediation-summary
             - completed-review-assessments
             - remediation-authority
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-worker/v1
-        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
-        max_rounds: 32
-        after_accept: retain
-      next: judge-re-audit
+        - node: capture-baseline
+          required: true
+          items:
+            - workflow-owner
+            - baseline-summary
+            - review-target-scope
+      next: confirm-re-audit-checkpoint
     - id: decide-re-audit
       use: re-audit-decision
       evidence_from:
@@ -3389,12 +3491,6 @@ graph:
             - audit-low-finding-count
             - audit-low-finding-identities
             - audit-low-basis-summary
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-worker/v1
-        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
-        max_rounds: 32
-        after_accept: retain
       next: confirm-final-review-route-binding
     - id: confirm-final-review-route-binding
       use: final-review-route-binding-decision
@@ -3442,6 +3538,8 @@ graph:
             - backend-check-result
             - assessment-provenance
             - assessment-provenance-kind
+            - review-source-contract
+            - review-source-binding
       routes:
         assessed:
           to: confirm-final-assessment-ordinal
@@ -3486,6 +3584,8 @@ graph:
             - assessment-provenance-kind
             - assessment-provenance-result
             - waiver-summary
+            - review-source-contract
+            - review-source-binding
       routes:
         valid:
           to: determine-final-backend-applicability
@@ -3508,6 +3608,8 @@ graph:
             - assessment-provenance-kind
             - assessment-provenance-result
             - waiver-summary
+            - review-source-contract
+            - review-source-binding
       routes:
         valid:
           to: determine-final-backend-applicability
@@ -3530,6 +3632,8 @@ graph:
             - assessment-provenance-kind
             - assessment-provenance-result
             - waiver-summary
+            - review-source-contract
+            - review-source-binding
       routes:
         valid:
           to: confirm-final-route-settlement
@@ -3589,9 +3693,14 @@ graph:
         - node: final-review
           required: true
           items:
+            - review-route
+            - prior-route-lifecycle-state
             - route-direction
             - route-change-readiness
       routes:
+        new-review-current-route:
+          to: authorize-new-mulgae-review
+          effect: advance
         recover:
           to: final-review
           effect: rework
@@ -3637,7 +3746,7 @@ graph:
             - final-review-observations
       routes:
         passed:
-          to: judge-validation-evidence
+          to: evaluator-validation-evidence
           effect: advance
         incomplete:
           to: record-review-operation-incomplete
@@ -3710,15 +3819,15 @@ graph:
             - completion-assessment-summary
             - completion-unmet-criteria
             - completion-unverified-criteria
-        - node: judge-validation-evidence
+        - node: evaluator-validation-evidence
           required: false
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
       routes:
         remediation:
           to: record-validation-rework-basis
@@ -3743,6 +3852,8 @@ graph:
             - pending-applicable-low-dispositions
             - current-applicable-blockers
             - required-evidence-gaps
+            - review-source-contract
+            - review-source-binding
       routes:
         validated:
           to: confirm-goal-assessment-core
@@ -3831,6 +3942,8 @@ graph:
             - pending-applicable-low-dispositions
             - current-applicable-blockers
             - required-evidence-gaps
+            - review-source-contract
+            - review-source-binding
         - node: final-review
           required: true
           items:
@@ -3935,6 +4048,11 @@ graph:
             - high-findings
             - medium-findings
             - low-findings
+        - node: final-review
+          required: false
+          items:
+            - review-source-contract
+            - review-source-binding
         - node: record-low-disposition
           required: false
           items:
@@ -3984,6 +4102,11 @@ graph:
             - high-findings
             - medium-findings
             - low-findings
+        - node: final-review
+          required: false
+          items:
+            - review-source-contract
+            - review-source-binding
         - node: record-stopped
           required: false
           items:
@@ -4048,16 +4171,16 @@ graph:
             - coverage-relationship
             - low-disposition-verification
             - pending-local-corrections
-        - node: judge-validation
+        - node: evaluator-validation
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-goal-outcome
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-goal-outcome
       routes:
         achieved:
           to: record-outcome
@@ -4108,16 +4231,16 @@ graph:
             - coverage-relationship
             - low-disposition-verification
             - pending-local-corrections
-        - node: judge-stopped-validation
+        - node: evaluator-stopped-validation
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-goal-outcome
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-goal-outcome
       routes:
         achieved:
           to: record-stopped-outcome
@@ -4196,109 +4319,54 @@ graph:
     - id: stopped-closeout
       use: closeout-record
       terminal: true
-    - id: judge-audit
-      use: audit-judge-assessment-record
+    - id: confirm-audit-checkpoint
+      use: confirm-audit-checkpoint
       evidence_from:
         - node: audit
           required: true
           items:
-            - audit-result
-            - audit-summary
-            - confirmed-gap-count
-            - blocking-gap-count
-            - eligible-low-gap-count
-            - confirmation-needed-gap-count
-            - blocking-rework-authority
-            - worker-handoff
-        - node: capture-baseline
-          required: true
-          items:
-            - workflow-owner
-            - baseline-summary
-            - review-target-scope
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-goal-judge/v1
-        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
-        max_rounds: 32
-        after_accept: retain
-      next: confirm-audit-checkpoint
-    - id: confirm-audit-checkpoint
-      use: confirm-audit-checkpoint
-      evidence_from:
-        - node: judge-audit
-          required: true
-          items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-checkpoint-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-checkpoint-result
       routes:
         ready:
           to: decide-gaps
           effect: advance
         inapplicable:
-          to: judge-audit
+          to: audit
           effect: rework
         evidence-needed:
           to: record-audit-followup
           effect: advance
-    - id: judge-re-audit
-      use: audit-judge-assessment-record
+    - id: confirm-re-audit-checkpoint
+      use: confirm-re-audit-checkpoint
       evidence_from:
         - node: re-audit
           required: true
           items:
-            - audit-result
-            - audit-summary
-            - confirmed-gap-count
-            - blocking-gap-count
-            - eligible-low-gap-count
-            - confirmation-needed-gap-count
-            - direction-required-gap-count
-            - blocking-rework-authority
-            - worker-handoff
-        - node: capture-baseline
-          required: true
-          items:
-            - workflow-owner
-            - baseline-summary
-            - review-target-scope
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-goal-judge/v1
-        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
-        max_rounds: 32
-        after_accept: retain
-      next: confirm-re-audit-checkpoint
-    - id: confirm-re-audit-checkpoint
-      use: confirm-re-audit-checkpoint
-      evidence_from:
-        - node: judge-re-audit
-          required: true
-          items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-checkpoint-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-checkpoint-result
       routes:
         ready:
           to: decide-re-audit
           effect: advance
         inapplicable:
-          to: judge-re-audit
+          to: re-audit
           effect: rework
         evidence-needed:
           to: record-re-audit-followup
           effect: advance
-    - id: judge-remediation
-      use: remediation-judge-assessment-record
+    - id: evaluator-remediation
+      use: remediation-evaluator-assessment-record
       evidence_from:
         - node: remediate
           required: true
@@ -4306,7 +4374,7 @@ graph:
             - remediation-candidate-summary
             - completed-review-assessments
             - remediation-authority
-            - worker-handoff
+            - executor-handoff
         - node: prepare-validation-pass
           required: true
           items:
@@ -4316,32 +4384,26 @@ graph:
           items:
             - workflow-owner
             - baseline-summary
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-goal-judge/v1
-        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
-        max_rounds: 32
-        after_accept: retain
       next: decide-remediation-assessment
     - id: decide-remediation-assessment
       use: decide-remediation-assessment
       evidence_from:
-        - node: judge-remediation
+        - node: evaluator-remediation
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-group-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-group-result
       routes:
         passed:
           to: settle-remediation-group
           effect: advance
         inapplicable:
-          to: judge-remediation
+          to: evaluator-remediation
           effect: rework
         rework:
           to: record-remediation-followup
@@ -4358,17 +4420,17 @@ graph:
             - remediation-candidate-summary
             - completed-review-assessments
             - remediation-authority
-            - worker-handoff
-        - node: judge-remediation
+            - executor-handoff
+        - node: evaluator-remediation
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-group-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-group-result
         - node: prepare-validation-pass
           required: true
           items:
@@ -4407,13 +4469,13 @@ graph:
         next-group:
           to: remediate
           effect: rework
-    - id: judge-validation-evidence
-      use: judge-assessment-record
+    - id: evaluator-validation-evidence
+      use: evaluator-assessment-record
       evidence_from:
         - node: final-review
           required: true
           items:
-            - worker-handoff
+            - executor-handoff
             - review-mode
             - review-operation
             - assessment-ordinal
@@ -4429,6 +4491,11 @@ graph:
             - current-applicable-blockers
             - required-evidence-gaps
             - finding-lineage-summary
+        - node: final-review
+          required: true
+          items:
+            - review-source-contract
+            - review-source-binding
         - node: record-current-audit-basis
           required: true
           items:
@@ -4438,32 +4505,26 @@ graph:
           items:
             - workflow-owner
             - baseline-summary
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-goal-judge/v1
-        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
-        max_rounds: 32
-        after_accept: retain
       next: decide-validation-evidence-assessment
     - id: decide-validation-evidence-assessment
       use: decide-validation-evidence-assessment
       evidence_from:
-        - node: judge-validation-evidence
+        - node: evaluator-validation-evidence
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-checkpoint-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-checkpoint-result
       routes:
         passed:
           to: confirm-completion-assessment
           effect: advance
         inapplicable:
-          to: judge-validation-evidence
+          to: evaluator-validation-evidence
           effect: rework
         rework:
           to: classify-local-corrections
@@ -4474,15 +4535,15 @@ graph:
     - id: record-audit-followup
       use: record-audit-followup
       evidence_from:
-        - node: judge-audit
+        - node: audit
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
         - node: capture-baseline
           required: true
           items:
@@ -4512,15 +4573,15 @@ graph:
     - id: record-re-audit-followup
       use: record-re-audit-followup
       evidence_from:
-        - node: judge-re-audit
+        - node: re-audit
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
         - node: capture-baseline
           required: true
           items:
@@ -4550,16 +4611,16 @@ graph:
     - id: record-remediation-followup
       use: record-remediation-followup
       evidence_from:
-        - node: judge-remediation
+        - node: evaluator-remediation
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-group-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-group-result
         - node: capture-baseline
           required: true
           items:
@@ -4589,16 +4650,16 @@ graph:
     - id: record-remediation-evidence
       use: record-remediation-evidence
       evidence_from:
-        - node: judge-remediation
+        - node: evaluator-remediation
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-group-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-group-result
         - node: capture-baseline
           required: true
           items:
@@ -4628,15 +4689,15 @@ graph:
     - id: record-validation-evidence-followup
       use: record-validation-evidence-followup
       evidence_from:
-        - node: judge-validation-evidence
+        - node: evaluator-validation-evidence
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
         - node: capture-baseline
           required: true
           items:
@@ -4652,6 +4713,8 @@ graph:
             - review-mode
             - assessment-ordinal
             - review-evidence-reference
+            - review-source-contract
+            - review-source-binding
       next: confirm-validation-evidence-followup-authority
     - id: confirm-validation-evidence-followup-authority
       use: confirm-validation-evidence-followup-authority
@@ -4680,19 +4743,21 @@ graph:
             - review-evidence-reference
             - completion-assessment-summary
             - current-applicable-blockers
+            - review-source-contract
+            - review-source-binding
         - node: capture-baseline
           required: true
           items:
             - baseline-summary
-        - node: judge-validation-evidence
+        - node: evaluator-validation-evidence
           required: false
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
         - node: record-low-disposition
           required: false
           items:
@@ -4750,7 +4815,7 @@ graph:
         - node: final-review
           required: false
           items:
-            - worker-handoff
+            - executor-handoff
             - final-review-result
             - review-evidence-reference
             - completion-assessment-summary
@@ -4758,15 +4823,17 @@ graph:
             - completion-unverified-criteria
             - applicable-obligation-summary
             - pending-applicable-low-dispositions
-        - node: judge-validation-evidence
+            - review-source-contract
+            - review-source-binding
+        - node: evaluator-validation-evidence
           required: false
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
         - node: settle-remediation-group
           required: false
           items:
@@ -4795,59 +4862,47 @@ graph:
           items:
             - audit-summary
             - audit-result
-            - worker-handoff
+            - evaluator-assessment
         - node: re-audit
           required: false
           items:
             - audit-summary
             - audit-result
-            - worker-handoff
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-worker/v1
-        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
-        max_rounds: 32
-        after_accept: retain
-      next: judge-validation
-    - id: judge-validation
-      use: final-judge-assessment-record
+            - evaluator-assessment
+      next: evaluator-validation
+    - id: evaluator-validation
+      use: final-evaluator-assessment-record
       evidence_from:
         - node: prepare-validation-assessment
           required: true
           items:
-            - worker-handoff
+            - candidate-evidence
             - validation-assessment-summary
         - node: capture-baseline
           required: true
           items:
             - workflow-owner
             - baseline-summary
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-goal-judge/v1
-        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
-        max_rounds: 32
-        after_accept: retain
-      next: confirm-judge-validation-applicability
-    - id: confirm-judge-validation-applicability
-      use: confirm-judge-validation-applicability
+      next: confirm-evaluator-validation-applicability
+    - id: confirm-evaluator-validation-applicability
+      use: confirm-evaluator-validation-applicability
       evidence_from:
-        - node: judge-validation
+        - node: evaluator-validation
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-goal-outcome
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-goal-outcome
       routes:
         current:
           to: assess-goal
           effect: advance
         invalid:
-          to: judge-validation
+          to: evaluator-validation
           effect: rework
     - id: prepare-stopped-validation-assessment
       use: validation-assessment-candidate
@@ -4863,7 +4918,7 @@ graph:
         - node: final-review
           required: false
           items:
-            - worker-handoff
+            - executor-handoff
             - final-review-result
             - review-evidence-reference
             - completion-assessment-summary
@@ -4871,15 +4926,17 @@ graph:
             - completion-unverified-criteria
             - applicable-obligation-summary
             - pending-applicable-low-dispositions
-        - node: judge-validation-evidence
+            - review-source-contract
+            - review-source-binding
+        - node: evaluator-validation-evidence
           required: false
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
         - node: settle-remediation-group
           required: false
           items:
@@ -4907,20 +4964,14 @@ graph:
           required: true
           items:
             - goal-outcome-boundary
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-worker/v1
-        role_snapshot_digest: sha256:7544cae7f4becb8fcf0d119e8ac0aa9815bd29d7c96cfa1761b2e00acd69e53e
-        max_rounds: 32
-        after_accept: retain
-      next: judge-stopped-validation
-    - id: judge-stopped-validation
-      use: final-judge-assessment-record
+      next: evaluator-stopped-validation
+    - id: evaluator-stopped-validation
+      use: final-evaluator-assessment-record
       evidence_from:
         - node: prepare-stopped-validation-assessment
           required: true
           items:
-            - worker-handoff
+            - candidate-evidence
             - validation-assessment-summary
         - node: capture-baseline
           required: true
@@ -4931,32 +4982,26 @@ graph:
           required: false
           items:
             - stopped-core-gaps
-      delegation:
-        binding_ref: aquarium-native
-        role_ref: aquarium-goal-judge/v1
-        role_snapshot_digest: sha256:a0309714155fb613eaafd0a0c67c109220e565a1b03291dfb659a9168669fb4c
-        max_rounds: 32
-        after_accept: retain
-      next: confirm-judge-stopped-validation-applicability
-    - id: confirm-judge-stopped-validation-applicability
-      use: confirm-judge-stopped-validation-applicability
+      next: confirm-evaluator-stopped-validation-applicability
+    - id: confirm-evaluator-stopped-validation-applicability
+      use: confirm-evaluator-stopped-validation-applicability
       evidence_from:
-        - node: judge-stopped-validation
+        - node: evaluator-stopped-validation
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-goal-outcome
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-goal-outcome
       routes:
         current:
           to: assess-stopped-goal
           effect: advance
         invalid:
-          to: judge-stopped-validation
+          to: evaluator-stopped-validation
           effect: rework
     - id: classify-local-corrections
       use: local-correction-candidate-decision
@@ -4965,16 +5010,16 @@ graph:
           required: true
           items:
             - local-correction-count
-        - node: judge-validation-evidence
+        - node: evaluator-validation-evidence
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-checkpoint-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-checkpoint-result
       routes:
         none:
           to: decide-validation-rework-authority
@@ -4989,16 +5034,16 @@ graph:
           required: true
           items:
             - local-correction-count
-        - node: judge-validation-evidence
+        - node: evaluator-validation-evidence
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-checkpoint-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-checkpoint-result
       routes:
         none:
           to: record-validation-evidence-followup
@@ -5013,16 +5058,16 @@ graph:
           required: true
           items:
             - local-correction-count
-        - node: judge-validation-evidence
+        - node: evaluator-validation-evidence
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-checkpoint-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-checkpoint-result
       routes:
         none:
           to: record-incomplete
@@ -5052,16 +5097,16 @@ graph:
           items:
             - local-correction-count
             - local-correction-eligibility
-        - node: judge-validation-evidence
+        - node: evaluator-validation-evidence
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-checkpoint-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-checkpoint-result
       routes:
         local:
           to: record-low-disposition
@@ -5077,16 +5122,16 @@ graph:
           items:
             - local-correction-count
             - local-correction-eligibility
-        - node: judge-validation-evidence
+        - node: evaluator-validation-evidence
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-checkpoint-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-checkpoint-result
       routes:
         local:
           to: record-low-disposition
@@ -5102,16 +5147,16 @@ graph:
           items:
             - local-correction-count
             - local-correction-eligibility
-        - node: judge-validation-evidence
+        - node: evaluator-validation-evidence
           required: true
           items:
-            - judge-assessment
-            - judge-verdict
-            - judge-unmet-criteria
-            - judge-unverified-criteria
-            - judge-applicability
-            - judge-summary
-            - judge-checkpoint-result
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-checkpoint-result
       routes:
         local:
           to: record-low-disposition
@@ -5154,6 +5199,23 @@ graph:
         incomplete:
           to: record-incomplete
           effect: advance
+    - id: authorize-new-mulgae-review
+      use: new-live-review-admission-decision
+      evidence_from:
+        - node: final-review
+          required: true
+          items:
+            - review-route
+            - route-direction
+            - prior-route-lifecycle-state
+            - route-change-readiness
+      routes:
+        start:
+          to: final-review
+          effect: rework
+        stop:
+          to: record-stopped
+          effect: advance
 manual_rework:
   allowed_targets:
     - prepare-validation-pass
@@ -5170,10 +5232,8 @@ manual_rework:
     - record-validation-evidence-followup
     - record-validation-rework-basis
     - prepare-validation-assessment
-    - judge-validation
+    - evaluator-validation
     - prepare-stopped-validation-assessment
-    - judge-stopped-validation
-    - judge-audit
-    - judge-re-audit
-    - judge-remediation
-    - judge-validation-evidence
+    - evaluator-stopped-validation
+    - evaluator-remediation
+    - evaluator-validation-evidence

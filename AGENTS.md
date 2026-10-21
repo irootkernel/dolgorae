@@ -14,6 +14,7 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 - Inspect the requested code and its named authorities before changing anything. Resolve discoverable facts before asking Master.
 - Reuse established facts instead of reading or searching for them again. Recheck only the affected information when relevant state changes, evidence conflicts, or missing context makes it unreliable.
 - State material assumptions and surface meaningful trade-offs. Ask when unresolved ambiguity would materially change the result, and push back on conflicts with repository authority, safety, or Master's goal.
+- Before changing a feature, read applicable directory AGENTS.md files and the canonical documents relevant to the change. Respect the selected harness's native instruction scope and precedence.
 
 ### 3. Act on Sufficient Evidence
 
@@ -22,6 +23,7 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 - Reuse established patterns. Avoid speculative features, abstractions, configurability, compatibility layers, and handling for states repository invariants make impossible. Simplify complexity that the required behavior does not justify.
 - Touch only what the outcome and its verification require. Preserve unrelated user work, match local style, and remove only artifacts made obsolete by this change.
 - Record only independent remaining work in the canonical `deferred-feedback` owner. If none exists, propose the entry and obtain approval before creating an owner. Promote epic-sized work to a TODO candidate or roadmap unit; never defer current correctness or acceptance work.
+- Read directory-guide adoption coverage in the root documentation index. Maintain affected canonical documents and existing applicable guides, including guides outside that coverage. Within adopted coverage, add guides for new feature boundaries as part of the authorized work. Report uncovered areas without unrelated backfill; guide absence alone adds no workflow blocker. Finish affected documentation before candidate review.
 
 ### 4. Carry Authorization Forward
 
@@ -110,7 +112,7 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 
 ### Project-Specific Operating Rules
 
-- Keep `.sorage/` ignored and untracked. Mulgae applies Git ignore policy during capture; use `.mulgaeignore` only for additional review exclusions.
+- Keep `.sorage/` ignored and untracked. Mulgae uses Git ignore rules for workspace candidate selection and includes tracked files even when they match ignore patterns. It no longer processes `.mulgaeignore`; preserve existing user files. Ignore rules do not restrict provider reads.
 - Use the Aquarium development channel only for explicitly requested development builds and execution. The producer entrypoints are `make aquarium-dev-describe` and `make aquarium-dev-build AQUARIUM_DEV_OUTPUT=<absolute-empty-directory>`; the builder requires a clean local `main` and writes only to the caller-created output directory outside the repository.
 - Use `aquarium-dev diagnose --repository "$PWD"` for channel readiness, `aquarium-dev rebuild --repository "$PWD" --approve-build` for an authorized build and publication, and `aquarium-dev dolgorae ...` to execute the selected leased generation. Do not manually copy binaries into manager-owned generation or selector paths.
 - An enrolled native post-commit hook requests a background development build after local `main` commits. Verify the published generation and checksum separately from Git commit success. Development publication does not authorize a stable release, production-tool replacement, or external review.
