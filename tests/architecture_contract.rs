@@ -54,7 +54,10 @@ fn source_module_dependencies_match_the_approved_graph() {
         ("codex_socket", &[][..]),
         ("global_runtime_observation", &["workspace"][..]),
         ("audit", &["event", "jcs"][..]),
-        ("operation", &["audit", "domain", "jcs", "turn"][..]),
+        (
+            "operation",
+            &["audit", "delegation_identity", "domain", "jcs", "turn"][..],
+        ),
         (
             "interaction",
             &["audit", "domain", "ledger", "machine", "snapshot"][..],
@@ -93,6 +96,11 @@ fn source_module_dependencies_match_the_approved_graph() {
             ][..],
         ),
         ("darwin", &["providers"][..]),
+        (
+            // `paths` is test-only: the unit-test capture fixture builds a home.
+            "delegation_identity",
+            &["domain", "instructions", "jcs", "machine", "paths"][..],
+        ),
         ("domain", &[][..]),
         (
             "direct_review",
@@ -131,11 +139,21 @@ fn source_module_dependencies_match_the_approved_graph() {
             "engagement",
             &[
                 "controller",
+                "delegation_identity",
                 "domain",
                 "global_runtime",
                 "instructions",
                 "jcs",
+                // `ledger_generation` is test-only: the maintenance-lease test
+                // holds the exclusive lease a maintenance owner would hold.
+                "ledger_generation",
                 "machine",
+                // `orchestration` is test-only: the generation-gate test asserts
+                // that the observer and the store refuse an unsupported schema.
+                "orchestration",
+                // `operation` verifies the retained mutation envelope a lookup
+                // relies on (its only producer owns the closed envelope shape).
+                "operation",
                 "review_output",
                 "run",
                 "specialist",
@@ -297,6 +315,10 @@ fn source_module_dependencies_match_the_approved_graph() {
             &[
                 "artifact",
                 "audit",
+                // `caller_scope` is test-only: the successor fixture writes one
+                // caller-scope accounting row so the close byte-identity test
+                // covers that table.
+                "caller_scope",
                 "controller",
                 "darwin",
                 "domain",
@@ -340,6 +362,80 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "machine",
                 "paths",
                 "process_inventory",
+                "workspace",
+            ][..],
+        ),
+        (
+            "caller_scope",
+            &[
+                "delegation_identity",
+                // `engagement` is test-only: the accounting fixture opens one
+                // generation-6 database through the real store.
+                "engagement",
+                "machine",
+            ][..],
+        ),
+        (
+            "delegation_service",
+            &[
+                "caller_scope",
+                "delegation_identity",
+                // Direct-target metadata is admitted before a successor intent.
+                "direct_review_target",
+                "domain",
+                "engagement",
+                "instructions",
+                "jcs",
+                "machine",
+                "operation",
+                // `orchestration` carries the managed Broker services: the
+                // session authority, the Broker execution rows and their reads
+                // live in the orchestration extension.
+                "orchestration",
+                // `paths` is test-only: the unit fixture builds an instruction
+                // home so one provisioning selection can be captured.
+                "paths",
+                "provisioning",
+                "review",
+                "run",
+                // `specialist_policy` is test-only: the managed fixture prepares a
+                // session with a legacy Specialist Policy record.
+                "specialist_policy",
+                "storage_observation",
+                "successor_capture",
+                "task_request",
+                "workspace",
+                "writer",
+            ][..],
+        ),
+        (
+            "successor_capture",
+            &[
+                "delegation_identity",
+                // `instructions` is test-only: the fixture builds one closed
+                // instruction snapshot to admit a configuration.
+                "instructions",
+                "jcs",
+                "machine",
+                // `review` is test-only: the fixture supplies a target selection.
+                "review",
+                "review_target",
+                "run",
+                "task_request",
+            ][..],
+        ),
+        (
+            "provisioning",
+            &[
+                "delegation_identity",
+                "global_runtime",
+                "instructions",
+                "jcs",
+                "machine",
+                // `paths` is test-only: the unit fixture builds an instruction
+                // home to capture one provisioning selection.
+                "paths",
+                "run",
                 "workspace",
             ][..],
         ),
@@ -411,6 +507,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             &[
                 "audit",
                 "darwin",
+                "delegation_identity",
                 "domain",
                 "global_runtime",
                 "instructions",
@@ -419,6 +516,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "ledger_generation",
                 "machine",
                 "markdown_policy",
+                // `profile` is test-only: the unit-test helper builds a binding.
+                "profile",
                 "projection",
                 "workspace",
             ][..],
@@ -445,11 +544,14 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "app_server",
                 "artifact",
                 "audit",
+                "caller_scope",
                 "cli",
                 "codex_socket",
                 "conformance",
                 "controller",
                 "darwin",
+                "delegation_identity",
+                "delegation_service",
                 "direct_review_target",
                 "domain",
                 "engagement",
@@ -467,15 +569,28 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "operation",
                 "orchestration",
                 "paths",
+                // The locator-missing owned-cleanup proof enumerates this
+                // Run's retained process-inventory registrations.
+                "process_inventory",
                 "profile",
                 "projection",
                 "protocol",
+                // `provisioning` is test-only here: the delegated-start
+                // regression publishes its Run from a retained snapshot.
+                "provisioning",
+                // The changes producer bounds one Turn's file-change
+                // snapshots by the existing workspace enumeration bound.
+                "review_target",
                 "run",
                 "runtime",
                 "session_policy",
                 "snapshot",
                 "specialist",
                 "specialist_policy",
+                "successor_capture",
+                // `task_request` names the accepted task the checked-output
+                // validator (specialist::parse_reviewer_output_v3) inspects.
+                "task_request",
                 "timeline",
                 "turn",
                 "worker",
@@ -583,6 +698,9 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "conformance",
                 "controller",
                 "darwin",
+                // `delegation_service` names the settlement owner type: a member
+                // Run settles through whichever aggregate its own manifest names.
+                "delegation_service",
                 "direct_review",
                 "direct_review_target",
                 "domain",
@@ -590,6 +708,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "event",
                 "external_engagement",
                 "fault",
+                // Recovery tests verify membership retirement through its owner.
+                "global_runtime",
                 "jcs",
                 "ledger",
                 "machine",
@@ -606,6 +726,9 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "run",
                 "semantic",
                 "snapshot",
+                // `successor_capture` binds a generation-4 dispatched Turn to the
+                // preserved accepted bytes.
+                "successor_capture",
                 "task_request",
                 "turn",
                 "workspace",

@@ -32,6 +32,11 @@ pub struct SourceCapture {
 }
 
 impl SourceCapture {
+    /// Capture already-admitted source text under the same rules as a file read.
+    pub fn from_body(body: &str) -> Result<Self, MachineError> {
+        Self::from_bytes(body.as_bytes().to_vec())
+    }
+
     fn from_bytes(bytes: Vec<u8>) -> Result<Self, MachineError> {
         let body = String::from_utf8(bytes).map_err(|_| source_invalid())?;
         if body.is_empty() || body.len() > MAX_SOURCE_BYTES || body.contains('\0') {
@@ -59,9 +64,286 @@ pub struct RoleCapture {
 }
 
 impl RoleCapture {
+    /// Capture an explicitly supplied Role body under the file rules.
+    pub fn from_body(name: &str, body: &str) -> Result<Self, MachineError> {
+        validate_role_name(name)?;
+        let source = SourceCapture::from_body(body)?;
+        Ok(Self {
+            name: name.to_owned(),
+            body: source.body,
+            byte_length: source.byte_length,
+            sha256: source.sha256,
+        })
+    }
+
     pub fn validate(&self) -> Result<(), MachineError> {
         validate_role_name(&self.name)?;
         validate_body(&self.body, self.byte_length, &self.sha256)
+    }
+}
+
+/// Trusted preparation input, separate from frozen facade request shapes.
+/// Paths are explicit instruction-home components, never inferred from aliases.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SelectedInstructionSource {
+    Inline(String),
+    File(Vec<String>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectedNamedSource {
+    pub name: String,
+    pub source: SelectedInstructionSource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegationSourceSelection {
+    pub role_name: String,
+    pub role: SelectedInstructionSource,
+    pub dependencies: Vec<SelectedNamedSource>,
+    pub selected_guidance: Vec<SelectedNamedSource>,
+}
+
+/// One captured named source: its alias and exact accepted bytes. This stays
+/// local to instruction capture so the successor identity module can build the
+/// closed named source without reversing the dependency edge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapturedNamedSource {
+    pub name: String,
+    pub body: String,
+}
+
+/// Exact accepted bytes for one delegated Role capture, before they become a
+/// closed `dolgorae.instructions/v3` identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegationCapture {
+    pub common: SourceCapture,
+    pub role: RoleCapture,
+    pub dependencies: Vec<CapturedNamedSource>,
+    pub selected_guidance: Vec<CapturedNamedSource>,
+}
+
+/// Runtime-only disclosure of the selected Profile's ambient instruction files.
+///
+/// Profile guidance contributes user instructions from the native
+/// `CODEX_HOME/AGENTS.override.md` or `AGENTS.md`. It is deliberately outside
+/// every captured body and every H1 identity: nothing here enters
+/// `InstructionSnapshot`, `role_snapshot`, `instruction_identity`,
+/// `admitted_configuration` or any mutation envelope. Editing a Profile file
+/// therefore changes later runtime input without changing a captured Role
+/// (CW-AMBIENT). This has no protocol schema because it is an observation, not
+/// an accepted identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmbientGuidanceDisclosure {
+    pub schema: String,
+    pub profile_binding_digest: String,
+    pub sources: Vec<AmbientGuidanceSource>,
+    /// User-facing warning that Profile instruction edits affect later runtime
+    /// input without changing the captured Role.
+    pub warning: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmbientGuidanceSource {
+    /// `AGENTS.override.md` or `AGENTS.md`.
+    pub name: String,
+    pub observation: AmbientGuidanceObservation,
+}
+
+/// What observation of one ambient source established. `Unobservable` is never
+/// reported as `Absent`: an unreadable or malformed file may still contribute
+/// guidance, so collapsing the two would hide a real difference from the
+/// operator.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AmbientGuidanceObservation {
+    Absent,
+    Present { content: SourceCapture },
+    Unobservable { reason: AmbientGuidanceGap },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbientGuidanceGap {
+    /// The file exists but cannot be opened or read.
+    Unreadable,
+    /// The file exceeds the captured source ceiling.
+    Oversized,
+    /// The entry is not a regular file (directory, socket, symlink, ...).
+    NotRegular,
+    /// The file is owned by another user.
+    WrongOwner,
+    /// The bytes are not admissible UTF-8 text.
+    NotUtf8,
+    /// The file is empty; every captured source must be non-empty.
+    Empty,
+    /// The bytes contain a NUL, which no captured source may carry.
+    ContainsNul,
+}
+
+impl AmbientGuidanceGap {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreadable => "unreadable",
+            Self::Oversized => "oversized",
+            Self::NotRegular => "not_regular",
+            Self::WrongOwner => "wrong_owner",
+            Self::NotUtf8 => "not_utf8",
+            Self::Empty => "empty",
+            Self::ContainsNul => "contains_nul",
+        }
+    }
+}
+
+pub const AMBIENT_GUIDANCE_SCHEMA: &str = "dolgorae.ambient-guidance-disclosure/runtime-v1";
+pub const AMBIENT_GUIDANCE_WARNING: &str = "Profile instruction files (CODEX_HOME/AGENTS.override.md or AGENTS.md) can change later runtime input without changing this captured Role. They grant no Controller or writer authority.";
+
+impl AmbientGuidanceDisclosure {
+    pub fn new(
+        profile_binding_digest: &str,
+        sources: Vec<AmbientGuidanceSource>,
+    ) -> Result<Self, MachineError> {
+        let digest = profile_binding_digest
+            .strip_prefix("sha256:")
+            .is_some_and(|hex| {
+                hex.len() == 64
+                    && hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+        let names = sources
+            .iter()
+            .map(|source| source.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        if !digest
+            || sources.len() > 2
+            || names.len() != sources.len()
+            || sources
+                .iter()
+                .any(|source| !matches!(source.name.as_str(), "AGENTS.override.md" | "AGENTS.md"))
+        {
+            return Err(source_invalid());
+        }
+        for source in &sources {
+            if let AmbientGuidanceObservation::Present { content } = &source.observation {
+                content.validate()?;
+            }
+        }
+        Ok(Self {
+            schema: AMBIENT_GUIDANCE_SCHEMA.to_owned(),
+            profile_binding_digest: profile_binding_digest.to_owned(),
+            sources,
+            warning: AMBIENT_GUIDANCE_WARNING.to_owned(),
+        })
+    }
+}
+
+impl AmbientGuidanceDisclosure {
+    /// The observation recorded for one ambient source.
+    #[must_use]
+    pub fn observation(&self, name: &str) -> Option<&AmbientGuidanceObservation> {
+        self.sources
+            .iter()
+            .find(|source| source.name == name)
+            .map(|source| &source.observation)
+    }
+}
+
+/// Observe the selected Profile's ambient instruction files.
+///
+/// This reads the native `CODEX_HOME/AGENTS.override.md` and `AGENTS.md` under
+/// bounded, symlink-free access and reports what observation established. It
+/// deliberately returns an observation, never a capture: ambient guidance is
+/// outside the admitted common/Role bytes and outside every H1 identity
+/// (CW-AMBIENT). A missing file is `Absent`; a present file that cannot be
+/// admitted is `Unobservable` with a typed reason. Neither outcome can
+/// establish or remove Controller, writer or lifecycle authority, so admission
+/// never fails because of Profile guidance.
+pub fn observe_profile_ambient(
+    canonical_codex_home: &std::path::Path,
+    profile_binding_digest: &str,
+) -> Result<AmbientGuidanceDisclosure, MachineError> {
+    let mut sources = Vec::new();
+    for name in ["AGENTS.override.md", "AGENTS.md"] {
+        sources.push(AmbientGuidanceSource {
+            name: name.to_owned(),
+            observation: observe_ambient(canonical_codex_home, name)?,
+        });
+    }
+    AmbientGuidanceDisclosure::new(profile_binding_digest, sources)
+}
+
+fn observe_ambient(
+    root: &std::path::Path,
+    name: &str,
+) -> Result<AmbientGuidanceObservation, MachineError> {
+    use crate::darwin::DarwinSystem;
+    let path = root.join(name);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AmbientGuidanceObservation::Absent);
+        }
+        Err(_) => {
+            return Ok(AmbientGuidanceObservation::Unobservable {
+                reason: AmbientGuidanceGap::Unreadable,
+            });
+        }
+        Ok(metadata) => metadata,
+    };
+    // Profile guidance is ordinary user content: any readable regular file the
+    // current user owns is admissible, whatever its mode. Ownership and regular
+    // file-ness are what make the observation trustworthy.
+    if !metadata.file_type().is_file() {
+        return Ok(AmbientGuidanceObservation::Unobservable {
+            reason: AmbientGuidanceGap::NotRegular,
+        });
+    }
+    if metadata.uid() != DarwinSystem.current_uid() {
+        return Ok(AmbientGuidanceObservation::Unobservable {
+            reason: AmbientGuidanceGap::WrongOwner,
+        });
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path);
+    let Ok(file) = file else {
+        return Ok(AmbientGuidanceObservation::Unobservable {
+            reason: AmbientGuidanceGap::Unreadable,
+        });
+    };
+    let mut bytes = Vec::new();
+    if std::io::Read::take(file, (MAX_SOURCE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return Ok(AmbientGuidanceObservation::Unobservable {
+            reason: AmbientGuidanceGap::Unreadable,
+        });
+    }
+    if bytes.len() > MAX_SOURCE_BYTES {
+        return Ok(AmbientGuidanceObservation::Unobservable {
+            reason: AmbientGuidanceGap::Oversized,
+        });
+    }
+    // Classify every `SourceCapture` refusal explicitly instead of folding them
+    // all into "not UTF-8": an empty or NUL-bearing file is valid UTF-8 text.
+    let unobservable = |reason| Ok(AmbientGuidanceObservation::Unobservable { reason });
+    if std::str::from_utf8(&bytes).is_err() {
+        return unobservable(AmbientGuidanceGap::NotUtf8);
+    }
+    if bytes.is_empty() {
+        return unobservable(AmbientGuidanceGap::Empty);
+    }
+    if bytes.contains(&0) {
+        return unobservable(AmbientGuidanceGap::ContainsNul);
+    }
+    match SourceCapture::from_bytes(bytes) {
+        Ok(content) => Ok(AmbientGuidanceObservation::Present { content }),
+        Err(_) => unobservable(AmbientGuidanceGap::Unreadable),
     }
 }
 
@@ -165,6 +447,92 @@ impl<F: FaultInjector> InstructionSourceStore<F> {
         Ok(())
     }
 
+    /// Read one explicitly selected source under the instruction home. Aliases
+    /// remain content metadata; they are never interpreted as path components.
+    pub fn capture_explicit_source(
+        &self,
+        directory_components: &[String],
+    ) -> Result<SourceCapture, MachineError> {
+        validate_directory_components(directory_components)?;
+        self.faults
+            .check(FaultBarrier::BeforeInstructionCapture)
+            .map_err(|_| source_invalid())?;
+        let mut tree = SourceTree::open(self)?;
+        let mut directory = 0;
+        for component in directory_components {
+            directory = tree.child(directory, component, false)?;
+        }
+        let source = tree.read(directory)?;
+        self.faults
+            .check(FaultBarrier::AfterInstructionRead)
+            .map_err(|_| source_invalid())?;
+        source.verify(&tree)?;
+        tree.verify()?;
+        self.faults
+            .check(FaultBarrier::BeforeInstructionAccept)
+            .map_err(|_| source_invalid())?;
+        Ok(source.capture)
+    }
+
+    /// Capture common, Role, dependencies and selected guidance exactly once.
+    ///
+    /// This is a **raw, byte-exact capture**: it reads each selected source
+    /// through the same secure tree, verifies stability across the read, and
+    /// returns the accepted bytes in caller order. It deliberately does not
+    /// apply closed-identity rules (sorted dependency aliases, unique aliases,
+    /// the 65,536-byte aggregate). `delegation_identity::InstructionSnapshot::
+    /// from_capture` is the single admission gate for those rules and must be
+    /// applied before any allocation or dispatch.
+    pub fn capture_delegation(
+        &self,
+        selection: &DelegationSourceSelection,
+    ) -> Result<DelegationCapture, MachineError> {
+        validate_role_name(&selection.role_name)?;
+        if selection.dependencies.len() > 64 || selection.selected_guidance.len() > 64 {
+            return Err(source_invalid());
+        }
+        self.faults
+            .check(FaultBarrier::BeforeInstructionCapture)
+            .map_err(|_| source_invalid())?;
+        let mut tree = SourceTree::open(self)?;
+        let common_directory = tree.child(0, "home", false)?;
+        let common = tree.read(common_directory)?;
+        let mut retained = vec![common];
+        let role = capture_selected_source(&mut tree, &mut retained, &selection.role)?;
+        let mut named = |sources: &[SelectedNamedSource]| {
+            sources
+                .iter()
+                .map(|selected| {
+                    let source =
+                        capture_selected_source(&mut tree, &mut retained, &selected.source)?;
+                    Ok(CapturedNamedSource {
+                        name: selected.name.clone(),
+                        body: source.body,
+                    })
+                })
+                .collect::<Result<Vec<_>, MachineError>>()
+        };
+        let dependencies = named(&selection.dependencies)?;
+        let selected_guidance = named(&selection.selected_guidance)?;
+        self.faults
+            .check(FaultBarrier::AfterInstructionRead)
+            .map_err(|_| source_invalid())?;
+        for source in &retained {
+            source.verify(&tree)?;
+        }
+        tree.verify()?;
+        let capture = DelegationCapture {
+            common: retained[0].capture.clone(),
+            role: RoleCapture::from_body(&selection.role_name, &role.body)?,
+            dependencies,
+            selected_guidance,
+        };
+        self.faults
+            .check(FaultBarrier::BeforeInstructionAccept)
+            .map_err(|_| source_invalid())?;
+        Ok(capture)
+    }
+
     pub fn capture(&self, name: &str) -> Result<InstructionSnapshot, MachineError> {
         self.capture_with(name, || Ok(()))
     }
@@ -263,6 +631,44 @@ struct CheckedDirectory {
     file: File,
     before: Metadata,
     parent: Option<(usize, OsString)>,
+}
+
+fn validate_directory_components(components: &[String]) -> Result<(), MachineError> {
+    if components.is_empty()
+        || components.len() > 64
+        || components.iter().any(|component| {
+            component.is_empty()
+                || component.len() > 255
+                || matches!(component.as_str(), "." | "..")
+                || component
+                    .chars()
+                    .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+        })
+    {
+        return Err(source_invalid());
+    }
+    Ok(())
+}
+
+fn capture_selected_source(
+    tree: &mut SourceTree,
+    retained: &mut Vec<BoundSource>,
+    selection: &SelectedInstructionSource,
+) -> Result<SourceCapture, MachineError> {
+    match selection {
+        SelectedInstructionSource::Inline(body) => SourceCapture::from_body(body),
+        SelectedInstructionSource::File(components) => {
+            validate_directory_components(components)?;
+            let mut directory = 0;
+            for component in components {
+                directory = tree.child(directory, component, false)?;
+            }
+            let source = tree.read(directory)?;
+            let capture = source.capture.clone();
+            retained.push(source);
+            Ok(capture)
+        }
+    }
 }
 
 struct SourceTree {
@@ -609,6 +1015,270 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    fn delegated_selection() -> DelegationSourceSelection {
+        DelegationSourceSelection {
+            role_name: "general".to_owned(),
+            role: SelectedInstructionSource::File(vec!["roles".to_owned(), "general".to_owned()]),
+            dependencies: vec![
+                SelectedNamedSource {
+                    name: "z".to_owned(),
+                    source: SelectedInstructionSource::Inline("Z\r\n".to_owned()),
+                },
+                SelectedNamedSource {
+                    name: "a".to_owned(),
+                    source: SelectedInstructionSource::Inline("A e\u{301}".to_owned()),
+                },
+            ],
+            selected_guidance: vec![
+                SelectedNamedSource {
+                    name: "second".to_owned(),
+                    source: SelectedInstructionSource::Inline("2".to_owned()),
+                },
+                SelectedNamedSource {
+                    name: "first".to_owned(),
+                    source: SelectedInstructionSource::Inline("1".to_owned()),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn delegated_selected_sources_preserve_bytes_and_file_inline_identity() {
+        let fixture = Fixture::new();
+        let body = "Role é\r\n\n ";
+        fs::write(fixture.role("general"), body).unwrap();
+        let mut selection = delegated_selection();
+        let file = fixture.store.capture_delegation(&selection).unwrap();
+        selection.role = SelectedInstructionSource::Inline(body.to_owned());
+        let inline = fixture.store.capture_delegation(&selection).unwrap();
+        // The file-backed and inline captures are the same accepted bytes.
+        assert_eq!(file, inline);
+        assert_eq!(inline.role.body, body);
+        // Dependencies are retained in capture order; the identity layer sorts
+        // them by alias. Guidance keeps the caller's explicit order.
+        assert_eq!(
+            inline
+                .dependencies
+                .iter()
+                .map(|source| source.name.as_str())
+                .collect::<Vec<_>>(),
+            ["z", "a"]
+        );
+        assert_eq!(
+            inline
+                .selected_guidance
+                .iter()
+                .map(|source| source.name.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "first"]
+        );
+        // Component paths are never inferred from aliases.
+        selection.role = SelectedInstructionSource::File(vec![
+            "..".to_owned(),
+            "roles".to_owned(),
+            "general".to_owned(),
+        ]);
+        assert!(fixture.store.capture_delegation(&selection).is_err());
+        fs::remove_file(fixture.role("general")).unwrap();
+        symlink(fixture.role("reviewer"), fixture.role("general")).unwrap();
+        selection.role =
+            SelectedInstructionSource::File(vec!["roles".to_owned(), "general".to_owned()]);
+        assert!(fixture.store.capture_delegation(&selection).is_err());
+    }
+
+    #[test]
+    fn delegated_capture_rejects_source_replacement_before_acceptance() {
+        struct ReplaceAfterRead(PathBuf);
+        impl FaultInjector for ReplaceAfterRead {
+            fn check(&self, barrier: FaultBarrier) -> Result<(), crate::fault::FaultInjected> {
+                if barrier == FaultBarrier::AfterInstructionRead {
+                    let replacement = self.0.with_extension("replacement");
+                    fs::write(&replacement, b"Changed source").unwrap();
+                    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
+                    fs::rename(replacement, &self.0).unwrap();
+                }
+                Ok(())
+            }
+        }
+        for common in [false, true] {
+            let fixture = Fixture::new();
+            let home = DolgoraeHome::from_canonical_home(fixture.root.clone()).unwrap();
+            let target = if common {
+                fixture.common()
+            } else {
+                fixture.role("general")
+            };
+            let store = InstructionSourceStore::with_faults(&home, ReplaceAfterRead(target));
+            let selection = DelegationSourceSelection {
+                role_name: "general".to_owned(),
+                role: SelectedInstructionSource::File(vec![
+                    "roles".to_owned(),
+                    "general".to_owned(),
+                ]),
+                dependencies: Vec::new(),
+                selected_guidance: Vec::new(),
+            };
+            assert_eq!(
+                store.capture_delegation(&selection).unwrap_err().code,
+                "INSTRUCTION_SOURCE_INVALID"
+            );
+        }
+    }
+
+    #[test]
+    fn delegated_capture_bounds_the_selector_but_defers_identity_rules() {
+        let fixture = Fixture::new();
+        let mut selection = delegated_selection();
+        selection.dependencies = (0..65)
+            .map(|index| SelectedNamedSource {
+                name: format!("d{index}"),
+                source: SelectedInstructionSource::Inline("x".to_owned()),
+            })
+            .collect();
+        assert!(fixture.store.capture_delegation(&selection).is_err());
+        // Duplicate aliases and the instruction aggregate are closed-identity
+        // rules; capture retains the caller's selection verbatim so
+        // `InstructionSnapshot::from_capture` can refuse it before allocation.
+        // Covered by the delegation_identity tests.
+        let mut selection = delegated_selection();
+        selection.dependencies = vec![
+            SelectedNamedSource {
+                name: "dup".to_owned(),
+                source: SelectedInstructionSource::Inline("1".to_owned()),
+            },
+            SelectedNamedSource {
+                name: "dup".to_owned(),
+                source: SelectedInstructionSource::Inline("2".to_owned()),
+            },
+        ];
+        assert!(fixture.store.capture_delegation(&selection).is_ok());
+    }
+
+    #[test]
+    fn ambient_profile_guidance_is_disclosed_but_never_enters_an_identity() {
+        let fixture = Fixture::new();
+        let codex_home = fixture.root.join("profile-codex");
+        fs::create_dir(&codex_home).unwrap();
+        fs::set_permissions(&codex_home, fs::Permissions::from_mode(0o700)).unwrap();
+        let digest = format!("sha256:{}", sha256_hex(b"profile-binding"));
+        let override_path = codex_home.join("AGENTS.override.md");
+        let plain_path = codex_home.join("AGENTS.md");
+        let ambient = "Profile ambient line e\u{301}\r\n";
+        let write_ambient = |path: &std::path::Path, bytes: &[u8], mode: u32| {
+            let _ = fs::remove_file(path);
+            fs::write(path, bytes).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        };
+        write_ambient(&override_path, ambient.as_bytes(), 0o600);
+        let disclosure = observe_profile_ambient(&codex_home, &digest).unwrap();
+        let present = |disclosure: &AmbientGuidanceDisclosure, name: &str| match disclosure
+            .observation(name)
+        {
+            Some(AmbientGuidanceObservation::Present { content }) => content.clone(),
+            other => panic!("expected a present ambient source, got {other:?}"),
+        };
+        assert_eq!(
+            present(&disclosure, "AGENTS.override.md").byte_length,
+            ambient.len() as u64
+        );
+        assert_eq!(
+            disclosure.observation("AGENTS.md"),
+            Some(&AmbientGuidanceObservation::Absent)
+        );
+        assert!(
+            disclosure
+                .warning
+                .contains("without changing this captured Role")
+        );
+
+        // Any readable current-user-owned regular file is observed, whatever
+        // its mode: 0644 and 0400 are normal for Profile guidance.
+        for mode in [0o644, 0o400] {
+            write_ambient(&plain_path, b"Plain ambient\n", mode);
+            let observed = observe_profile_ambient(&codex_home, &digest).unwrap();
+            assert_eq!(
+                present(&observed, "AGENTS.md").byte_length,
+                "Plain ambient\n".len() as u64,
+                "mode {mode:o} is observable"
+            );
+        }
+
+        // The disclosure is an observation: editing the ambient file changes
+        // only the observation, and the disclosure carries no captured
+        // instruction body or snapshot field. The identity invariance proof
+        // lives with the identity (`delegation_identity` tests).
+        write_ambient(&plain_path, b"Changed after compose\n", 0o644);
+        let observed = observe_profile_ambient(&codex_home, &digest).unwrap();
+        assert_ne!(disclosure, observed);
+        let encoded = serde_json::to_string(&observed).unwrap();
+        assert!(!encoded.contains("instruction_identity"));
+        assert!(!encoded.contains("role_snapshot"));
+
+        // Unobservable is reported as such, never as absent.
+        fs::remove_file(&plain_path).unwrap();
+        symlink(fixture.common(), &plain_path).unwrap();
+        assert_eq!(
+            observe_profile_ambient(&codex_home, &digest)
+                .unwrap()
+                .observation("AGENTS.md"),
+            Some(&AmbientGuidanceObservation::Unobservable {
+                reason: AmbientGuidanceGap::NotRegular
+            })
+        );
+        fs::remove_file(&plain_path).unwrap();
+        let oversized = codex_home.join("AGENTS.md");
+        fs::write(&oversized, "x".repeat(MAX_SOURCE_BYTES + 1)).unwrap();
+        fs::set_permissions(&oversized, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            observe_profile_ambient(&codex_home, &digest)
+                .unwrap()
+                .observation("AGENTS.md"),
+            Some(&AmbientGuidanceObservation::Unobservable {
+                reason: AmbientGuidanceGap::Oversized
+            })
+        );
+        fs::remove_file(&oversized).unwrap();
+        fs::write(&oversized, [b'a', 0x80, b'b']).unwrap();
+        fs::set_permissions(&oversized, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            observe_profile_ambient(&codex_home, &digest)
+                .unwrap()
+                .observation("AGENTS.md"),
+            Some(&AmbientGuidanceObservation::Unobservable {
+                reason: AmbientGuidanceGap::NotUtf8
+            })
+        );
+        // An empty file is observable text but not an admissible source.
+        write_ambient(&oversized, b"", 0o644);
+        assert_eq!(
+            observe_profile_ambient(&codex_home, &digest)
+                .unwrap()
+                .observation("AGENTS.md"),
+            Some(&AmbientGuidanceObservation::Unobservable {
+                reason: AmbientGuidanceGap::Empty
+            })
+        );
+        // A NUL-bearing file is valid UTF-8 but still inadmissible.
+        write_ambient(&oversized, b"ambient\0line", 0o644);
+        assert_eq!(
+            observe_profile_ambient(&codex_home, &digest)
+                .unwrap()
+                .observation("AGENTS.md"),
+            Some(&AmbientGuidanceObservation::Unobservable {
+                reason: AmbientGuidanceGap::ContainsNul
+            })
+        );
+        write_ambient(&oversized, b"ambient", 0o000);
+        assert_eq!(
+            observe_profile_ambient(&codex_home, &digest)
+                .unwrap()
+                .observation("AGENTS.md"),
+            Some(&AmbientGuidanceObservation::Unobservable {
+                reason: AmbientGuidanceGap::Unreadable
+            })
+        );
     }
 
     #[test]

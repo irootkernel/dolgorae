@@ -1,0 +1,12866 @@
+//! Successor delegation services shared by the TASK-077/078 adapters.
+//!
+//! Each keyed method writes its intent `prepared` before its acceptance
+//! transaction and its receipt inside it, so a receipt always precedes the
+//! acknowledgement (MDC:59-72). This module owns the closed successor error and
+//! view shapes; it never names the semantic Run service: member Run start is
+//! reached through the [`RunSettlementPort`] the caller supplies.
+
+use crate::delegation_identity::{AcceptedSubjects, LookupNamespace, OperationReceipt};
+use crate::domain::{AggregateKind, CallerWorkspaceAccess};
+use crate::engagement::{self, EngagementStore, IntentAdmission, IntentLookup, IntentPreparation};
+use crate::instructions::{AmbientGuidanceDisclosure, observe_profile_ambient};
+use crate::jcs::{canonicalize, parse, sha256_hex};
+use crate::machine::MachineError;
+use crate::operation::{BytesRef, ENVELOPE_SCHEMA, Envelope, Namespace};
+use crate::provisioning::{ProvisioningCandidate, ProvisioningSources, RetainedSnapshot};
+use crate::run::{AgentConfigurationSnapshot, AggregateBinding, AggregateMemberKind};
+use crate::workspace::WorkspaceView;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
+
+const RECEIPT_SCHEMA: &str = "dolgorae.operation-receipt/v1";
+const LOOKUP_SCHEMA: &str = "dolgorae.operation-lookup/v1";
+const INSTALL_BODY_SCHEMA: &str = "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/install_provisioning_normalized_body";
+const OPEN_BODY_SCHEMA: &str = "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/open_external_engagement_normalized_body";
+const SUCCESSOR_ERROR_SCHEMA: &str = "dolgorae.successor-error/v1";
+const ASSIGN_BODY_SCHEMA: &str = "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_external_specialist_task_normalized_body";
+const ASSIGN_MANAGED_BODY_SCHEMA: &str = "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_specialist_task_normalized_body";
+/// One accepted task retains at most this many context slots.
+const MAX_AWAIT_SECONDS: u64 = 3_600;
+/// The facade assignment bound on one task deadline.
+const MAX_ASSIGN_DEADLINE_SECONDS: u64 = 3_600;
+const HIRE_BODY_SCHEMA: &str = "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/hire_external_specialist_normalized_body";
+const SPAWN_BODY_SCHEMA: &str = "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/spawn_specialist_normalized_body";
+
+/// The authenticated workspace and Controller one successor call runs under.
+///
+/// The trusted transport authenticates the Controller binding; every successor
+/// namespace is derived from it, never from caller-supplied identity text.
+pub struct DelegationScope<'a> {
+    pub view: &'a WorkspaceView,
+    pub state_root: &'a Path,
+    pub controller: &'a crate::run::ControllerBinding,
+}
+
+/// The one installed provisioning snapshot a hire request names.
+pub struct HireExternalSpecialist<'a> {
+    pub engagement_id: Uuid,
+    pub provisioning_ref: &'a str,
+    pub role_ref: &'a str,
+    pub agent_configuration_digest: &'a str,
+    pub idempotency_key: &'a str,
+    /// The scope membership revision the admission must observe, if any.
+    pub expected_revision: Option<u64>,
+}
+
+/// One external task assignment over the caller's trusted scope.
+/// The one review task the successor test fixtures accept.
+///
+/// Cross-module fixtures (the member Run gate tests) need the exact accepted
+/// task shape without naming it again, exactly as `caller_scope::fixture`
+/// supplies a trusted scope.
+#[cfg(test)]
+pub(crate) fn fixture_task() -> crate::task_request::SpecialistTaskRequest {
+    crate::task_request::SpecialistTaskRequest {
+        purpose: "change".to_owned(),
+        brief: "Assess the accepted candidate.\n".to_owned(),
+        contexts: vec![crate::task_request::TaskContext {
+            id: "ctx-0".to_owned(),
+            content: "context body 0\n".to_owned(),
+            provenance: "caller".to_owned(),
+        }],
+        criteria: Vec::new(),
+        expected_output: "structured_review_v3".to_owned(),
+    }
+}
+
+pub struct AssignExternalSpecialistTask<'a> {
+    pub engagement_id: Uuid,
+    pub member_ref: Uuid,
+    pub task: crate::task_request::SpecialistTaskRequest,
+    pub execution_intent: &'a str,
+    pub target: Option<crate::review::ReviewTargetRequest>,
+    /// The requested task deadline in seconds (1..=3600).
+    pub deadline_seconds: u64,
+    pub idempotency_key: &'a str,
+    /// The scoped membership revision this admission must observe, if any.
+    pub expected_revision: Option<u64>,
+}
+
+/// One await over a set of accepted task references (MDC:139).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AwaitPredicate {
+    Any,
+    All,
+    AtLeast(u64),
+}
+
+/// One await request over an engagement's member.
+pub struct AwaitExternalSpecialistTasks<'a> {
+    pub engagement_id: Uuid,
+    pub member_ref: Uuid,
+    pub tasks: &'a [Uuid],
+    pub predicate: AwaitPredicate,
+    pub timeout_seconds: u64,
+}
+
+/// The `task` object of the closed successor facade.
+///
+/// `result_digest` and the complete result belong to the collect surface; an
+/// observation that cannot yet produce them reports `content_availability`
+/// `pending` with the required next action.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationTaskObservation {
+    pub task_ref: String,
+    pub member_ref: String,
+    pub accepted_task_digest: String,
+    pub state: String,
+    pub result_digest: Option<String>,
+    /// The complete result is published by the collect surface; the
+    /// closed shape still carries the required nullable field.
+    pub complete_result: Option<Value>,
+    pub content_availability: String,
+    pub required_action: String,
+}
+
+/// The `member` object of the closed successor facade.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationMemberView {
+    pub member_ref: String,
+    pub run_ref: String,
+    pub scope_kind: String,
+    pub scope_ref: String,
+    pub role_ref: String,
+    pub role_snapshot_digest: String,
+    pub agent_configuration_digest: String,
+    pub state: String,
+    pub revision: u64,
+}
+
+/// The `engagement` object of the closed successor facade.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationEngagementView {
+    pub engagement_ref: String,
+    pub workspace_ref: String,
+    pub state: String,
+    pub revision: u64,
+    pub members: Vec<DelegationMemberView>,
+    pub next_cursor: Option<String>,
+}
+
+/// One admitted member plus the receipt and the call-time ambient disclosure.
+///
+/// `ambient_guidance` is a runtime observation outside every captured and
+/// digested object; TASK-077 must never project it into the closed identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemberAdmissionView {
+    pub member: DelegationMemberView,
+    pub receipt: OperationReceipt,
+    pub ambient_guidance: AmbientGuidanceDisclosure,
+}
+
+/// One already admitted member Run start, handed to the settlement port.
+///
+/// `configuration` is the output of the single admission gate
+/// (`InstructionSnapshot::from_capture` plus
+/// `AgentConfigurationSnapshot::from_admitted`) over the retained snapshot, so
+/// a start that has not passed the gate cannot be represented here.
+/// One collectable successor task: its observation, its complete result and the
+/// fresh disposition observed after that result (RPC:399-410).
+///
+/// Both aggregate owners answer with this one view; only the owner's task store
+/// differs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CollectedTask {
+    pub task: DelegationTaskObservation,
+    pub complete_result: Option<Value>,
+    pub disposition: DelegationDispositionView,
+}
+
+/// The disposition one collect observed after the committed result.
+///
+/// The frozen `disposition_proof` is the all-zero idle/released proof; a member
+/// with work in flight is reported as its execution facts instead of a proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegationDispositionView {
+    pub state: String,
+    pub observed_after_result_digest: String,
+    pub membership_revision: u64,
+    pub workload_revision: u64,
+    pub running: u64,
+    pub queued: u64,
+    pub claimed: u64,
+    pub dispatching: u64,
+    pub unresolved: u64,
+    /// The member still owes an owned writer cleanup .
+    pub cleanup_pending: bool,
+    /// The settled member's release proof, derived from its frozen terminal
+    /// release row whenever the disposition is `released` (RPC:396-423).
+    pub release_receipt: Option<crate::delegation_identity::MemberReleaseProof>,
+}
+
+/// One delegation identity read: the closed object plus the call-time ambient
+/// disclosure that never enters it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DelegationIdentityView {
+    pub identity: crate::delegation_identity::DelegationIdentity,
+    pub ambient_guidance: AmbientGuidanceDisclosure,
+}
+
+/// One collect request: the task the caller observes (MDC:140).
+pub struct CollectExternalSpecialistTask<'a> {
+    pub engagement_id: Uuid,
+    pub member_ref: Uuid,
+    pub task_ref: Uuid,
+    /// Provider-owned adapter provenance; never derived here (MDC:594-597).
+    pub adapter_id: &'a str,
+    pub adapter_version: &'a str,
+}
+
+pub struct AdmittedMemberStart<'a> {
+    pub view: &'a WorkspaceView,
+    pub state_root: &'a Path,
+    pub snapshot: &'a RetainedSnapshot,
+    pub configuration: &'a AgentConfigurationSnapshot,
+    pub run_id: Uuid,
+    pub aggregate: &'a AggregateBinding,
+    pub access: CallerWorkspaceAccess,
+    /// The member Run's own Broker credential on the managed path.
+    ///
+    /// A managed member Run is controlled by the Broker, so its start carries the
+    /// freshly minted credential; the external path passes `None` and keeps the
+    /// authenticated transport's carrier, unchanged.
+    pub broker: Option<&'a crate::orchestration::BrokerCredential>,
+    pub idempotency_key: String,
+}
+
+/// The Run one member start created or resumed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MemberRunStart {
+    pub run_id: Uuid,
+}
+
+/// One accepted member task dispatch, handed to the settlement port.
+///
+/// The port holds the member Run's authority for the whole dispatch, so the
+/// dispatch index is captured and recorded under it, and the Turn is built from
+/// the preserved accepted bytes only.
+pub struct MemberTaskDispatch<'a> {
+    pub view: &'a WorkspaceView,
+    pub state_root: &'a Path,
+    pub engagement_id: Uuid,
+    pub member_ref: Uuid,
+    pub task_ref: Uuid,
+    pub idempotency_key: &'a str,
+    pub execution_intent: &'a str,
+    pub accepted: &'a crate::delegation_identity::AcceptedTask,
+    pub contents: &'a crate::successor_capture::AcceptedTaskContents,
+    pub deadline_seconds: u64,
+}
+
+/// One accepted managed task dispatch, handed to the settlement port.
+///
+/// The managed dispatch submits the Turn under the member Run's own Broker
+/// credential, including writer acquisition and complete change capture for
+/// writable tasks after acceptance.
+pub struct ManagedTaskDispatch<'a> {
+    pub view: &'a WorkspaceView,
+    pub state_root: &'a Path,
+    pub session_id: Uuid,
+    pub member_ref: Uuid,
+    pub task_ref: Uuid,
+    pub execution_intent: &'a str,
+    pub accepted: &'a crate::delegation_identity::AcceptedTask,
+    pub contents: &'a crate::successor_capture::AcceptedTaskContents,
+    pub deadline_seconds: u64,
+}
+
+/// The aggregate that owns one accepted task's execution facts.
+///
+/// The external owner keeps its task rows in the Engagement's own tables; the
+/// managed owner keeps them in its Session's Broker extension tables. Every
+/// settlement, sweep and hook reads the same two facts from whichever owner the
+/// member Run's manifest names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettlementOwner {
+    External { engagement_id: Uuid },
+    Managed { session_id: Uuid },
+}
+
+impl SettlementOwner {
+    /// The `scope_kind` every owner-scoped fact carries.
+    #[must_use]
+    pub fn scope_kind(&self) -> &'static str {
+        match self {
+            Self::External { .. } => "external_engagement",
+            Self::Managed { .. } => "orchestrated_session",
+        }
+    }
+
+    /// The accepted aggregate identity of this owner.
+    #[must_use]
+    pub fn scope_ref(&self) -> Uuid {
+        match *self {
+            Self::External { engagement_id } => engagement_id,
+            Self::Managed { session_id } => session_id,
+        }
+    }
+}
+
+/// One member task settlement request.
+///
+/// The Run service owns the observation of the member Run's Turn and the writer
+/// authority around it; the service only states which task is being settled and
+/// which aggregate owns it.
+pub struct MemberTaskSettlement<'a> {
+    pub view: &'a WorkspaceView,
+    pub state_root: &'a Path,
+    pub owner: SettlementOwner,
+    pub member_ref: Uuid,
+    pub task_ref: Uuid,
+    pub execution_intent: &'a str,
+}
+
+/// One read-only observation of a member's pending owned cleanup .
+///
+/// The Run service is the only component that may read the workspace writer, so
+/// the read path asks it for the fact instead of deriving it. This observation
+/// must never mutate the writer or the Run, and it names the aggregate owner so
+/// both owners reach it through the same port.
+pub struct MemberCleanupObservation<'a> {
+    pub view: &'a WorkspaceView,
+    pub state_root: &'a Path,
+    pub owner: SettlementOwner,
+    pub member_ref: Uuid,
+}
+
+/// One writer observation: the guard facts and the identity they came from.
+///
+/// The fingerprint identifies the observed writer record (generation, state,
+/// holder, transaction and content digest), so a boundary can prove the guard did
+/// not move across the database read. Whether that guard is *pending cleanup*
+/// depends on the member's write work, which is a database fact of the same
+/// attempt, so the decision is taken inside that attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemberWriterObservation {
+    /// The member Run holds the workspace writer (reserved, active or releasing).
+    pub holds: bool,
+    /// The guard is blocked-unknown: unresolved cleanup whatever the work is.
+    pub blocked_unknown: bool,
+    pub fingerprint: String,
+}
+
+/// Whether one writer guard is pending owned cleanup for this member.
+fn cleanup_pending(hold: &MemberWriterObservation, active_write_tasks: u64) -> bool {
+    hold.blocked_unknown || (hold.holds && active_write_tasks == 0)
+}
+
+/// Validate retained intents inside the disposition's own read transaction.
+fn managed_active_write_count(
+    connection: &rusqlite::Connection,
+    session_id: Uuid,
+    member_ref: Uuid,
+) -> Result<u64, MachineError> {
+    let invalid = || {
+        MachineError::new(
+            "INTERNAL_ERROR",
+            "the active task acceptance is invalid",
+            false,
+            json!({"invariant": "managed_disposition"}),
+        )
+    };
+    let mut count = 0;
+    for json in
+        crate::orchestration::successor_active_task_acceptances(connection, session_id, member_ref)?
+    {
+        let accepted: crate::delegation_identity::AcceptedTask =
+            serde_json::from_str(&json).map_err(|_| invalid())?;
+        accepted.digest().map_err(|_| invalid())?;
+        if accepted.execution_intent == "canonical_workspace_write" {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// What one settlement attempt established.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemberSettlement {
+    /// The dispatched Turn has no observed terminal yet: nothing was settled.
+    Running,
+    /// The task is terminal, settled by this call or an earlier one.
+    Terminal,
+}
+
+/// One S member-release admission request (RPC:219-325).
+///
+/// The adapter authenticated `controller` as the current authority over the
+/// scope; the Run service owns everything from the durable read onward, because
+/// only it can hold the member Run's lifecycle lease.
+pub struct MemberReleaseRequest<'a> {
+    pub view: &'a WorkspaceView,
+    pub state_root: &'a Path,
+    pub owner: SettlementOwner,
+    pub workspace_ref: &'a str,
+    pub member_ref: Uuid,
+    /// The initiating Controller this call authenticated for the scope.
+    pub controller: &'a crate::run::ControllerBinding,
+    pub allow_interrupt: bool,
+    pub expected_revision: u64,
+}
+
+/// What the release admission step established.
+// The settled operation dominates the two refusal variants; boxing it would
+// change the settlement port's public shape.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemberReleaseOutcome {
+    /// The durable release operation, at whatever progress it stands.
+    Operation(crate::delegation_identity::MemberReleaseOperation),
+    /// A verified live owner of this very operation holds the member Run, so
+    /// this attempt must not mutate anything (RPC:442-446).
+    Busy { operation_ref: Uuid },
+    /// The member Run is held but its owner cannot be proven: recovery, never a
+    /// takeover (RPC:316-318).
+    Recovery { operation_ref: Uuid },
+}
+
+/// Why one release admission attempt stopped.
+#[derive(Debug)]
+pub enum MemberReleaseFailure {
+    /// Nothing durable was written by this attempt.
+    BeforeAdmission(MachineError),
+    /// The durable release row exists and this attempt could not continue it.
+    AfterAdmission {
+        operation_ref: Uuid,
+        error: MachineError,
+    },
+}
+
+/// The successor release result one adapter projects (facade `release_*_response`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemberReleaseView {
+    pub member_ref: Uuid,
+    pub run_ref: Uuid,
+    pub scope_kind: &'static str,
+    pub scope_ref: Uuid,
+    /// `releasing`, `released`, `cleanup_failed` or `unknown`.
+    pub state: &'static str,
+    /// The observed scoped membership revision (RPC:496-503).
+    pub revision: u64,
+    pub operation: crate::delegation_identity::MemberReleaseOperation,
+}
+
+/// One external member release request (`S`, no idempotency key).
+pub struct ReleaseExternalSpecialist {
+    pub engagement_id: Uuid,
+    pub member_ref: Uuid,
+    pub expected_revision: u64,
+    pub allow_interrupt: bool,
+}
+
+/// One managed member release request (`S`, no idempotency key).
+pub struct ReleaseSpecialist {
+    pub member_ref: Uuid,
+    pub expected_revision: u64,
+    pub allow_interrupt: bool,
+}
+
+/// What one dispatch established.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemberDispatchOutcome {
+    /// The executor accepted the Turn; the dispatch is no longer uncertain.
+    Accepted { turn_ref: String },
+    /// A definitive dispatch refusal: the caller records Case B.
+    Refused { code: String, message: String },
+    /// A transport or unknown failure: the task stays reserved and the round
+    /// stays counted (MDC:138).
+    Uncertain { code: String, message: String },
+}
+
+/// Member Run start, declared here and implemented by the Run service.
+///
+/// This is the only direction between the successor services and the semantic
+/// Run layer: the service names this trait, and the caller supplies the
+/// implementation.
+pub trait RunSettlementPort {
+    fn start_member_run(
+        &self,
+        request: AdmittedMemberStart<'_>,
+    ) -> Result<MemberRunStart, MachineError>;
+
+    fn dispatch_member_task(
+        &self,
+        request: MemberTaskDispatch<'_>,
+    ) -> Result<MemberDispatchOutcome, MachineError>;
+
+    /// Dispatch one accepted managed task under the member's Broker authority.
+    ///
+    /// The reservation (`dispatching`), the Turn submission and the acceptance
+    /// record use the member Run's own Broker credential; a refused or uncertain
+    /// outcome is reported exactly as the external dispatch reports it under the
+    /// round accounting rules.
+    fn dispatch_managed_task(
+        &self,
+        request: ManagedTaskDispatch<'_>,
+    ) -> Result<MemberDispatchOutcome, MachineError>;
+
+    /// Settle one dispatched task from the member Run's observed Turn.
+    ///
+    /// The implementation observes the Turn durably, runs the after-capture while
+    /// the writer authority is still held, records the terminal facts exactly
+    /// once and only then releases the writer. It never settles twice.
+    fn settle_member_task(
+        &self,
+        request: MemberTaskSettlement<'_>,
+    ) -> Result<MemberSettlement, MachineError>;
+
+    /// Explicit owner recovery of an already accepted task. Read operations do
+    /// not call this effectful boundary; it advertises no public transport.
+    fn reconcile_member_task(
+        &self,
+        _request: MemberTaskSettlement<'_>,
+    ) -> Result<MemberSettlement, MachineError> {
+        Err(MachineError::new(
+            "CAPABILITY_UNSUPPORTED",
+            "member recovery port is unavailable",
+            false,
+            json!({}),
+        ))
+    }
+
+    /// Admit (or resume) one `S` member release and settle it.
+    ///
+    /// The Run service keeps the member Run's lifecycle lease, so the durable
+    /// release operation, its `owner_ref` and the whole settlement — close,
+    /// owned-cleanup verification, writer verification, Profile retirement and
+    /// the atomic terminal commit — run there (RPC:219-460).
+    fn settle_member_release(
+        &self,
+        request: MemberReleaseRequest<'_>,
+    ) -> Result<MemberReleaseOutcome, MemberReleaseFailure>;
+
+    /// Whether this member still owes an owned writer cleanup .
+    ///
+    /// A member Run that holds the workspace writer — or whose guard is
+    /// blocked-unknown — while it has no active write task has pending cleanup,
+    /// and pending cleanup never idles.
+    fn member_writer_observation(
+        &self,
+        request: MemberCleanupObservation<'_>,
+    ) -> Result<MemberWriterObservation, MachineError>;
+}
+
+/// Validate one provisioning selection. This call writes nothing.
+pub fn validate_provisioning(
+    sources: &ProvisioningSources<'_>,
+) -> Result<ProvisioningCandidate, MachineError> {
+    boundary(
+        "validate_provisioning",
+        crate::provisioning::validate_provisioning(sources),
+    )
+}
+
+/// Install one provisioning selection and return its retained receipt.
+///
+/// A pre-allocation install has no fenced revision domain, so a non-null
+/// `expected_revision` is refused before any intent row exists.
+pub fn install_provisioning(
+    scope: &DelegationScope<'_>,
+    sources: &ProvisioningSources<'_>,
+    idempotency_key: &str,
+    expected_revision: Option<u64>,
+) -> Result<(ProvisioningCandidate, OperationReceipt), MachineError> {
+    boundary(
+        "install_provisioning",
+        install_provisioning_in(scope, sources, idempotency_key, expected_revision),
+    )
+}
+
+fn install_provisioning_in(
+    scope: &DelegationScope<'_>,
+    sources: &ProvisioningSources<'_>,
+    idempotency_key: &str,
+    expected_revision: Option<u64>,
+) -> Result<(ProvisioningCandidate, OperationReceipt), MachineError> {
+    let key = checked_key(idempotency_key)?;
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let snapshot = crate::provisioning::capture_provisioning(sources)?;
+    let body = json!({"sources": snapshot.sources_identity()?});
+    let identity = intent_identity(
+        scope,
+        "install_provisioning",
+        None,
+        key,
+        INSTALL_BODY_SCHEMA,
+        &body,
+    )?;
+    let mut store = open_store(scope)?;
+    if let Some(receipt) = replay(
+        &store,
+        &identity.lookup,
+        &identity.digest,
+        "install_provisioning",
+    )? {
+        // Replay returns the retained receipt before any new-admission fence.
+        return Ok((snapshot.candidate(true)?, receipt));
+    }
+    // A pre-allocation install has no fenced revision domain, so the null-only
+    // rule applies to new admissions only.
+    if expected_revision.is_some() {
+        return Err(preallocation_revision_refusal("install_provisioning"));
+    }
+    let operation_ref = Uuid::now_v7();
+    let now = now_ms()?;
+    let preparation = store.transact(|transaction| {
+        engagement::intent_prepare(
+            transaction,
+            IntentAdmission {
+                operation_ref,
+                namespace: &identity.lookup,
+                mutation_envelope_json: &identity.json,
+                mutation_envelope_digest: &identity.digest,
+                expected_revision,
+                now_ms: now,
+            },
+        )
+    })?;
+    let operation_ref = match preparation {
+        IntentPreparation::Created => operation_ref,
+        IntentPreparation::Accepted(receipt) => {
+            return Ok((snapshot.candidate(true)?, *receipt));
+        }
+        IntentPreparation::Unresolved { operation_ref } => {
+            return Err(unresolved_refusal("install_provisioning", operation_ref));
+        }
+    };
+    // The intent precedes its effect: the snapshot is published only after the
+    // prepared intent exists, and a publication failure is a definitive
+    // refusal of this new admission.
+    if let Err(error) = crate::provisioning::install_snapshot(scope.state_root, &snapshot) {
+        store.transact(|transaction| {
+            engagement::intent_refuse_before_acceptance(
+                transaction,
+                operation_ref,
+                &error.code,
+                now,
+            )
+        })?;
+        // The durable refusal keeps the original code, and the returned error
+        // takes its classification from the one successor table .
+        return Err(successor_boundary_error_at(
+            error,
+            "install_provisioning",
+            Some(operation_ref),
+        ));
+    }
+    let subjects = AcceptedSubjects {
+        provisioning_ref: Some(snapshot.provisioning_ref()?),
+        ..AcceptedSubjects::default()
+    };
+    let receipt = build_receipt(
+        &identity.namespace,
+        operation_ref,
+        &identity.digest,
+        subjects,
+        0,
+    )?;
+    if let Err(error) = store.transact(|transaction| {
+        engagement::intent_accept(transaction, operation_ref, &receipt, now)
+    }) {
+        // An acceptance attempt that did not commit leaves the effect unsettled;
+        // either state lookup observes from here is `unresolved`.
+        let _ = store.transact(|transaction| {
+            engagement::intent_mark_unresolved(transaction, operation_ref, now)
+        });
+        return Err(unresolved_effect(
+            &error.code,
+            "install_provisioning",
+            operation_ref,
+            &error.message,
+        ));
+    }
+    Ok((snapshot.candidate(true)?, receipt))
+}
+
+/// Open one External Specialist Engagement and return its retained receipt.
+pub fn open_external_engagement(
+    scope: &DelegationScope<'_>,
+    idempotency_key: &str,
+    expected_revision: Option<u64>,
+) -> Result<(DelegationEngagementView, OperationReceipt), MachineError> {
+    boundary(
+        "open_external_engagement",
+        open_external_engagement_in(scope, idempotency_key, expected_revision),
+    )
+}
+
+fn open_external_engagement_in(
+    scope: &DelegationScope<'_>,
+    idempotency_key: &str,
+    expected_revision: Option<u64>,
+) -> Result<(DelegationEngagementView, OperationReceipt), MachineError> {
+    let key = checked_key(idempotency_key)?;
+    engagement::require_external_owner_binding(scope.controller)?;
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let identity = intent_identity(
+        scope,
+        "open_external_engagement",
+        None,
+        key,
+        OPEN_BODY_SCHEMA,
+        &json!({}),
+    )?;
+    let mut store = open_store(scope)?;
+    if let Some(receipt) = replay(
+        &store,
+        &identity.lookup,
+        &identity.digest,
+        "open_external_engagement",
+    )? {
+        return Ok((
+            opened_engagement(&scope.view.workspace_id, &receipt)?,
+            receipt,
+        ));
+    }
+    // The null-only rule applies to new admissions only.
+    if expected_revision.is_some() {
+        return Err(preallocation_revision_refusal("open_external_engagement"));
+    }
+    let operation_ref = Uuid::now_v7();
+    let engagement_id = Uuid::now_v7();
+    let bootstrap_operation_id = Uuid::now_v7();
+    let now = now_ms()?;
+    let preparation = store.transact(|transaction| {
+        engagement::intent_prepare(
+            transaction,
+            IntentAdmission {
+                operation_ref,
+                namespace: &identity.lookup,
+                mutation_envelope_json: &identity.json,
+                mutation_envelope_digest: &identity.digest,
+                expected_revision,
+                now_ms: now,
+            },
+        )
+    })?;
+    let operation_ref = match preparation {
+        IntentPreparation::Created => operation_ref,
+        IntentPreparation::Accepted(receipt) => {
+            return Ok((
+                opened_engagement(&scope.view.workspace_id, &receipt)?,
+                *receipt,
+            ));
+        }
+        IntentPreparation::Unresolved { operation_ref } => {
+            return Err(unresolved_refusal(
+                "open_external_engagement",
+                operation_ref,
+            ));
+        }
+    };
+    let subjects = AcceptedSubjects {
+        engagement_ref: Some(engagement_id.to_string()),
+        ..AcceptedSubjects::default()
+    };
+    let receipt = build_receipt(
+        &identity.namespace,
+        operation_ref,
+        &identity.digest,
+        subjects,
+        0,
+    )?;
+    let binding_json = canonical_text(scope.controller)?;
+    let controller_sha256 = sha256_hex(binding_json.as_bytes());
+    let accepted = store.transact(|transaction| {
+        engagement::open_external_engagement_in(
+            transaction,
+            engagement::ExternalOpenCore {
+                engagement_id,
+                workspace_id: &scope.view.workspace_id,
+                controller_sha256: &controller_sha256,
+                bootstrap_operation_id,
+                external_json: None,
+                external_sha256: None,
+                label: None,
+                binding_json: &binding_json,
+                now_ms: now,
+            },
+        )?;
+        engagement::intent_accept(transaction, operation_ref, &receipt, now)
+    });
+    if let Err(error) = accepted {
+        // An acceptance attempt that did not commit leaves the effect unsettled;
+        // either state lookup observes from here is `unresolved`.
+        let _ = store.transact(|transaction| {
+            engagement::intent_mark_unresolved(transaction, operation_ref, now)
+        });
+        return Err(unresolved_effect(
+            &error.code,
+            "open_external_engagement",
+            operation_ref,
+            &error.message,
+        ));
+    }
+    Ok((
+        opened_engagement(&scope.view.workspace_id, &receipt)?,
+        receipt,
+    ))
+}
+
+/// Hire one external member from an installed provisioning snapshot.
+///
+/// The retained snapshot is the only instruction source: the Role home is never
+/// re-read, and no allocation of any kind happens before the closed identity has
+/// accepted the captured bytes (MDC:304-306, implementation notes).
+pub fn hire_external_specialist(
+    scope: &DelegationScope<'_>,
+    port: &dyn RunSettlementPort,
+    request: HireExternalSpecialist<'_>,
+) -> Result<MemberAdmissionView, MachineError> {
+    boundary(
+        "hire_external_specialist",
+        hire_external_specialist_in(scope, port, request),
+    )
+}
+
+fn hire_external_specialist_in(
+    scope: &DelegationScope<'_>,
+    port: &dyn RunSettlementPort,
+    request: HireExternalSpecialist<'_>,
+) -> Result<MemberAdmissionView, MachineError> {
+    let key = checked_key(request.idempotency_key)?;
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let mut store = open_store(scope)?;
+    // The scope Controller must be the authenticated aggregate owner recorded
+    // by the engagement open, before any intent row exists (MDC:137).
+    let (owner_workspace, owner) = store.external_owner_binding(request.engagement_id)?;
+    if owner_workspace != scope.view.workspace_id || owner != *scope.controller {
+        return Err(owner_refusal_for("hire_external_specialist"));
+    }
+    // Only an accepted install admits a member: a published-but-unaccepted
+    // snapshot is not installed.
+    if store
+        .accepted_install_receipt(&scope.view.workspace_id, request.provisioning_ref)?
+        .is_none()
+    {
+        return Err(provisioning_not_installed());
+    }
+    let snapshot =
+        crate::provisioning::retained_snapshot(scope.state_root, request.provisioning_ref)?;
+    // The single admission gate: nothing below this pair may allocate a Run.
+    let (instructions, configuration) = snapshot.admitted_configuration()?;
+    let candidate = snapshot.candidate(false)?;
+    if snapshot.role_name() != request.role_ref
+        || candidate.agent_configuration_digest != request.agent_configuration_digest
+        || candidate.provisioning_ref != request.provisioning_ref
+    {
+        return Err(MachineError::invalid_argument(
+            "provisioning_ref",
+            "the installed snapshot does not match the requested admission",
+        ));
+    }
+    let scope_ref = request.engagement_id.to_string();
+    let body = json!({
+        "provisioning_ref": request.provisioning_ref,
+        "role_ref": request.role_ref,
+        "agent_configuration_digest": request.agent_configuration_digest,
+    });
+    let identity = intent_identity(
+        scope,
+        "hire_external_specialist",
+        Some(("external_engagement", scope_ref.as_str())),
+        key,
+        HIRE_BODY_SCHEMA,
+        &body,
+    )?;
+    if let Some(receipt) = replay(
+        &store,
+        &identity.lookup,
+        &identity.digest,
+        "hire_external_specialist",
+    )? {
+        return accepted_boundary(
+            "hire_external_specialist",
+            Some(replay_operation_ref(&receipt)),
+            member_admission_view(&store, &snapshot, &instructions, &receipt),
+        );
+    }
+    let operation_ref = Uuid::now_v7();
+    let specialist_run_id = Uuid::now_v7();
+    let now = now_ms()?;
+    let configuration_json = canonical_text(&configuration)?;
+    let configuration_sha256 = crate::run::agent_configuration_digest(&configuration)
+        .map_err(|_| MachineError::invalid_argument("agent_configuration", "unrepresentable"))?;
+    let access = match snapshot.admitted.requested_access.as_str() {
+        "read_only" => CallerWorkspaceAccess::ReadOnly,
+        _ => CallerWorkspaceAccess::Writable,
+    };
+    let preparation = store.transact(|transaction| {
+        engagement::intent_prepare(
+            transaction,
+            IntentAdmission {
+                operation_ref,
+                namespace: &identity.lookup,
+                mutation_envelope_json: &identity.json,
+                mutation_envelope_digest: &identity.digest,
+                expected_revision: request.expected_revision,
+                now_ms: now,
+            },
+        )
+    })?;
+    let operation_ref = match preparation {
+        IntentPreparation::Created => operation_ref,
+        IntentPreparation::Accepted(receipt) => {
+            return accepted_boundary(
+                "hire_external_specialist",
+                Some(replay_operation_ref(&receipt)),
+                member_admission_view(&store, &snapshot, &instructions, &receipt),
+            );
+        }
+        IntentPreparation::Unresolved { operation_ref } => {
+            return Err(unresolved_refusal(
+                "hire_external_specialist",
+                operation_ref,
+            ));
+        }
+    };
+    let admission = match store.transact(|transaction| {
+        accept_hire(
+            transaction,
+            HireAcceptance {
+                engagement_id: request.engagement_id,
+                operation_ref,
+                namespace: &identity.namespace,
+                accepted_input_digest: &identity.digest,
+                expected_revision: request.expected_revision,
+                specialist_run_id,
+                role_ref: request.role_ref,
+                configuration_json: &configuration_json,
+                configuration_sha256: &configuration_sha256,
+                requested_access: snapshot.admitted.requested_access.as_str(),
+                request_payload: &identity.json,
+                now_ms: now,
+            },
+        )
+    }) {
+        Ok(admission) => admission,
+        Err(error) => {
+            // An uncertain acceptance attempt must not stay silently prepared;
+            // either state lookup observes from here is `unresolved`.
+            let _ = store.transact(|transaction| {
+                engagement::intent_mark_unresolved(transaction, operation_ref, now)
+            });
+            return Err(unresolved_effect(
+                &error.code,
+                "hire_external_specialist",
+                operation_ref,
+                &error.message,
+            ));
+        }
+    };
+    let (reservation, receipt, revision) = match admission {
+        HireAdmission::Accepted(accepted) => {
+            (accepted.reservation, accepted.receipt, accepted.revision)
+        }
+        HireAdmission::Refused { code, message } => {
+            // Case A: one transaction durably resolves the intent under the
+            // original safe code, so lookup can report it verbatim.
+            store.transact(|transaction| {
+                engagement::intent_refuse_before_acceptance(transaction, operation_ref, &code, now)
+            })?;
+            return Err(successor_error(
+                &code,
+                "hire_external_specialist",
+                Some(operation_ref),
+                "none",
+                "Rejected",
+                "fix_request",
+                message,
+            ));
+        }
+    };
+    let aggregate = AggregateBinding {
+        aggregate_kind: AggregateKind::ExternalSpecialistEngagement,
+        aggregate_id: request.engagement_id,
+        operation_id: operation_ref,
+        member_kind: AggregateMemberKind::Specialist,
+        policy_sha256: None,
+        role_reference: Some(snapshot.role_name().to_owned()),
+        // The aggregate binding carries bare digests; the closed identities
+        // keep their prefixed form.
+        role_snapshot_sha256: Some(bare_digest(&instructions.role_snapshot_digest)),
+        agent_configuration_sha256: Some(configuration_sha256.clone()),
+    };
+    let start = port.start_member_run(AdmittedMemberStart {
+        view: scope.view,
+        state_root: scope.state_root,
+        snapshot: &snapshot,
+        configuration: &configuration,
+        run_id: reservation.specialist_run_id,
+        aggregate: &aggregate,
+        access,
+        broker: None,
+        idempotency_key: format!("delegated-member-start:{operation_ref}"),
+    });
+    let outcome = if start.is_ok() {
+        engagement::RuntimeOutcome::Accepted
+    } else {
+        // An error after the acceptance commit may hide a started writer, so the
+        // member stays degraded until its Run is recovered.
+        engagement::RuntimeOutcome::Unknown
+    };
+    // Everything from the acceptance commit onwards reports that effect: the
+    // member admission is durable, so a later failure is recovery .
+    accepted_boundary(
+        "hire_external_specialist",
+        Some(operation_ref),
+        (|| {
+            store.transact(|transaction| {
+                engagement::settle_external_hire_in(transaction, &reservation, outcome, now)
+            })?;
+            match start {
+                Ok(_) => {
+                    let (state, residency) = store.external_member_state(
+                        request.engagement_id,
+                        reservation.specialist_run_id,
+                    )?;
+                    let member = DelegationMemberView {
+                        member_ref: reservation.specialist_run_id.to_string(),
+                        run_ref: reservation.specialist_run_id.to_string(),
+                        scope_kind: "external_engagement".to_owned(),
+                        scope_ref: request.engagement_id.to_string(),
+                        role_ref: snapshot.role_name().to_owned(),
+                        role_snapshot_digest: instructions.role_snapshot_digest.clone(),
+                        agent_configuration_digest: candidate.agent_configuration_digest.clone(),
+                        state: member_state(&state, &residency).to_owned(),
+                        revision,
+                    };
+                    Ok(MemberAdmissionView {
+                        member,
+                        receipt,
+                        ambient_guidance: ambient_guidance(&snapshot)?,
+                    })
+                }
+                Err(error) => Err(successor_error(
+                    "HIRE_START_UNRESOLVED",
+                    "hire_external_specialist",
+                    Some(operation_ref),
+                    "accepted",
+                    "RecoveryNeeded",
+                    "recover_run",
+                    &format!(
+                        "the accepted member Run could not be started: {}",
+                        error.code
+                    ),
+                )),
+            }
+        })(),
+    )
+}
+
+/// Assign one external task under the caller's trusted round budget.
+///
+/// The accepted task identity and its exact bytes are committed with the
+/// acceptance (MDC:355-356); the member Run's dispatch then happens inside its
+/// writer authority through the settlement port.
+pub fn assign_external_specialist_task(
+    scope: &DelegationScope<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: AssignExternalSpecialistTask<'_>,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    boundary(
+        "assign_external_specialist_task",
+        assign_external_specialist_task_in(scope, caller, port, request),
+    )
+}
+
+fn assign_external_specialist_task_in(
+    scope: &DelegationScope<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: AssignExternalSpecialistTask<'_>,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    let key = checked_key(request.idempotency_key)?;
+    if !(1..=MAX_ASSIGN_DEADLINE_SECONDS).contains(&request.deadline_seconds) {
+        return Err(MachineError::invalid_argument(
+            "deadline_seconds",
+            "a task deadline is 1..=3600 seconds",
+        ));
+    }
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let mut store = open_store(scope)?;
+    // The scope Controller must be the authenticated aggregate owner (MDC:137).
+    let (owner_workspace, owner) = store.external_owner_binding(request.engagement_id)?;
+    if owner_workspace != scope.view.workspace_id || owner != *scope.controller {
+        return Err(owner_refusal_for("assign_external_specialist_task"));
+    }
+    // MD2: a non-Git workspace cannot capture delegated write changes, so a
+    // writable delegation is refused before any intent row exists.
+    if request.execution_intent == "canonical_workspace_write"
+        && scope.view.mode == crate::workspace::WorkspaceMode::NonGit
+    {
+        return Err(canonical_write_unsupported());
+    }
+    if let Some(receipt) = assignment_replay(
+        scope,
+        &store,
+        SettlementOwner::External {
+            engagement_id: request.engagement_id,
+        },
+        request.member_ref,
+        &request.task,
+        request.execution_intent,
+        request.target.as_ref(),
+        request.deadline_seconds,
+        key,
+    )? {
+        verify_replay_scope(&store, &receipt, caller)?;
+        return accepted_boundary(
+            "assign_external_specialist_task",
+            Some(replay_operation_ref(&receipt)),
+            assigned_observation(&store, &receipt),
+        );
+    }
+    let (configuration, _, _) =
+        store.external_member_configuration(request.engagement_id, request.member_ref)?;
+    admit_checked_task(
+        scope,
+        SettlementOwner::External {
+            engagement_id: request.engagement_id,
+        },
+        request.member_ref,
+        &configuration,
+        &request.task,
+        request.execution_intent,
+        request.target.as_ref(),
+    )?;
+    let target = admit_assignment_target(scope, request.target.as_ref())?;
+    let (accepted, contents) = crate::successor_capture::capture_facade_task(
+        &configuration,
+        &request.task,
+        request.execution_intent,
+        target
+            .as_ref()
+            .map(|(identity, bytes)| (identity.as_str(), bytes.as_slice())),
+    )?;
+    let accepted_task_digest = accepted.digest()?;
+    let scope_ref = request.engagement_id.to_string();
+    // The acceptance body and the dispatch re-derivation share one producer, so
+    // the frozen envelope digest binds the retained task to this acceptance.
+    let body = crate::successor_capture::assignment_body(
+        request.member_ref,
+        &request.task,
+        &accepted,
+        request.deadline_seconds,
+    )?;
+    let identity = intent_identity(
+        scope,
+        "assign_external_specialist_task",
+        Some(("external_engagement", scope_ref.as_str())),
+        key,
+        ASSIGN_BODY_SCHEMA,
+        &body,
+    )?;
+    if let Some(receipt) = replay(
+        &store,
+        &identity.lookup,
+        &identity.digest,
+        "assign_external_specialist_task",
+    )? {
+        verify_replay_scope(&store, &receipt, caller)?;
+        return accepted_boundary(
+            "assign_external_specialist_task",
+            Some(replay_operation_ref(&receipt)),
+            assigned_observation(&store, &receipt),
+        );
+    }
+    let operation_ref = Uuid::now_v7();
+    let task_id = Uuid::now_v7();
+    let now = now_ms()?;
+    let preparation = store.transact(|transaction| {
+        engagement::intent_prepare(
+            transaction,
+            IntentAdmission {
+                operation_ref,
+                namespace: &identity.lookup,
+                mutation_envelope_json: &identity.json,
+                mutation_envelope_digest: &identity.digest,
+                expected_revision: request.expected_revision,
+                now_ms: now,
+            },
+        )
+    })?;
+    let operation_ref = match preparation {
+        IntentPreparation::Created => operation_ref,
+        IntentPreparation::Accepted(receipt) => {
+            return accepted_boundary(
+                "assign_external_specialist_task",
+                Some(replay_operation_ref(&receipt)),
+                replay_observation(&store, &receipt, caller),
+            );
+        }
+        IntentPreparation::Unresolved { operation_ref } => {
+            return Err(unresolved_refusal(
+                "assign_external_specialist_task",
+                operation_ref,
+            ));
+        }
+    };
+    let acceptance = store.transact(|transaction| {
+        accept_assign(
+            transaction,
+            AssignAcceptance {
+                caller,
+                engagement_id: request.engagement_id,
+                member_ref: request.member_ref,
+                task_id,
+                namespace: &identity.namespace,
+                accepted_input_digest: &identity.digest,
+                expected_revision: request.expected_revision,
+                objective_sha256: &accepted_task_digest,
+                external_request_json: &json!({
+                    "provisioning_ref": null,
+                    "accepted_task_digest": accepted_task_digest,
+                    "deadline_seconds": request.deadline_seconds,
+                }),
+                request_json: &canonical_text(&accepted)?,
+                accepted_contents: &contents,
+                request_sha256: &identity.digest,
+                execution_intent: request.execution_intent,
+                deadline_seconds: request.deadline_seconds,
+                operation_ref,
+                now_ms: now,
+                workspace_ref: &scope.view.workspace_id,
+            },
+        )
+    });
+    let (receipt, _revision) = match acceptance {
+        Ok(accepted) => accepted,
+        Err(error) if is_assignment_refusal(&error) => {
+            // Case A of the round accounting rules: the acceptance rolled back,
+            // and one transaction resolves the intent and releases the attempt's
+            // own accounting row when one already exists.
+            store.transact(|transaction| {
+                engagement::intent_refuse_before_acceptance(
+                    transaction,
+                    operation_ref,
+                    &error.code,
+                    now,
+                )?;
+                crate::caller_scope::release_attempt(transaction, task_id)
+            })?;
+            return Err(successor_error(
+                &error.code,
+                "assign_external_specialist_task",
+                Some(operation_ref),
+                "none",
+                "Rejected",
+                "fix_request",
+                &error.message,
+            ));
+        }
+        Err(error) => {
+            // A durable intent exists but never became accepted: report it.
+            let _ = store.transact(|transaction| {
+                engagement::intent_mark_unresolved(transaction, operation_ref, now)
+            });
+            return Err(unresolved_effect(
+                &error.code,
+                "assign_external_specialist_task",
+                operation_ref,
+                &error.message,
+            ));
+        }
+    };
+    // The accepted identity and its bytes are durable; dispatch from them now.
+    let outcome = port.dispatch_member_task(MemberTaskDispatch {
+        view: scope.view,
+        state_root: scope.state_root,
+        engagement_id: request.engagement_id,
+        member_ref: request.member_ref,
+        task_ref: task_id,
+        idempotency_key: key,
+        execution_intent: request.execution_intent,
+        accepted: &accepted,
+        contents: &contents,
+        deadline_seconds: request.deadline_seconds,
+    });
+    match outcome {
+        Ok(MemberDispatchOutcome::Accepted { .. }) => accepted_boundary(
+            "assign_external_specialist_task",
+            Some(operation_ref),
+            assigned_observation(&store, &receipt),
+        ),
+        Ok(MemberDispatchOutcome::Refused { code, message }) => {
+            // Case B of the round accounting rules: the accepted intent and its
+            // receipt stay byte-identical; only the dispatch refusal and the
+            // accounting transition are written.
+            // The step stays inside the accepted boundary, so a failure here
+            // reports the accepted effect with its operation reference.
+            accepted_boundary(
+                "assign_external_specialist_task",
+                Some(operation_ref),
+                store.transact(|transaction| {
+                    engagement::terminalize_external_task_in(
+                        transaction,
+                        engagement::TaskTerminal {
+                            engagement_id: request.engagement_id,
+                            task_id,
+                            state: "failed",
+                            safe_error_code: Some(&code),
+                            result_sha256: None,
+                            artifact_id: None,
+                            diagnostic_json: None,
+                            now_ms: now,
+                        },
+                    )?;
+                    crate::caller_scope::proved_nondispatch(transaction, task_id)
+                }),
+            )?;
+            Err(successor_error(
+                &code,
+                "assign_external_specialist_task",
+                Some(operation_ref),
+                "accepted",
+                "RecoveryNeeded",
+                "reconcile_operation",
+                &message,
+            ))
+        }
+        Ok(MemberDispatchOutcome::Uncertain { code, message }) => Err(uncertain_dispatch(
+            "assign_external_specialist_task",
+            &code,
+            Some(operation_ref),
+            &message,
+        )),
+        Err(error) => {
+            // An error escaping the dispatch port is uncertain too: the Turn may
+            // have reached the Run, so the round stays counted and recovery owns it.
+            Err(accepted_error(
+                "assign_external_specialist_task",
+                Some(operation_ref),
+                error,
+            ))
+        }
+    }
+}
+
+/// Await one accepted task reference set under the facade's bounded wait.
+pub fn await_external_specialist_tasks(
+    scope: &DelegationScope<'_>,
+    request: AwaitExternalSpecialistTasks<'_>,
+) -> Result<(Vec<DelegationTaskObservation>, bool), MachineError> {
+    boundary(
+        "await_external_specialist_task",
+        await_external_specialist_tasks_in(scope, request),
+    )
+}
+
+fn await_external_specialist_tasks_in(
+    scope: &DelegationScope<'_>,
+    request: AwaitExternalSpecialistTasks<'_>,
+) -> Result<(Vec<DelegationTaskObservation>, bool), MachineError> {
+    validate_await(request.tasks, request.predicate, request.timeout_seconds)?;
+    engagement::require_delegation_namespace(scope.state_root)?;
+    {
+        // A wait observes one aggregate this trusted Controller owns; the read
+        // uses the read-only opener, so an R call never migrates or repairs.
+        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+            scope.state_root,
+        ))?;
+        let (owner_workspace, owner) = store.external_owner_binding(request.engagement_id)?;
+        if owner_workspace != scope.view.workspace_id || owner != *scope.controller {
+            return Err(owner_refusal_for("await_external_specialist_task"));
+        }
+    }
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(request.timeout_seconds);
+    loop {
+        let observed = crate::storage_observation::epoch()?;
+        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+            scope.state_root,
+        ))?;
+        let mut observations = Vec::with_capacity(request.tasks.len());
+        let mut terminal = 0;
+        for task in request.tasks {
+            let observation = task_observation(&store, request.engagement_id, *task)?;
+            // Every awaited task must belong to the named member.
+            if observation.member_ref != request.member_ref.to_string() {
+                return Err(MachineError::invalid_argument(
+                    "task_ref",
+                    "the await task set names another member's task",
+                ));
+            }
+            if !matches!(
+                observation.state.as_str(),
+                "queued" | "claimed" | "dispatching" | "running" | "unknown"
+            ) {
+                terminal += 1;
+            }
+            observations.push(observation);
+        }
+        if await_satisfied(request.predicate, terminal, request.tasks.len()) {
+            return Ok((observations, false));
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok((observations, true));
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        crate::storage_observation::wait(
+            observed,
+            remaining.min(std::time::Duration::from_millis(50)),
+        )?;
+    }
+}
+
+/// Read one keyed delegation namespace under its four closed lookup states.
+///
+/// `aggregate_scope` must be the exact accepted scope of the original
+/// operation; pre-allocation kinds (`install_provisioning`,
+/// `open_external_engagement`) pass `None`. A caller that supplies another
+/// scope reads another namespace, never a foreign receipt.
+/// Collect one dispatched successor task (R, MDC:140).
+///
+/// The call observes the member Run's Turn through the settlement port, which
+/// settles a terminal Turn exactly once inside one writable transaction, and
+/// then reads the committed result from the read-only opener. It writes no
+/// collect record, changes no round and computes the disposition after the
+/// result (RPC:399-410).
+pub fn reconcile_external_member_task(
+    scope: &DelegationScope<'_>,
+    port: &dyn RunSettlementPort,
+    engagement_id: Uuid,
+    member_ref: Uuid,
+    task_ref: Uuid,
+) -> Result<MemberSettlement, MachineError> {
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let (workspace, owner) = store.external_owner_binding(engagement_id)?;
+    if workspace != scope.view.workspace_id || owner != *scope.controller {
+        return Err(owner_refusal_for("reconcile_member_task"));
+    }
+    let task = store.external_task(engagement_id, task_ref)?;
+    if task.specialist_run_id != member_ref {
+        return Err(owner_refusal_for("reconcile_member_task"));
+    }
+    let intent = store.external_task_execution_intent(engagement_id, task_ref)?;
+    port.reconcile_member_task(MemberTaskSettlement {
+        view: scope.view,
+        state_root: scope.state_root,
+        owner: SettlementOwner::External { engagement_id },
+        member_ref,
+        task_ref,
+        execution_intent: &intent,
+    })
+}
+
+pub fn reconcile_managed_member_task(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    port: &dyn RunSettlementPort,
+    member_ref: Uuid,
+    task_ref: Uuid,
+) -> Result<MemberSettlement, MachineError> {
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let broker = crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?;
+    managed_read_scope(&broker, scope, context, "reconcile_member_task")?;
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let task =
+        crate::orchestration::successor_task(store.connection(), context.session_id, task_ref)?
+            .ok_or_else(|| managed_task_not_found("reconcile_member_task", member_ref))?;
+    if task.member_ref != member_ref.to_string() {
+        return Err(managed_task_not_found("reconcile_member_task", member_ref));
+    }
+    let accepted = crate::successor_capture::retained_accepted_task(&task.accepted_request_json)?;
+    port.reconcile_member_task(MemberTaskSettlement {
+        view: scope.view,
+        state_root: scope.state_root,
+        owner: SettlementOwner::Managed {
+            session_id: context.session_id,
+        },
+        member_ref,
+        task_ref,
+        execution_intent: &accepted.execution_intent,
+    })
+}
+
+pub fn collect_external_specialist_task(
+    scope: &DelegationScope<'_>,
+    port: &dyn RunSettlementPort,
+    request: CollectExternalSpecialistTask<'_>,
+) -> Result<CollectedTask, MachineError> {
+    boundary(
+        "collect_external_specialist_task",
+        collect_external_specialist_task_in(scope, port, &request).map(|(collected, _)| collected),
+    )
+}
+
+/// Collect reads committed state only: it settles nothing, publishes
+/// nothing and releases no writer, so every R error carries no effect. The port
+/// is used only to observe pending owned cleanup .
+fn collect_external_specialist_task_in(
+    scope: &DelegationScope<'_>,
+    port: &dyn RunSettlementPort,
+    request: &CollectExternalSpecialistTask<'_>,
+) -> Result<
+    (
+        CollectedTask,
+        Option<crate::delegation_identity::CompleteResult>,
+    ),
+    MachineError,
+> {
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let engagement_id = request.engagement_id;
+    let member_ref = request.member_ref;
+    // The read path authorizes the aggregate owner on the read-only opener.
+    let execution_intent = {
+        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+            scope.state_root,
+        ))?;
+        let (owner_workspace, owner) = store.external_owner_binding(engagement_id)?;
+        if owner_workspace != scope.view.workspace_id || owner != *scope.controller {
+            return Err(owner_refusal_for("collect_external_specialist_task"));
+        }
+        let _ = store.external_member_configuration(engagement_id, member_ref)?;
+        let task = store.external_task(engagement_id, request.task_ref)?;
+        if task.specialist_run_id != member_ref {
+            return Err(successor_error(
+                "SPECIALIST_TASK_NOT_FOUND",
+                "collect_external_specialist_task",
+                None,
+                "none",
+                "Rejected",
+                "fix_request",
+                "the task is not one this member was dispatched",
+            ));
+        }
+        store.external_task_execution_intent(engagement_id, request.task_ref)?
+    };
+    // The dispatch facts are observed, never acted on: settlement belongs to the
+    // execution side .
+    let _ = execution_intent;
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let task = store.external_task(engagement_id, request.task_ref)?;
+    let accepted = store
+        .external_task_identity(engagement_id, request.task_ref)?
+        .ok_or_else(|| {
+            successor_error(
+                "ACCEPTED_TASK_UNAVAILABLE",
+                "collect_external_specialist_task",
+                None,
+                "none",
+                "RecoveryNeeded",
+                "restore_state",
+                "the accepted task identity is unavailable",
+            )
+        })?;
+    let accepted_task_digest = accepted.digest()?;
+    let complete = complete_result_of(
+        &store,
+        SettlementOwner::External { engagement_id },
+        member_ref,
+        request.task_ref,
+        &accepted_task_digest,
+        &task.state,
+        "collect_external_specialist_task",
+    )?;
+    // the observation speaks the facade vocabulary only.
+    let terminal = matches!(
+        task.state.as_str(),
+        "completed_not_delivered" | "completed" | "delivered" | "failed" | "cancelled" | "expired"
+    );
+    let state = task_state(&task.state);
+    let required_action = task_required_action(&task.state);
+    // The disposition is computed inside the confirmed attempt, from that
+    // attempt's cleanup fact, so it can never say "idle" while cleanup is pending.
+    let digest = complete
+        .as_ref()
+        .map_or_else(|| "none".to_owned(), |(digest, _, _)| digest.clone());
+    let (disposition, _) = consistent_observation(
+        || {
+            port.member_writer_observation(MemberCleanupObservation {
+                view: scope.view,
+                state_root: scope.state_root,
+                owner: SettlementOwner::External { engagement_id },
+                member_ref,
+            })
+        },
+        |hold| {
+            let transaction = store.connection().unchecked_transaction().map_err(|_| {
+                MachineError::new(
+                    "INTERNAL_ERROR",
+                    "the engagement read transaction is unavailable",
+                    false,
+                    json!({"invariant": "disposition_read"}),
+                )
+            })?;
+            // The write-work fact is read in this attempt's snapshot, so the
+            // cleanup decision and the state see one database state.
+            let active_write_tasks = crate::engagement::EngagementStore::active_write_task_count(
+                &transaction,
+                engagement_id,
+                member_ref,
+            )?;
+            let disposition = disposition_view(
+                &transaction,
+                &scope.view.workspace_id,
+                SettlementOwner::External { engagement_id },
+                member_ref,
+                digest.clone(),
+                cleanup_pending(hold, active_write_tasks),
+            )?;
+            drop(transaction);
+            Ok(disposition)
+        },
+    )?;
+    // A complete result is published whole or not at all (the typed-unavailable
+    // rule): a terminal task without one is the typed condition, never a
+    // partial object.
+    if terminal && complete.is_none() {
+        return Err(complete_result_unavailable(
+            "collect_external_specialist_task",
+        ));
+    }
+    let observation = DelegationTaskObservation {
+        task_ref: request.task_ref.to_string(),
+        member_ref: member_ref.to_string(),
+        accepted_task_digest,
+        state: state.to_owned(),
+        result_digest: complete.as_ref().map(|(digest, _, _)| digest.clone()),
+        complete_result: complete.as_ref().map(|(_, value, _)| value.clone()),
+        // `available` only with the complete result; a task still in flight has
+        // nothing to publish yet.
+        content_availability: if terminal {
+            "available".to_owned()
+        } else {
+            "pending".to_owned()
+        },
+        required_action: required_action.to_owned(),
+    };
+    let (value, typed) = match complete {
+        Some((_, value, result)) => (Some(value), Some(result)),
+        None => (None, None),
+    };
+    Ok((
+        CollectedTask {
+            task: observation,
+            complete_result: value,
+            disposition,
+        },
+        typed,
+    ))
+}
+
+/// The closed `delegation_identity/v1` for one collected task (R).
+///
+/// The ambient disclosure rides beside the identity in the view and enters no
+/// digest; an unavailable result refuses this task's export only.
+pub fn get_external_delegation_identity(
+    scope: &DelegationScope<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: CollectExternalSpecialistTask<'_>,
+) -> Result<DelegationIdentityView, MachineError> {
+    boundary(
+        "get_external_delegation_identity",
+        get_external_delegation_identity_in(scope, caller, port, &request),
+    )
+}
+
+fn get_external_delegation_identity_in(
+    scope: &DelegationScope<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: &CollectExternalSpecialistTask<'_>,
+) -> Result<DelegationIdentityView, MachineError> {
+    let (collected, complete_result) = collect_external_specialist_task_in(scope, port, request)
+        .map_err(|error| reoperation(error, "get_external_delegation_identity"))?;
+    let Some(complete_result) = complete_result else {
+        return Err(complete_result_unavailable(
+            "get_external_delegation_identity",
+        ));
+    };
+    // The disposition is re-observed together with the proof below; the
+    // collect snapshot supplies only the task and its result.
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let accepted = store
+        .external_task_identity(request.engagement_id, request.task_ref)?
+        .ok_or_else(|| complete_result_unavailable("get_external_delegation_identity"))?;
+    let manifest =
+        crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, scope.state_root)
+            .load_manifest(request.member_ref)?;
+    let delegation = manifest
+        .instructions
+        .delegation()
+        .ok_or_else(|| complete_result_unavailable("get_external_delegation_identity"))?;
+    let ambient_guidance =
+        member_ambient_disclosure_in(scope, request.engagement_id, request.member_ref)?;
+    let database_facts = || {
+        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+            scope.state_root,
+        ))?;
+        let transaction = store.connection().unchecked_transaction().map_err(|_| {
+            MachineError::new(
+                "INTERNAL_ERROR",
+                "the engagement read transaction is unavailable",
+                false,
+                json!({"invariant": "identity_read"}),
+            )
+        })?;
+        // Export binds the task to the caller scope it was admitted under; a
+        // relabelled task is a closed refusal, never an identity.
+        if crate::caller_scope::verify_replay(&transaction, request.task_ref, caller).is_err() {
+            return Err(caller_scope_mismatch("get_external_delegation_identity"));
+        }
+        let rounds = crate::caller_scope::rounds_used(&transaction, caller)?;
+        let counts = assignment_counts(&transaction, caller)?;
+        let quiescence = crate::engagement::successor_member_quiescence(
+            &transaction,
+            &scope.view.workspace_id,
+            "external_engagement",
+            &request.engagement_id.to_string(),
+            &request.member_ref.to_string(),
+        )?;
+        // Every database fact of one attempt, including the member's write work,
+        // comes from this same snapshot.
+        let active_write_tasks = EngagementStore::active_write_task_count(
+            &transaction,
+            request.engagement_id,
+            request.member_ref,
+        )?;
+        // The frozen terminal release row is read in the same snapshot, so the
+        // released export's proof and revisions are one fact with the counts
+        // (RPC:396-423).
+        let released = released_proof(
+            &transaction,
+            &scope.view.workspace_id,
+            SettlementOwner::External {
+                engagement_id: request.engagement_id,
+            },
+            request.member_ref,
+            quiescence.membership_revision,
+            quiescence.workload_revision,
+        )?;
+        drop(transaction);
+        Ok((rounds, counts, quiescence, active_write_tasks, released))
+    };
+    // The writer fact and the database facts are one observation boundary,
+    // re-observed while the writer fact moves (a concurrent assign can release a
+    // stale hold and start a new write task).
+    let (
+        (rounds_used, (accepted_assignments, unresolved_assignments), quiescence, released),
+        _hold,
+    ) = consistent_observation(
+        || {
+            port.member_writer_observation(MemberCleanupObservation {
+                view: scope.view,
+                state_root: scope.state_root,
+                owner: SettlementOwner::External {
+                    engagement_id: request.engagement_id,
+                },
+                member_ref: request.member_ref,
+            })
+        },
+        |hold| {
+            let (rounds, counts, mut facts, active_write_tasks, released) = database_facts()?;
+            // The write-work fact of the same snapshot decides the cleanup.
+            facts.cleanup_pending = cleanup_pending(hold, active_write_tasks);
+            Ok((rounds, counts, facts, released))
+        },
+    )?;
+    drop(store);
+    if accepted_assignments + unresolved_assignments != rounds_used {
+        return Err(complete_result_unavailable(
+            "get_external_delegation_identity",
+        ));
+    }
+    let digest = collected
+        .task
+        .result_digest
+        .clone()
+        .ok_or_else(|| complete_result_unavailable("get_external_delegation_identity"))?;
+    // The disposition of the export: a terminal release row is the settled
+    // member's `released` export carrying the derived proof (RPC:396-423);
+    // otherwise the member must be current, idle and fully cleaned.
+    let (worker_disposition, disposition_proof) = if let Some(proof) = released {
+        if !release_settled(&quiescence) {
+            return Err(released_contradiction(request.member_ref));
+        }
+        (
+            "released",
+            crate::delegation_identity::DispositionProof {
+                state: "released".to_owned(),
+                observed_after_result_digest: digest.clone(),
+                membership_revision: quiescence.membership_revision,
+                workload_revision: quiescence.workload_revision,
+                running: 0,
+                queued: 0,
+                claimed: 0,
+                dispatching: 0,
+                unresolved: 0,
+                pending_interaction: false,
+                cleanup_pending: false,
+                release_receipt: Some(proof),
+            },
+        )
+    } else {
+        if !quiescence.idle() {
+            return Err(disposition_not_idle("get_external_delegation_identity"));
+        }
+        (
+            "idle",
+            crate::delegation_identity::DispositionProof {
+                state: "idle".to_owned(),
+                observed_after_result_digest: digest.clone(),
+                membership_revision: quiescence.membership_revision,
+                workload_revision: quiescence.workload_revision,
+                running: quiescence.running,
+                queued: quiescence.queued,
+                claimed: quiescence.claimed,
+                dispatching: quiescence.dispatching,
+                unresolved: quiescence.unresolved,
+                pending_interaction: false,
+                cleanup_pending: quiescence.cleanup_pending,
+                release_receipt: None,
+            },
+        )
+    };
+    let identity = crate::delegation_identity::DelegationIdentity {
+        schema: "dolgorae.delegation-identity/v1".to_owned(),
+        mapping_contract: "dolgorae.podway-external/v1".to_owned(),
+        adapter_id: request.adapter_id.to_owned(),
+        adapter_version: request.adapter_version.to_owned(),
+        binding_ref: caller.accepted().binding_ref.clone(),
+        primary_host: "external".to_owned(),
+        scope_kind: "external_engagement".to_owned(),
+        scope_ref: request.engagement_id.to_string(),
+        supervisor_ref: format!("controller:{}", manifest.controller.identity.controller_id),
+        worker_ref: request.member_ref.to_string(),
+        task_ref: request.task_ref.to_string(),
+        role_ref: delegation.role.name.clone(),
+        role_body_sha256: delegation
+            .role_snapshot
+            .role_body
+            .sha256
+            .trim_start_matches("sha256:")
+            .to_owned(),
+        role_body_byte_length: delegation.role_snapshot.role_body.byte_length,
+        role_snapshot_digest: delegation.role_snapshot_digest.clone(),
+        instruction_identity_digest: delegation.instruction_identity_digest.clone(),
+        agent_configuration_digest: accepted.agent_configuration_digest.clone(),
+        accepted_task_digest: accepted.digest()?,
+        result_digest: digest.clone(),
+        complete_result,
+        caller_scope: caller.accepted().clone(),
+        rounds_used,
+        accepted_assignments,
+        unresolved_assignments,
+        // Counts, revisions and the proof all come from the final read
+        // transaction above (cleanup is folded in before the disposition).
+        worker_disposition: worker_disposition.to_owned(),
+        disposition_proof,
+    };
+    identity.validate()?;
+    Ok(DelegationIdentityView {
+        identity,
+        ambient_guidance,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Managed Broker services
+// ---------------------------------------------------------------------------
+
+/// The authenticated managed call context of one successor Broker operation.
+///
+/// The session root Run and the Turn that issued the call are provenance: they
+/// are validated against the durable session, never trusted as authority. The
+/// idempotency key is the caller's original key and lives only in the successor
+/// store.
+pub struct ManagedCallContext<'a> {
+    pub session_id: Uuid,
+    pub source_run_id: Uuid,
+    pub source_turn_id: &'a str,
+    pub source_tool_call_id: &'a str,
+    pub idempotency_key: &'a str,
+}
+
+/// One managed spawn request over a verified installed provisioning snapshot.
+///
+/// The normalized body is exactly the frozen facade-v5 `spawn_specialist` body:
+/// the envelope fields (scope and key) are excluded, so the accepted identity
+/// binds the selected snapshot only (MDC:132-137).
+pub struct SpawnSpecialist<'a> {
+    pub provisioning_ref: &'a str,
+    pub role_ref: &'a str,
+    pub agent_configuration_digest: &'a str,
+    /// The scoped session membership revision this admission must observe.
+    pub expected_revision: Option<u64>,
+}
+
+/// Spawn one managed member from an installed provisioning snapshot (K).
+///
+/// The retained snapshot is the only instruction source and the single admission
+/// gate decides before any Run is allocated (MDC:304-306). No session approval
+/// step and no session Specialist Policy limit applies: the authority is the
+/// accepted install plus the authenticated root Primary Controller.
+pub fn spawn_specialist(
+    scope: &DelegationScope<'_>,
+    caller: &ManagedCallContext<'_>,
+    port: &dyn RunSettlementPort,
+    request: SpawnSpecialist<'_>,
+) -> Result<MemberAdmissionView, MachineError> {
+    boundary(
+        "spawn_specialist",
+        spawn_specialist_in(scope, caller, port, request),
+    )
+}
+
+fn spawn_specialist_in(
+    scope: &DelegationScope<'_>,
+    caller: &ManagedCallContext<'_>,
+    port: &dyn RunSettlementPort,
+    request: SpawnSpecialist<'_>,
+) -> Result<MemberAdmissionView, MachineError> {
+    let key = checked_key(caller.idempotency_key)?;
+    checked_provenance(caller.source_turn_id, caller.source_tool_call_id)?;
+    engagement::require_delegation_namespace(scope.state_root)?;
+    // The writable extension opener validates the orchestration generation
+    // before this call writes anything (RPC:508-517).
+    let broker = crate::orchestration::OrchestrationStore::open(scope.state_root)?;
+    let scope_ref = caller.session_id.to_string();
+    let mut store = open_store(scope)?;
+    managed_session(&broker, scope, caller, "spawn_specialist")?;
+    // Only an accepted install admits a member: a published-but-unaccepted
+    // snapshot is not installed.
+    if store
+        .accepted_install_receipt(&scope.view.workspace_id, request.provisioning_ref)?
+        .is_none()
+    {
+        return Err(provisioning_not_installed());
+    }
+    let snapshot =
+        crate::provisioning::retained_snapshot(scope.state_root, request.provisioning_ref)?;
+    // The single admission gate: nothing below this pair may allocate a Run.
+    let (instructions, configuration) = snapshot.admitted_configuration()?;
+    let candidate = snapshot.candidate(false)?;
+    if snapshot.role_name() != request.role_ref
+        || candidate.agent_configuration_digest != request.agent_configuration_digest
+        || candidate.provisioning_ref != request.provisioning_ref
+    {
+        return Err(MachineError::invalid_argument(
+            "provisioning_ref",
+            "the installed snapshot does not match the requested admission",
+        ));
+    }
+    let body = json!({
+        "provisioning_ref": request.provisioning_ref,
+        "role_ref": request.role_ref,
+        "agent_configuration_digest": request.agent_configuration_digest,
+    });
+    let identity = intent_identity(
+        scope,
+        "spawn_specialist",
+        Some(("orchestrated_session", scope_ref.as_str())),
+        key,
+        SPAWN_BODY_SCHEMA,
+        &body,
+    )?;
+    if let Some(receipt) = managed_replay(
+        &store,
+        caller.session_id,
+        key,
+        &identity.lookup,
+        &identity.digest,
+        "spawn_specialist",
+    )? {
+        return accepted_boundary(
+            "spawn_specialist",
+            Some(replay_operation_ref(&receipt)),
+            managed_member_view(&store, &broker, scope, caller.session_id, &receipt),
+        );
+    }
+    let operation_ref = Uuid::now_v7();
+    let member_run_id = Uuid::now_v7();
+    let now = now_ms()?;
+    let configuration_json = canonical_text(&configuration)?;
+    let configuration_sha256 = crate::run::agent_configuration_digest(&configuration)
+        .map_err(|_| MachineError::invalid_argument("agent_configuration", "unrepresentable"))?;
+    let access = match snapshot.admitted.requested_access.as_str() {
+        "read_only" => CallerWorkspaceAccess::ReadOnly,
+        _ => CallerWorkspaceAccess::Writable,
+    };
+    let preparation = store.transact(|transaction| {
+        require_broker_key_free(transaction, caller.session_id, key, "spawn_specialist")?;
+        engagement::intent_prepare(
+            transaction,
+            IntentAdmission {
+                operation_ref,
+                namespace: &identity.lookup,
+                mutation_envelope_json: &identity.json,
+                mutation_envelope_digest: &identity.digest,
+                expected_revision: request.expected_revision,
+                now_ms: now,
+            },
+        )
+    })?;
+    let operation_ref = match preparation {
+        IntentPreparation::Created => operation_ref,
+        IntentPreparation::Accepted(receipt) => {
+            return accepted_boundary(
+                "spawn_specialist",
+                Some(replay_operation_ref(&receipt)),
+                managed_member_view(&store, &broker, scope, caller.session_id, &receipt),
+            );
+        }
+        IntentPreparation::Unresolved { operation_ref } => {
+            return Err(unresolved_refusal("spawn_specialist", operation_ref));
+        }
+    };
+    // The member Run is controlled by its own Broker credential, minted here and
+    // handed to the Run service through the settlement port. Every failure
+    // after the durable prepare keeps that intent's operation reference and the
+    // unresolved effect floor.
+    let credential = match broker.create_member_credential(member_run_id) {
+        Ok(credential) => credential,
+        Err(error) => {
+            let _ = store.transact(|transaction| {
+                engagement::intent_mark_unresolved(transaction, operation_ref, now)
+            });
+            return Err(unresolved_effect(
+                &error.code,
+                "spawn_specialist",
+                operation_ref,
+                &error.message,
+            ));
+        }
+    };
+    let prepared = (|| -> Result<(String, String, String, String), MachineError> {
+        let internal_key = successor_internal_key(operation_ref);
+        let request_sha256 = sha256_hex(
+            &crate::operation::canonical(&body)
+                .map_err(|_| MachineError::invalid_argument("request_body", "unrepresentable"))?,
+        );
+        let marker = successor_spawn_payload(&SuccessorSpawnMarker {
+            operation_ref,
+            provisioning_ref: request.provisioning_ref,
+            role_ref: request.role_ref,
+            agent_configuration_digest: request.agent_configuration_digest,
+            requested_access: snapshot.admitted.requested_access.as_str(),
+        });
+        let marker_json = canonical_text(&marker)?;
+        let controller_binding_json = canonical_text(&credential.binding)?;
+        Ok((
+            internal_key,
+            request_sha256,
+            marker_json,
+            controller_binding_json,
+        ))
+    })();
+    let (internal_key, request_sha256, marker_json, controller_binding_json) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = broker.discard_member_credential(credential);
+            let _ = store.transact(|transaction| {
+                engagement::intent_mark_unresolved(transaction, operation_ref, now)
+            });
+            return Err(unresolved_effect(
+                &error.code,
+                "spawn_specialist",
+                operation_ref,
+                &error.message,
+            ));
+        }
+    };
+    let role_snapshot_sha256 = bare_digest(&instructions.role_snapshot_digest);
+    #[cfg(test)]
+    run_pre_acceptance_interleave();
+    let acceptance = store.transact(|transaction| {
+        // The acceptance re-reads the session row inside its own
+        // transaction, so a close intent that committed after the pre-check
+        // stops this admission at the durable boundary.
+        require_session_still_active(transaction, caller.session_id, caller.source_run_id)?;
+        require_broker_key_free(transaction, caller.session_id, key, "spawn_specialist")?;
+        let current = engagement::scope_membership_revision(
+            transaction,
+            &scope.view.workspace_id,
+            "orchestrated_session",
+            &scope_ref,
+        )?;
+        if request
+            .expected_revision
+            .is_some_and(|expected| expected != current)
+        {
+            // A definitive refusal is an error, so the transaction rolls back
+            // instead of committing a partial acceptance.
+            return Err(assignment_refusal(
+                "REVISION_CONFLICT",
+                "the session membership revision moved",
+            ));
+        }
+        crate::orchestration::admit_successor_spawn(
+            transaction,
+            crate::orchestration::SuccessorSpawn {
+                operation_ref,
+                session_id: caller.session_id,
+                member_run_id,
+                parent_run_id: caller.source_run_id,
+                internal_key: &internal_key,
+                request_sha256: &request_sha256,
+                request_json: &marker_json,
+                role_ref: snapshot.role_name(),
+                role_snapshot_sha256: &role_snapshot_sha256,
+                agent_configuration_json: &configuration_json,
+                agent_configuration_sha256: &configuration_sha256,
+                controller_binding_json: &controller_binding_json,
+                requested_access: snapshot.admitted.requested_access.as_str(),
+                source_turn_id: caller.source_turn_id,
+                source_tool_call_id: caller.source_tool_call_id,
+                now_ms: now,
+            },
+        )?;
+        // Member admission is a membership-state change, so the scoped
+        // counter advances once here.
+        let revision = engagement::advance_scope_membership_revision(
+            transaction,
+            &scope.view.workspace_id,
+            "orchestrated_session",
+            &scope_ref,
+        )?;
+        let member = member_run_id.to_string();
+        let subjects = AcceptedSubjects {
+            run_ref: Some(member.clone()),
+            member_ref: Some(member),
+            // The accepted snapshot is named so a replay never re-reads sources.
+            provisioning_ref: Some(request.provisioning_ref.to_owned()),
+            ..AcceptedSubjects::default()
+        };
+        let receipt = build_receipt(
+            &identity.namespace,
+            operation_ref,
+            &identity.digest,
+            subjects,
+            revision,
+        )?;
+        engagement::intent_accept(transaction, operation_ref, &receipt, now)?;
+        Ok(receipt)
+    });
+    let receipt = match acceptance {
+        Ok(receipt) => receipt,
+        Err(error) if is_assignment_refusal(&error) => {
+            // Case A: the acceptance rolled back, so the refusal is recorded in
+            // its own transaction and the minted credential is discarded. A
+            // failure while recording it keeps the intent's unresolved floor.
+            let _ = broker.discard_member_credential(credential);
+            let refused = store.transact(|transaction| {
+                engagement::intent_refuse_before_acceptance(
+                    transaction,
+                    operation_ref,
+                    &error.code,
+                    now,
+                )
+            });
+            if let Err(record) = refused {
+                let _ = store.transact(|transaction| {
+                    engagement::intent_mark_unresolved(transaction, operation_ref, now)
+                });
+                return Err(unresolved_effect(
+                    &record.code,
+                    "spawn_specialist",
+                    operation_ref,
+                    &record.message,
+                ));
+            }
+            return Err(successor_error(
+                &error.code,
+                "spawn_specialist",
+                Some(operation_ref),
+                "none",
+                "Rejected",
+                "fix_request",
+                &error.message,
+            ));
+        }
+        Err(error) => {
+            let _ = broker.discard_member_credential(credential);
+            let _ = store.transact(|transaction| {
+                engagement::intent_mark_unresolved(transaction, operation_ref, now)
+            });
+            return Err(unresolved_effect(
+                &error.code,
+                "spawn_specialist",
+                operation_ref,
+                &error.message,
+            ));
+        }
+    };
+    // The accepted member's Run start is the effect of this operation.
+    let aggregate = AggregateBinding {
+        aggregate_kind: AggregateKind::OrchestratedSession,
+        aggregate_id: caller.session_id,
+        operation_id: operation_ref,
+        member_kind: AggregateMemberKind::Specialist,
+        policy_sha256: None,
+        role_reference: Some(snapshot.role_name().to_owned()),
+        role_snapshot_sha256: Some(role_snapshot_sha256.clone()),
+        agent_configuration_sha256: Some(configuration_sha256.clone()),
+    };
+    let start = port.start_member_run(AdmittedMemberStart {
+        view: scope.view,
+        state_root: scope.state_root,
+        snapshot: &snapshot,
+        configuration: &configuration,
+        run_id: member_run_id,
+        aggregate: &aggregate,
+        access,
+        broker: Some(&credential),
+        idempotency_key: format!("delegated-member-spawn:{operation_ref}"),
+    });
+    // An error after the acceptance commit may hide a started Run, so the member
+    // stays degraded until its Run is recovered (hire's HIRE_START_UNRESOLVED).
+    let started = start.is_ok();
+    accepted_boundary(
+        "spawn_specialist",
+        Some(operation_ref),
+        (|| {
+            store.transact(|transaction| {
+                crate::orchestration::settle_successor_spawn(
+                    transaction,
+                    caller.session_id,
+                    operation_ref,
+                    member_run_id,
+                    started,
+                    (!started).then_some(SPAWN_START_UNRESOLVED),
+                    now,
+                )
+            })?;
+            if started {
+                managed_member_view(&store, &broker, scope, caller.session_id, &receipt)
+            } else {
+                Err(successor_error(
+                    SPAWN_START_UNRESOLVED,
+                    "spawn_specialist",
+                    Some(operation_ref),
+                    "accepted",
+                    "RecoveryNeeded",
+                    "recover_run",
+                    "the accepted member Run could not be started",
+                ))
+            }
+        })(),
+    )
+}
+
+/// The successor marker one managed spawn carries in its Broker request row.
+struct SuccessorSpawnMarker<'a> {
+    operation_ref: Uuid,
+    provisioning_ref: &'a str,
+    role_ref: &'a str,
+    agent_configuration_digest: &'a str,
+    requested_access: &'a str,
+}
+
+fn successor_spawn_payload(marker: &SuccessorSpawnMarker<'_>) -> Value {
+    json!({
+        "schema": crate::orchestration::SUCCESSOR_SPAWN_MARKER_SCHEMA,
+        "operation_ref": marker.operation_ref.to_string(),
+        "provisioning_ref": marker.provisioning_ref,
+        "role_ref": marker.role_ref,
+        "agent_configuration_digest": marker.agent_configuration_digest,
+        "requested_access": marker.requested_access,
+    })
+}
+
+/// The internal Broker key of one successor spawn.
+///
+/// It is derived from the successor operation reference, so the caller's key is
+/// never written into a Broker key column and a legacy replay that names this key
+/// fails its own digest comparison instead of adopting the row.
+fn successor_internal_key(operation_ref: Uuid) -> String {
+    format!("successor:{operation_ref}")
+}
+
+/// One managed task assignment over the caller's trusted round budget.
+pub struct AssignSpecialistTask<'a> {
+    pub member_ref: Uuid,
+    pub task: crate::task_request::SpecialistTaskRequest,
+    pub execution_intent: &'a str,
+    pub target: Option<crate::review::ReviewTargetRequest>,
+    /// The requested task deadline in seconds (1..=3600).
+    pub deadline_seconds: u64,
+    /// The scoped session membership revision this admission must observe.
+    pub expected_revision: Option<u64>,
+}
+
+/// Assign one managed task to an active successor member (K).
+///
+/// Non-Git write tasks are refused before any intent row (MD2).
+/// The membership gate, the task rows, the
+/// accepted identity and its bytes, the round accounting row and the receipt
+/// commit in one transaction.
+pub fn assign_specialist_task(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: AssignSpecialistTask<'_>,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    boundary(
+        "assign_specialist_task",
+        assign_specialist_task_in(scope, context, caller, port, request),
+    )
+}
+
+fn assign_specialist_task_in(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: AssignSpecialistTask<'_>,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    let key = checked_key(context.idempotency_key)?;
+    checked_provenance(context.source_turn_id, context.source_tool_call_id)?;
+    if !(1..=MAX_ASSIGN_DEADLINE_SECONDS).contains(&request.deadline_seconds) {
+        return Err(MachineError::invalid_argument(
+            "deadline_seconds",
+            "a task deadline is 1..=3600 seconds",
+        ));
+    }
+    // MD2 applies before any intent, exactly as on the external path.
+    if request.execution_intent == "canonical_workspace_write"
+        && scope.view.mode == crate::workspace::WorkspaceMode::NonGit
+    {
+        return Err(canonical_write_unsupported());
+    }
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let broker = crate::orchestration::OrchestrationStore::open(scope.state_root)?;
+    let scope_ref = context.session_id.to_string();
+    let mut store = open_store(scope)?;
+    managed_session(&broker, scope, context, "assign_specialist_task")?;
+    if let Some(receipt) = assignment_replay(
+        scope,
+        &store,
+        SettlementOwner::Managed {
+            session_id: context.session_id,
+        },
+        request.member_ref,
+        &request.task,
+        request.execution_intent,
+        request.target.as_ref(),
+        request.deadline_seconds,
+        key,
+    )? {
+        verify_replay_scope(&store, &receipt, caller)?;
+        return accepted_boundary(
+            "assign_specialist_task",
+            Some(replay_operation_ref(&receipt)),
+            managed_assigned_observation(&broker, context.session_id, &receipt),
+        );
+    }
+    // Only a member its own successor spawn admitted is a successor member.
+    let member = managed_member(&store, context.session_id, request.member_ref)?;
+    admit_checked_task(
+        scope,
+        SettlementOwner::Managed {
+            session_id: context.session_id,
+        },
+        request.member_ref,
+        &member.agent_configuration,
+        &request.task,
+        request.execution_intent,
+        request.target.as_ref(),
+    )?;
+    let target = admit_assignment_target(scope, request.target.as_ref())?;
+    let (accepted, contents) = crate::successor_capture::capture_facade_task(
+        &member.agent_configuration,
+        &request.task,
+        request.execution_intent,
+        target
+            .as_ref()
+            .map(|(identity, bytes)| (identity.as_str(), bytes.as_slice())),
+    )?;
+    let accepted_task_digest = accepted.digest()?;
+    let body = crate::successor_capture::assignment_body(
+        request.member_ref,
+        &request.task,
+        &accepted,
+        request.deadline_seconds,
+    )?;
+    let identity = intent_identity(
+        scope,
+        "assign_specialist_task",
+        Some(("orchestrated_session", scope_ref.as_str())),
+        key,
+        ASSIGN_MANAGED_BODY_SCHEMA,
+        &body,
+    )?;
+    if let Some(receipt) = managed_replay(
+        &store,
+        context.session_id,
+        key,
+        &identity.lookup,
+        &identity.digest,
+        "assign_specialist_task",
+    )? {
+        verify_replay_scope(&store, &receipt, caller)?;
+        return accepted_boundary(
+            "assign_specialist_task",
+            Some(replay_operation_ref(&receipt)),
+            managed_assigned_observation(&broker, context.session_id, &receipt),
+        );
+    }
+    // A replay answers before any new-admission fence (MDC:66-68), so the budget
+    // and the revision fence decide only a new admission.
+    require_assignment_budget(&store, caller, "assign_specialist_task")?;
+    let fence = managed_membership_revision(&store, scope, context.session_id)?;
+    if request
+        .expected_revision
+        .is_some_and(|expected| expected != fence)
+    {
+        return Err(revision_conflict("assign_specialist_task"));
+    }
+    let operation_ref = Uuid::now_v7();
+    let task_id = Uuid::now_v7();
+    let now = now_ms()?;
+    let request_sha256 = sha256_hex(
+        &crate::operation::canonical(&body)
+            .map_err(|_| MachineError::invalid_argument("request_body", "unrepresentable"))?,
+    );
+    let accepted_json = canonical_text(&accepted)?;
+    let accepted_sha256 = sha256_hex(accepted_json.as_bytes());
+    let marker = successor_task_payload(&SuccessorTaskMarker {
+        operation_ref,
+        member_ref: request.member_ref,
+        accepted_task_digest: &accepted_task_digest,
+        execution_intent: request.execution_intent,
+        deadline_seconds: request.deadline_seconds,
+    });
+    let marker_json = canonical_text(&marker)?;
+    let internal_key = successor_internal_key(operation_ref);
+    let preparation = store.transact(|transaction| {
+        require_broker_key_free(
+            transaction,
+            context.session_id,
+            key,
+            "assign_specialist_task",
+        )?;
+        engagement::intent_prepare(
+            transaction,
+            IntentAdmission {
+                operation_ref,
+                namespace: &identity.lookup,
+                mutation_envelope_json: &identity.json,
+                mutation_envelope_digest: &identity.digest,
+                expected_revision: request.expected_revision,
+                now_ms: now,
+            },
+        )
+    })?;
+    let operation_ref = match preparation {
+        IntentPreparation::Created => operation_ref,
+        IntentPreparation::Accepted(receipt) => {
+            verify_replay_scope(&store, &receipt, caller)?;
+            return accepted_boundary(
+                "assign_specialist_task",
+                Some(replay_operation_ref(&receipt)),
+                managed_assigned_observation(&broker, context.session_id, &receipt),
+            );
+        }
+        IntentPreparation::Unresolved { operation_ref } => {
+            return Err(unresolved_refusal("assign_specialist_task", operation_ref));
+        }
+    };
+    let member_ref = request.member_ref.to_string();
+    #[cfg(test)]
+    run_pre_acceptance_interleave();
+    let acceptance = store.transact(|transaction| {
+        // The acceptance re-reads the session row inside its own
+        // transaction, so a close intent that committed after the pre-check
+        // stops this admission at the durable boundary.
+        require_session_still_active(transaction, context.session_id, context.source_run_id)?;
+        require_broker_key_free(
+            transaction,
+            context.session_id,
+            key,
+            "assign_specialist_task",
+        )?;
+        let current = engagement::scope_membership_revision(
+            transaction,
+            &scope.view.workspace_id,
+            "orchestrated_session",
+            &scope_ref,
+        )?;
+        if request
+            .expected_revision
+            .is_some_and(|expected| expected != current)
+        {
+            return Err(assignment_refusal(
+                "REVISION_CONFLICT",
+                "the session membership revision moved",
+            ));
+        }
+        // The membership gate is read inside this transaction, so a member that
+        // became inactive after the pre-check never receives a task row.
+        let active = crate::orchestration::successor_member(
+            transaction,
+            context.session_id,
+            request.member_ref,
+        )?
+        .is_some_and(|facts| facts.membership_state == "active");
+        if !active {
+            return Err(assignment_refusal(
+                "SPECIALIST_NOT_MEMBER",
+                "the member is not an active successor member",
+            ));
+        }
+        if let Err(error) = crate::orchestration::admit_successor_task(
+            transaction,
+            crate::orchestration::SuccessorTask {
+                session_id: context.session_id,
+                task_id,
+                member_run_id: request.member_ref,
+                internal_key: &internal_key,
+                request_sha256: &request_sha256,
+                request_json: &marker_json,
+                accepted_request_json: &accepted_json,
+                accepted_request_sha256: &accepted_sha256,
+                source_run_id: context.source_run_id,
+                source_turn_id: context.source_turn_id,
+                source_tool_call_id: context.source_tool_call_id,
+                deadline_origin_ms: now,
+                now_ms: now,
+            },
+        ) {
+            if definitive_managed_refusal(&error.code) {
+                return Err(assignment_refusal(
+                    &error.code,
+                    "the member cannot accept this task",
+                ));
+            }
+            return Err(error);
+        }
+        engagement::retain_accepted_task_content(
+            transaction,
+            task_id,
+            &contents.task_body,
+            &contents.contexts,
+            contents.target.as_deref(),
+            now,
+        )?;
+        if let Err(error) = crate::caller_scope::admit(
+            transaction,
+            &crate::caller_scope::CallerAssignment {
+                assignment_id: task_id,
+                workspace_ref: &scope.view.workspace_id,
+                aggregate_scope_kind: "orchestrated_session",
+                aggregate_scope_ref: &scope_ref,
+                member_ref: request.member_ref,
+            },
+            caller,
+            now,
+        ) {
+            if definitive_managed_refusal(&error.code) {
+                // This refusal lands after the Broker task row, its acceptance and
+                // its retained content were written, so it must be an error: the
+                // transaction rolls those rows back and Case A is recorded in its
+                // own transaction.
+                return Err(assignment_refusal(
+                    &error.code,
+                    "the caller scope refused this assignment",
+                ));
+            }
+            return Err(error);
+        }
+        // Assignment advances only the member workload revision.
+        engagement::advance_member_workload_revision(
+            transaction,
+            &scope.view.workspace_id,
+            "orchestrated_session",
+            &scope_ref,
+            &member_ref,
+        )?;
+        let subjects = AcceptedSubjects {
+            run_ref: Some(member_ref.clone()),
+            member_ref: Some(member_ref),
+            task_ref: Some(task_id.to_string()),
+            ..AcceptedSubjects::default()
+        };
+        let receipt = build_receipt(
+            &identity.namespace,
+            operation_ref,
+            &identity.digest,
+            subjects,
+            current,
+        )?;
+        engagement::intent_accept(transaction, operation_ref, &receipt, now)?;
+        Ok(receipt)
+    });
+    let receipt = match acceptance {
+        Ok(receipt) => receipt,
+        Err(error) if is_assignment_refusal(&error) => {
+            // Case A: the acceptance rolled back whole, and the refusal plus the
+            // attempt's own accounting row (if any) commit in their own
+            // transaction. A failure while recording it keeps the intent's
+            // unresolved floor.
+            let refused = store.transact(|transaction| {
+                engagement::intent_refuse_before_acceptance(
+                    transaction,
+                    operation_ref,
+                    &error.code,
+                    now,
+                )?;
+                crate::caller_scope::release_attempt(transaction, task_id)
+            });
+            if let Err(record) = refused {
+                let _ = store.transact(|transaction| {
+                    engagement::intent_mark_unresolved(transaction, operation_ref, now)
+                });
+                return Err(unresolved_effect(
+                    &record.code,
+                    "assign_specialist_task",
+                    operation_ref,
+                    &record.message,
+                ));
+            }
+            return Err(successor_error(
+                &error.code,
+                "assign_specialist_task",
+                Some(operation_ref),
+                "none",
+                "Rejected",
+                "fix_request",
+                &error.message,
+            ));
+        }
+        Err(error) => {
+            let _ = store.transact(|transaction| {
+                engagement::intent_mark_unresolved(transaction, operation_ref, now)
+            });
+            return Err(unresolved_effect(
+                &error.code,
+                "assign_specialist_task",
+                operation_ref,
+                &error.message,
+            ));
+        }
+    };
+    // Dispatch the accepted task under the member's own Broker authority.
+    let outcome = port.dispatch_managed_task(ManagedTaskDispatch {
+        view: scope.view,
+        state_root: scope.state_root,
+        session_id: context.session_id,
+        member_ref: request.member_ref,
+        task_ref: task_id,
+        execution_intent: request.execution_intent,
+        accepted: &accepted,
+        contents: &contents,
+        deadline_seconds: request.deadline_seconds,
+    });
+    match outcome {
+        Ok(MemberDispatchOutcome::Accepted { .. }) => accepted_boundary(
+            "assign_specialist_task",
+            Some(operation_ref),
+            managed_assigned_observation(&broker, context.session_id, &receipt),
+        ),
+        Ok(MemberDispatchOutcome::Refused { code, message }) => {
+            // Case B of the round accounting rules: the accepted intent and its
+            // receipt stay byte-identical; only the dispatch refusal and the
+            // accounting transition are written.
+            accepted_boundary(
+                "assign_specialist_task",
+                Some(operation_ref),
+                store.transact(|transaction| {
+                    crate::orchestration::terminalize_successor_task(
+                        transaction,
+                        context.session_id,
+                        task_id,
+                        &code,
+                        now,
+                    )?;
+                    crate::caller_scope::proved_nondispatch(transaction, task_id)
+                }),
+            )?;
+            Err(successor_error(
+                &code,
+                "assign_specialist_task",
+                Some(operation_ref),
+                "accepted",
+                "RecoveryNeeded",
+                "reconcile_operation",
+                &message,
+            ))
+        }
+        Ok(MemberDispatchOutcome::Uncertain { code, message }) => Err(uncertain_dispatch(
+            "assign_specialist_task",
+            &code,
+            Some(operation_ref),
+            &message,
+        )),
+        Err(error) => {
+            // An error escaping the dispatch port is uncertain too: the Turn may
+            // have reached the Run, so the round stays counted and recovery owns it.
+            Err(accepted_error(
+                "assign_specialist_task",
+                Some(operation_ref),
+                error,
+            ))
+        }
+    }
+}
+
+/// The codes a managed admission reports for a definitive refusal (Case A).
+fn definitive_managed_refusal(code: &str) -> bool {
+    matches!(
+        code,
+        "RUN_STATE_CONFLICT"
+            | "SPECIALIST_NOT_MEMBER"
+            | "SPECIALIST_POLICY_DENIED"
+            | "ROUNDS_EXHAUSTED"
+            | "REVISION_CONFLICT"
+            | "INVALID_ARGUMENT"
+    )
+}
+
+/// The successor marker one managed task carries in its Broker request row.
+struct SuccessorTaskMarker<'a> {
+    operation_ref: Uuid,
+    member_ref: Uuid,
+    accepted_task_digest: &'a str,
+    execution_intent: &'a str,
+    deadline_seconds: u64,
+}
+
+fn successor_task_payload(marker: &SuccessorTaskMarker<'_>) -> Value {
+    json!({
+        "schema": crate::orchestration::SUCCESSOR_TASK_MARKER_SCHEMA,
+        "operation_ref": marker.operation_ref.to_string(),
+        "member_ref": marker.member_ref.to_string(),
+        "accepted_task_digest": marker.accepted_task_digest,
+        "execution_intent": marker.execution_intent,
+        "deadline_seconds": marker.deadline_seconds,
+    })
+}
+
+/// The successor member one managed assignment targets.
+fn managed_member(
+    store: &EngagementStore,
+    session_id: Uuid,
+    member_ref: Uuid,
+) -> Result<crate::orchestration::SuccessorMemberFacts, MachineError> {
+    let facts = crate::orchestration::successor_member(store.connection(), session_id, member_ref)?
+        .ok_or_else(|| {
+            successor_error(
+                "SPECIALIST_NOT_MEMBER",
+                "assign_specialist_task",
+                None,
+                "none",
+                "Rejected",
+                "fix_request",
+                "the task target is not a member of this session",
+            )
+        })?;
+    // A legacy member was admitted by its session Specialist Policy, not by a
+    // successor spawn, so a successor service never assigns one.
+    let admitted = engagement::successor_spawn_member(
+        store.connection(),
+        &facts.spawn_operation_id.to_string(),
+    )?;
+    if admitted.as_deref() != Some(member_ref.to_string().as_str()) {
+        return Err(successor_error(
+            "CAPABILITY_UNSUPPORTED",
+            "assign_specialist_task",
+            None,
+            "none",
+            "Rejected",
+            "renegotiate",
+            "legacy_specialist_member is recognized_unsupported for successor managed tasks: the member was not admitted by a successor spawn",
+        ));
+    }
+    Ok(facts)
+}
+
+/// The caller's remaining round budget, refused before any intent row.
+fn require_assignment_budget(
+    store: &EngagementStore,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    operation_kind: &str,
+) -> Result<(), MachineError> {
+    let used = crate::caller_scope::rounds_used(store.connection(), caller)?;
+    if used >= caller.accepted().max_rounds {
+        return Err(successor_error(
+            "ROUNDS_EXHAUSTED",
+            operation_kind,
+            None,
+            "none",
+            "Rejected",
+            "fix_request",
+            "the caller scope assignment budget is exhausted",
+        ));
+    }
+    Ok(())
+}
+
+/// The scoped session membership revision this admission fences.
+fn managed_membership_revision(
+    store: &EngagementStore,
+    scope: &DelegationScope<'_>,
+    session_id: Uuid,
+) -> Result<u64, MachineError> {
+    store.scope_membership_revision(
+        &scope.view.workspace_id,
+        "orchestrated_session",
+        &session_id.to_string(),
+    )
+}
+
+fn revision_conflict(operation_kind: &str) -> MachineError {
+    successor_error(
+        "REVISION_CONFLICT",
+        operation_kind,
+        None,
+        "none",
+        "Rejected",
+        "fix_request",
+        "the scoped membership revision moved",
+    )
+}
+
+/// The observation one accepted managed assignment answers with.
+fn managed_assigned_observation(
+    broker: &crate::orchestration::OrchestrationStore,
+    session_id: Uuid,
+    receipt: &OperationReceipt,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    let task_ref = receipt
+        .accepted_subjects
+        .task_ref
+        .as_deref()
+        .ok_or_else(|| MachineError::invalid_argument("receipt", "the receipt names no task"))?;
+    let task_id = Uuid::parse_str(task_ref)
+        .map_err(|_| MachineError::invalid_argument("receipt", "invalid task identity"))?;
+    let facts = broker.successor_task(session_id, task_id)?.ok_or_else(|| {
+        MachineError::invalid_argument("task_ref", "the accepted task identity is missing")
+    })?;
+    let accepted: crate::delegation_identity::AcceptedTask =
+        serde_json::from_str(&facts.accepted_request_json).map_err(|_| {
+            MachineError::invalid_argument("task_ref", "the accepted task identity is invalid")
+        })?;
+    Ok((
+        DelegationTaskObservation {
+            task_ref: task_id.to_string(),
+            member_ref: facts.member_ref,
+            accepted_task_digest: accepted.digest()?,
+            state: task_state(&facts.state).to_owned(),
+            // The complete result belongs to the collect surface.
+            result_digest: None,
+            complete_result: None,
+            content_availability: "pending".to_owned(),
+            required_action: task_required_action(&facts.state).to_owned(),
+        },
+        receipt.clone(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Managed Broker R services
+// ---------------------------------------------------------------------------
+
+/// One managed await request over accepted task references (MDC:139).
+pub struct AwaitSpecialistTasks<'a> {
+    pub member_ref: Uuid,
+    pub tasks: &'a [Uuid],
+    pub predicate: AwaitPredicate,
+    pub timeout_seconds: u64,
+}
+
+/// One managed collect request (MDC:140).
+pub struct CollectSpecialistTask<'a> {
+    pub member_ref: Uuid,
+    pub task_ref: Uuid,
+    /// Provider-owned adapter provenance; never derived here (MDC:594-597).
+    pub adapter_id: &'a str,
+    pub adapter_version: &'a str,
+}
+
+/// Await one accepted managed task reference set under the bounded wait (R).
+///
+/// The wait is a read: it observes the Broker rows through the read-only openers,
+/// settles nothing and changes no round .
+pub fn await_specialist_tasks(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    request: AwaitSpecialistTasks<'_>,
+) -> Result<(Vec<DelegationTaskObservation>, bool), MachineError> {
+    boundary(
+        "await_specialist_task",
+        await_specialist_tasks_in(scope, context, request),
+    )
+}
+
+fn await_specialist_tasks_in(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    request: AwaitSpecialistTasks<'_>,
+) -> Result<(Vec<DelegationTaskObservation>, bool), MachineError> {
+    validate_await(request.tasks, request.predicate, request.timeout_seconds)?;
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let owner = SettlementOwner::Managed {
+        session_id: context.session_id,
+    };
+    {
+        // A wait observes one aggregate this trusted Controller owns, through the
+        // read-only opener, so an R call never migrates or repairs. The read
+        // scope keeps answering after a close intent.
+        let observer = crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?;
+        managed_read_scope(&observer, scope, context, "await_specialist_task")?;
+    }
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(request.timeout_seconds);
+    loop {
+        let observed = crate::storage_observation::epoch()?;
+        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+            scope.state_root,
+        ))?;
+        let transaction = store.connection().unchecked_transaction().map_err(|_| {
+            MachineError::new(
+                "INTERNAL_ERROR",
+                "the engagement read transaction is unavailable",
+                false,
+                json!({"invariant": "managed_await"}),
+            )
+        })?;
+        let mut observations = Vec::with_capacity(request.tasks.len());
+        let mut terminal = 0;
+        for task in request.tasks {
+            let observation =
+                managed_task_observation(&transaction, owner, request.member_ref, *task)?;
+            if !matches!(
+                observation.state.as_str(),
+                "queued" | "claimed" | "dispatching" | "running" | "unknown"
+            ) {
+                terminal += 1;
+            }
+            observations.push(observation);
+        }
+        drop(transaction);
+        drop(store);
+        if await_satisfied(request.predicate, terminal, request.tasks.len()) {
+            return Ok((observations, false));
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok((observations, true));
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        crate::storage_observation::wait(
+            observed,
+            remaining.min(std::time::Duration::from_millis(50)),
+        )?;
+    }
+}
+
+/// Collect one settled managed task (R, MDC:140).
+///
+/// The call observes committed state only: it settles nothing, publishes nothing
+/// and changes no round. It returns the retained complete result and the fresh
+/// disposition observed after that result (RPC:399-410).
+pub fn collect_specialist_task(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    port: &dyn RunSettlementPort,
+    request: CollectSpecialistTask<'_>,
+) -> Result<CollectedTask, MachineError> {
+    boundary(
+        "collect_specialist_task",
+        collect_specialist_task_in(scope, context, port, &request).map(|(collected, _)| collected),
+    )
+}
+
+fn collect_specialist_task_in(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    port: &dyn RunSettlementPort,
+    request: &CollectSpecialistTask<'_>,
+) -> Result<
+    (
+        CollectedTask,
+        Option<crate::delegation_identity::CompleteResult>,
+    ),
+    MachineError,
+> {
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let owner = SettlementOwner::Managed {
+        session_id: context.session_id,
+    };
+    let observer = crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?;
+    managed_read_scope(&observer, scope, context, "collect_specialist_task")?;
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let facts = crate::orchestration::successor_task(
+        store.connection(),
+        context.session_id,
+        request.task_ref,
+    )?
+    .ok_or_else(|| managed_task_not_found("collect_specialist_task", request.member_ref))?;
+    if facts.member_ref != request.member_ref.to_string() {
+        return Err(managed_task_not_found(
+            "collect_specialist_task",
+            request.member_ref,
+        ));
+    }
+    let accepted: crate::delegation_identity::AcceptedTask =
+        serde_json::from_str(&facts.accepted_request_json)
+            .map_err(|_| complete_result_unavailable("collect_specialist_task"))?;
+    let accepted_task_digest = accepted.digest()?;
+    let complete = complete_result_of(
+        &store,
+        owner,
+        request.member_ref,
+        request.task_ref,
+        &accepted_task_digest,
+        &facts.state,
+        "collect_specialist_task",
+    )?;
+    let terminal = matches!(
+        facts.state.as_str(),
+        "completed_not_delivered" | "completed" | "delivered" | "failed" | "cancelled" | "expired"
+    );
+    let state = task_state(&facts.state);
+    let required_action = task_required_action(&facts.state);
+    let digest = complete
+        .as_ref()
+        .map_or_else(|| "none".to_owned(), |(digest, _, _)| digest.clone());
+    let (disposition, _) = consistent_observation(
+        || {
+            port.member_writer_observation(MemberCleanupObservation {
+                view: scope.view,
+                state_root: scope.state_root,
+                owner,
+                member_ref: request.member_ref,
+            })
+        },
+        |hold| {
+            let transaction = store.connection().unchecked_transaction().map_err(|_| {
+                MachineError::new(
+                    "INTERNAL_ERROR",
+                    "the engagement read transaction is unavailable",
+                    false,
+                    json!({"invariant": "managed_disposition"}),
+                )
+            })?;
+            #[cfg(test)]
+            managed_observation_probe(&transaction, "collect_specialist_task", None);
+            let active_write_tasks =
+                managed_active_write_count(&transaction, context.session_id, request.member_ref)?;
+            #[cfg(test)]
+            managed_observation_probe(
+                &transaction,
+                "collect_specialist_task",
+                Some(active_write_tasks),
+            );
+            let disposition = disposition_view(
+                &transaction,
+                &scope.view.workspace_id,
+                owner,
+                request.member_ref,
+                digest.clone(),
+                cleanup_pending(hold, active_write_tasks),
+            )?;
+            drop(transaction);
+            Ok(disposition)
+        },
+    )?;
+    // A complete result is published whole or not at all (the typed-unavailable
+    // rule).
+    if terminal && complete.is_none() {
+        return Err(complete_result_unavailable("collect_specialist_task"));
+    }
+    let observation = DelegationTaskObservation {
+        task_ref: request.task_ref.to_string(),
+        member_ref: request.member_ref.to_string(),
+        accepted_task_digest,
+        state: state.to_owned(),
+        result_digest: complete.as_ref().map(|(digest, _, _)| digest.clone()),
+        complete_result: complete.as_ref().map(|(_, value, _)| value.clone()),
+        content_availability: if terminal {
+            "available".to_owned()
+        } else {
+            "pending".to_owned()
+        },
+        required_action: required_action.to_owned(),
+    };
+    let (value, typed) = match complete {
+        Some((_, value, result)) => (Some(value), Some(result)),
+        None => (None, None),
+    };
+    Ok((
+        CollectedTask {
+            task: observation,
+            complete_result: value,
+            disposition,
+        },
+        typed,
+    ))
+}
+
+/// The closed `delegation_identity/v1` for one collected managed task (R).
+///
+/// The ambient disclosure rides beside the identity in the view and enters no
+/// digest; an unavailable result refuses this task's export only.
+pub fn get_managed_delegation_identity(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: CollectSpecialistTask<'_>,
+) -> Result<DelegationIdentityView, MachineError> {
+    boundary(
+        "get_managed_delegation_identity",
+        get_managed_delegation_identity_in(scope, context, caller, port, &request),
+    )
+}
+
+fn get_managed_delegation_identity_in(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: &CollectSpecialistTask<'_>,
+) -> Result<DelegationIdentityView, MachineError> {
+    const OPERATION: &str = "get_managed_delegation_identity";
+    let (collected, complete_result) = collect_specialist_task_in(scope, context, port, request)
+        .map_err(|error| reoperation(error, OPERATION))?;
+    let Some(complete_result) = complete_result else {
+        return Err(complete_result_unavailable(OPERATION));
+    };
+    let session_id = context.session_id;
+    let owner = SettlementOwner::Managed { session_id };
+    let observer = crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?;
+    let session = managed_read_scope(&observer, scope, context, OPERATION)?;
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let facts =
+        crate::orchestration::successor_task(store.connection(), session_id, request.task_ref)?
+            .ok_or_else(|| {
+                managed_task_not_found("get_managed_delegation_identity", request.member_ref)
+            })?;
+    let accepted: crate::delegation_identity::AcceptedTask =
+        serde_json::from_str(&facts.accepted_request_json)
+            .map_err(|_| complete_result_unavailable(OPERATION))?;
+    let runs =
+        crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, scope.state_root);
+    let manifest = runs.load_manifest(request.member_ref)?;
+    let delegation = manifest
+        .instructions
+        .delegation()
+        .ok_or_else(|| complete_result_unavailable(OPERATION))?;
+    // MDC:604: the managed supervisor is the authenticated root Primary
+    // Controller, never the member's own Broker controller.
+    let supervisor = runs.load_controller_binding(session.root_run_id)?;
+    let ambient_guidance = managed_ambient_disclosure_in(scope, session_id, &manifest)?;
+    let database_facts = || {
+        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+            scope.state_root,
+        ))?;
+        let transaction = store.connection().unchecked_transaction().map_err(|_| {
+            MachineError::new(
+                "INTERNAL_ERROR",
+                "the engagement read transaction is unavailable",
+                false,
+                json!({"invariant": "managed_identity_read"}),
+            )
+        })?;
+        // Export binds the task to the caller scope it was admitted under; a
+        // relabelled task is a closed refusal, never an identity.
+        if crate::caller_scope::verify_replay(&transaction, request.task_ref, caller).is_err() {
+            return Err(caller_scope_mismatch(OPERATION));
+        }
+        let rounds = crate::caller_scope::rounds_used(&transaction, caller)?;
+        let counts = assignment_counts(&transaction, caller)?;
+        let quiescence = crate::orchestration::successor_member_quiescence(
+            &transaction,
+            &scope.view.workspace_id,
+            session_id,
+            request.member_ref,
+        )?;
+        #[cfg(test)]
+        managed_observation_probe(&transaction, OPERATION, None);
+        let active_write_tasks =
+            managed_active_write_count(&transaction, session_id, request.member_ref)?;
+        #[cfg(test)]
+        managed_observation_probe(&transaction, OPERATION, Some(active_write_tasks));
+        // The frozen terminal release row is read in the same snapshot, so the
+        // released export's proof and revisions are one fact with the counts
+        // (RPC:396-423).
+        let released = released_proof(
+            &transaction,
+            &scope.view.workspace_id,
+            owner,
+            request.member_ref,
+            quiescence.membership_revision,
+            quiescence.workload_revision,
+        )?;
+        drop(transaction);
+        Ok((rounds, counts, quiescence, active_write_tasks, released))
+    };
+    let (
+        (rounds_used, (accepted_assignments, unresolved_assignments), quiescence, released),
+        _hold,
+    ) = consistent_observation(
+        || {
+            port.member_writer_observation(MemberCleanupObservation {
+                view: scope.view,
+                state_root: scope.state_root,
+                owner,
+                member_ref: request.member_ref,
+            })
+        },
+        |hold| {
+            let (rounds, counts, mut facts, active_write_tasks, released) = database_facts()?;
+            facts.cleanup_pending = cleanup_pending(hold, active_write_tasks);
+            Ok((rounds, counts, facts, released))
+        },
+    )?;
+    drop(store);
+    if accepted_assignments + unresolved_assignments != rounds_used {
+        return Err(complete_result_unavailable(OPERATION));
+    }
+    let digest = collected
+        .task
+        .result_digest
+        .clone()
+        .ok_or_else(|| complete_result_unavailable(OPERATION))?;
+    // The disposition of the export: a terminal release row is the settled
+    // member's `released` export carrying the derived proof (RPC:396-423);
+    // otherwise the member must be current, idle and fully cleaned.
+    let (worker_disposition, disposition_proof) = if let Some(proof) = released {
+        if !release_settled(&quiescence) {
+            return Err(released_contradiction(request.member_ref));
+        }
+        (
+            "released",
+            crate::delegation_identity::DispositionProof {
+                state: "released".to_owned(),
+                observed_after_result_digest: digest.clone(),
+                membership_revision: quiescence.membership_revision,
+                workload_revision: quiescence.workload_revision,
+                running: 0,
+                queued: 0,
+                claimed: 0,
+                dispatching: 0,
+                unresolved: 0,
+                pending_interaction: false,
+                cleanup_pending: false,
+                release_receipt: Some(proof),
+            },
+        )
+    } else {
+        if !quiescence.idle() {
+            return Err(disposition_not_idle(OPERATION));
+        }
+        (
+            "idle",
+            crate::delegation_identity::DispositionProof {
+                state: "idle".to_owned(),
+                observed_after_result_digest: digest.clone(),
+                membership_revision: quiescence.membership_revision,
+                workload_revision: quiescence.workload_revision,
+                running: quiescence.running,
+                queued: quiescence.queued,
+                claimed: quiescence.claimed,
+                dispatching: quiescence.dispatching,
+                unresolved: quiescence.unresolved,
+                pending_interaction: false,
+                cleanup_pending: quiescence.cleanup_pending,
+                release_receipt: None,
+            },
+        )
+    };
+    let identity = crate::delegation_identity::DelegationIdentity {
+        schema: "dolgorae.delegation-identity/v1".to_owned(),
+        mapping_contract: "dolgorae.podway-managed/v1".to_owned(),
+        adapter_id: request.adapter_id.to_owned(),
+        adapter_version: request.adapter_version.to_owned(),
+        binding_ref: caller.accepted().binding_ref.clone(),
+        primary_host: "managed".to_owned(),
+        scope_kind: "orchestrated_session".to_owned(),
+        scope_ref: session_id.to_string(),
+        supervisor_ref: format!("controller:{}", supervisor.identity.controller_id),
+        worker_ref: request.member_ref.to_string(),
+        task_ref: request.task_ref.to_string(),
+        role_ref: delegation.role.name.clone(),
+        role_body_sha256: delegation
+            .role_snapshot
+            .role_body
+            .sha256
+            .trim_start_matches("sha256:")
+            .to_owned(),
+        role_body_byte_length: delegation.role_snapshot.role_body.byte_length,
+        role_snapshot_digest: delegation.role_snapshot_digest.clone(),
+        instruction_identity_digest: delegation.instruction_identity_digest.clone(),
+        agent_configuration_digest: accepted.agent_configuration_digest.clone(),
+        accepted_task_digest: accepted.digest()?,
+        result_digest: digest.clone(),
+        complete_result,
+        caller_scope: caller.accepted().clone(),
+        rounds_used,
+        accepted_assignments,
+        unresolved_assignments,
+        // Counts, revisions and the proof all come from the final read
+        // transaction above (cleanup is folded in before the disposition).
+        worker_disposition: worker_disposition.to_owned(),
+        disposition_proof,
+    };
+    identity.validate()?;
+    Ok(DelegationIdentityView {
+        identity,
+        ambient_guidance,
+    })
+}
+
+/// One managed task's closed observation, read from the Broker rows.
+fn managed_task_observation(
+    connection: &rusqlite::Connection,
+    owner: SettlementOwner,
+    member_ref: Uuid,
+    task_ref: Uuid,
+) -> Result<DelegationTaskObservation, MachineError> {
+    const OPERATION: &str = "await_specialist_task";
+    let facts = crate::orchestration::successor_task(connection, owner.scope_ref(), task_ref)?
+        .ok_or_else(|| managed_task_not_found(OPERATION, member_ref))?;
+    if facts.member_ref != member_ref.to_string() {
+        return Err(managed_task_not_found(OPERATION, member_ref));
+    }
+    let accepted: crate::delegation_identity::AcceptedTask =
+        serde_json::from_str(&facts.accepted_request_json)
+            .map_err(|_| complete_result_unavailable(OPERATION))?;
+    Ok(DelegationTaskObservation {
+        task_ref: task_ref.to_string(),
+        member_ref: member_ref.to_string(),
+        accepted_task_digest: accepted.digest()?,
+        state: task_state(&facts.state).to_owned(),
+        // The complete result belongs to the collect surface.
+        result_digest: None,
+        complete_result: None,
+        content_availability: "pending".to_owned(),
+        required_action: task_required_action(&facts.state).to_owned(),
+    })
+}
+
+/// One managed task identity this member was not dispatched is a closed refusal.
+fn managed_task_not_found(operation: &'static str, member_ref: Uuid) -> MachineError {
+    successor_error(
+        "SPECIALIST_TASK_NOT_FOUND",
+        operation,
+        None,
+        "none",
+        "Rejected",
+        "fix_request",
+        &format!("the task is not one this member ({member_ref}) was dispatched"),
+    )
+}
+
+/// Release one external Specialist (`S`, no idempotency key; RPC:219-460).
+///
+/// The call authenticates the scope authority in the Run service, admits (or
+/// resumes) the member's durable release operation, and returns its
+/// `operation_ref` with the member projection an adapter answers with.
+pub fn release_external_specialist(
+    scope: &DelegationScope<'_>,
+    port: &dyn RunSettlementPort,
+    request: ReleaseExternalSpecialist,
+) -> Result<MemberReleaseView, MachineError> {
+    boundary(
+        "release_external_specialist",
+        release_external_specialist_in(scope, port, request),
+    )
+}
+
+fn release_external_specialist_in(
+    scope: &DelegationScope<'_>,
+    port: &dyn RunSettlementPort,
+    request: ReleaseExternalSpecialist,
+) -> Result<MemberReleaseView, MachineError> {
+    engagement::require_delegation_namespace(scope.state_root)?;
+    {
+        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+            scope.state_root,
+        ))?;
+        // RPC:433 authentication comes first: the workspace and the
+        // engagement's owner binding decide before any member or eligibility
+        // fact, so a foreign Controller gets the same owner refusal for a
+        // legacy, a modern and an absent member alike.
+        let (owner_workspace, owner) = store.external_owner_binding(request.engagement_id)?;
+        if owner_workspace != scope.view.workspace_id || owner != *scope.controller {
+            return Err(owner_refusal_for("release_external_specialist"));
+        }
+        successor_external_member(&store, request.engagement_id, request.member_ref)?;
+    }
+    release_member_in(
+        scope,
+        port,
+        "release_external_specialist",
+        SettlementOwner::External {
+            engagement_id: request.engagement_id,
+        },
+        request.member_ref,
+        request.expected_revision,
+        request.allow_interrupt,
+    )
+}
+
+/// One successor external member a release may settle.
+///
+/// Only a member its own successor hire admitted is released here; a legacy
+/// facade-v4 member keeps its legacy release owner.
+fn successor_external_member(
+    store: &EngagementStore,
+    engagement_id: Uuid,
+    member_ref: Uuid,
+) -> Result<(), MachineError> {
+    store.external_member_configuration(engagement_id, member_ref)?;
+    if !engagement::successor_hire_member(store.connection(), &member_ref.to_string())? {
+        return Err(successor_error(
+            "CAPABILITY_UNSUPPORTED",
+            "release_external_specialist",
+            None,
+            "none",
+            "Rejected",
+            "renegotiate",
+            "legacy_specialist_member is recognized_unsupported for the successor external release: the member was not admitted by a successor hire",
+        ));
+    }
+    Ok(())
+}
+
+/// Release one managed successor Specialist (`S`, no idempotency key).
+///
+/// Only a member its own successor spawn admitted is released here; a legacy
+/// member keeps its legacy release owner.
+pub fn release_specialist(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    port: &dyn RunSettlementPort,
+    request: ReleaseSpecialist,
+) -> Result<MemberReleaseView, MachineError> {
+    boundary(
+        "release_specialist",
+        release_specialist_in(scope, context, port, request),
+    )
+}
+
+fn release_specialist_in(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    port: &dyn RunSettlementPort,
+    request: ReleaseSpecialist,
+) -> Result<MemberReleaseView, MachineError> {
+    engagement::require_delegation_namespace(scope.state_root)?;
+    {
+        let observer = crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?;
+        // RPC §7 (:432-441): every release call first authenticates the current
+        // Controller authority for the scope, then inspects the release row —
+        // a terminal row answers the settled projection and the original
+        // operation_ref even after the session left 'active' and with a stale
+        // expected_revision. The release therefore authenticates the session's
+        // root Primary, workspace identity and root Controller binding without
+        // the active-status precondition, exactly as the R read calls do;
+        // mutations keep managed_session and the session re-read fence.
+        managed_read_scope(&observer, scope, context, "release_specialist")?;
+    }
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    managed_member(&store, context.session_id, request.member_ref)?;
+    drop(store);
+    release_member_in(
+        scope,
+        port,
+        "release_specialist",
+        SettlementOwner::Managed {
+            session_id: context.session_id,
+        },
+        request.member_ref,
+        request.expected_revision,
+        request.allow_interrupt,
+    )
+}
+
+/// Admit (or resume) one member release and report it as the closed result.
+fn release_member_in(
+    scope: &DelegationScope<'_>,
+    port: &dyn RunSettlementPort,
+    operation_kind: &'static str,
+    owner: SettlementOwner,
+    member_ref: Uuid,
+    expected_revision: u64,
+    allow_interrupt: bool,
+) -> Result<MemberReleaseView, MachineError> {
+    let outcome = port.settle_member_release(MemberReleaseRequest {
+        view: scope.view,
+        state_root: scope.state_root,
+        owner,
+        workspace_ref: &scope.view.workspace_id,
+        member_ref,
+        controller: scope.controller,
+        allow_interrupt,
+        expected_revision,
+    });
+    let operation = match outcome {
+        Ok(MemberReleaseOutcome::Operation(operation)) => operation,
+        Ok(MemberReleaseOutcome::Busy { operation_ref }) => {
+            return Err(successor_error(
+                "RELEASE_IN_PROGRESS",
+                operation_kind,
+                Some(operation_ref),
+                "none",
+                "Rejected",
+                "reconcile_operation",
+                "another live owner holds this member's release operation",
+            ));
+        }
+        Ok(MemberReleaseOutcome::Recovery { operation_ref }) => {
+            return Err(successor_error(
+                "RELEASE_OWNER_UNPROVEN",
+                operation_kind,
+                Some(operation_ref),
+                "unresolved",
+                "Unknown",
+                "restore_state",
+                "the member Run is held but its release owner cannot be proven",
+            ));
+        }
+        Err(MemberReleaseFailure::BeforeAdmission(error)) => return Err(error),
+        Err(MemberReleaseFailure::AfterAdmission {
+            operation_ref,
+            error,
+        }) => {
+            return Err(unresolved_effect(
+                &error.code,
+                operation_kind,
+                operation_ref,
+                &error.message,
+            ));
+        }
+    };
+    // The release is durably admitted from here on, so every later failure —
+    // including the response projection's own reads — keeps the known
+    // operation reference and the unresolved floor (MDC:39).
+    let operation_ref = Uuid::parse_str(&operation.operation_ref).map_err(|_| {
+        MachineError::invalid_argument("member_release", "invalid operation identity")
+    })?;
+    release_member_view(scope, owner, operation).map_err(|error| {
+        unresolved_effect(&error.code, operation_kind, operation_ref, &error.message)
+    })
+}
+
+/// Project one settled-or-owned release operation as the closed response.
+fn release_member_view(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    operation: crate::delegation_identity::MemberReleaseOperation,
+) -> Result<MemberReleaseView, MachineError> {
+    // The response's member projection carries the observed scoped membership
+    // revision of the same domain the fence checked (RPC:496-503).
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let revision = engagement::scope_membership_revision(
+        store.connection(),
+        &scope.view.workspace_id,
+        owner.scope_kind(),
+        &owner.scope_ref().to_string(),
+    )?;
+    drop(store);
+    let identity = |value: &str| {
+        Uuid::parse_str(value)
+            .map_err(|_| MachineError::invalid_argument("member_release", "invalid identity"))
+    };
+    Ok(MemberReleaseView {
+        member_ref: identity(&operation.member_ref)?,
+        run_ref: identity(&operation.run_ref)?,
+        scope_kind: owner.scope_kind(),
+        scope_ref: identity(&operation.scope_ref)?,
+        state: release_member_state(&operation.progress),
+        revision,
+        operation,
+    })
+}
+
+/// The closed member state one release operation projects.
+fn release_member_state(progress: &str) -> &'static str {
+    match progress {
+        "requested" | "settling" => "releasing",
+        "terminal" => "released",
+        "cleanup_failed" => "cleanup_failed",
+        _ => "unknown",
+    }
+}
+
+/// The Profile ambient guidance of one managed member.
+fn managed_ambient_disclosure_in(
+    scope: &DelegationScope<'_>,
+    session_id: Uuid,
+    manifest: &crate::run::RunManifest,
+) -> Result<AmbientGuidanceDisclosure, MachineError> {
+    if manifest.aggregate_binding.as_ref().is_none_or(|binding| {
+        binding.aggregate_id != session_id
+            || binding.aggregate_kind != AggregateKind::OrchestratedSession
+    }) {
+        return Err(successor_error(
+            "SESSION_OWNER_MISMATCH",
+            "get_managed_delegation_identity",
+            None,
+            "none",
+            "Rejected",
+            "fix_request",
+            "the member does not belong to this session",
+        ));
+    }
+    let _ = scope;
+    let binding = manifest
+        .global_profile_binding
+        .as_ref()
+        .ok_or_else(|| complete_result_unavailable("get_managed_delegation_identity"))?;
+    observe_profile_ambient(
+        Path::new(&binding.launch_snapshot.canonical_codex_home),
+        &format!("sha256:{}", binding.digest()?),
+    )
+}
+
+/// Validate one bounded await request (MDC:139).
+fn validate_await(
+    tasks: &[Uuid],
+    predicate: AwaitPredicate,
+    timeout_seconds: u64,
+) -> Result<(), MachineError> {
+    if timeout_seconds > MAX_AWAIT_SECONDS {
+        return Err(MachineError::invalid_argument(
+            "timeout_seconds",
+            "the wait timeout is bounded by 3600 seconds",
+        ));
+    }
+    if tasks.is_empty() || tasks.len() > 32 {
+        return Err(MachineError::invalid_argument(
+            "task_ref",
+            "a wait names 1..=32 accepted task references",
+        ));
+    }
+    let unique = tasks.iter().collect::<std::collections::BTreeSet<_>>();
+    if unique.len() != tasks.len() {
+        return Err(MachineError::invalid_argument(
+            "task_ref",
+            "a wait names each accepted task once",
+        ));
+    }
+    if let AwaitPredicate::AtLeast(k) = predicate
+        && (k == 0 || usize::try_from(k).unwrap_or(usize::MAX) > tasks.len())
+    {
+        return Err(MachineError::invalid_argument(
+            "predicate",
+            "an at-least predicate needs 1 <= k <= the task count",
+        ));
+    }
+    Ok(())
+}
+
+fn await_satisfied(predicate: AwaitPredicate, terminal: usize, total: usize) -> bool {
+    match predicate {
+        AwaitPredicate::Any => terminal >= 1,
+        AwaitPredicate::All => terminal == total,
+        AwaitPredicate::AtLeast(k) => terminal >= usize::try_from(k).unwrap_or(usize::MAX),
+    }
+}
+
+/// The active Orchestrated Session one successor managed call is authorized under.
+///
+/// MDC:604 makes the authenticated root Primary Controller the managed
+/// `supervisor_ref`, so the scope Controller must be that Run's binding; the
+/// session must be active and its root Run must be the caller's source Run.
+fn managed_session(
+    broker: &crate::orchestration::OrchestrationStore,
+    scope: &DelegationScope<'_>,
+    caller: &ManagedCallContext<'_>,
+    operation_kind: &str,
+) -> Result<crate::orchestration::OrchestratedSessionSnapshot, MachineError> {
+    let session = broker.session(caller.session_id)?;
+    if session.status != "active" || session.root_run_id != caller.source_run_id {
+        return Err(managed_session_conflict(
+            caller.session_id,
+            "the caller is not the active session Primary",
+        ));
+    }
+    managed_scope_authority(broker, scope, caller.session_id, operation_kind)
+}
+
+/// The authenticated session scope of one managed R observation.
+///
+/// RPC:396-423: await, collect and the identity export keep answering after a
+/// close intent moves the session out of `active` and after a member release,
+/// so the R paths authenticate the session's root Primary and workspace
+/// identity without the active-status precondition. The caller still names
+/// the session's root Run, and mutations keep the stricter
+/// `managed_session`/`managed_scope_authority` gates.
+fn managed_read_scope(
+    broker: &crate::orchestration::OrchestrationStore,
+    scope: &DelegationScope<'_>,
+    caller: &ManagedCallContext<'_>,
+    operation_kind: &str,
+) -> Result<crate::orchestration::OrchestratedSessionSnapshot, MachineError> {
+    let session = broker.session(caller.session_id)?;
+    if session.root_run_id != caller.source_run_id {
+        return Err(managed_session_conflict(
+            caller.session_id,
+            "the caller is not the session's root Primary",
+        ));
+    }
+    managed_scope_identity(scope, &session, caller.session_id, operation_kind)?;
+    Ok(session)
+}
+
+/// The authenticated session scope of one mutation, without a caller Turn.
+///
+/// The scope is authenticated before any Broker or key collision read, so a
+/// foreign Controller cannot tell a used key from an unused one (MDC:134).
+fn managed_scope_authority(
+    broker: &crate::orchestration::OrchestrationStore,
+    scope: &DelegationScope<'_>,
+    session_id: Uuid,
+    operation_kind: &str,
+) -> Result<crate::orchestration::OrchestratedSessionSnapshot, MachineError> {
+    let session = broker.session(session_id)?;
+    if session.status != "active" {
+        return Err(managed_session_conflict(
+            session_id,
+            "the session is not active",
+        ));
+    }
+    managed_scope_identity(scope, &session, session_id, operation_kind)?;
+    Ok(session)
+}
+
+/// The workspace and root Primary a managed scope must prove, and nothing else.
+///
+/// Lookup authenticates exactly this much: the retained intent and receipt stay
+/// readable after a close intent moves the session out of `active`
+/// (MDC:186-200). The session's active status is a mutation precondition and
+/// stays in `managed_scope_authority`.
+fn managed_scope_identity(
+    scope: &DelegationScope<'_>,
+    session: &crate::orchestration::OrchestratedSessionSnapshot,
+    session_id: Uuid,
+    operation_kind: &str,
+) -> Result<(), MachineError> {
+    if session.workspace_id != scope.view.workspace_id {
+        return Err(managed_session_conflict(
+            session_id,
+            "the session belongs to another workspace",
+        ));
+    }
+    let binding =
+        crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, scope.state_root)
+            .load_controller_binding(session.root_run_id)?;
+    if binding != *scope.controller {
+        return Err(successor_error(
+            "SESSION_OWNER_MISMATCH",
+            operation_kind,
+            None,
+            "none",
+            "Rejected",
+            "fix_request",
+            "the trusted Controller is not this session's authenticated root Primary",
+        ));
+    }
+    Ok(())
+}
+
+fn managed_session_conflict(session_id: Uuid, reason: &'static str) -> MachineError {
+    MachineError::new(
+        "RUN_STATE_CONFLICT",
+        "Orchestrated Session state conflicts with the operation",
+        false,
+        json!({"session_id": session_id, "reason": reason}),
+    )
+}
+
+/// Refuse a successor key the session's Broker tables already own.
+///
+/// A legacy `request_specialist` / `assign_specialist_task` key is owned by the
+/// Broker namespace, so the successor namespace never reports it `absent` and
+/// never admits a second owner for it.
+fn require_broker_key_free(
+    connection: &rusqlite::Connection,
+    session_id: Uuid,
+    idempotency_key: &str,
+    operation_kind: &str,
+) -> Result<(), MachineError> {
+    if crate::orchestration::broker_key_owner(connection, session_id, idempotency_key)?.is_some() {
+        return Err(successor_error(
+            "RECOVERY_REQUIRED",
+            operation_kind,
+            None,
+            "none",
+            "RecoveryNeeded",
+            "reconcile_operation",
+            "the idempotency key belongs to the legacy Broker operation namespace",
+        ));
+    }
+    Ok(())
+}
+
+/// The managed member view of one accepted spawn: retained snapshot plus Broker row.
+fn managed_member_view(
+    store: &EngagementStore,
+    broker: &crate::orchestration::OrchestrationStore,
+    scope: &DelegationScope<'_>,
+    session_id: Uuid,
+    receipt: &OperationReceipt,
+) -> Result<MemberAdmissionView, MachineError> {
+    let member_ref = receipt
+        .accepted_subjects
+        .member_ref
+        .as_deref()
+        .ok_or_else(|| MachineError::invalid_argument("receipt", "the receipt names no member"))?;
+    let member_id = Uuid::parse_str(member_ref)
+        .map_err(|_| MachineError::invalid_argument("receipt", "invalid member identity"))?;
+    let provisioning_ref = receipt
+        .accepted_subjects
+        .provisioning_ref
+        .as_deref()
+        .ok_or_else(|| {
+            MachineError::invalid_argument("receipt", "the receipt names no provisioning snapshot")
+        })?;
+    // The retained snapshot is durable, so a replay answers from it instead of
+    // re-reading any Role source (MDC:304-306).
+    let snapshot = crate::provisioning::retained_snapshot(scope.state_root, provisioning_ref)?;
+    let (instructions, _configuration) = snapshot.admitted_configuration()?;
+    let facts = broker
+        .successor_member(session_id, member_id)?
+        .ok_or_else(|| {
+            MachineError::new(
+                "SPECIALIST_NOT_MEMBER",
+                "Specialist is not an active aggregate member",
+                false,
+                json!({"run_id": member_id}),
+            )
+        })?;
+    let revision = store.scope_membership_revision(
+        &receipt.namespace.workspace_ref,
+        "orchestrated_session",
+        &session_id.to_string(),
+    )?;
+    // The public member view publishes the admitted configuration's domain
+    // digest; the runtime snapshot hash stays internal (MDC:608).
+    let public_configuration_digest = snapshot.admitted.digest()?;
+    Ok(MemberAdmissionView {
+        member: DelegationMemberView {
+            member_ref: member_id.to_string(),
+            run_ref: member_id.to_string(),
+            scope_kind: "orchestrated_session".to_owned(),
+            scope_ref: session_id.to_string(),
+            role_ref: facts.role_ref,
+            role_snapshot_digest: instructions.role_snapshot_digest.clone(),
+            agent_configuration_digest: public_configuration_digest,
+            state: member_state(&facts.membership_state, &facts.actor_residency).to_owned(),
+            revision,
+        },
+        receipt: receipt.clone(),
+        ambient_guidance: ambient_guidance(&snapshot)?,
+    })
+}
+
+/// Validate the caller's own Turn provenance, exactly as the legacy Broker does.
+fn checked_provenance(source_turn_id: &str, source_tool_call_id: &str) -> Result<(), MachineError> {
+    for (value, field) in [
+        (source_turn_id, "source_turn_id"),
+        (source_tool_call_id, "source_tool_call_id"),
+    ] {
+        if value.is_empty() || value.len() > 256 || value.contains('\0') {
+            return Err(MachineError::invalid_argument(
+                field,
+                "value is outside the checked bound",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The one successor code a member Run start failure reports.
+const SPAWN_START_UNRESOLVED: &str = "SPAWN_START_UNRESOLVED";
+
+/// Test-only access to the writer/database observation boundary.
+#[cfg(test)]
+pub(crate) fn fixture_consistent_observation<T>(
+    writer_fact: impl FnMut() -> Result<MemberWriterObservation, MachineError>,
+    database_facts: impl FnMut(&MemberWriterObservation) -> Result<T, MachineError>,
+) -> Result<(T, MemberWriterObservation), MachineError> {
+    consistent_observation(writer_fact, database_facts)
+}
+
+/// Restate one closed successor error under the operation that is answering .
+fn reoperation(error: MachineError, operation_kind: &str) -> MachineError {
+    if error.details.get("schema").and_then(Value::as_str) != Some(SUCCESSOR_ERROR_SCHEMA) {
+        return successor_boundary_error(error, operation_kind);
+    }
+    let operation_ref = error
+        .details
+        .get("operation_ref")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    successor_error(
+        &error.code,
+        operation_kind,
+        operation_ref,
+        // Every R operation has no product-state effect.
+        "none",
+        error
+            .details
+            .get("classification")
+            .and_then(Value::as_str)
+            .unwrap_or("Rejected"),
+        error
+            .details
+            .get("required_action")
+            .and_then(Value::as_str)
+            .unwrap_or("none"),
+        &error.message,
+    )
+}
+
+/// The closed caller-scope refusal: this task was admitted under another scope.
+fn caller_scope_mismatch(operation_kind: &str) -> MachineError {
+    successor_error(
+        "CALLER_SCOPE_MISMATCH",
+        operation_kind,
+        None,
+        "none",
+        "Rejected",
+        "none",
+        "the task belongs to a different retained caller scope",
+    )
+}
+
+/// The closed disposition refusal: an R call observes, it never waits .
+fn disposition_not_idle(operation_kind: &str) -> MachineError {
+    successor_error(
+        "DISPOSITION_NOT_IDLE",
+        operation_kind,
+        None,
+        "none",
+        "Rejected",
+        "none",
+        "the member still holds work in flight; await the task first",
+    )
+}
+
+/// Verify the retained complete result belongs to exactly this task .
+#[allow(clippy::too_many_arguments)]
+fn verify_result_source(
+    result: &crate::delegation_identity::CompleteResult,
+    owner: SettlementOwner,
+    member_ref: Uuid,
+    task_ref: Uuid,
+    accepted_task_digest: &str,
+    task_state: &str,
+    operation_kind: &str,
+) -> Result<(), MachineError> {
+    let expected_outcome = match task_state {
+        "completed_not_delivered" | "completed" => "completed",
+        "failed" => "failed",
+        "cancelled" => "cancelled",
+        "expired" => "expired",
+        _ => return Err(result_substituted(operation_kind)),
+    };
+    let source = &result.source;
+    if source.scope_kind != owner.scope_kind()
+        || source.scope_ref != owner.scope_ref().to_string()
+        || source.worker_ref != member_ref.to_string()
+        || source.task_ref != task_ref.to_string()
+        || source.accepted_task_digest != accepted_task_digest
+        || result.terminal_outcome != expected_outcome
+    {
+        return Err(result_substituted(operation_kind));
+    }
+    Ok(())
+}
+
+/// A retained result that names another task is refused, never projected.
+fn result_substituted(operation_kind: &str) -> MachineError {
+    successor_error(
+        "COMPLETE_RESULT_MISMATCH",
+        operation_kind,
+        None,
+        "none",
+        "Rejected",
+        "none",
+        "the retained result does not belong to this task",
+    )
+}
+
+/// The typed unavailable complete result, never an incomplete object.
+fn complete_result_unavailable(operation_kind: &str) -> MachineError {
+    successor_error(
+        "COMPLETE_RESULT_UNAVAILABLE",
+        operation_kind,
+        None,
+        "none",
+        "RecoveryNeeded",
+        "restore_state",
+        "the task has no complete result; a partial change set is never published",
+    )
+}
+
+/// The committed complete result of one task, validated against its digest.
+fn complete_result_of(
+    store: &EngagementStore,
+    owner: SettlementOwner,
+    member_ref: Uuid,
+    task_ref: Uuid,
+    accepted_task_digest: &str,
+    task_state: &str,
+    operation_kind: &str,
+) -> Result<Option<(String, Value, crate::delegation_identity::CompleteResult)>, MachineError> {
+    let published = match owner {
+        SettlementOwner::External { engagement_id } => {
+            store.task_complete_result(engagement_id, task_ref)?
+        }
+        SettlementOwner::Managed { session_id } => {
+            // The Broker task links its published bytes by digest, so a result row
+            // that is missing or unlinked is the typed-unavailable condition.
+            let Some(facts) =
+                crate::orchestration::successor_task(store.connection(), session_id, task_ref)?
+            else {
+                return Ok(None);
+            };
+            let Some(digest) = facts.result_sha256 else {
+                return Ok(None);
+            };
+            crate::orchestration::successor_task_result(store.connection(), task_ref)?
+                .map(|bytes| (digest, bytes))
+        }
+    };
+    let Some((digest, bytes)) = published else {
+        return Ok(None);
+    };
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| complete_result_unavailable(operation_kind))?;
+    let result: crate::delegation_identity::CompleteResult = serde_json::from_value(value.clone())
+        .map_err(|_| complete_result_unavailable(operation_kind))?;
+    // The row keeps the content digest of exactly these bytes, and the object
+    // must re-derive its own identity digest.
+    let canonical = canonical_text(&value)?;
+    if crate::jcs::sha256_hex(canonical.as_bytes()) != digest {
+        return Err(complete_result_unavailable(operation_kind));
+    }
+    // The retained result must name this task, its member and its acceptance,
+    // and its outcome must be the one the task settled with.
+    verify_result_source(
+        &result,
+        owner,
+        member_ref,
+        task_ref,
+        accepted_task_digest,
+        task_state,
+        operation_kind,
+    )?;
+    if let Some(code) = result.safe_failure_code.as_deref().filter(|code| {
+        matches!(
+            *code,
+            "REVIEW_TARGET_DRIFTED"
+                | "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                | "REVIEW_TARGET_UNAVAILABLE"
+        )
+    }) {
+        return Err(successor_error(
+            code,
+            operation_kind,
+            None,
+            "none",
+            "Rejected",
+            "fix_request",
+            "the checked review could not adopt its candidate evidence",
+        ));
+    }
+    let identity_digest = result.digest()?;
+    Ok(Some((identity_digest, value, result)))
+}
+
+#[cfg(test)]
+type ObservationProbe = Box<dyn FnMut(&str, Option<u64>)>;
+#[cfg(test)]
+thread_local! {
+    static MANAGED_OBSERVATION_PROBE: std::cell::RefCell<Option<ObservationProbe>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) struct ManagedObservationProbeGuard;
+#[cfg(test)]
+impl Drop for ManagedObservationProbeGuard {
+    fn drop(&mut self) {
+        MANAGED_OBSERVATION_PROBE.with(|probe| {
+            probe.borrow_mut().take();
+        });
+    }
+}
+#[cfg(test)]
+pub(crate) fn set_managed_observation_probe(
+    probe: impl FnMut(&str, Option<u64>) + 'static,
+) -> ManagedObservationProbeGuard {
+    MANAGED_OBSERVATION_PROBE.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Box::new(probe));
+    });
+    ManagedObservationProbeGuard
+}
+#[cfg(test)]
+fn managed_observation_probe(
+    connection: &rusqlite::Connection,
+    operation: &str,
+    count: Option<u64>,
+) {
+    MANAGED_OBSERVATION_PROBE.with(|probe| {
+        if let Some(probe) = probe.borrow_mut().as_mut() {
+            if count.is_none() {
+                // Pin this observation's transaction before another connection commits.
+                connection
+                    .query_row("SELECT COUNT(*) FROM caller_scope_assignments", [], |row| {
+                        row.get::<_, u64>(0)
+                    })
+                    .unwrap();
+            }
+            probe(operation, count);
+        }
+    });
+}
+
+/// Observe the writer fact and the database facts as one consistent boundary.
+///
+/// The writer record is not part of the engagement database, so each attempt
+/// reads the writer, opens a **new** read transaction for the database facts and
+/// re-reads the writer; the pair is accepted only when the writer identity is
+/// unchanged across that read. A fact that will not hold still is a typed
+/// recovery refusal. The database closure receives the confirmed writer fact, so
+/// a state derived from it can never contradict the cleanup it reports.
+fn consistent_observation<T>(
+    mut writer_fact: impl FnMut() -> Result<MemberWriterObservation, MachineError>,
+    mut database_facts: impl FnMut(&MemberWriterObservation) -> Result<T, MachineError>,
+) -> Result<(T, MemberWriterObservation), MachineError> {
+    const ATTEMPTS: usize = 3;
+    let mut before = writer_fact()?;
+    for _ in 0..ATTEMPTS {
+        let facts = database_facts(&before)?;
+        let after = writer_fact()?;
+        if before.fingerprint == after.fingerprint {
+            return Ok((facts, after));
+        }
+        before = after;
+    }
+    Err(MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the member's writer and database facts could not be observed together",
+        false,
+        json!({"required_action": "restore_state"}),
+    ))
+}
+
+/// The settled member's release proof, derived from its frozen terminal
+/// release row (RPC:388-394).
+///
+/// `None` while no terminal release exists. The proof is re-derived from the
+/// closed row on every read, so an unrelated aggregate revision advance
+/// cannot change it; the observed revisions must dominate the frozen terminal
+/// ones, and the frozen terminal revision must dominate the admitted one
+/// (RPC:283-290).
+fn released_proof(
+    connection: &rusqlite::Connection,
+    workspace_ref: &str,
+    owner: SettlementOwner,
+    member_ref: Uuid,
+    membership_revision: u64,
+    workload_revision: u64,
+) -> Result<Option<crate::delegation_identity::MemberReleaseProof>, MachineError> {
+    let Some(operation) = crate::engagement::member_release_operation(
+        connection,
+        workspace_ref,
+        owner.scope_kind(),
+        &owner.scope_ref().to_string(),
+        &member_ref.to_string(),
+    )?
+    .filter(|operation| operation.progress == "terminal") else {
+        return Ok(None);
+    };
+    operation.validate()?;
+    let proof = crate::delegation_identity::MemberReleaseProof {
+        schema: "dolgorae.member-release-proof/v1".to_owned(),
+        operation_ref: operation.operation_ref.clone(),
+        operation_kind: operation.operation_kind.clone(),
+        workspace_ref: operation.workspace_ref.clone(),
+        scope_kind: operation.scope_kind.clone(),
+        scope_ref: operation.scope_ref.clone(),
+        member_ref: operation.member_ref.clone(),
+        run_ref: operation.run_ref.clone(),
+        controller_principal: operation.controller_principal.clone(),
+        controller_generation: operation.controller_generation,
+        terminal_membership_revision: operation
+            .terminal_membership_revision
+            .expect("a terminal row carries its completion revisions"),
+        settled_workload_revision: operation
+            .settled_workload_revision
+            .expect("a terminal row carries its completion revisions"),
+    };
+    proof.validate()?;
+    if operation.admitted_membership_revision >= proof.terminal_membership_revision
+        || proof.terminal_membership_revision > membership_revision
+        || proof.settled_workload_revision > workload_revision
+    {
+        return Err(MachineError::new(
+            "RECOVERY_REQUIRED",
+            "the settled release proof contradicts the observed revision domains",
+            false,
+            json!({"member_ref": member_ref, "required_action": "reconcile_operation"}),
+        ));
+    }
+    Ok(Some(proof))
+}
+
+/// The typed refusal for a terminal release row the observation contradicts:
+/// the terminal commit proved the member settled (require_member_settled), so
+/// work or pending cleanup seen now can never be a `released` disposition.
+fn released_contradiction(member_ref: Uuid) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the released member contradicts its settled release",
+        false,
+        json!({"member_ref": member_ref, "required_action": "reconcile_operation"}),
+    )
+}
+
+/// Whether a terminal-released member's quiescence is the settled state its
+/// terminal commit proved.
+fn release_settled(quiescence: &crate::engagement::MemberQuiescence) -> bool {
+    quiescence.running == 0
+        && quiescence.queued == 0
+        && quiescence.claimed == 0
+        && quiescence.dispatching == 0
+        && quiescence.unresolved == 0
+        && !quiescence.pending_interaction
+        && !quiescence.cleanup_pending
+}
+
+fn disposition_view(
+    connection: &rusqlite::Connection,
+    workspace_ref: &str,
+    owner: SettlementOwner,
+    member_ref: Uuid,
+    observed_after_result_digest: String,
+    cleanup_pending: bool,
+) -> Result<DelegationDispositionView, MachineError> {
+    let mut quiescence = match owner {
+        SettlementOwner::External { engagement_id } => {
+            crate::engagement::successor_member_quiescence(
+                connection,
+                workspace_ref,
+                "external_engagement",
+                &engagement_id.to_string(),
+                &member_ref.to_string(),
+            )?
+        }
+        // The managed member's tasks live in the Broker tables, so its
+        // disposition is read from there in this same snapshot.
+        SettlementOwner::Managed { session_id } => {
+            crate::orchestration::successor_member_quiescence(
+                connection,
+                workspace_ref,
+                session_id,
+                member_ref,
+            )?
+        }
+    };
+    quiescence.cleanup_pending = cleanup_pending;
+    // A terminal release row is read in the same snapshot as the quiescence,
+    // so the proof's revision domains and the observation are one fact.
+    let release_receipt = released_proof(
+        connection,
+        workspace_ref,
+        owner,
+        member_ref,
+        quiescence.membership_revision,
+        quiescence.workload_revision,
+    )?;
+    if release_receipt.is_some() {
+        if !release_settled(&quiescence) {
+            return Err(released_contradiction(member_ref));
+        }
+        return Ok(DelegationDispositionView {
+            state: "released".to_owned(),
+            cleanup_pending: false,
+            observed_after_result_digest,
+            membership_revision: quiescence.membership_revision,
+            workload_revision: quiescence.workload_revision,
+            running: 0,
+            queued: 0,
+            claimed: 0,
+            dispatching: 0,
+            unresolved: 0,
+            release_receipt,
+        });
+    }
+    let state = if quiescence.idle() {
+        "idle"
+    } else if quiescence.unresolved > 0 {
+        "unresolved"
+    } else {
+        "active"
+    };
+    Ok(DelegationDispositionView {
+        state: state.to_owned(),
+        cleanup_pending: quiescence.cleanup_pending,
+        observed_after_result_digest,
+        membership_revision: quiescence.membership_revision,
+        workload_revision: quiescence.workload_revision,
+        running: quiescence.running,
+        queued: quiescence.queued,
+        claimed: quiescence.claimed,
+        dispatching: quiescence.dispatching,
+        unresolved: quiescence.unresolved,
+        release_receipt: None,
+    })
+}
+
+fn accounting_unreadable() -> MachineError {
+    MachineError::new(
+        "INTERNAL_ERROR",
+        "the caller scope accounting is unreadable",
+        false,
+        json!({"invariant": "caller_scope"}),
+    )
+}
+
+fn assignment_counts(
+    connection: &rusqlite::Connection,
+    caller: &crate::caller_scope::TrustedCallerScope,
+) -> Result<(u64, u64), MachineError> {
+    let accepted: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM caller_scope_assignments
+              WHERE binding_ref=?1 AND podway_workspace_ref=?2 AND podway_session_ref=?3
+                AND podway_attempt_ref=?4 AND delegated_placement_ref=?5
+                AND accounting_state='counted_accepted'",
+            rusqlite::params![
+                caller.accepted().binding_ref,
+                caller.accepted().podway_workspace_ref,
+                caller.accepted().podway_session_ref,
+                caller.accepted().podway_attempt_ref,
+                caller.accepted().delegated_placement_ref
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| accounting_unreadable())?;
+    let unresolved: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM caller_scope_assignments
+              WHERE binding_ref=?1 AND podway_workspace_ref=?2 AND podway_session_ref=?3
+                AND podway_attempt_ref=?4 AND delegated_placement_ref=?5
+                AND accounting_state='counted_unresolved'",
+            rusqlite::params![
+                caller.accepted().binding_ref,
+                caller.accepted().podway_workspace_ref,
+                caller.accepted().podway_session_ref,
+                caller.accepted().podway_attempt_ref,
+                caller.accepted().delegated_placement_ref
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| accounting_unreadable())?;
+    Ok((accepted, unresolved))
+}
+
+/// Observe the ambient Profile guidance one member's Run is exposed to.
+///
+/// The disclosure is a runtime observation at call time, never part of any
+/// captured or digested object: it may change between calls without changing the
+/// member's or the task's identities. It is scoped by the engagement owner and
+/// read from the member Run's own Profile binding, which is the tenant the Run
+/// actually starts under.
+pub fn member_ambient_disclosure(
+    scope: &DelegationScope<'_>,
+    engagement_id: Uuid,
+    member_ref: Uuid,
+) -> Result<AmbientGuidanceDisclosure, MachineError> {
+    boundary(
+        "member_ambient_disclosure",
+        member_ambient_disclosure_in(scope, engagement_id, member_ref),
+    )
+}
+
+fn member_ambient_disclosure_in(
+    scope: &DelegationScope<'_>,
+    engagement_id: Uuid,
+    member_ref: Uuid,
+) -> Result<AmbientGuidanceDisclosure, MachineError> {
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let (owner_workspace, owner) = store.external_owner_binding(engagement_id)?;
+    if owner_workspace != scope.view.workspace_id || owner != *scope.controller {
+        return Err(owner_refusal_for("member_ambient_disclosure"));
+    }
+    // Reading the member accepts only an active member of this engagement.
+    let _ = store.external_member_configuration(engagement_id, member_ref)?;
+    drop(store);
+    let manifest =
+        crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, scope.state_root)
+            .load_manifest(member_ref)?;
+    if manifest.aggregate_binding.as_ref().is_none_or(|binding| {
+        binding.aggregate_id != engagement_id
+            || binding.aggregate_kind != crate::domain::AggregateKind::ExternalSpecialistEngagement
+    }) {
+        return Err(owner_refusal_for("member_ambient_disclosure"));
+    }
+    let binding = manifest
+        .global_profile_binding
+        .as_ref()
+        .ok_or_else(|| owner_refusal_for("member_ambient_disclosure"))?;
+    observe_profile_ambient(
+        Path::new(&binding.launch_snapshot.canonical_codex_home),
+        &format!("sha256:{}", binding.digest()?),
+    )
+}
+
+pub fn lookup_operation(
+    scope: &DelegationScope<'_>,
+    operation_kind: &str,
+    aggregate_scope: Option<(&str, &str)>,
+    idempotency_key: &str,
+) -> Result<Value, MachineError> {
+    boundary(
+        "lookup_operation",
+        lookup_operation_in(scope, operation_kind, aggregate_scope, idempotency_key),
+    )
+}
+
+fn lookup_operation_in(
+    scope: &DelegationScope<'_>,
+    operation_kind: &str,
+    aggregate_scope: Option<(&str, &str)>,
+    idempotency_key: &str,
+) -> Result<Value, MachineError> {
+    let key = checked_key(idempotency_key)?;
+    // The namespace check runs first: lookup never opens the store for creation.
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let namespace = Namespace::delegation(
+        &scope.controller.identity,
+        &scope.view.workspace_id,
+        aggregate_scope,
+        operation_kind,
+        key,
+    )
+    .map_err(|reason| MachineError::invalid_argument("namespace", reason))?;
+    let lookup: LookupNamespace = (&namespace).into();
+    // A managed namespace is authenticated before any Broker or key read, so a
+    // foreign Controller cannot tell a used key from an unused one (MDC:134).
+    // Lookup proves the workspace and the root Primary only: after a close intent
+    // the owner still reads the retained receipt and its state (MDC:186-200).
+    if let Some(session_id) = managed_scope_session(operation_kind, aggregate_scope) {
+        let observer = crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?;
+        let session = observer.session(session_id)?;
+        managed_scope_identity(scope, &session, session_id, operation_kind)?;
+    }
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let observed = managed_lookup(&store, &lookup, operation_kind, aggregate_scope, key)?;
+    match observed {
+        IntentLookup::Accepted(receipt) => Ok(json!({
+            "schema": LOOKUP_SCHEMA,
+            "namespace": lookup,
+            "state": "accepted",
+            "operation_ref": receipt.operation_ref,
+            "accepted_input_digest": receipt.accepted_input_digest,
+            "receipt": receipt,
+            "accepted_subjects": receipt.accepted_subjects,
+            "current_outcome": current_outcome(&store, operation_kind, &receipt)?,
+            "result_ref": null,
+            "result_digest": null,
+        })),
+        IntentLookup::NotAccepted {
+            operation_ref,
+            input_digest,
+            refusal_code,
+            durable_refusal_revision,
+        } => Ok(json!({
+            "schema": LOOKUP_SCHEMA,
+            "namespace": lookup,
+            "state": "not_accepted",
+            "operation_ref": operation_ref.to_string(),
+            "input_digest": input_digest,
+            "refusal_code": refusal_code,
+            "durable_refusal_revision": durable_refusal_revision,
+            "exact_key_retry_permitted": true,
+        })),
+        IntentLookup::Unresolved {
+            operation_ref,
+            known_subjects,
+        } => Ok(json!({
+            "schema": LOOKUP_SCHEMA,
+            "namespace": lookup,
+            "state": "unresolved",
+            "operation_ref": operation_ref.to_string(),
+            "known_subjects": known_subjects,
+            "effect": "unresolved",
+            "required_action": "reconcile_operation",
+        })),
+        IntentLookup::Absent { durable_watermark } => Ok(json!({
+            "schema": LOOKUP_SCHEMA,
+            "namespace": lookup,
+            "state": "absent",
+            "proof": {
+                "authoritative": true,
+                "complete": true,
+                "retained_namespace_generation": namespace.controller_generation,
+                "durable_watermark": durable_watermark,
+                "tombstones_checked": true,
+                "matching_operation": false,
+                "matching_tombstone": false,
+            },
+        })),
+    }
+}
+
+struct IntentIdentity {
+    namespace: Namespace,
+    lookup: LookupNamespace,
+    json: String,
+    digest: String,
+}
+
+fn intent_identity(
+    scope: &DelegationScope<'_>,
+    operation_kind: &str,
+    aggregate_scope: Option<(&str, &str)>,
+    idempotency_key: &str,
+    request_schema: &str,
+    body: &Value,
+) -> Result<IntentIdentity, MachineError> {
+    let namespace = Namespace::delegation(
+        &scope.controller.identity,
+        &scope.view.workspace_id,
+        aggregate_scope,
+        operation_kind,
+        idempotency_key,
+    )
+    .map_err(|reason| MachineError::invalid_argument("namespace", reason))?;
+    let request_body = crate::operation::canonical(body)
+        .map_err(|_| MachineError::invalid_argument("request_body", "unrepresentable"))?;
+    let envelope = Envelope {
+        schema: ENVELOPE_SCHEMA.to_owned(),
+        request_schema: request_schema.to_owned(),
+        namespace,
+        trusted_invocation_ref: None,
+        request_body: BytesRef {
+            byte_length: u64::try_from(request_body.len())
+                .map_err(|_| MachineError::invalid_argument("request_body", "unbounded"))?,
+            sha256: format!("sha256:{}", sha256_hex(&request_body)),
+        },
+    };
+    let digest = crate::operation::envelope_digest(&envelope)
+        .map_err(|_| MachineError::invalid_argument("mutation_envelope", "invalid"))?;
+    let namespace = envelope.namespace.clone();
+    Ok(IntentIdentity {
+        lookup: (&namespace).into(),
+        namespace,
+        json: canonical_text(&envelope)?,
+        digest,
+    })
+}
+
+fn build_receipt(
+    namespace: &Namespace,
+    operation_ref: Uuid,
+    accepted_input_digest: &str,
+    accepted_subjects: AcceptedSubjects,
+    accepted_revision: u64,
+) -> Result<OperationReceipt, MachineError> {
+    let mut receipt = OperationReceipt {
+        schema: RECEIPT_SCHEMA.to_owned(),
+        operation_ref: operation_ref.to_string(),
+        namespace: namespace.into(),
+        accepted_input_digest: accepted_input_digest.to_owned(),
+        accepted_subjects,
+        receipt_digest: String::new(),
+        accepted_revision,
+        result_digest: None,
+    };
+    receipt.receipt_digest = receipt.compute_digest()?;
+    receipt
+        .validate()
+        .map_err(|_| MachineError::invalid_argument("operation_receipt", "invalid"))?;
+    Ok(receipt)
+}
+
+/// One assignment acceptance inside its own transaction.
+struct AssignAcceptance<'a> {
+    caller: &'a crate::caller_scope::TrustedCallerScope,
+    engagement_id: Uuid,
+    member_ref: Uuid,
+    task_id: Uuid,
+    namespace: &'a Namespace,
+    accepted_input_digest: &'a str,
+    expected_revision: Option<u64>,
+    objective_sha256: &'a str,
+    external_request_json: &'a Value,
+    request_json: &'a str,
+    /// The exact accepted task bytes, preserved with the acceptance.
+    accepted_contents: &'a crate::successor_capture::AcceptedTaskContents,
+    request_sha256: &'a str,
+    execution_intent: &'a str,
+    deadline_seconds: u64,
+    operation_ref: Uuid,
+    now_ms: i64,
+    workspace_ref: &'a str,
+}
+
+/// A refusal decided inside the acceptance transaction.
+///
+/// It is returned as an error so the transaction rolls back: no task row and
+/// no accounting row may survive a refused assignment (Case A of the round
+/// accounting rules).
+fn assignment_refusal(code: &str, message: &'static str) -> MachineError {
+    MachineError::new(
+        code,
+        message,
+        false,
+        json!({"assignment_refusal": true, "required_action": "fix_request"}),
+    )
+}
+
+fn is_assignment_refusal(error: &MachineError) -> bool {
+    error.details.get("assignment_refusal") == Some(&Value::Bool(true))
+}
+
+/// The in-transaction session re-read of a successor acceptance.
+///
+/// A close intent and its interrupt choice are durable before effects, and
+/// new Broker admission stops at that commit boundary
+/// (docs/specs/README.md:4526-4529): the pre-acceptance `managed_session`
+/// check can race a close intent that commits between it and this
+/// transaction, so the acceptance itself re-reads the session row and refuses
+/// unless it is still the active session of this root. The refusal is an
+/// assignment refusal, so the existing Case A path rolls the transaction
+/// back, records the refusal on the intent and discards the spawn's minted
+/// credential.
+fn require_session_still_active(
+    transaction: &rusqlite::Transaction<'_>,
+    session_id: Uuid,
+    root_run_id: Uuid,
+) -> Result<(), MachineError> {
+    let session: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT status,root_run_id FROM orchestrated_sessions WHERE session_id=?1",
+            [session_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            _ => Err(accounting_unreadable()),
+        })?;
+    match session {
+        Some((status, root)) if status == "active" && root == root_run_id.to_string() => Ok(()),
+        _ => Err(assignment_refusal(
+            "RUN_STATE_CONFLICT",
+            "the session is no longer the active session of this root",
+        )),
+    }
+}
+
+// Test-only interleave point between a successor acceptance's pre-check and
+// its acceptance transaction; never compiled into the real build.
+#[cfg(test)]
+thread_local! {
+    static PRE_ACCEPTANCE_INTERLEAVE: std::cell::RefCell<Option<Box<dyn Fn() + 'static>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install one test interleave; the guard clears it when the test ends.
+#[cfg(test)]
+struct PreAcceptanceHookGuard;
+
+#[cfg(test)]
+impl Drop for PreAcceptanceHookGuard {
+    fn drop(&mut self) {
+        PRE_ACCEPTANCE_INTERLEAVE.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+fn set_pre_acceptance_interleave(hook: impl Fn() + 'static) -> PreAcceptanceHookGuard {
+    PRE_ACCEPTANCE_INTERLEAVE.with(|cell| *cell.borrow_mut() = Some(Box::new(hook)));
+    PreAcceptanceHookGuard
+}
+
+#[cfg(test)]
+fn run_pre_acceptance_interleave() {
+    PRE_ACCEPTANCE_INTERLEAVE.with(|cell| {
+        if let Some(hook) = cell.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
+/// Reserve the task, admit its accounting row, advance the member workload
+/// revision and accept the intent in one transaction.
+fn accept_assign(
+    transaction: &rusqlite::Transaction<'_>,
+    request: AssignAcceptance<'_>,
+) -> Result<(OperationReceipt, u64), MachineError> {
+    let scope_ref = request.engagement_id.to_string();
+    let member = request.member_ref.to_string();
+    // The facade exposes only `member.revision`, so the new-operation fence is
+    // the scoped membership counter (MDC:697); the member workload
+    // revision still advances below for release proofs.
+    let current = engagement::scope_membership_revision(
+        transaction,
+        request.workspace_ref,
+        "external_engagement",
+        &scope_ref,
+    )?;
+    if request
+        .expected_revision
+        .is_some_and(|expected| expected != current)
+    {
+        return Err(assignment_refusal(
+            "REVISION_CONFLICT",
+            "the scoped membership revision moved",
+        ));
+    }
+    let external_json = canonical_text(request.external_request_json)?;
+    let snapshot = match engagement::reserve_external_task_in(
+        transaction,
+        engagement::ExternalTaskReservationCore {
+            engagement_id: request.engagement_id,
+            specialist_run_id: request.member_ref,
+            task_id: request.task_id,
+            // The accepted-task digest is the retained task objective identity.
+            objective_sha256: Some(request.objective_sha256),
+            external_request_json: Some(&external_json),
+            request_json: request.request_json,
+            request_sha256: request.request_sha256,
+            execution_intent: request.execution_intent,
+            // The caller's requested deadline is retained verbatim.
+            deadline_seconds: request.deadline_seconds,
+            now_ms: request.now_ms,
+        },
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) if definitive_admission_refusal(&error.code) => {
+            return Err(assignment_refusal(
+                &error.code,
+                "the engagement cannot accept this task",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    engagement::retain_accepted_task_content(
+        transaction,
+        request.task_id,
+        &request.accepted_contents.task_body,
+        &request.accepted_contents.contexts,
+        request.accepted_contents.target.as_deref(),
+        request.now_ms,
+    )?;
+    if let Err(error) = crate::caller_scope::admit(
+        transaction,
+        &crate::caller_scope::CallerAssignment {
+            assignment_id: request.task_id,
+            workspace_ref: request.workspace_ref,
+            aggregate_scope_kind: "external_engagement",
+            aggregate_scope_ref: &scope_ref,
+            member_ref: request.member_ref,
+        },
+        request.caller,
+        request.now_ms,
+    ) {
+        if definitive_accounting_refusal(&error.code) {
+            return Err(assignment_refusal(
+                &error.code,
+                "the caller scope refused this assignment",
+            ));
+        }
+        return Err(error);
+    }
+    // The member workload revision still advances for later release proofs.
+    engagement::advance_member_workload_revision(
+        transaction,
+        request.workspace_ref,
+        "external_engagement",
+        &scope_ref,
+        &member,
+    )?;
+    // The scoped membership counter advances on admission, terminal
+    // transition and release only, so this assignment reads it for the fence and
+    // the receipt and advances only the member workload revision.
+    let revision = current;
+    let subjects = AcceptedSubjects {
+        run_ref: Some(member.clone()),
+        member_ref: Some(member),
+        task_ref: Some(request.task_id.to_string()),
+        ..AcceptedSubjects::default()
+    };
+    let receipt = build_receipt(
+        request.namespace,
+        request.operation_ref,
+        request.accepted_input_digest,
+        subjects,
+        revision,
+    )?;
+    engagement::intent_accept(transaction, request.operation_ref, &receipt, request.now_ms)?;
+    let _ = snapshot;
+    Ok((receipt, revision))
+}
+
+/// The codes an assignment reservation reports for a definitive refusal.
+fn definitive_accounting_refusal(code: &str) -> bool {
+    matches!(code, "ROUNDS_EXHAUSTED" | "SPECIALIST_POLICY_DENIED")
+}
+
+/// One admission attempt inside the hire acceptance transaction.
+struct HireAcceptance<'a> {
+    engagement_id: Uuid,
+    operation_ref: Uuid,
+    namespace: &'a Namespace,
+    accepted_input_digest: &'a str,
+    expected_revision: Option<u64>,
+    specialist_run_id: Uuid,
+    role_ref: &'a str,
+    configuration_json: &'a str,
+    configuration_sha256: &'a str,
+    requested_access: &'a str,
+    request_payload: &'a str,
+    now_ms: i64,
+}
+
+/// The accepted half of one hire admission; boxed because it dominates the
+/// refusal variant.
+struct HireAccepted {
+    reservation: engagement::ExternalHireReservation,
+    receipt: OperationReceipt,
+    revision: u64,
+}
+
+enum HireAdmission {
+    Accepted(Box<HireAccepted>),
+    /// A definitive admission refusal, under the code the reservation returned.
+    Refused {
+        code: String,
+        message: &'static str,
+    },
+}
+
+/// Admit one reserved member, advance the scoped membership revision and accept
+/// the intent in one transaction, or report a definitive refusal.
+fn accept_hire(
+    transaction: &rusqlite::Transaction<'_>,
+    request: HireAcceptance<'_>,
+) -> Result<HireAdmission, MachineError> {
+    let scope_ref = request.engagement_id.to_string();
+    let current = engagement::scope_membership_revision(
+        transaction,
+        &request.namespace.workspace_ref,
+        "external_engagement",
+        &scope_ref,
+    )?;
+    if request
+        .expected_revision
+        .is_some_and(|expected| expected != current)
+    {
+        return Ok(HireAdmission::Refused {
+            code: "REVISION_CONFLICT".to_owned(),
+            message: "the engagement membership revision moved",
+        });
+    }
+    let reservation = match engagement::reserve_external_hire_in(
+        transaction,
+        engagement::ExternalHireReservationCore {
+            engagement_id: request.engagement_id,
+            hire_operation_id: request.operation_ref,
+            specialist_run_id: request.specialist_run_id,
+            role_ref: request.role_ref,
+            configuration_json: request.configuration_json,
+            configuration_sha256: request.configuration_sha256,
+            // A successor hire carries no separate objective.
+            objective_sha256: None,
+            requested_access: request.requested_access,
+            event_payload: request.request_payload,
+            now_ms: request.now_ms,
+        },
+    ) {
+        Ok(reservation) => reservation,
+        Err(error) if definitive_admission_refusal(&error.code) => {
+            // The durable refusal keeps the code the reservation actually
+            // returned, so lookup reports it verbatim.
+            return Ok(HireAdmission::Refused {
+                code: error.code,
+                message: "the engagement cannot admit this member",
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let revision = engagement::advance_scope_membership_revision(
+        transaction,
+        &request.namespace.workspace_ref,
+        "external_engagement",
+        &scope_ref,
+    )?;
+    let subjects = AcceptedSubjects {
+        run_ref: Some(reservation.specialist_run_id.to_string()),
+        member_ref: Some(reservation.specialist_run_id.to_string()),
+        ..AcceptedSubjects::default()
+    };
+    let receipt = build_receipt(
+        request.namespace,
+        request.operation_ref,
+        request.accepted_input_digest,
+        subjects,
+        revision,
+    )?;
+    engagement::intent_accept(transaction, request.operation_ref, &receipt, request.now_ms)?;
+    Ok(HireAdmission::Accepted(Box::new(HireAccepted {
+        reservation,
+        receipt,
+        revision,
+    })))
+}
+
+/// The codes a member reservation reports for a definitive admission refusal.
+fn definitive_admission_refusal(code: &str) -> bool {
+    matches!(
+        code,
+        "ENGAGEMENT_NOT_FOUND"
+            | "STATE_CONFLICT"
+            | "SPECIALIST_NOT_MEMBER"
+            | "SPECIALIST_POLICY_DENIED"
+            | "INTERRUPTED_UNKNOWN"
+            | "INVALID_ARGUMENT"
+    )
+}
+
+/// The static qualification the worker verifies against its actual session.
+pub(crate) fn qualified_successor_review(manifest: &crate::run::RunManifest) -> bool {
+    manifest.schema_version == 4
+        && manifest.initial_access == crate::domain::Access::Read
+        && manifest.purpose.kind == crate::domain::PurposeKind::Review
+        && manifest
+            .agent_configuration
+            .admitted_configuration
+            .as_ref()
+            .is_some_and(|configuration| {
+                configuration.purpose_kind == "review"
+                    && configuration.requested_access == "read_only"
+            })
+        && manifest.aggregate_binding.as_ref().is_some_and(|binding| {
+            binding.member_kind == crate::run::AggregateMemberKind::Specialist
+        })
+        && manifest
+            .global_profile_binding
+            .as_ref()
+            .is_some_and(|binding| binding.checked_review_supported())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_checked_task(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    member: Uuid,
+    configuration: &crate::run::AgentConfigurationSnapshot,
+    task: &crate::task_request::SpecialistTaskRequest,
+    intent: &str,
+    target: Option<&crate::review::ReviewTargetRequest>,
+) -> Result<(), MachineError> {
+    if task.expected_output != "structured_review_v4" {
+        return Ok(());
+    }
+    task.validate_review()?;
+    if target.is_none() {
+        return Err(MachineError::invalid_argument(
+            "target",
+            "checked v4 review requires an explicit target",
+        ));
+    }
+    let refused = crate::direct_review_target::reading_boundary_unsupported;
+    if intent != "read_only" || configuration.purpose.kind != crate::domain::PurposeKind::Review {
+        return Err(refused());
+    }
+    let manifest =
+        crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, scope.state_root)
+            .load_manifest(member)?;
+    let kind = match owner {
+        SettlementOwner::External { .. } => {
+            crate::domain::AggregateKind::ExternalSpecialistEngagement
+        }
+        SettlementOwner::Managed { .. } => crate::domain::AggregateKind::OrchestratedSession,
+    };
+    if !qualified_successor_review(&manifest)
+        || manifest.workspace_id != scope.view.workspace_id
+        || manifest.agent_configuration.admitted_configuration
+            != configuration.admitted_configuration
+        || manifest.aggregate_binding.as_ref().is_none_or(|binding| {
+            binding.aggregate_kind != kind || binding.aggregate_id != owner.scope_ref()
+        })
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+/// Load one task's reader from retained acceptance; a recorded Turn forbids creation.
+pub(crate) fn successor_task_reader(
+    state_root: &std::path::Path,
+    manifest: &crate::run::RunManifest,
+    task_ref: Uuid,
+    create: bool,
+) -> Result<Option<crate::direct_review_target::DirectTargetReader>, MachineError> {
+    let refused = || crate::direct_review_target::provenance_invalid(task_ref);
+    let binding = manifest.aggregate_binding.as_ref().ok_or_else(refused)?;
+    let store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
+    let (accepted, member, recorded) = match binding.aggregate_kind {
+        crate::domain::AggregateKind::ExternalSpecialistEngagement => {
+            let task = store.external_task(binding.aggregate_id, task_ref)?;
+            (
+                store
+                    .external_task_identity(binding.aggregate_id, task_ref)?
+                    .ok_or_else(refused)?,
+                task.specialist_run_id,
+                task.turn_id.is_some(),
+            )
+        }
+        crate::domain::AggregateKind::OrchestratedSession => {
+            let facts = crate::orchestration::successor_task(
+                store.connection(),
+                binding.aggregate_id,
+                task_ref,
+            )?
+            .ok_or_else(refused)?;
+            (
+                crate::successor_capture::retained_accepted_task(&facts.accepted_request_json)?,
+                Uuid::parse_str(&facts.member_ref).map_err(|_| refused())?,
+                facts.target_turn_id.is_some(),
+            )
+        }
+    };
+    if member != manifest.run_id {
+        return Err(refused());
+    }
+    if accepted.expected_output_schema != "structured_review_v4" {
+        return Ok(None);
+    }
+    if !qualified_successor_review(manifest) || accepted.execution_intent != "read_only" {
+        return Err(crate::direct_review_target::reading_boundary_unsupported());
+    }
+    let (task_body, contexts, target) =
+        engagement::accepted_task_content(store.connection(), task_ref)?.ok_or_else(refused)?;
+    let contents = crate::successor_capture::AcceptedTaskContents {
+        task_body,
+        contexts,
+        target,
+    };
+    let task: crate::task_request::SpecialistTaskRequest =
+        serde_json::from_slice(&contents.task_body).map_err(|_| refused())?;
+    let (deadline, recorded_digest) = match binding.aggregate_kind {
+        crate::domain::AggregateKind::ExternalSpecialistEngagement => {
+            let key: String = store.connection().query_row("SELECT idempotency_key FROM delegation_operations WHERE workspace_ref=?1 AND scope_kind='external_engagement' AND scope_ref=?2 AND operation_kind='assign_external_specialist_task' AND state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref')=?3", rusqlite::params![manifest.workspace_id, binding.aggregate_id.to_string(), task_ref.to_string()], |row| row.get(0)).map_err(|_| refused())?;
+            (
+                store
+                    .external_task_dispatch_facts(binding.aggregate_id, task_ref)?
+                    .1,
+                store
+                    .accepted_assignment_body_digest(
+                        &manifest.workspace_id,
+                        binding.aggregate_id,
+                        &key,
+                    )?
+                    .ok_or_else(refused)?,
+            )
+        }
+        crate::domain::AggregateKind::OrchestratedSession => {
+            let facts = crate::orchestration::successor_task(
+                store.connection(),
+                binding.aggregate_id,
+                task_ref,
+            )?
+            .ok_or_else(refused)?;
+            let marker: Value = serde_json::from_str(&facts.request_json).map_err(|_| refused())?;
+            (
+                marker["deadline_seconds"].as_u64().ok_or_else(refused)?,
+                format!("sha256:{}", facts.source_request_sha256),
+            )
+        }
+    };
+    if !crate::successor_capture::verify_accepted_assignment(
+        manifest.run_id,
+        &task,
+        &accepted,
+        deadline,
+        &recorded_digest,
+    )? || manifest
+        .agent_configuration
+        .admitted_configuration
+        .as_ref()
+        .ok_or_else(refused)?
+        .digest()?
+        != accepted.agent_configuration_digest
+        || manifest
+            .instructions
+            .delegation()
+            .ok_or_else(refused)?
+            .role_snapshot_digest
+            != accepted.role_snapshot_digest
+    {
+        return Err(refused());
+    }
+    contents.prompt(&accepted, "read_only", deadline)?;
+
+    let target: crate::direct_review_target::DirectTarget =
+        serde_json::from_slice(contents.target.as_deref().ok_or_else(refused)?)
+            .map_err(|_| refused())?;
+    if target.workspace_id != manifest.workspace_id {
+        return Err(refused());
+    }
+    crate::direct_review_target::DirectTargetReader::create_for_admitted_task(
+        state_root,
+        &manifest.canonical_workspace.to_path_buf()?,
+        manifest.workspace_mode,
+        task_ref,
+        manifest.run_id,
+        target,
+        create && !recorded,
+    )
+    .map(Some)
+}
+
+/// Restart restores an existing active task reader without creating or re-admitting.
+pub(crate) fn successor_restart_reader(
+    state_root: &std::path::Path,
+    manifest: &crate::run::RunManifest,
+) -> Result<Option<crate::direct_review_target::DirectTargetReader>, MachineError> {
+    let binding = manifest
+        .aggregate_binding
+        .as_ref()
+        .ok_or_else(|| crate::direct_review_target::provenance_invalid(manifest.run_id))?;
+    let store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
+    let tasks = match binding.aggregate_kind {
+        crate::domain::AggregateKind::ExternalSpecialistEngagement => store
+            .external_active_tasks(binding.aggregate_id)?
+            .into_iter()
+            .filter(|task| task.specialist_run_id == manifest.run_id)
+            .map(|task| (task.task_id, task.turn_id.is_some()))
+            .collect(),
+        crate::domain::AggregateKind::OrchestratedSession => {
+            crate::orchestration::active_successor_task_refs(
+                store.connection(),
+                binding.aggregate_id,
+                manifest.run_id,
+            )?
+        }
+    };
+    let mut selected = None;
+    for (task, recorded) in tasks {
+        if !recorded
+            && !state_root
+                .join("direct-reviews")
+                .join(task.to_string())
+                .try_exists()
+                .map_err(|_| {
+                    MachineError::new(
+                        "RUNTIME_STATE_INVALID",
+                        "task reader is unobservable",
+                        false,
+                        json!({}),
+                    )
+                })?
+        {
+            continue;
+        }
+        if let Some(reader) = successor_task_reader(state_root, manifest, task, false)? {
+            if selected.is_some() {
+                return Err(crate::direct_review_target::provenance_invalid(task));
+            }
+            selected = Some(reader);
+        }
+    }
+    Ok(selected)
+}
+
+/// Resolve a new target only after scope authentication and before any intent.
+fn admit_assignment_target(
+    scope: &DelegationScope<'_>,
+    request: Option<&crate::review::ReviewTargetRequest>,
+) -> Result<Option<(String, Vec<u8>)>, MachineError> {
+    request
+        .map(|request| {
+            request.validate()?;
+            let target = crate::direct_review_target::DirectTarget::admit(
+                &scope.view.canonical_path.to_path_buf()?,
+                scope.view.mode,
+                &request.kind,
+                request.revision.as_deref(),
+                Uuid::now_v7(),
+            )?;
+            Ok((target.target_sha256.clone(), target.metadata_bytes()?))
+        })
+        .transpose()
+}
+
+/// Replay uses the accepted manifest's selection, never current Git refs.
+#[allow(clippy::too_many_arguments)]
+fn assignment_replay(
+    scope: &DelegationScope<'_>,
+    store: &EngagementStore,
+    owner: SettlementOwner,
+    member: Uuid,
+    task: &crate::task_request::SpecialistTaskRequest,
+    intent: &str,
+    target: Option<&crate::review::ReviewTargetRequest>,
+    deadline: u64,
+    key: &str,
+) -> Result<Option<OperationReceipt>, MachineError> {
+    let (operation, schema) = match owner {
+        SettlementOwner::External { .. } => ("assign_external_specialist_task", ASSIGN_BODY_SCHEMA),
+        SettlementOwner::Managed { .. } => ("assign_specialist_task", ASSIGN_MANAGED_BODY_SCHEMA),
+    };
+    let scope_ref = owner.scope_ref().to_string();
+    let aggregate = Some((owner.scope_kind(), scope_ref.as_str()));
+    let namespace = Namespace::delegation(
+        &scope.controller.identity,
+        &scope.view.workspace_id,
+        aggregate,
+        operation,
+        key,
+    )
+    .map_err(|reason| MachineError::invalid_argument("namespace", reason))?;
+    let observed = managed_lookup(store, &(&namespace).into(), operation, aggregate, key)?;
+    let receipt = match observed {
+        IntentLookup::Accepted(receipt) => *receipt,
+        IntentLookup::Unresolved { operation_ref, .. } => {
+            return Err(unresolved_refusal(operation, operation_ref));
+        }
+        _ => return Ok(None),
+    };
+    let operation_ref = replay_operation_ref(&receipt);
+    let check = (|| {
+        let bad = || {
+            MachineError::new(
+                "RECOVERY_REQUIRED",
+                "the retained assignment is inconsistent",
+                false,
+                json!({"required_action":"restore_state"}),
+            )
+        };
+        let task_id = Uuid::parse_str(
+            receipt
+                .accepted_subjects
+                .task_ref
+                .as_deref()
+                .ok_or_else(bad)?,
+        )
+        .map_err(|_| bad())?;
+        let original_member = Uuid::parse_str(
+            receipt
+                .accepted_subjects
+                .member_ref
+                .as_deref()
+                .ok_or_else(bad)?,
+        )
+        .map_err(|_| bad())?;
+        let (mut accepted, original_deadline) = match owner {
+            SettlementOwner::External { engagement_id } => {
+                let accepted = store
+                    .external_task_identity(engagement_id, task_id)?
+                    .ok_or_else(bad)?;
+                let (_, deadline) = store.external_task_dispatch_facts(engagement_id, task_id)?;
+                (accepted, deadline)
+            }
+            SettlementOwner::Managed { session_id } => {
+                let facts =
+                    crate::orchestration::successor_task(store.connection(), session_id, task_id)?
+                        .ok_or_else(bad)?;
+                let marker: Value = serde_json::from_str(&facts.request_json).map_err(|_| bad())?;
+                (
+                    crate::successor_capture::retained_accepted_task(&facts.accepted_request_json)?,
+                    marker["deadline_seconds"].as_u64().ok_or_else(bad)?,
+                )
+            }
+        };
+        let (task_body, contexts, manifest) =
+            engagement::accepted_task_content(store.connection(), task_id)?.ok_or_else(bad)?;
+        let contents = crate::successor_capture::AcceptedTaskContents {
+            task_body,
+            contexts,
+            target: manifest,
+        };
+        contents.prompt(&accepted, &accepted.execution_intent, original_deadline)?;
+        let original_task: crate::task_request::SpecialistTaskRequest =
+            serde_json::from_slice(&contents.task_body).map_err(|_| bad())?;
+        let original = crate::successor_capture::assignment_body(
+            original_member,
+            &original_task,
+            &accepted,
+            original_deadline,
+        )?;
+        if intent_identity(scope, operation, aggregate, key, schema, &original)?.digest
+            != receipt.accepted_input_digest
+        {
+            return Err(bad());
+        }
+        let selection = contents
+            .target
+            .as_ref()
+            .map(|bytes| {
+                serde_json::from_slice::<crate::direct_review_target::DirectTarget>(bytes)
+                    .map_err(|_| bad())
+            })
+            .transpose()?;
+        match (target, selection) {
+            (Some(request), Some(retained))
+                if request.kind == retained.kind
+                    && request.revision == retained.requested_revision => {}
+            (None, None) => {}
+            _ => return Err(idempotency_conflict()),
+        }
+        accepted.execution_intent = intent.to_owned();
+        let body = crate::successor_capture::assignment_body(member, task, &accepted, deadline)?;
+        let identity = intent_identity(scope, operation, aggregate, key, schema, &body)?;
+        replay_outcome(
+            IntentLookup::Accepted(Box::new(receipt)),
+            &identity.digest,
+            operation,
+        )
+    })();
+    accepted_boundary(operation, Some(operation_ref), check)
+}
+
+fn replay(
+    store: &EngagementStore,
+    lookup: &LookupNamespace,
+    accepted_input_digest: &str,
+    operation_kind: &str,
+) -> Result<Option<OperationReceipt>, MachineError> {
+    replay_outcome(
+        store.intent_lookup(lookup)?,
+        accepted_input_digest,
+        operation_kind,
+    )
+}
+
+/// The one managed replay: retained intent first, then the Broker key namespace.
+///
+/// A retained successor intent answers its own key (MDC:66-68); only a key with
+/// no retained intent is checked against the Broker tables, so a legacy Broker
+/// row can never be reported `absent` or adopted as new.
+fn managed_replay(
+    store: &EngagementStore,
+    session_id: Uuid,
+    idempotency_key: &str,
+    lookup: &LookupNamespace,
+    accepted_input_digest: &str,
+    operation_kind: &str,
+) -> Result<Option<OperationReceipt>, MachineError> {
+    let transaction = store.connection().unchecked_transaction().map_err(|_| {
+        MachineError::new(
+            "INTERNAL_ERROR",
+            "the engagement read transaction is unavailable",
+            false,
+            json!({"invariant": "managed_replay"}),
+        )
+    })?;
+    let observed = engagement::intent_lookup(&transaction, lookup)?;
+    let observed = match &observed {
+        IntentLookup::Accepted(_) | IntentLookup::Unresolved { .. } => observed,
+        _ => {
+            require_broker_key_free(&transaction, session_id, idempotency_key, operation_kind)?;
+            observed
+        }
+    };
+    drop(transaction);
+    replay_outcome(observed, accepted_input_digest, operation_kind)
+}
+
+/// The one closed four-state replay outcome every keyed owner shares.
+fn replay_outcome(
+    lookup: IntentLookup,
+    accepted_input_digest: &str,
+    operation_kind: &str,
+) -> Result<Option<OperationReceipt>, MachineError> {
+    match lookup {
+        IntentLookup::Accepted(receipt) => {
+            if receipt.accepted_input_digest != accepted_input_digest {
+                return Err(idempotency_conflict());
+            }
+            Ok(Some(*receipt))
+        }
+        IntentLookup::Unresolved { operation_ref, .. } => {
+            Err(unresolved_refusal(operation_kind, operation_ref))
+        }
+        IntentLookup::NotAccepted { .. } | IntentLookup::Absent { .. } => Ok(None),
+    }
+}
+
+/// One successor lookup: retained intent first, then the Broker key namespace.
+///
+/// A managed key the session's Broker tables own is a typed compatibility refusal
+/// and never `absent`; every namespace outside the managed kinds keeps
+/// its existing four-state read unchanged.
+fn managed_lookup(
+    store: &EngagementStore,
+    lookup: &LookupNamespace,
+    operation_kind: &str,
+    aggregate_scope: Option<(&str, &str)>,
+    idempotency_key: &str,
+) -> Result<IntentLookup, MachineError> {
+    let Some(session_id) = managed_scope_session(operation_kind, aggregate_scope) else {
+        return store.intent_lookup(lookup);
+    };
+    let transaction = store.connection().unchecked_transaction().map_err(|_| {
+        MachineError::new(
+            "INTERNAL_ERROR",
+            "the engagement read transaction is unavailable",
+            false,
+            json!({"invariant": "managed_lookup"}),
+        )
+    })?;
+    let observed = engagement::intent_lookup(&transaction, lookup)?;
+    let observed = match &observed {
+        IntentLookup::Accepted(_) | IntentLookup::Unresolved { .. } => observed,
+        _ => {
+            require_broker_key_free(&transaction, session_id, idempotency_key, operation_kind)?;
+            observed
+        }
+    };
+    drop(transaction);
+    Ok(observed)
+}
+
+/// The Orchestrated Session one managed operation kind belongs to, if any.
+fn managed_scope_session(
+    operation_kind: &str,
+    aggregate_scope: Option<(&str, &str)>,
+) -> Option<Uuid> {
+    if !matches!(
+        operation_kind,
+        "spawn_specialist" | "assign_specialist_task"
+    ) {
+        return None;
+    }
+    match aggregate_scope {
+        Some(("orchestrated_session", scope)) => Uuid::parse_str(scope).ok(),
+        _ => None,
+    }
+}
+
+fn member_admission_view(
+    store: &EngagementStore,
+    snapshot: &RetainedSnapshot,
+    instructions: &crate::delegation_identity::InstructionSnapshot,
+    receipt: &OperationReceipt,
+) -> Result<MemberAdmissionView, MachineError> {
+    let member_ref = receipt
+        .accepted_subjects
+        .member_ref
+        .as_deref()
+        .ok_or_else(|| MachineError::invalid_argument("receipt", "the receipt names no member"))?;
+    let member_id = Uuid::parse_str(member_ref)
+        .map_err(|_| MachineError::invalid_argument("receipt", "invalid member identity"))?;
+    let engagement_id = receipt
+        .namespace
+        .scope_ref
+        .as_deref()
+        .and_then(|scope| Uuid::parse_str(scope).ok())
+        .ok_or_else(|| MachineError::invalid_argument("receipt", "invalid engagement scope"))?;
+    let (state, residency) = store.external_member_state(engagement_id, member_id)?;
+    let revision = store.scope_membership_revision(
+        &receipt.namespace.workspace_ref,
+        "external_engagement",
+        &engagement_id.to_string(),
+    )?;
+    // The public member view publishes the admitted configuration's domain
+    // digest; the runtime snapshot hash stays internal (MDC:608).
+    let public_configuration_digest = snapshot.admitted.digest()?;
+    Ok(MemberAdmissionView {
+        member: DelegationMemberView {
+            member_ref: member_id.to_string(),
+            run_ref: member_id.to_string(),
+            scope_kind: "external_engagement".to_owned(),
+            scope_ref: engagement_id.to_string(),
+            role_ref: snapshot.role_name().to_owned(),
+            role_snapshot_digest: instructions.role_snapshot_digest.clone(),
+            agent_configuration_digest: public_configuration_digest,
+            state: member_state(&state, &residency).to_owned(),
+            revision,
+        },
+        receipt: receipt.clone(),
+        ambient_guidance: ambient_guidance(snapshot)?,
+    })
+}
+
+/// The closed member state derived from the member row and its Run residency.
+fn member_state(state: &str, residency: &str) -> &'static str {
+    match (state, residency) {
+        ("provisioning", _) => "provisioning",
+        ("active", "recovering") | ("degraded", "recovering") => "unknown",
+        ("active", _) => "idle",
+        ("releasing", _) => "releasing",
+        ("released", _) | ("retired", _) => "released",
+        ("degraded", "unavailable") => "unknown",
+        _ => "unknown",
+    }
+}
+
+/// The retained result of one open: the engagement as it was created.
+///
+/// A keyed replay returns this original result, never a later observation, so
+/// the response cannot drift as members join (MDC:66-68).
+fn opened_engagement(
+    workspace_ref: &str,
+    receipt: &OperationReceipt,
+) -> Result<DelegationEngagementView, MachineError> {
+    let engagement_id = receipt
+        .accepted_subjects
+        .engagement_ref
+        .as_deref()
+        .and_then(|scope| Uuid::parse_str(scope).ok())
+        .ok_or_else(|| MachineError::invalid_argument("receipt", "invalid engagement identity"))?;
+    Ok(DelegationEngagementView {
+        engagement_ref: engagement_id.to_string(),
+        workspace_ref: workspace_ref.to_owned(),
+        state: "open".to_owned(),
+        revision: 1,
+        members: Vec::new(),
+        next_cursor: None,
+    })
+}
+
+/// The closed `lookup_accepted.current_outcome` derivation.
+fn current_outcome(
+    store: &EngagementStore,
+    operation_kind: &str,
+    receipt: &OperationReceipt,
+) -> Result<&'static str, MachineError> {
+    match operation_kind {
+        // Install and open have no delegated execution to observe.
+        "install_provisioning" | "open_external_engagement" => Ok("completed"),
+        "assign_external_specialist_task" => {
+            let task_ref = receipt
+                .accepted_subjects
+                .task_ref
+                .as_deref()
+                .ok_or_else(|| {
+                    MachineError::invalid_argument("receipt", "the receipt names no task")
+                })?;
+            let task_id = Uuid::parse_str(task_ref)
+                .map_err(|_| MachineError::invalid_argument("receipt", "invalid task identity"))?;
+            let engagement_id = receipt
+                .namespace
+                .scope_ref
+                .as_deref()
+                .and_then(|scope| Uuid::parse_str(scope).ok())
+                .ok_or_else(|| {
+                    MachineError::invalid_argument("receipt", "invalid engagement scope")
+                })?;
+            let snapshot = store.external_task(engagement_id, task_id)?;
+            Ok(match snapshot.state.as_str() {
+                "accepted" | "queued" | "claimed" => "pending",
+                "dispatching" | "running" => "running",
+                "completed_not_delivered" | "delivered" => "completed",
+                "failed" => "failed",
+                "cancelled" => "cancelled",
+                "expired" => "expired",
+                _ => "unknown",
+            })
+        }
+        "hire_external_specialist" => {
+            let member_ref = receipt
+                .accepted_subjects
+                .member_ref
+                .as_deref()
+                .ok_or_else(|| {
+                    MachineError::invalid_argument("receipt", "the receipt names no member")
+                })?;
+            let member_id = Uuid::parse_str(member_ref).map_err(|_| {
+                MachineError::invalid_argument("receipt", "invalid member identity")
+            })?;
+            let engagement_id = receipt
+                .namespace
+                .scope_ref
+                .as_deref()
+                .and_then(|scope| Uuid::parse_str(scope).ok())
+                .ok_or_else(|| {
+                    MachineError::invalid_argument("receipt", "invalid engagement scope")
+                })?;
+            let (state, residency) = store.external_member_state(engagement_id, member_id)?;
+            Ok(match (state.as_str(), residency.as_str()) {
+                ("provisioning", _) => "pending",
+                ("active", "recovering") | ("degraded", "recovering") | ("unknown", _) => "unknown",
+                ("degraded", "unavailable") => "failed",
+                ("degraded", _) => "unknown",
+                _ => "completed",
+            })
+        }
+        "spawn_specialist" => {
+            // The managed analogue of the hire arm: the Broker member row and its
+            // Run residency are the only facts that decide the outcome.
+            let member_ref = receipt
+                .accepted_subjects
+                .member_ref
+                .as_deref()
+                .ok_or_else(|| {
+                    MachineError::invalid_argument("receipt", "the receipt names no member")
+                })?;
+            let member_id = Uuid::parse_str(member_ref).map_err(|_| {
+                MachineError::invalid_argument("receipt", "invalid member identity")
+            })?;
+            let session_id = receipt
+                .namespace
+                .scope_ref
+                .as_deref()
+                .and_then(|scope| Uuid::parse_str(scope).ok())
+                .ok_or_else(|| {
+                    MachineError::invalid_argument("receipt", "invalid session scope")
+                })?;
+            let facts =
+                crate::orchestration::successor_member(store.connection(), session_id, member_id)?
+                    .ok_or_else(|| {
+                        MachineError::invalid_argument("receipt", "the receipt names no member")
+                    })?;
+            Ok(
+                match (
+                    facts.membership_state.as_str(),
+                    facts.actor_residency.as_str(),
+                ) {
+                    ("provisioning", _) => "pending",
+                    ("active", "recovering") | ("degraded", "recovering") | ("unknown", _) => {
+                        "unknown"
+                    }
+                    ("degraded", "unavailable") => "failed",
+                    ("degraded", _) => "unknown",
+                    _ => "completed",
+                },
+            )
+        }
+        "assign_specialist_task" => {
+            // The managed task's own Broker row is the execution fact.
+            let task_ref = receipt
+                .accepted_subjects
+                .task_ref
+                .as_deref()
+                .ok_or_else(|| {
+                    MachineError::invalid_argument("receipt", "the receipt names no task")
+                })?;
+            let task_id = Uuid::parse_str(task_ref)
+                .map_err(|_| MachineError::invalid_argument("receipt", "invalid task identity"))?;
+            let session_id = receipt
+                .namespace
+                .scope_ref
+                .as_deref()
+                .and_then(|scope| Uuid::parse_str(scope).ok())
+                .ok_or_else(|| {
+                    MachineError::invalid_argument("receipt", "invalid session scope")
+                })?;
+            let facts =
+                crate::orchestration::successor_task(store.connection(), session_id, task_id)?
+                    .ok_or_else(|| {
+                        MachineError::invalid_argument("receipt", "the receipt names no task")
+                    })?;
+            Ok(match facts.state.as_str() {
+                "accepted" | "queued" | "claimed" => "pending",
+                "dispatching" | "running" => "running",
+                "completed_not_delivered" | "delivered" => "completed",
+                "failed" => "failed",
+                "cancelled" => "cancelled",
+                "expired" => "expired",
+                _ => "unknown",
+            })
+        }
+        _ => Ok("completed"),
+    }
+}
+
+fn ambient_guidance(
+    snapshot: &RetainedSnapshot,
+) -> Result<AmbientGuidanceDisclosure, MachineError> {
+    let binding = snapshot.profile_binding();
+    observe_profile_ambient(
+        Path::new(&binding.launch_snapshot.canonical_codex_home),
+        &format!("sha256:{}", binding.digest()?),
+    )
+}
+
+fn open_store(scope: &DelegationScope<'_>) -> Result<EngagementStore, MachineError> {
+    EngagementStore::open(&EngagementStore::workspace_database_path(scope.state_root))
+}
+
+fn checked_key(idempotency_key: &str) -> Result<&str, MachineError> {
+    if idempotency_key.is_empty() || idempotency_key.len() > 256 {
+        return Err(MachineError::invalid_argument(
+            "idempotency_key",
+            "an idempotency key is 1..=256 bytes",
+        ));
+    }
+    Ok(idempotency_key)
+}
+
+fn canonical_text(value: &impl Serialize) -> Result<String, MachineError> {
+    let text = serde_json::to_string(value)
+        .map_err(|_| MachineError::invalid_argument("value", "unrepresentable"))?;
+    let canonical = canonicalize(
+        &parse(&text).map_err(|_| MachineError::invalid_argument("value", "invalid"))?,
+    )
+    .map_err(|_| MachineError::invalid_argument("value", "invalid"))?;
+    String::from_utf8(canonical).map_err(|_| MachineError::invalid_argument("value", "invalid"))
+}
+
+fn now_ms() -> Result<i64, MachineError> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| MachineError::invalid_argument("clock", "unavailable"))?
+            .as_millis(),
+    )
+    .map_err(|_| MachineError::invalid_argument("clock", "unavailable"))
+}
+
+fn successor_error(
+    code: &str,
+    operation_kind: &str,
+    operation_ref: Option<Uuid>,
+    effect: &str,
+    classification: &str,
+    required_action: &str,
+    message: &str,
+) -> MachineError {
+    MachineError::new(
+        code,
+        message,
+        false,
+        json!({
+            "schema": "dolgorae.successor-error/v1",
+            "code": code,
+            "operation_kind": operation_kind,
+            "operation_ref": operation_ref.map(|id| id.to_string()),
+            "effect": effect,
+            "classification": classification,
+            "required_action": required_action,
+            "retry_new_key": false,
+        }),
+    )
+}
+
+/// One successor error boundary for every public entry point.
+///
+/// Any error that leaves this module is `dolgorae.successor-error/v1` with all
+/// required fields, and it always keeps the original safe code.
+fn boundary<T>(operation_kind: &str, result: Result<T, MachineError>) -> Result<T, MachineError> {
+    result.map_err(|error| successor_boundary_error(error, operation_kind))
+}
+
+fn successor_boundary_error(error: MachineError, operation_kind: &str) -> MachineError {
+    successor_boundary_error_at(error, operation_kind, None)
+}
+
+fn successor_boundary_error_at(
+    error: MachineError,
+    operation_kind: &str,
+    operation_ref: Option<Uuid>,
+) -> MachineError {
+    if error.details.get("schema").and_then(Value::as_str) == Some(SUCCESSOR_ERROR_SCHEMA) {
+        return error;
+    }
+    let (effect, classification, required_action) = match error.code.as_str() {
+        "DELEGATION_NAMESPACE_UNSET" => ("none", "Rejected", "restore_state"),
+        "RECOVERY_REQUIRED" => ("none", "RecoveryNeeded", "restore_state"),
+        "IDEMPOTENCY_CONFLICT" => ("none", "Rejected", "lookup_original_key"),
+        "INTERNAL_ERROR" => ("none", "RecoveryNeeded", "reconcile_operation"),
+        _ => ("none", "Rejected", "fix_request"),
+    };
+    successor_error(
+        &error.code,
+        operation_kind,
+        operation_ref,
+        effect,
+        classification,
+        required_action,
+        &error.message,
+    )
+}
+
+/// A failure after a durable intent reports that effect: the retained intent is
+/// no longer accepted, so this key stays unresolved until it is reconciled .
+fn unresolved_effect(
+    code: &str,
+    operation_kind: &str,
+    operation_ref: Uuid,
+    message: &str,
+) -> MachineError {
+    successor_error(
+        code,
+        operation_kind,
+        Some(operation_ref),
+        "unresolved",
+        "Unknown",
+        "reconcile_operation",
+        message,
+    )
+}
+
+/// A failure after the acceptance commit keeps the accepted effect.
+fn accepted_boundary<T>(
+    operation_kind: &str,
+    operation_ref: Option<Uuid>,
+    result: Result<T, MachineError>,
+) -> Result<T, MachineError> {
+    result.map_err(|error| accepted_error(operation_kind, operation_ref, error))
+}
+
+fn accepted_error(
+    operation_kind: &str,
+    operation_ref: Option<Uuid>,
+    error: MachineError,
+) -> MachineError {
+    if error.details.get("schema").and_then(Value::as_str) == Some(SUCCESSOR_ERROR_SCHEMA) {
+        return error;
+    }
+    successor_error(
+        &error.code,
+        operation_kind,
+        operation_ref,
+        "accepted",
+        "RecoveryNeeded",
+        "reconcile_operation",
+        &error.message,
+    )
+}
+
+/// An uncertain dispatch keeps the accepted effect and the counted round.
+///
+/// `Unknown` requires an unresolved effect, which would deny the durable
+/// acceptance; recovery is the correct classification.
+fn uncertain_dispatch(
+    operation_kind: &str,
+    code: &str,
+    operation_ref: Option<Uuid>,
+    message: &str,
+) -> MachineError {
+    successor_error(
+        code,
+        operation_kind,
+        operation_ref,
+        "accepted",
+        "RecoveryNeeded",
+        "reconcile_operation",
+        message,
+    )
+}
+
+fn replay_operation_ref(receipt: &OperationReceipt) -> Uuid {
+    Uuid::parse_str(&receipt.operation_ref).unwrap_or(Uuid::nil())
+}
+
+/// The trusted Controller is not the engagement's authenticated owner.
+fn owner_refusal_for(operation_kind: &str) -> MachineError {
+    successor_error(
+        "ENGAGEMENT_OWNER_MISMATCH",
+        operation_kind,
+        None,
+        "none",
+        "Rejected",
+        "fix_request",
+        "the trusted Controller is not this engagement's authenticated owner",
+    )
+}
+
+/// MD2: a recognised but unsupported capability, refused before acceptance.
+///
+/// The successor error shape is closed, so the capability is named in the
+/// message; the transport may map it to its own capability metadata.
+fn canonical_write_unsupported() -> MachineError {
+    successor_error(
+        "CAPABILITY_UNSUPPORTED",
+        "assign_external_specialist_task",
+        None,
+        "none",
+        "Rejected",
+        "renegotiate",
+        "canonical_workspace_write_delegation is recognized_unsupported: canonical-workspace-write delegation needs a Git workspace",
+    )
+}
+
+/// Verify and read one replayed assignment under the caller's trusted scope.
+fn replay_observation(
+    store: &EngagementStore,
+    receipt: &OperationReceipt,
+    caller: &crate::caller_scope::TrustedCallerScope,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    verify_replay_scope(store, receipt, caller)?;
+    assigned_observation(store, receipt)
+}
+
+fn verify_replay_scope(
+    store: &EngagementStore,
+    receipt: &OperationReceipt,
+    caller: &crate::caller_scope::TrustedCallerScope,
+) -> Result<(), MachineError> {
+    let task_ref = receipt
+        .accepted_subjects
+        .task_ref
+        .as_deref()
+        .ok_or_else(|| MachineError::invalid_argument("receipt", "the receipt names no task"))?;
+    let task_id = Uuid::parse_str(task_ref)
+        .map_err(|_| MachineError::invalid_argument("receipt", "invalid task identity"))?;
+    crate::caller_scope::verify_replay(store.connection(), task_id, caller)
+}
+
+/// Read one assigned task as the closed successor observation.
+fn task_observation(
+    store: &EngagementStore,
+    engagement_id: Uuid,
+    task_id: Uuid,
+) -> Result<DelegationTaskObservation, MachineError> {
+    let snapshot = store.external_task(engagement_id, task_id)?;
+    let accepted = store
+        .external_task_identity(engagement_id, task_id)?
+        .ok_or_else(|| {
+            MachineError::invalid_argument("task_ref", "the accepted task identity is missing")
+        })?;
+    Ok(DelegationTaskObservation {
+        task_ref: task_id.to_string(),
+        member_ref: snapshot.specialist_run_id.to_string(),
+        accepted_task_digest: accepted.digest()?,
+        state: task_state(&snapshot.state).to_owned(),
+        // The complete result belongs to the collect surface.
+        result_digest: None,
+        complete_result: None,
+        content_availability: "pending".to_owned(),
+        required_action: task_required_action(&snapshot.state).to_owned(),
+    })
+}
+
+/// The closed `task_observation.state` derivation.
+fn task_state(state: &str) -> &'static str {
+    match state {
+        "accepted" => "queued",
+        "queued" => "queued",
+        "claimed" => "claimed",
+        "dispatching" => "dispatching",
+        "running" => "running",
+        "completed_not_delivered" | "delivered" => "completed",
+        "failed" => "failed",
+        "cancelled" => "cancelled",
+        "expired" => "expired",
+        _ => "unknown",
+    }
+}
+
+fn task_required_action(state: &str) -> &'static str {
+    match state {
+        "accepted" | "queued" | "claimed" | "dispatching" | "running" => "await_task",
+        "completed_not_delivered" | "delivered" | "failed" | "cancelled" | "expired" => "none",
+        _ => "reconcile_operation",
+    }
+}
+
+fn assigned_observation(
+    store: &EngagementStore,
+    receipt: &OperationReceipt,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    let task_ref = receipt
+        .accepted_subjects
+        .task_ref
+        .as_deref()
+        .ok_or_else(|| MachineError::invalid_argument("receipt", "the receipt names no task"))?;
+    let task_id = Uuid::parse_str(task_ref)
+        .map_err(|_| MachineError::invalid_argument("receipt", "invalid task identity"))?;
+    let engagement_id = receipt
+        .namespace
+        .scope_ref
+        .as_deref()
+        .and_then(|scope| Uuid::parse_str(scope).ok())
+        .ok_or_else(|| MachineError::invalid_argument("receipt", "invalid engagement scope"))?;
+    let observation = task_observation(store, engagement_id, task_id)?;
+    Ok((observation, receipt.clone()))
+}
+
+/// The requested snapshot was published but its own keyed install was not
+/// accepted, so this workspace has not installed it.
+fn provisioning_not_installed() -> MachineError {
+    successor_error(
+        "PROVISIONING_REF_NOT_INSTALLED",
+        "hire_external_specialist",
+        None,
+        "none",
+        "Rejected",
+        "fix_request",
+        "the provisioning reference has no accepted install in this workspace",
+    )
+}
+
+fn preallocation_revision_refusal(operation_kind: &str) -> MachineError {
+    successor_error(
+        "INVALID_ARGUMENT",
+        operation_kind,
+        None,
+        "none",
+        "Rejected",
+        "fix_request",
+        "a pre-allocation operation has no revision domain to fence",
+    )
+}
+
+fn unresolved_refusal(operation_kind: &str, operation_ref: Uuid) -> MachineError {
+    successor_error(
+        "OUTCOME_UNKNOWN",
+        operation_kind,
+        Some(operation_ref),
+        "unresolved",
+        "Unknown",
+        "reconcile_operation",
+        "the retained intent has no accepted receipt yet",
+    )
+}
+
+fn bare_digest(value: &str) -> String {
+    value.strip_prefix("sha256:").unwrap_or(value).to_owned()
+}
+
+fn idempotency_conflict() -> MachineError {
+    successor_error(
+        "IDEMPOTENCY_CONFLICT",
+        "delegation",
+        None,
+        "none",
+        "Rejected",
+        "lookup_original_key",
+        "the idempotency key was reused with different input",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{ControllerIdentity, ControllerKind};
+    use crate::instructions::SelectedNamedSource;
+    use crate::paths::DolgoraeHome;
+    use crate::run::ControllerBinding;
+    use crate::workspace::{LosslessPath, WorkspaceMode};
+    use std::cell::RefCell;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::PathBuf;
+
+    /// What one member Run start was handed.
+    struct StartRecord {
+        run_id: Uuid,
+        aggregate: crate::run::AggregateBinding,
+        access: CallerWorkspaceAccess,
+        broker: bool,
+    }
+
+    struct FakePort {
+        calls: std::cell::Cell<usize>,
+        started: RefCell<Vec<AgentConfigurationSnapshot>>,
+        starts: RefCell<Vec<StartRecord>>,
+        failure: Option<&'static str>,
+        dispatched: RefCell<Vec<(Uuid, String, String)>>,
+        dispatch_outcome: RefCell<Option<MemberDispatchOutcome>>,
+        /// Reserve the managed dispatch boundary before reporting the outcome,
+        /// exactly as the real port does before it submits the Turn.
+        reserve_before_outcome: std::cell::Cell<bool>,
+        /// Capture the accepted receipt at the dispatch boundary, so a Case B
+        /// test can prove the refusal rewrote nothing.
+        capture_receipt_at_dispatch: std::cell::Cell<bool>,
+        captured_receipt: RefCell<Option<String>>,
+        /// The release admission outcome a test states; the real admission is the
+        /// Run service's own and is exercised by the semantic release tests.
+        release_outcome: RefCell<Option<Result<MemberReleaseOutcome, MemberReleaseFailure>>>,
+        release_requests: RefCell<Vec<(String, Uuid, u64, bool)>>,
+    }
+
+    impl FakePort {
+        fn new() -> Self {
+            Self {
+                calls: std::cell::Cell::new(0),
+                started: RefCell::new(Vec::new()),
+                starts: RefCell::new(Vec::new()),
+                failure: None,
+                dispatched: RefCell::new(Vec::new()),
+                dispatch_outcome: RefCell::new(None),
+                reserve_before_outcome: std::cell::Cell::new(false),
+                capture_receipt_at_dispatch: std::cell::Cell::new(false),
+                captured_receipt: RefCell::new(None),
+                release_outcome: RefCell::new(None),
+                release_requests: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn start_records(&self) -> Vec<StartRecord> {
+            std::mem::take(&mut *self.starts.borrow_mut())
+        }
+
+        fn failing(code: &'static str) -> Self {
+            Self {
+                failure: Some(code),
+                ..Self::new()
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.get()
+        }
+
+        fn refusing_dispatch(code: &'static str) -> Self {
+            let port = Self::new();
+            *port.dispatch_outcome.borrow_mut() = Some(MemberDispatchOutcome::Refused {
+                code: code.to_owned(),
+                message: "the executor refused the dispatch".to_owned(),
+            });
+            port
+        }
+
+        fn uncertain_dispatch(code: &'static str) -> Self {
+            let port = Self::new();
+            *port.dispatch_outcome.borrow_mut() = Some(MemberDispatchOutcome::Uncertain {
+                code: code.to_owned(),
+                message: "the dispatch outcome is unknown".to_owned(),
+            });
+            port
+        }
+
+        /// One uncertain managed dispatch whose reservation was already durable.
+        fn uncertain_after_reservation(code: &'static str) -> Self {
+            let port = Self::uncertain_dispatch(code);
+            port.reserve_before_outcome.set(true);
+            port
+        }
+
+        /// One refusing dispatch that records the retained accepted receipt as
+        /// it stood at the dispatch boundary, before the refusal.
+        fn capturing_receipt(code: &'static str) -> Self {
+            let port = Self::refusing_dispatch(code);
+            port.capture_receipt_at_dispatch.set(true);
+            port
+        }
+
+        fn captured_receipt(&self) -> Option<String> {
+            self.captured_receipt.borrow().clone()
+        }
+
+        /// One port that states the release admission's outcome.
+        fn releasing(outcome: Result<MemberReleaseOutcome, MemberReleaseFailure>) -> Self {
+            let port = Self::new();
+            *port.release_outcome.borrow_mut() = Some(outcome);
+            port
+        }
+
+        fn release_requests(&self) -> Vec<(String, Uuid, u64, bool)> {
+            self.release_requests.borrow().clone()
+        }
+
+        fn dispatched_tasks(&self) -> Vec<(Uuid, String, String)> {
+            self.dispatched.borrow().clone()
+        }
+    }
+
+    impl RunSettlementPort for FakePort {
+        fn member_writer_observation(
+            &self,
+            _request: MemberCleanupObservation<'_>,
+        ) -> Result<MemberWriterObservation, MachineError> {
+            Ok(MemberWriterObservation {
+                holds: false,
+                blocked_unknown: false,
+                fingerprint: "fixture:absent".to_owned(),
+            })
+        }
+
+        fn settle_member_task(
+            &self,
+            _request: MemberTaskSettlement<'_>,
+        ) -> Result<MemberSettlement, MachineError> {
+            Ok(MemberSettlement::Terminal)
+        }
+
+        fn dispatch_member_task(
+            &self,
+            request: MemberTaskDispatch<'_>,
+        ) -> Result<MemberDispatchOutcome, MachineError> {
+            self.calls.set(self.calls.get() + 1);
+            self.dispatched.borrow_mut().push((
+                request.task_ref,
+                request.execution_intent.to_owned(),
+                request
+                    .contents
+                    .prompt(
+                        request.accepted,
+                        request.execution_intent,
+                        request.deadline_seconds,
+                    )
+                    .unwrap_or_default(),
+            ));
+            if let Some(outcome) = self.dispatch_outcome.borrow().clone() {
+                return Ok(outcome);
+            }
+            Ok(MemberDispatchOutcome::Accepted {
+                turn_ref: format!("turn-{}", request.task_ref),
+            })
+        }
+
+        fn dispatch_managed_task(
+            &self,
+            request: ManagedTaskDispatch<'_>,
+        ) -> Result<MemberDispatchOutcome, MachineError> {
+            self.calls.set(self.calls.get() + 1);
+            if self.capture_receipt_at_dispatch.get() {
+                let database = EngagementStore::workspace_database_path(request.state_root);
+                *self.captured_receipt.borrow_mut() =
+                    accepted_managed_receipt(&database, request.session_id);
+            }
+            self.dispatched.borrow_mut().push((
+                request.task_ref,
+                request.execution_intent.to_owned(),
+                request
+                    .contents
+                    .prompt(
+                        request.accepted,
+                        request.execution_intent,
+                        request.deadline_seconds,
+                    )
+                    .unwrap_or_default(),
+            ));
+            if self.reserve_before_outcome.get() {
+                let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(
+                    request.state_root,
+                ))?;
+                store.transact(|transaction| {
+                    crate::orchestration::mark_successor_task_dispatching(
+                        transaction,
+                        request.session_id,
+                        request.task_ref,
+                        1_700_000_000_000,
+                    )
+                })?;
+            }
+            if let Some(outcome) = self.dispatch_outcome.borrow().clone() {
+                return Ok(outcome);
+            }
+            // The port owns the acceptance bookkeeping, so the fixture performs
+            // exactly what the real managed dispatch performs: the Turn is
+            // running and the round is counted accepted.
+            let turn_ref = format!("turn-{}", request.task_ref);
+            let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(
+                request.state_root,
+            ))?;
+            store.transact(|transaction| {
+                crate::orchestration::mark_successor_task_running(
+                    transaction,
+                    request.session_id,
+                    request.task_ref,
+                    &turn_ref,
+                    1_700_000_000_000,
+                )
+            })?;
+            store.transact(|transaction| {
+                crate::caller_scope::accepted(transaction, request.task_ref)
+            })?;
+            Ok(MemberDispatchOutcome::Accepted { turn_ref })
+        }
+
+        fn settle_member_release(
+            &self,
+            request: MemberReleaseRequest<'_>,
+        ) -> Result<MemberReleaseOutcome, MemberReleaseFailure> {
+            self.calls.set(self.calls.get() + 1);
+            self.release_requests.borrow_mut().push((
+                request.owner.scope_kind().to_owned(),
+                request.owner.scope_ref(),
+                request.expected_revision,
+                request.allow_interrupt,
+            ));
+            // The release settlement is the Run service's own, so a port that a
+            // test did not state never stands in for it.
+            self.release_outcome.borrow_mut().take().unwrap_or_else(|| {
+                Err(MemberReleaseFailure::BeforeAdmission(MachineError::new(
+                    "INTERNAL_ERROR",
+                    "the fixture port does not settle releases",
+                    false,
+                    json!({"invariant":"fixture_release_not_admitted"}),
+                )))
+            })
+        }
+
+        fn start_member_run(
+            &self,
+            request: AdmittedMemberStart<'_>,
+        ) -> Result<MemberRunStart, MachineError> {
+            self.calls.set(self.calls.get() + 1);
+            if let Some(code) = self.failure {
+                return Err(MachineError::new(
+                    code,
+                    "the member Run could not be started",
+                    true,
+                    json!({"effect":"unknown"}),
+                ));
+            }
+            self.starts.borrow_mut().push(StartRecord {
+                run_id: request.run_id,
+                aggregate: request.aggregate.clone(),
+                access: request.access,
+                broker: request.broker.is_some(),
+            });
+            self.started
+                .borrow_mut()
+                .push(request.configuration.clone());
+            Ok(MemberRunStart {
+                run_id: request.run_id,
+            })
+        }
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        state_root: PathBuf,
+        codex_home: PathBuf,
+        home_root: PathBuf,
+        store: crate::instructions::InstructionSourceStore,
+        view: WorkspaceView,
+        controller: ControllerBinding,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("dolgorae-delegation-{}", Uuid::now_v7()));
+            fs::create_dir(&root).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            let root = root.canonicalize().unwrap();
+            let home = DolgoraeHome::from_canonical_home(root.clone()).unwrap();
+            fs::create_dir(home.root()).unwrap();
+            fs::set_permissions(home.root(), fs::Permissions::from_mode(0o700)).unwrap();
+            let home_root = home.root().to_path_buf();
+            let store = crate::instructions::InstructionSourceStore::new(&home);
+            store.initialize_templates().unwrap();
+            let state_root = root.join("state");
+            fs::create_dir(&state_root).unwrap();
+            fs::set_permissions(&state_root, fs::Permissions::from_mode(0o700)).unwrap();
+            let codex_home = root.join("codex-home");
+            fs::create_dir(&codex_home).unwrap();
+            fs::set_permissions(&codex_home, fs::Permissions::from_mode(0o700)).unwrap();
+            let workspace_path = root.join("workspace");
+            fs::create_dir(&workspace_path).unwrap();
+            let git = |arguments: &[&str]| {
+                assert!(
+                    std::process::Command::new("/usr/bin/git")
+                        .arg("-C")
+                        .arg(&workspace_path)
+                        .args(["-c", "user.email=test@example.invalid"])
+                        .args(["-c", "user.name=Dolgorae Test"])
+                        .args(arguments)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            };
+            fs::write(workspace_path.join("README.md"), b"baseline\n").unwrap();
+            git(&["init", "-q"]);
+            git(&["add", "README.md"]);
+            git(&["commit", "-q", "-m", "baseline"]);
+            let view = WorkspaceView {
+                workspace_id: crate::workspace::workspace_id(&workspace_path),
+                canonical_path: LosslessPath::Utf8(workspace_path.to_str().unwrap().to_owned()),
+                mode: WorkspaceMode::Git,
+                created: true,
+            };
+            let controller = ControllerBinding {
+                identity: ControllerIdentity {
+                    controller_id: Uuid::now_v7(),
+                    kind: ControllerKind::Automation,
+                    instance_id: "test-host".to_owned(),
+                    subject_id: Some("test-principal".to_owned()),
+                    generation: 1,
+                },
+                capability_sha256: "e".repeat(64),
+            };
+            Self {
+                root,
+                state_root,
+                codex_home,
+                home_root,
+                store,
+                view,
+                controller,
+            }
+        }
+
+        fn scope(&self) -> DelegationScope<'_> {
+            DelegationScope {
+                view: &self.view,
+                state_root: &self.state_root,
+                controller: &self.controller,
+            }
+        }
+
+        /// Bring the workspace delegation namespace up explicitly.
+        ///
+        /// `dolgorae init` does not create it; setup is the explicit
+        /// `ensure_delegation_namespace` step the adapters call.
+        fn set_up_namespace(&self) {
+            drop(
+                EngagementStore::open(&EngagementStore::workspace_database_path(&self.state_root))
+                    .unwrap(),
+            );
+        }
+
+        fn database(&self) -> PathBuf {
+            EngagementStore::workspace_database_path(&self.state_root)
+        }
+
+        fn sources(&self) -> ProvisioningSources<'_> {
+            // The selected Profile binding keeps the fixture's approved shape;
+            // only the ambient codex home is redirected into this fixture.
+            let mut binding = {
+                let reservation: crate::run::CallerStartReservation =
+                    serde_json::from_str(include_str!(
+                        "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+                    ))
+                    .unwrap();
+                reservation.accepted_intent.global_profile_binding
+            };
+            binding.launch_snapshot.canonical_codex_home =
+                self.codex_home.to_str().unwrap().to_owned();
+            binding.launch_snapshot_sha256 =
+                sha256_hex(&canonical_bytes(&binding.launch_snapshot).unwrap());
+            ProvisioningSources {
+                instruct: &self.store,
+                role_name: "reviewer",
+                role: crate::instructions::SelectedInstructionSource::File(vec![
+                    "roles".to_owned(),
+                    "reviewer".to_owned(),
+                ]),
+                dependencies: vec![SelectedNamedSource {
+                    name: "contract".to_owned(),
+                    source: crate::instructions::SelectedInstructionSource::Inline(
+                        "The accepted contract is complete.\n".to_owned(),
+                    ),
+                }],
+                selected_guidance: Vec::new(),
+                profile_binding: binding,
+                admission: crate::provisioning::ProvisioningAdmission {
+                    model: "gpt-5.6".to_owned(),
+                    effort: "high".to_owned(),
+                    purpose_kind: "review".to_owned(),
+                    purpose_label: None,
+                    required_capabilities: Vec::new(),
+                    execution_lane: "dedicated".to_owned(),
+                    requested_access: "read_only".to_owned(),
+                    required_assurance: "best_effort_personal_alpha".to_owned(),
+                    native_subagent_policy: "disabled".to_owned(),
+                },
+            }
+        }
+
+        /// The same selection admitted for canonical-workspace-write access.
+        fn sources_write(&self) -> ProvisioningSources<'_> {
+            let mut sources = self.sources();
+            sources.admission.requested_access = "canonical_workspace_write".to_owned();
+            sources
+        }
+
+        fn install_write(&self) -> ProvisioningCandidate {
+            install_provisioning(&self.scope(), &self.sources_write(), "install-write", None)
+                .unwrap()
+                .0
+        }
+
+        fn install(&self) -> ProvisioningCandidate {
+            install_provisioning(&self.scope(), &self.sources(), "install-key", None)
+                .unwrap()
+                .0
+        }
+
+        fn open(&self) -> Uuid {
+            let (view, _) = open_external_engagement(&self.scope(), "open-key", None).unwrap();
+            Uuid::parse_str(&view.engagement_ref).unwrap()
+        }
+
+        fn member_rows(&self) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row("SELECT COUNT(*) FROM members", [], |row| row.get(0))
+                .unwrap()
+        }
+
+        fn legacy_operation_rows(&self) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row("SELECT COUNT(*) FROM operations", [], |row| row.get(0))
+                .unwrap()
+        }
+
+        fn hire_member(
+            &self,
+            engagement_id: Uuid,
+            candidate: &ProvisioningCandidate,
+            key: &str,
+        ) -> Uuid {
+            let port = FakePort::new();
+            let view = hire_external_specialist(
+                &self.scope(),
+                &port,
+                hire_request(engagement_id, candidate, key, None),
+            )
+            .unwrap();
+            Uuid::parse_str(&view.member.member_ref).unwrap()
+        }
+
+        /// Initialize the workspace writer authority with no holder, so a
+        /// dispatch may observe the workspace under its exclusive guard.
+        fn initialize_writer_authority(&self) {
+            for directory in [
+                self.state_root.join("runtime"),
+                self.state_root.join("runtime/locks"),
+            ] {
+                fs::create_dir_all(&directory).unwrap();
+                fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            crate::writer::WriterStore::initialize_layout(
+                &self.state_root,
+                &self.view.workspace_id,
+                {
+                    use crate::workspace::WorkspacePlatform as _;
+                    crate::workspace::SystemWorkspacePlatform.current_uid()
+                },
+            )
+            .unwrap();
+        }
+
+        fn task_count(&self) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+                .unwrap()
+        }
+
+        fn assignment_rows(&self) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row("SELECT COUNT(*) FROM caller_scope_assignments", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        }
+
+        fn task_state(&self, task_id: Uuid) -> String {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row(
+                    "SELECT state FROM tasks WHERE task_id=?1",
+                    [task_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        fn membership_revision(&self, engagement_id: Uuid) -> u64 {
+            let store = EngagementStore::open_read_only(&self.database()).unwrap();
+            store
+                .scope_membership_revision(
+                    &self.view.workspace_id,
+                    "external_engagement",
+                    &engagement_id.to_string(),
+                )
+                .unwrap()
+        }
+
+        // -------------------------------------------------------------------
+        // Managed half
+        // -------------------------------------------------------------------
+
+        /// Publish the root Run and activate its Orchestrated Session.
+        ///
+        /// The managed authority is the root Run's Controller binding, so the
+        /// session needs a real manifest carrying this fixture's Controller.
+        fn managed_session(&self) -> Uuid {
+            self.set_up_namespace();
+            let root_run_id = Uuid::now_v7();
+            for path in [self.state_root.clone(), self.state_root.join("runs")] {
+                fs::create_dir_all(&path).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let manifest = root_manifest(&self.view, &self.controller, root_run_id);
+            crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &self.state_root)
+                .publish(&manifest)
+                .unwrap();
+            let artifact_root =
+                crate::run::run_root(&self.state_root, root_run_id).join("artifacts");
+            fs::create_dir_all(&artifact_root).unwrap();
+            for path in [
+                crate::run::run_root(&self.state_root, root_run_id),
+                artifact_root,
+            ] {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let mut store =
+                crate::orchestration::OrchestrationStore::open(&self.state_root).unwrap();
+            store
+                .prepare_session(
+                    &self.view.workspace_id,
+                    root_run_id,
+                    "session-bootstrap",
+                    &"b".repeat(64),
+                    &managed_policy(),
+                )
+                .unwrap();
+            store.mark_primary_intent(root_run_id).unwrap();
+            let session = store
+                .finish_primary_publication(root_run_id, Ok(()))
+                .unwrap();
+            assert_eq!(session.status, "active");
+            root_run_id
+        }
+
+        fn managed_context<'a>(&'a self, session_id: Uuid, key: &'a str) -> ManagedCallContext<'a> {
+            ManagedCallContext {
+                session_id,
+                source_run_id: session_id,
+                source_turn_id: "turn-primary",
+                source_tool_call_id: "tool-call-primary",
+                idempotency_key: key,
+            }
+        }
+
+        fn spawn(
+            &self,
+            session_id: Uuid,
+            candidate: &ProvisioningCandidate,
+            key: &str,
+            expected_revision: Option<u64>,
+            port: &FakePort,
+        ) -> Result<MemberAdmissionView, MachineError> {
+            let caller = self.managed_context(session_id, key);
+            spawn_specialist(
+                &self.scope(),
+                &caller,
+                port,
+                SpawnSpecialist {
+                    provisioning_ref: &candidate.provisioning_ref,
+                    role_ref: "reviewer",
+                    agent_configuration_digest: &candidate.agent_configuration_digest,
+                    expected_revision,
+                },
+            )
+        }
+
+        fn session_membership_revision(&self, session_id: Uuid) -> u64 {
+            let store = EngagementStore::open_read_only(&self.database()).unwrap();
+            store
+                .scope_membership_revision(
+                    &self.view.workspace_id,
+                    "orchestrated_session",
+                    &session_id.to_string(),
+                )
+                .unwrap()
+        }
+
+        fn intent_rows(&self, operation_kind: &str) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM delegation_operations WHERE operation_kind=?1",
+                    [operation_kind],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        fn broker_spawn_rows(&self) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM brokered_spawn_operations",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        fn broker_member_rows(&self) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row("SELECT COUNT(*) FROM brokered_members", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        }
+
+        fn broker_key_rows(&self, key: &str) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM brokered_spawn_operations WHERE idempotency_key=?1)
+                          + (SELECT COUNT(*) FROM brokered_tasks WHERE idempotency_key=?1)",
+                    [key],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        fn member_broker_state(&self, session_id: Uuid, member: Uuid) -> (String, String) {
+            let broker = crate::orchestration::OrchestrationStore::open(&self.state_root).unwrap();
+            let facts = broker
+                .successor_member(session_id, member)
+                .unwrap()
+                .unwrap();
+            (facts.membership_state, facts.actor_residency)
+        }
+
+        fn run_directories(&self) -> usize {
+            fs::read_dir(self.state_root.join("runs")).unwrap().count()
+        }
+
+        // -------------------------------------------------------------------
+        // Managed assignment
+        // -------------------------------------------------------------------
+
+        fn spawn_member(
+            &self,
+            session_id: Uuid,
+            key: &str,
+            port: &FakePort,
+        ) -> MemberAdmissionView {
+            let candidate = self.install();
+            self.spawn(session_id, &candidate, key, None, port).unwrap()
+        }
+
+        fn assign(
+            &self,
+            session_id: Uuid,
+            key: &str,
+            caller: &crate::caller_scope::TrustedCallerScope,
+            port: &FakePort,
+            request: AssignSpecialistTask<'_>,
+        ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+            let context = self.managed_context(session_id, key);
+            assign_specialist_task(&self.scope(), &context, caller, port, request)
+        }
+
+        fn broker_task_rows(&self) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row("SELECT COUNT(*) FROM brokered_tasks", [], |row| row.get(0))
+                .unwrap()
+        }
+
+        fn broker_acceptance_rows(&self) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM brokered_task_acceptances",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        /// The retained accepted-task content rows, one per retained side.
+        fn retained_accepted_content_rows(&self) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM result_content_refs WHERE owner_kind='accepted_task'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        fn broker_member_id(&self, session_id: Uuid) -> Uuid {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            let value: String = connection
+                .query_row(
+                    "SELECT run_id FROM brokered_members WHERE session_id=?1
+                      ORDER BY created_at_ms,run_id LIMIT 1",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            Uuid::parse_str(&value).unwrap()
+        }
+
+        fn broker_task_state(&self, task_id: Uuid) -> String {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row(
+                    "SELECT state FROM brokered_tasks WHERE task_id=?1",
+                    [task_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        fn broker_task_key_rows(&self, key: &str) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM brokered_tasks WHERE idempotency_key=?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        fn accounting_state(&self, task_id: Uuid) -> String {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row(
+                    "SELECT accounting_state FROM caller_scope_assignments
+                      WHERE assignment_id=?1",
+                    [task_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        fn accounting_rows(&self) -> i64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            connection
+                .query_row("SELECT COUNT(*) FROM caller_scope_assignments", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        }
+
+        fn workload_revision(&self, session_id: Uuid, member_ref: Uuid) -> u64 {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            crate::engagement::member_workload_revision(
+                &connection,
+                &self.view.workspace_id,
+                "orchestrated_session",
+                &session_id.to_string(),
+                &member_ref.to_string(),
+            )
+            .unwrap()
+        }
+
+        /// Seed one legacy Broker member of a session: a spawn row with a plain
+        /// legacy key and a member row with its legacy activation policy.
+        fn seed_legacy_broker_member(&self, session_id: Uuid, key: &str) -> Uuid {
+            let operation_id = Uuid::now_v7();
+            let run_id = Uuid::now_v7();
+            let role_status = managed_policy();
+            let role = &role_status.roles[0];
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            let now = 1_700_000_000_000_i64;
+            connection
+                .execute(
+                    "INSERT INTO brokered_spawn_operations(
+                       operation_id,session_id,idempotency_key,request_sha256,request_json,role_ref,
+                       parent_run_id,child_run_id,approval_request_id,state,safe_error_code,
+                       source_turn_id,source_tool_call_id,created_at_ms,updated_at_ms
+                     ) VALUES(?1,?2,?3,?4,?5,'reviewer',?2,?6,NULL,'ready',NULL,
+                       'turn-primary','tool-call-primary',?7,?7)",
+                    rusqlite::params![
+                        operation_id.to_string(),
+                        session_id.to_string(),
+                        key,
+                        crate::jcs::sha256_hex(b"legacy broker request"),
+                        serde_json::to_string(&crate::orchestration::RequestSpecialist {
+                            role_ref: "reviewer".to_owned(),
+                            objective: "Review the accepted candidate.".to_owned(),
+                            expected_output: vec!["A bounded verdict".to_owned()],
+                            requested_access: "read_only".to_owned(),
+                            deadline_seconds: 60,
+                        })
+                        .unwrap(),
+                        run_id.to_string(),
+                        now
+                    ],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO brokered_members(
+                       run_id,session_id,parent_run_id,role_ref,role_snapshot_sha256,
+                       agent_configuration_json,agent_configuration_sha256,controller_binding_json,
+                       spawn_operation_id,spawned_by_turn_id,membership_state,actor_residency,
+                       activation_policy,requested_access,created_at_ms,updated_at_ms
+                     ) VALUES(?1,?2,?2,'reviewer',?3,?4,?5,?6,?7,'turn-primary','active',
+                       'resident','keep_resident','read_only',?8,?8)",
+                    rusqlite::params![
+                        run_id.to_string(),
+                        session_id.to_string(),
+                        sha256_hex(&canonical_bytes(role).unwrap()),
+                        serde_json::to_string(&role.agent_configuration).unwrap(),
+                        crate::run::agent_configuration_digest(&role.agent_configuration).unwrap(),
+                        serde_json::to_string(&ControllerBinding {
+                            identity: ControllerIdentity {
+                                controller_id: Uuid::now_v7(),
+                                kind: ControllerKind::Automation,
+                                instance_id: "legacy-broker".to_owned(),
+                                subject_id: None,
+                                generation: 1,
+                            },
+                            capability_sha256: "d".repeat(64),
+                        })
+                        .unwrap(),
+                        operation_id.to_string(),
+                        now
+                    ],
+                )
+                .unwrap();
+            run_id
+        }
+
+        /// Seed one legacy Broker task row that already owns a session key.
+        fn seed_legacy_broker_task(&self, session_id: Uuid, member_ref: Uuid, key: &str) -> Uuid {
+            let task_id = Uuid::now_v7();
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            let now = 1_700_000_000_000_i64;
+            connection
+                .execute(
+                    "INSERT INTO brokered_tasks(
+                       task_id,session_id,idempotency_key,request_sha256,source_run_id,source_turn_id,
+                       source_tool_call_id,target_run_id,request_json,target_turn_id,result_json,
+                       result_sha256,result_artifact_id,state,safe_error_code,created_at_ms,updated_at_ms
+                     ) VALUES(?1,?2,?3,?4,?2,'turn-primary','tool-call-primary',?5,?6,NULL,
+                       NULL,NULL,NULL,'running',NULL,?7,?7)",
+                    rusqlite::params![
+                        task_id.to_string(),
+                        session_id.to_string(),
+                        key,
+                        crate::jcs::sha256_hex(b"legacy broker task request"),
+                        member_ref.to_string(),
+                        serde_json::to_string(&crate::orchestration::RequestSpecialist {
+                            role_ref: "reviewer".to_owned(),
+                            objective: "Review the accepted candidate.".to_owned(),
+                            expected_output: vec!["A bounded verdict".to_owned()],
+                            requested_access: "read_only".to_owned(),
+                            deadline_seconds: 60,
+                        })
+                        .unwrap(),
+                        now
+                    ],
+                )
+                .unwrap();
+            task_id
+        }
+
+        fn retained_accepted_task(&self, task_id: Uuid) -> Option<Vec<u8>> {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            crate::engagement::accepted_task_content(&connection, task_id)
+                .unwrap()
+                .map(|(body, _, _)| body)
+        }
+
+        /// Publish one managed task's terminal fact and complete result.
+        ///
+        /// The rows are exactly what the managed settlement writes, so the R
+        /// services can be held to their post-settlement behaviour.
+        fn settle_managed_task(
+            &self,
+            session_id: Uuid,
+            member_ref: Uuid,
+            task_ref: Uuid,
+            outcome: &str,
+            text: Option<&str>,
+        ) {
+            let mut store = EngagementStore::open(&self.database()).unwrap();
+            let facts =
+                crate::orchestration::successor_task(store.connection(), session_id, task_ref)
+                    .unwrap()
+                    .unwrap();
+            let accepted: crate::delegation_identity::AcceptedTask =
+                serde_json::from_str(&facts.accepted_request_json).unwrap();
+            let failure = match outcome {
+                "completed" => None,
+                "cancelled" => Some("TURN_INTERRUPTED"),
+                _ => Some("TURN_FAILED"),
+            };
+            let state = match outcome {
+                "completed" => "completed_not_delivered",
+                "cancelled" => "cancelled",
+                _ => "failed",
+            };
+            let result = crate::delegation_identity::CompleteResult {
+                schema: crate::delegation_identity::COMPLETE_RESULT_SCHEMA.to_owned(),
+                source: crate::delegation_identity::ResultSource {
+                    scope_kind: "orchestrated_session".to_owned(),
+                    scope_ref: session_id.to_string(),
+                    worker_ref: member_ref.to_string(),
+                    task_ref: task_ref.to_string(),
+                    role_snapshot_digest: accepted.role_snapshot_digest.clone(),
+                    agent_configuration_digest: accepted.agent_configuration_digest.clone(),
+                    accepted_task_digest: accepted.digest().unwrap(),
+                },
+                terminal_outcome: outcome.to_owned(),
+                final_response: text.map(|text| crate::delegation_identity::BytesRef {
+                    byte_length: u64::try_from(text.len()).unwrap(),
+                    sha256: format!("sha256:{}", crate::jcs::sha256_hex(text.as_bytes())),
+                }),
+                structured_output_schema: None,
+                structured_output: None,
+                changes: Vec::new(),
+                attachments: Vec::new(),
+                safe_failure_code: failure.map(str::to_owned),
+            };
+            let value = serde_json::to_value(&result).unwrap();
+            let canonical = canonical_text(&value).unwrap();
+            let now = now_ms().unwrap();
+            store
+                .transact(|transaction| {
+                    crate::orchestration::retain_successor_task_result(
+                        transaction,
+                        task_ref,
+                        canonical.as_bytes(),
+                    )?;
+                    if !crate::orchestration::settle_successor_task_result(
+                        transaction,
+                        session_id,
+                        task_ref,
+                        state,
+                        failure,
+                        Some(&crate::jcs::sha256_hex(canonical.as_bytes())),
+                        now,
+                    )? {
+                        return Err(MachineError::new(
+                            "STATE_CONFLICT",
+                            "the fixture task is not settleable",
+                            false,
+                            json!({}),
+                        ));
+                    }
+                    // The settled terminal resolves the conservative round
+                    // exactly as the real settlement transaction does.
+                    crate::caller_scope::accepted(transaction, task_ref)?;
+                    crate::engagement::advance_member_workload_revision(
+                        transaction,
+                        &self.view.workspace_id,
+                        "orchestrated_session",
+                        &session_id.to_string(),
+                        &member_ref.to_string(),
+                    )
+                    .map(|_| ())
+                })
+                .unwrap();
+        }
+
+        /// Publish the typed-unavailable marker as one managed task's result.
+        fn settle_managed_task_unavailable(
+            &self,
+            session_id: Uuid,
+            member_ref: Uuid,
+            task_ref: Uuid,
+        ) {
+            let mut store = EngagementStore::open(&self.database()).unwrap();
+            let marker = json!({
+                "schema": "dolgorae.complete-result-unavailable/v1",
+                "reason": "complete_result_unavailable",
+                "task_ref": task_ref.to_string(),
+            });
+            let canonical = canonical_text(&marker).unwrap();
+            let now = now_ms().unwrap();
+            store
+                .transact(|transaction| {
+                    crate::orchestration::retain_successor_task_result(
+                        transaction,
+                        task_ref,
+                        canonical.as_bytes(),
+                    )?;
+                    if !crate::orchestration::settle_successor_task_result(
+                        transaction,
+                        session_id,
+                        task_ref,
+                        "failed",
+                        Some("COMPLETE_RESULT_UNAVAILABLE"),
+                        Some(&crate::jcs::sha256_hex(canonical.as_bytes())),
+                        now,
+                    )? {
+                        return Err(MachineError::new(
+                            "STATE_CONFLICT",
+                            "the fixture task is not settleable",
+                            false,
+                            json!({}),
+                        ));
+                    }
+                    // The settled terminal resolves the conservative round
+                    // exactly as the real settlement transaction does.
+                    crate::caller_scope::accepted(transaction, task_ref)?;
+                    crate::engagement::advance_member_workload_revision(
+                        transaction,
+                        &self.view.workspace_id,
+                        "orchestrated_session",
+                        &session_id.to_string(),
+                        &member_ref.to_string(),
+                    )
+                    .map(|_| ())
+                })
+                .unwrap();
+        }
+
+        /// Rewrite one settled managed result so it names another task.
+        fn substitute_managed_result(&self, task_ref: Uuid, other_task: Uuid) {
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            let bytes = crate::orchestration::successor_task_result(&connection, task_ref)
+                .unwrap()
+                .unwrap();
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value["source"]["task_ref"] = json!(other_task.to_string());
+            let canonical = canonical_text(&value).unwrap();
+            let digest = crate::jcs::sha256_hex(canonical.as_bytes());
+            connection
+                .execute(
+                    "INSERT OR REPLACE INTO result_content(sha256,bytes) VALUES(?1,?2)",
+                    rusqlite::params![digest, canonical.as_bytes()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE result_content_refs SET sha256=?1,byte_length=?2
+                      WHERE owner_kind='successor_task_result' AND owner_id=?3
+                        AND representation='complete_result'",
+                    rusqlite::params![
+                        digest,
+                        u64::try_from(canonical.len()).unwrap(),
+                        task_ref.to_string()
+                    ],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE brokered_tasks SET result_sha256=?1 WHERE task_id=?2",
+                    rusqlite::params![digest, task_ref.to_string()],
+                )
+                .unwrap();
+        }
+
+        /// The main database file's bytes, for the R-side no-effect assertion.
+        fn database_bytes(&self) -> Vec<u8> {
+            fs::read(self.database()).unwrap()
+        }
+
+        /// The installed snapshot's admitted configuration (v4).
+        fn admitted_configuration(&self) -> AgentConfigurationSnapshot {
+            let candidate = self.install();
+            crate::provisioning::retained_snapshot(&self.state_root, &candidate.provisioning_ref)
+                .unwrap()
+                .admitted_configuration()
+                .unwrap()
+                .1
+        }
+
+        /// Leave one managed intent prepared with no acceptance (a crash window).
+        ///
+        /// This is exactly the row the service writes before its acceptance
+        /// transaction, so lookup and the exact-key replay are held to the state a
+        /// crash between the two leaves behind.
+        fn prepare_managed_intent(
+            &self,
+            session_id: Uuid,
+            operation_kind: &str,
+            idempotency_key: &str,
+            body: &Value,
+            request_schema: &str,
+        ) -> Uuid {
+            let operation_ref = Uuid::now_v7();
+            let scope_ref = session_id.to_string();
+            let identity = intent_identity(
+                &self.scope(),
+                operation_kind,
+                Some(("orchestrated_session", scope_ref.as_str())),
+                idempotency_key,
+                request_schema,
+                body,
+            )
+            .unwrap();
+            let mut store = EngagementStore::open(&self.database()).unwrap();
+            let now = now_ms().unwrap();
+            let prepared = store
+                .transact(|transaction| {
+                    engagement::intent_prepare(
+                        transaction,
+                        IntentAdmission {
+                            operation_ref,
+                            namespace: &identity.lookup,
+                            mutation_envelope_json: &identity.json,
+                            mutation_envelope_digest: &identity.digest,
+                            expected_revision: None,
+                            now_ms: now,
+                        },
+                    )
+                })
+                .unwrap();
+            assert!(matches!(prepared, IntentPreparation::Created));
+            operation_ref
+        }
+
+        /// Publish the member Run's own manifest-4 record over the retained snapshot.
+        ///
+        /// The identity surface reads the member's accepted instructions from
+        /// this manifest, so the fixture holds it to a real published one.
+        fn publish_member_manifest(&self, session_id: Uuid, member_ref: Uuid) {
+            let candidate = self.install();
+            let snapshot = crate::provisioning::retained_snapshot(
+                &self.state_root,
+                &candidate.provisioning_ref,
+            )
+            .unwrap();
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            let facts = crate::orchestration::successor_member(&connection, session_id, member_ref)
+                .unwrap()
+                .unwrap();
+            let manifest = member_manifest(
+                &self.view,
+                &self.controller,
+                member_ref,
+                session_id,
+                facts.spawn_operation_id,
+                &snapshot,
+            );
+            crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &self.state_root)
+                .publish(&manifest)
+                .unwrap();
+        }
+
+        /// Seed one legacy Broker spawn row for the same Session and key.
+        fn seed_legacy_broker_key(&self, session_id: Uuid, key: &str) -> Uuid {
+            let operation_id = Uuid::now_v7();
+            let request = serde_json::to_string(&crate::orchestration::RequestSpecialist {
+                role_ref: "reviewer".to_owned(),
+                objective: "Review the accepted candidate.".to_owned(),
+                expected_output: vec!["A bounded verdict".to_owned()],
+                requested_access: "read_only".to_owned(),
+                deadline_seconds: 60,
+            })
+            .unwrap();
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            let now = 1_700_000_000_000_i64;
+            connection
+                .execute(
+                    "INSERT INTO brokered_spawn_operations(
+                       operation_id,session_id,idempotency_key,request_sha256,request_json,role_ref,
+                       parent_run_id,child_run_id,approval_request_id,state,safe_error_code,
+                       source_turn_id,source_tool_call_id,created_at_ms,updated_at_ms
+                     ) VALUES(?1,?2,?3,?4,?5,'reviewer',?2,NULL,NULL,'ready',NULL,
+                       'turn-primary','tool-call-primary',?6,?6)",
+                    rusqlite::params![
+                        operation_id.to_string(),
+                        session_id.to_string(),
+                        key,
+                        crate::jcs::sha256_hex(request.as_bytes()),
+                        request,
+                        now
+                    ],
+                )
+                .unwrap();
+            operation_id
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// One root Run manifest that carries the fixture's Controller.
+    ///
+    /// A managed successor call is authorized against the authenticated root
+    /// Primary Controller (MDC:604), so the session fixture needs a real manifest
+    /// rather than an inferred identity.
+    fn root_manifest(
+        view: &WorkspaceView,
+        controller: &ControllerBinding,
+        run_id: Uuid,
+    ) -> crate::run::RunManifest {
+        use crate::domain::{Access, Assurance, ControlMode, ExecutionLane, Purpose, PurposeKind};
+        use crate::run::{
+            AgentConfigurationSnapshot, AppServerFacts, AuditPolicy, CapabilityState,
+            CompatibilityVerdict, DolgoraeBuild, ExecutableIdentity, ProfileCapabilitySnapshot,
+            ProfileSnapshot, RunManifest, launch_contract_digest, runtime_profile_snapshot_digest,
+        };
+        use crate::workspace::{GitBaseline, LosslessPath};
+        use std::collections::BTreeMap;
+
+        let instructions_text = "Do the task.".to_owned();
+        let instructions = crate::run::InstructionSnapshot {
+            schema: "dolgorae.instructions/v1".to_owned(),
+            common_prefix_version: 1,
+            mode_prefix_version: 1,
+            purpose_prefix_version: 1,
+            normalized_byte_length: instructions_text.len() as u64,
+            normalized_sha256: sha256_hex(instructions_text.as_bytes()),
+        };
+        let purpose = Purpose {
+            kind: PurposeKind::Implementation,
+            external_label: None,
+        };
+        let mut environment = BTreeMap::new();
+        environment.insert("LANG".to_owned(), "C".to_owned());
+        let mut capabilities = BTreeMap::new();
+        capabilities.insert("reader".to_owned(), CapabilityState::Supported);
+        let mut profile = ProfileSnapshot {
+            schema_version: 1,
+            profile_name: "default".to_owned(),
+            canonical_codex_home: "/tmp/codex-home".to_owned(),
+            normalized_argv: vec!["/usr/local/bin/codex".to_owned()],
+            launch_cwd_policy: "profile_state_directory_v1".to_owned(),
+            derived_launch_cwd: "/tmp/dolgorae/profiles/server".to_owned(),
+            sanitized_environment: environment,
+            enabled_features: Vec::new(),
+            disabled_features: Vec::new(),
+            process_static_configuration: BTreeMap::new(),
+            initial_configuration_observation: BTreeMap::new(),
+            executable_identity: ExecutableIdentity {
+                resolved_path: LosslessPath::Utf8("/usr/local/bin/codex".to_owned()),
+                device: 1,
+                inode: 2,
+                sha256: "8".repeat(64),
+            },
+            codex_version: "0.147.0".to_owned(),
+            app_server_schema_sha256: "4".repeat(64),
+            compatibility_manifest_sha256: "a".repeat(64),
+            launch_contract_sha256: "0".repeat(64),
+            initial_server_key: "3".repeat(64),
+        };
+        profile.launch_contract_sha256 = launch_contract_digest(&profile).unwrap();
+        let agent_configuration = AgentConfigurationSnapshot {
+            schema_version: 1,
+            runtime_profile: "default".to_owned(),
+            runtime_profile_snapshot_sha256: runtime_profile_snapshot_digest(&profile).unwrap(),
+            model: "gpt-5.6".to_owned(),
+            default_effort: "high".to_owned(),
+            purpose: purpose.clone(),
+            required_capabilities: vec!["reader".to_owned()],
+            role_reference: None,
+            normalized_instructions: instructions_text,
+            instructions: instructions.clone().into(),
+            execution_lane: ExecutionLane::SharedReadonly,
+            required_assurance: Assurance::BestEffortPersonalAlpha,
+            native_subagent_policy: "enabled".to_owned(),
+            admitted_configuration: None,
+        };
+        RunManifest {
+            schema_version: 1,
+            run_id,
+            workspace_id: view.workspace_id.clone(),
+            canonical_workspace: view.canonical_path.clone(),
+            workspace_mode: view.mode,
+            start_baseline: GitBaseline::empty(),
+            created_at: "2026-08-22T12:34:56.123456Z".to_owned(),
+            initial_access: Access::Read,
+            control_mode: ControlMode::ManagedAgent,
+            execution_lane: ExecutionLane::SharedReadonly,
+            requested_assurance: Assurance::BestEffortPersonalAlpha,
+            achieved_assurance: Assurance::BestEffortPersonalAlpha,
+            profile,
+            global_profile_binding: None,
+            agent_configuration,
+            profile_capability_snapshot: ProfileCapabilitySnapshot {
+                schema_version: 1,
+                profile_name: "default".to_owned(),
+                server_key: "3".repeat(64),
+                server_epoch: 1,
+                app_server_version: "0.147.0".to_owned(),
+                schema_sha256: "4".repeat(64),
+                capabilities,
+            },
+            app_server: AppServerFacts {
+                version: Some("0.147.0".to_owned()),
+                schema_status: Some("accepted".to_owned()),
+                actual_codex_home: Some("/tmp/codex-home".to_owned()),
+            },
+            dolgorae: DolgoraeBuild {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                binary_sha256: "5".repeat(64),
+                ipc_protocol_version: 1,
+            },
+            model: "gpt-5.6".to_owned(),
+            initial_reasoning_effort: "high".to_owned(),
+            default_reasoning_effort: "high".to_owned(),
+            instructions: instructions.into(),
+            controller: controller.clone(),
+            purpose,
+            parent_ref: None,
+            required_capabilities: vec!["reader".to_owned()],
+            thread_id: None,
+            fork_provenance: None,
+            write_continuation_provenance: None,
+            aggregate_binding: None,
+            audit: AuditPolicy::default(),
+            compatibility: CompatibilityVerdict::Accepted,
+            requested_access: None,
+            selected_role: None,
+            start_contract: None,
+            creation_mode: None,
+            admitted_configuration_digest: None,
+            start_operation_receipt: None,
+        }
+    }
+
+    /// One managed member Run manifest (manifest 4) over the retained snapshot.
+    ///
+    /// The member's own manifest is the authority for the accepted instructions,
+    /// so the identity surface must read a real one (MDC:604).
+    fn member_manifest(
+        view: &WorkspaceView,
+        controller: &ControllerBinding,
+        run_id: Uuid,
+        session_id: Uuid,
+        operation_ref: Uuid,
+        snapshot: &crate::provisioning::RetainedSnapshot,
+    ) -> crate::run::RunManifest {
+        use crate::domain::{Access, AggregateKind, CallerWorkspaceAccess};
+        use crate::run::{
+            AggregateBinding, AggregateMemberKind, ParentReference, RunInstructionSnapshot,
+        };
+
+        let mut manifest = root_manifest(view, controller, run_id);
+        let (instructions, configuration) = snapshot.admitted_configuration().unwrap();
+        let binding = snapshot.profile_binding().clone();
+        manifest.schema_version = 4;
+        manifest.profile.profile_name = configuration.runtime_profile.clone();
+        manifest.profile.initial_server_key = binding.server_key.clone();
+        manifest.profile.launch_contract_sha256 =
+            crate::run::launch_contract_digest(&manifest.profile).unwrap();
+        manifest.profile_capability_snapshot.profile_name = configuration.runtime_profile.clone();
+        manifest.profile_capability_snapshot.server_key = binding.server_key.clone();
+        manifest.global_profile_binding = Some(binding);
+        manifest.agent_configuration = configuration.clone();
+        manifest.instructions = RunInstructionSnapshot::Delegation(Box::new(
+            crate::delegation_identity::InstructionSnapshot::from_capture(snapshot.capture())
+                .unwrap(),
+        ));
+        manifest.model = configuration.model.clone();
+        manifest.initial_reasoning_effort = configuration.default_effort.clone();
+        manifest.default_reasoning_effort = configuration.default_effort.clone();
+        manifest.purpose = configuration.purpose.clone();
+        manifest.required_capabilities = configuration.required_capabilities.clone();
+        manifest.execution_lane = configuration.execution_lane;
+        manifest.requested_assurance = configuration.required_assurance;
+        manifest.achieved_assurance = configuration.required_assurance;
+        manifest.requested_access = Some(CallerWorkspaceAccess::ReadOnly);
+        manifest.initial_access = Access::Read;
+        manifest.selected_role = Some(instructions.role.name.clone());
+        manifest.start_contract = Some("caller_workspace/v1".to_owned());
+        manifest.creation_mode = Some("read_only".to_owned());
+        manifest.admitted_configuration_digest = Some(
+            configuration
+                .admitted_configuration
+                .as_ref()
+                .unwrap()
+                .digest()
+                .unwrap(),
+        );
+        manifest.start_operation_receipt = Some(None);
+        manifest.parent_ref = Some(ParentReference {
+            namespace: "dolgorae.orchestrated-session.v1".to_owned(),
+            kind: "specialist".to_owned(),
+            id: session_id.to_string(),
+        });
+        manifest.aggregate_binding = Some(AggregateBinding {
+            aggregate_kind: AggregateKind::OrchestratedSession,
+            aggregate_id: session_id,
+            operation_id: operation_ref,
+            member_kind: AggregateMemberKind::Specialist,
+            policy_sha256: None,
+            role_reference: configuration.role_reference.clone(),
+            role_snapshot_sha256: Some(
+                instructions
+                    .role_snapshot_digest
+                    .trim_start_matches("sha256:")
+                    .to_owned(),
+            ),
+            agent_configuration_sha256: Some(
+                crate::run::agent_configuration_digest(&configuration).unwrap(),
+            ),
+        });
+        manifest
+    }
+
+    /// The session policy one fixture session is prepared with.
+    ///
+    /// The successor spawn re-applies no session Specialist Policy, so this
+    /// policy only satisfies the legacy session record.
+    fn managed_policy() -> crate::specialist_policy::InstalledSpecialistPolicy {
+        use crate::specialist_policy::{
+            InstalledSpecialistPolicy, InstalledSpecialistRole, RoleSource, RoleSourceReference,
+            RoleSourceScope,
+        };
+
+        let role_source = RoleSource {
+            schema_version: 1,
+            name: "reviewer".to_owned(),
+            display_name: "Reviewer".to_owned(),
+            description: "Reviews the requested change.".to_owned(),
+            instructions: "Inspect the evidence and return a bounded result.".to_owned(),
+        };
+        let role_source_sha256 = sha256_hex(&canonical_bytes(&role_source).unwrap());
+        let instructions_text = "Inspect the evidence and return a bounded result.".to_owned();
+        InstalledSpecialistPolicy {
+            schema_version: 2,
+            policy_name: "successor-policy".to_owned(),
+            revision: 1,
+            approval_policy: "fully_delegated".to_owned(),
+            max_active_specialists: 4,
+            roles: vec![InstalledSpecialistRole {
+                role_ref: "reviewer".to_owned(),
+                role_source: RoleSourceReference {
+                    scope: RoleSourceScope::Project,
+                    name: "reviewer".to_owned(),
+                },
+                role_source_sha256,
+                role: role_source,
+                agent_configuration: AgentSnapshotFixture::legacy(&instructions_text),
+                max_active_instances: 2,
+                reuse_policy: "never".to_owned(),
+                allowed_access: vec!["read_only".to_owned()],
+                activation_policy: "keep_resident".to_owned(),
+                primary_may_request: true,
+                collaboration_source: false,
+                collaboration_target: false,
+                auto_approve_when_fully_delegated: true,
+            }],
+        }
+    }
+
+    /// The legacy v2 Agent Configuration one session Role carries.
+    struct AgentSnapshotFixture;
+
+    impl AgentSnapshotFixture {
+        fn legacy(instructions_text: &str) -> AgentConfigurationSnapshot {
+            use crate::domain::{Assurance, ExecutionLane, Purpose, PurposeKind};
+            AgentConfigurationSnapshot {
+                schema_version: 2,
+                runtime_profile: "test".to_owned(),
+                runtime_profile_snapshot_sha256: "a".repeat(64),
+                model: "test-model".to_owned(),
+                default_effort: "medium".to_owned(),
+                purpose: Purpose {
+                    kind: PurposeKind::Review,
+                    external_label: None,
+                },
+                required_capabilities: Vec::new(),
+                role_reference: Some("reviewer".to_owned()),
+                normalized_instructions: instructions_text.to_owned(),
+                admitted_configuration: None,
+                instructions: crate::run::InstructionSnapshot {
+                    schema: "dolgorae.instructions/v1".to_owned(),
+                    common_prefix_version: 1,
+                    mode_prefix_version: 1,
+                    purpose_prefix_version: 1,
+                    normalized_byte_length: instructions_text.len() as u64,
+                    normalized_sha256: sha256_hex(instructions_text.as_bytes()),
+                }
+                .into(),
+                execution_lane: ExecutionLane::Dedicated,
+                required_assurance: Assurance::BestEffortPersonalAlpha,
+                native_subagent_policy: "enabled".to_owned(),
+            }
+        }
+    }
+
+    fn canonical_bytes(value: &impl Serialize) -> Result<Vec<u8>, MachineError> {
+        let text = serde_json::to_string(value)
+            .map_err(|_| MachineError::invalid_argument("value", "unrepresentable"))?;
+        canonicalize(&parse(&text).map_err(|_| MachineError::invalid_argument("value", "invalid"))?)
+            .map_err(|_| MachineError::invalid_argument("value", "invalid"))
+    }
+
+    fn hire_request<'a>(
+        engagement_id: Uuid,
+        candidate: &'a ProvisioningCandidate,
+        key: &'a str,
+        expected_revision: Option<u64>,
+    ) -> HireExternalSpecialist<'a> {
+        HireExternalSpecialist {
+            engagement_id,
+            provisioning_ref: &candidate.provisioning_ref,
+            role_ref: "reviewer",
+            agent_configuration_digest: &candidate.agent_configuration_digest,
+            idempotency_key: key,
+            expected_revision,
+        }
+    }
+
+    #[test]
+    fn install_and_hire_replay_before_the_revision_fence() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        let scope = fixture.scope();
+        let first = hire_external_specialist(
+            &scope,
+            &port,
+            hire_request(engagement_id, &candidate, "hire-key", Some(0)),
+        )
+        .unwrap();
+        assert_eq!(first.member.state, "idle");
+        assert_eq!(first.receipt.accepted_revision, 1);
+        assert_eq!(fixture.membership_revision(engagement_id), 1);
+        // A stale revision never replaces the retained receipt of the same key.
+        let replay = hire_external_specialist(
+            &scope,
+            &port,
+            hire_request(engagement_id, &candidate, "hire-key", Some(99)),
+        )
+        .unwrap();
+        assert_eq!(replay.receipt, first.receipt);
+        assert_eq!(replay.member, first.member);
+        assert_eq!(port.calls(), 1);
+        assert_eq!(fixture.member_rows(), 1);
+    }
+
+    #[test]
+    fn a_changed_identity_under_the_same_key_conflicts() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let candidate = fixture.install();
+        let mut changed = fixture.sources();
+        changed.admission.model = "gpt-5.6-mini".to_owned();
+        let conflict =
+            install_provisioning(&fixture.scope(), &changed, "install-key", None).unwrap_err();
+        assert_eq!(conflict.code, "IDEMPOTENCY_CONFLICT");
+        // The original install still replays its own identity.
+        let (again, _) =
+            install_provisioning(&fixture.scope(), &fixture.sources(), "install-key", None)
+                .unwrap();
+        assert_eq!(again, candidate);
+    }
+
+    #[test]
+    fn lookup_is_descriptor_complete_for_every_closed_state() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let scope = fixture.scope();
+        let empty = lookup_operation(&scope, "install_provisioning", None, "absent-key").unwrap();
+        assert_eq!(empty["state"], "absent");
+        assert_eq!(empty["proof"]["retained_namespace_generation"], 1);
+        assert_eq!(empty["proof"]["durable_watermark"], 0);
+        assert_eq!(empty["proof"]["matching_operation"], false);
+
+        let candidate = fixture.install();
+        let accepted =
+            lookup_operation(&scope, "install_provisioning", None, "install-key").unwrap();
+        assert_eq!(accepted["state"], "accepted");
+        assert_eq!(accepted["current_outcome"], "completed");
+        assert_eq!(
+            accepted["accepted_input_digest"],
+            accepted["receipt"]["accepted_input_digest"]
+        );
+        assert!(accepted["receipt"]["namespace"]["scope_kind"].is_null());
+        assert_eq!(
+            accepted["accepted_subjects"]["provisioning_ref"],
+            json!(candidate.provisioning_ref)
+        );
+        assert!(accepted["result_ref"].is_null());
+        assert!(accepted["result_digest"].is_null());
+
+        // A stale revision fence is Case A: one durable refusal, retry permitted.
+        let engagement_id = fixture.open();
+        let port = FakePort::new();
+        let fence = hire_external_specialist(
+            &scope,
+            &port,
+            hire_request(engagement_id, &candidate, "fenced-hire", Some(7)),
+        )
+        .unwrap_err();
+        assert_eq!(fence.code, "REVISION_CONFLICT");
+        assert_eq!(port.calls(), 0);
+        let refused = lookup_operation(
+            &scope,
+            "hire_external_specialist",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "fenced-hire",
+        )
+        .unwrap();
+        assert_eq!(refused["state"], "not_accepted");
+        assert_eq!(refused["refusal_code"], "REVISION_CONFLICT");
+        assert_eq!(refused["exact_key_retry_permitted"], true);
+        assert!(refused["durable_refusal_revision"].as_u64().unwrap() >= 1);
+
+        // A prepared intent whose effect is unsettled reports unresolved.
+        let scope_ref = engagement_id.to_string();
+        let identity = intent_identity(
+            &scope,
+            "hire_external_specialist",
+            Some(("external_engagement", scope_ref.as_str())),
+            "unsettled-hire",
+            HIRE_BODY_SCHEMA,
+            &json!({
+                "provisioning_ref": candidate.provisioning_ref,
+                "role_ref": "reviewer",
+                "agent_configuration_digest": candidate.agent_configuration_digest,
+            }),
+        )
+        .unwrap();
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        store
+            .transact(|transaction| {
+                crate::engagement::intent_prepare(
+                    transaction,
+                    crate::engagement::IntentAdmission {
+                        operation_ref: Uuid::now_v7(),
+                        namespace: &identity.lookup,
+                        mutation_envelope_json: &identity.json,
+                        mutation_envelope_digest: &identity.digest,
+                        expected_revision: None,
+                        now_ms: 1,
+                    },
+                )
+            })
+            .unwrap();
+        let unresolved = lookup_operation(
+            &scope,
+            "hire_external_specialist",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "unsettled-hire",
+        )
+        .unwrap();
+        assert_eq!(unresolved["state"], "unresolved");
+        assert_eq!(unresolved["effect"], "unresolved");
+        assert_eq!(unresolved["required_action"], "reconcile_operation");
+        assert!(unresolved["known_subjects"]["member_ref"].is_null());
+    }
+
+    #[test]
+    fn a_legacy_operations_key_is_refused_by_lookup_and_by_direct_admission() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let scope = fixture.scope();
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO operations(scope_id,operation,idempotency_key,request_sha256,response_json)
+                 VALUES(?1,'hire_external_specialist','legacy-hire',?2,'{}')",
+                rusqlite::params![
+                    engagement_id.to_string(),
+                    format!("sha256:{}", "e".repeat(64))
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        let lookup = lookup_operation(
+            &scope,
+            "hire_external_specialist",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "legacy-hire",
+        )
+        .unwrap_err();
+        assert_eq!(lookup.code, "RECOVERY_REQUIRED");
+        let port = FakePort::new();
+        let refused = hire_external_specialist(
+            &scope,
+            &port,
+            hire_request(engagement_id, &candidate, "legacy-hire", Some(0)),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        assert_eq!(port.calls(), 0);
+        assert_eq!(fixture.member_rows(), 0);
+    }
+
+    #[test]
+    fn absent_needs_a_set_up_namespace_and_lookup_creates_no_database() {
+        let fixture = Fixture::new();
+        let scope = fixture.scope();
+        let unset = lookup_operation(&scope, "install_provisioning", None, "any-key").unwrap_err();
+        assert_eq!(unset.code, "DELEGATION_NAMESPACE_UNSET");
+        assert!(!fixture.database().exists());
+        fixture.set_up_namespace();
+        let database = fixture.database();
+        let before = fs::read(&database).unwrap();
+        let absent = lookup_operation(&scope, "install_provisioning", None, "any-key").unwrap();
+        assert_eq!(absent["state"], "absent");
+        assert_eq!(fs::read(&database).unwrap(), before);
+        assert!(!fixture.state_root.join("provisioning").exists());
+    }
+
+    #[test]
+    fn hire_refuses_an_unknown_or_mismatched_snapshot_before_any_allocation() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let scope = fixture.scope();
+        let port = FakePort::new();
+        let unknown = HireExternalSpecialist {
+            engagement_id,
+            provisioning_ref: "provisioning:sha256:absent",
+            role_ref: "reviewer",
+            agent_configuration_digest: &candidate.agent_configuration_digest,
+            idempotency_key: "unknown-snapshot",
+            expected_revision: None,
+        };
+        // An unknown or unaccepted reference is not installed.
+        assert_eq!(
+            hire_external_specialist(&scope, &port, unknown)
+                .unwrap_err()
+                .code,
+            "PROVISIONING_REF_NOT_INSTALLED"
+        );
+        let mismatched = HireExternalSpecialist {
+            agent_configuration_digest: &format!("sha256:{}", "0".repeat(64)),
+            ..hire_request(engagement_id, &candidate, "mismatched-snapshot", None)
+        };
+        assert_eq!(
+            hire_external_specialist(&scope, &port, mismatched)
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+        let path = fixture.state_root.join("provisioning/sha256").join(format!(
+            "{}.json",
+            candidate
+                .provisioning_ref
+                .strip_prefix(crate::provisioning::PROVISIONING_REF_PREFIX)
+                .unwrap()
+        ));
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.push(b' ');
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            hire_external_specialist(
+                &scope,
+                &port,
+                hire_request(engagement_id, &candidate, "tampered-snapshot", None)
+            )
+            .unwrap_err()
+            .code,
+            "RECOVERY_REQUIRED"
+        );
+        assert_eq!(port.calls(), 0);
+        assert!(!fixture.state_root.join("runs").exists());
+        assert_eq!(fixture.member_rows(), 0);
+    }
+
+    #[test]
+    fn hire_discloses_ambient_guidance_outside_every_digest() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let scope = fixture.scope();
+        let port = FakePort::new();
+        let without = hire_external_specialist(
+            &scope,
+            &port,
+            hire_request(engagement_id, &candidate, "ambient-absent", None),
+        )
+        .unwrap();
+        assert!(matches!(
+            without.ambient_guidance.observation("AGENTS.md"),
+            Some(crate::instructions::AmbientGuidanceObservation::Absent)
+        ));
+        let canary = "Profile ambient guidance canary.\n";
+        fs::write(fixture.codex_home.join("AGENTS.md"), canary).unwrap();
+        let with = hire_external_specialist(
+            &scope,
+            &port,
+            hire_request(engagement_id, &candidate, "ambient-present", None),
+        )
+        .unwrap();
+        match with.ambient_guidance.observation("AGENTS.md") {
+            Some(crate::instructions::AmbientGuidanceObservation::Present { content }) => {
+                assert_eq!(content.body, canary)
+            }
+            other => panic!("expected a present ambient source, got {other:?}"),
+        }
+        // The disclosure is a call-time observation: every captured identity
+        // digest stays identical, and no ambient byte enters a digested object.
+        assert_eq!(
+            with.member.agent_configuration_digest,
+            without.member.agent_configuration_digest
+        );
+        assert_eq!(
+            with.member.role_snapshot_digest,
+            without.member.role_snapshot_digest
+        );
+        assert!(
+            !serde_json::to_string(&with.receipt)
+                .unwrap()
+                .contains("canary")
+        );
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let configuration: String = connection
+            .query_row(
+                "SELECT configuration_json FROM members WHERE specialist_run_id=?1",
+                [with.member.member_ref.clone()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!configuration.contains("canary"));
+        drop(connection);
+        // An unreadable-by-policy source is unobservable, never absent.
+        fs::write(fixture.codex_home.join("AGENTS.md"), "x".repeat(70_000)).unwrap();
+        let oversized = hire_external_specialist(
+            &scope,
+            &port,
+            hire_request(engagement_id, &candidate, "ambient-oversized", None),
+        )
+        .unwrap();
+        match oversized.ambient_guidance.observation("AGENTS.md") {
+            Some(crate::instructions::AmbientGuidanceObservation::Unobservable { reason }) => {
+                assert_eq!(reason.as_str(), "oversized")
+            }
+            other => panic!("expected an unobservable ambient source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn captured_bytes_survive_source_edits_after_install() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let retained = crate::provisioning::retained_snapshot(
+            &fixture.state_root,
+            &candidate.provisioning_ref,
+        )
+        .unwrap();
+        let (expected, _) = retained.admitted_configuration().unwrap();
+        fs::remove_dir_all(fixture.home_root.join("roles")).unwrap();
+        let port = FakePort::new();
+        let admitted = hire_external_specialist(
+            &fixture.scope(),
+            &port,
+            hire_request(engagement_id, &candidate, "edited-sources", Some(0)),
+        )
+        .unwrap();
+        assert_eq!(port.calls(), 1);
+        let started = port.started.borrow();
+        let instructions = started[0].instructions.delegation().unwrap();
+        assert_eq!(
+            instructions.instruction_identity_digest,
+            expected.instruction_identity_digest
+        );
+        assert_eq!(
+            instructions.developer_prefix().unwrap(),
+            expected.developer_prefix().unwrap()
+        );
+        assert_eq!(
+            admitted.member.role_snapshot_digest,
+            expected.role_snapshot_digest
+        );
+    }
+
+    #[test]
+    fn a_lost_acknowledgement_replays_the_receipt_without_a_legacy_row() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let scope = fixture.scope();
+        let port = FakePort::new();
+        let first = hire_external_specialist(
+            &scope,
+            &port,
+            hire_request(engagement_id, &candidate, "lost-ack", Some(0)),
+        )
+        .unwrap();
+        let replay = hire_external_specialist(
+            &scope,
+            &port,
+            hire_request(engagement_id, &candidate, "lost-ack", Some(0)),
+        )
+        .unwrap();
+        assert_eq!(replay.receipt, first.receipt);
+        assert_eq!(replay.member, first.member);
+        assert_eq!(port.calls(), 1);
+        assert_eq!(fixture.member_rows(), 1);
+        assert_eq!(fixture.membership_revision(engagement_id), 1);
+        // No dual-write: a successor hire writes no legacy facade-v4 receipt.
+        assert_eq!(fixture.legacy_operation_rows(), 0);
+    }
+
+    #[test]
+    fn an_uncertain_start_is_reported_unknown_and_stays_replayable() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let scope = fixture.scope();
+        let failing = FakePort::failing("WORKER_STARTUP_FAILED");
+        let error = hire_external_specialist(
+            &scope,
+            &failing,
+            hire_request(engagement_id, &candidate, "uncertain-start", Some(0)),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "HIRE_START_UNRESOLVED");
+        assert_eq!(error.details["effect"], "accepted");
+        assert_eq!(error.details["classification"], "RecoveryNeeded");
+        assert_eq!(error.details["required_action"], "recover_run");
+        let lookup = lookup_operation(
+            &scope,
+            "hire_external_specialist",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "uncertain-start",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "accepted");
+        assert_eq!(lookup["current_outcome"], "unknown");
+        // The accepted receipt replays; a second allocation never happens.
+        let succeeding = FakePort::new();
+        let replay = hire_external_specialist(
+            &scope,
+            &succeeding,
+            hire_request(engagement_id, &candidate, "uncertain-start", Some(0)),
+        )
+        .unwrap();
+        assert_eq!(replay.member.state, "unknown");
+        assert_eq!(succeeding.calls(), 0);
+        // A definitively failed start reports failed, from the same member row.
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute(
+                "UPDATE members SET actor_residency='unavailable' WHERE engagement_id=?1",
+                [engagement_id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        let failed = lookup_operation(
+            &scope,
+            "hire_external_specialist",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "uncertain-start",
+        )
+        .unwrap();
+        assert_eq!(failed["current_outcome"], "failed");
+    }
+
+    #[test]
+    fn install_and_open_refuse_a_preallocation_revision_fence() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let scope = fixture.scope();
+        assert_eq!(
+            install_provisioning(&scope, &fixture.sources(), "install-fenced", Some(0))
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+        assert_eq!(
+            open_external_engagement(&scope, "open-fenced", Some(1))
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+        // No intent row exists, so both keys still look absent.
+        assert_eq!(
+            lookup_operation(&scope, "install_provisioning", None, "install-fenced").unwrap()["state"],
+            "absent"
+        );
+        assert_eq!(
+            lookup_operation(&scope, "open_external_engagement", None, "open-fenced").unwrap()["state"],
+            "absent"
+        );
+    }
+
+    #[test]
+    fn the_published_configuration_digest_is_the_admitted_domain_digest() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let scope = fixture.scope();
+        let port = FakePort::new();
+        let admitted = crate::provisioning::retained_snapshot(
+            &fixture.state_root,
+            &candidate.provisioning_ref,
+        )
+        .unwrap()
+        .admitted
+        .digest()
+        .unwrap();
+        assert_eq!(candidate.agent_configuration_digest, admitted);
+        let view = hire_external_specialist(
+            &scope,
+            &port,
+            hire_request(engagement_id, &candidate, "digest-domain", Some(0)),
+        )
+        .unwrap();
+        assert_eq!(view.member.agent_configuration_digest, admitted);
+        let replay = hire_external_specialist(
+            &scope,
+            &port,
+            hire_request(engagement_id, &candidate, "digest-domain", Some(0)),
+        )
+        .unwrap();
+        assert_eq!(replay.member.agent_configuration_digest, admitted);
+    }
+
+    #[test]
+    fn a_preallocation_replay_precedes_the_null_only_fence() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let scope = fixture.scope();
+        let (_, install_receipt) =
+            install_provisioning(&scope, &fixture.sources(), "install-replay", None).unwrap();
+        let (_, install_replay) =
+            install_provisioning(&scope, &fixture.sources(), "install-replay", Some(1)).unwrap();
+        assert_eq!(install_replay, install_receipt);
+        let (_, open_receipt) = open_external_engagement(&scope, "open-replay", None).unwrap();
+        let (_, open_replay) = open_external_engagement(&scope, "open-replay", Some(1)).unwrap();
+        assert_eq!(open_replay, open_receipt);
+    }
+
+    #[test]
+    fn only_the_engagement_owner_may_hire() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        let other = crate::run::ControllerBinding {
+            identity: ControllerIdentity {
+                controller_id: Uuid::now_v7(),
+                kind: ControllerKind::Automation,
+                instance_id: "other-host".to_owned(),
+                subject_id: Some("other-principal".to_owned()),
+                generation: 1,
+            },
+            capability_sha256: "f".repeat(64),
+        };
+        let other_scope = DelegationScope {
+            view: &fixture.view,
+            state_root: &fixture.state_root,
+            controller: &other,
+        };
+        let refused = hire_external_specialist(
+            &other_scope,
+            &port,
+            hire_request(engagement_id, &candidate, "foreign-owner", Some(0)),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "ENGAGEMENT_OWNER_MISMATCH");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(port.calls(), 0);
+        assert_eq!(fixture.member_rows(), 0);
+        // Another principal reads another namespace: nothing was admitted.
+        let lookup = lookup_operation(
+            &other_scope,
+            "hire_external_specialist",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "foreign-owner",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "absent");
+    }
+
+    #[test]
+    fn hire_requires_an_accepted_install() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        // Published, but its own keyed install was never accepted.
+        let snapshot = crate::provisioning::capture_provisioning(&fixture.sources()).unwrap();
+        crate::provisioning::install_snapshot(&fixture.state_root, &snapshot).unwrap();
+        let candidate = snapshot.candidate(true).unwrap();
+        let port = FakePort::new();
+        let refused = hire_external_specialist(
+            &fixture.scope(),
+            &port,
+            hire_request(engagement_id, &candidate, "unaccepted-install", Some(0)),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "PROVISIONING_REF_NOT_INSTALLED");
+        assert_eq!(port.calls(), 0);
+        assert_eq!(fixture.member_rows(), 0);
+    }
+
+    #[test]
+    fn an_install_publication_failure_is_a_definitive_refusal() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let snapshot = crate::provisioning::capture_provisioning(&fixture.sources()).unwrap();
+        let reference = snapshot.provisioning_ref().unwrap();
+        let directory = fixture.state_root.join("provisioning/sha256");
+        fs::create_dir_all(&directory).unwrap();
+        for private in [&fixture.state_root.join("provisioning"), &directory] {
+            fs::set_permissions(private, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let path = directory.join(format!(
+            "{}.json",
+            reference
+                .strip_prefix(crate::provisioning::PROVISIONING_REF_PREFIX)
+                .unwrap()
+        ));
+        // A different retained snapshot at this content address refuses the
+        // publication, which resolves the intent before any effect.
+        fs::write(&path, b"{}\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let refused = install_provisioning(
+            &fixture.scope(),
+            &fixture.sources(),
+            "publish-failure",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        assert_eq!(refused.details["effect"], "none");
+        // The returned classification comes from the one successor table.
+        assert_eq!(refused.details["classification"], "RecoveryNeeded");
+        assert_eq!(refused.details["required_action"], "restore_state");
+        assert_eq!(
+            refused.details["operation_ref"].as_str().unwrap(),
+            lookup_operation(
+                &fixture.scope(),
+                "install_provisioning",
+                None,
+                "publish-failure"
+            )
+            .unwrap()["operation_ref"]
+                .as_str()
+                .unwrap()
+        );
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "install_provisioning",
+            None,
+            "publish-failure",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "not_accepted");
+        assert_eq!(lookup["refusal_code"], "RECOVERY_REQUIRED");
+        assert!(lookup["durable_refusal_revision"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn an_open_acceptance_failure_leaves_the_intent_unresolved() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER refuse_open BEFORE INSERT ON engagements
+                 BEGIN SELECT RAISE(ABORT,'refused'); END;",
+            )
+            .unwrap();
+        drop(connection);
+        let refused = open_external_engagement(&fixture.scope(), "open-failure", None).unwrap_err();
+        assert_eq!(refused.code, "INTERNAL_ERROR");
+        // The durable intent keeps the failure visible to the caller.
+        assert_eq!(refused.details["effect"], "unresolved");
+        assert_eq!(refused.details["classification"], "Unknown");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        assert!(Uuid::parse_str(refused.details["operation_ref"].as_str().unwrap()).is_ok());
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "open_external_engagement",
+            None,
+            "open-failure",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "unresolved");
+        assert_eq!(lookup["effect"], "unresolved");
+        assert_eq!(lookup["required_action"], "reconcile_operation");
+    }
+
+    #[test]
+    fn a_hire_acceptance_failure_leaves_the_intent_unresolved() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER refuse_member BEFORE INSERT ON members
+                 BEGIN SELECT RAISE(ABORT,'refused'); END;",
+            )
+            .unwrap();
+        drop(connection);
+        let port = FakePort::new();
+        let refused = hire_external_specialist(
+            &fixture.scope(),
+            &port,
+            hire_request(engagement_id, &candidate, "hire-failure", Some(0)),
+        )
+        .unwrap_err();
+        assert_eq!(refused.details["effect"], "unresolved");
+        assert_eq!(refused.details["classification"], "Unknown");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        assert!(Uuid::parse_str(refused.details["operation_ref"].as_str().unwrap()).is_ok());
+        assert_eq!(port.calls(), 0);
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "hire_external_specialist",
+            Some(("external_engagement", engagement_id.to_string().as_str())),
+            "hire-failure",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "unresolved");
+        assert_eq!(lookup["operation_ref"], refused.details["operation_ref"]);
+    }
+
+    #[test]
+    fn a_definitive_hire_refusal_keeps_its_original_code() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute(
+                "UPDATE engagements SET state='closed' WHERE engagement_id=?1",
+                [engagement_id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        let port = FakePort::new();
+        let refused = hire_external_specialist(
+            &fixture.scope(),
+            &port,
+            hire_request(engagement_id, &candidate, "closed-engagement", Some(0)),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "STATE_CONFLICT");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(port.calls(), 0);
+        assert_eq!(fixture.member_rows(), 0);
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "hire_external_specialist",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "closed-engagement",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "not_accepted");
+        assert_eq!(lookup["refusal_code"], "STATE_CONFLICT");
+        assert_eq!(lookup["exact_key_retry_permitted"], true);
+        assert!(lookup["durable_refusal_revision"].as_u64().unwrap() >= 1);
+    }
+
+    fn assert_successor_error(
+        error: &MachineError,
+        code: &str,
+        classification: &str,
+        action: &str,
+    ) {
+        let details = &error.details;
+        assert_eq!(error.code, code);
+        assert_eq!(details["schema"], "dolgorae.successor-error/v1");
+        assert_eq!(details["code"], code);
+        assert_eq!(details["classification"], classification);
+        assert_eq!(details["required_action"], action);
+        assert_eq!(details["retry_new_key"], false);
+        assert!(details["operation_kind"].is_string());
+        assert!(details.get("operation_ref").is_some());
+        assert!(details["effect"].is_string());
+    }
+
+    #[test]
+    fn every_successor_error_carries_the_closed_facts() {
+        // A namespace that is not set up is a rejection requiring restoration.
+        let unset = Fixture::new();
+        let error =
+            lookup_operation(&unset.scope(), "install_provisioning", None, "key").unwrap_err();
+        assert_successor_error(
+            &error,
+            "DELEGATION_NAMESPACE_UNSET",
+            "Rejected",
+            "restore_state",
+        );
+        // A corrupt retained intent is a recovery condition.
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let scope = fixture.scope();
+        fixture.install();
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute(
+                "UPDATE delegation_operations SET accepted_subjects_json='{}'
+                  WHERE operation_kind='install_provisioning'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let corrupt =
+            lookup_operation(&scope, "install_provisioning", None, "install-key").unwrap_err();
+        assert_successor_error(
+            &corrupt,
+            "RECOVERY_REQUIRED",
+            "RecoveryNeeded",
+            "restore_state",
+        );
+        // A reused key with another identity is a rejection that permits only
+        // the original key.
+        let second = Fixture::new();
+        second.set_up_namespace();
+        let mut changed = second.sources();
+        changed.admission.model = "gpt-5.6-mini".to_owned();
+        assert!(
+            install_provisioning(&second.scope(), &second.sources(), "install-key", None).is_ok()
+        );
+        let conflict =
+            install_provisioning(&second.scope(), &changed, "install-key", None).unwrap_err();
+        assert_successor_error(
+            &conflict,
+            "IDEMPOTENCY_CONFLICT",
+            "Rejected",
+            "lookup_original_key",
+        );
+    }
+
+    #[test]
+    fn a_hire_failure_after_the_acceptance_commit_keeps_its_effect() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER refuse_settle BEFORE UPDATE ON members
+                 BEGIN SELECT RAISE(ABORT,'refused'); END;",
+            )
+            .unwrap();
+        drop(connection);
+        let port = FakePort::new();
+        let refused = hire_external_specialist(
+            &fixture.scope(),
+            &port,
+            hire_request(engagement_id, &candidate, "post-commit", Some(0)),
+        )
+        .unwrap_err();
+        // The member admission is durable, so the failure reports that effect.
+        assert_eq!(refused.details["effect"], "accepted");
+        assert_eq!(refused.details["classification"], "RecoveryNeeded");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        assert!(Uuid::parse_str(refused.details["operation_ref"].as_str().unwrap()).is_ok());
+        assert_eq!(fixture.member_rows(), 1);
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "hire_external_specialist",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "post-commit",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "accepted");
+        assert_eq!(lookup["current_outcome"], "pending");
+    }
+
+    fn review_task(contexts: usize, brief: &str) -> crate::task_request::SpecialistTaskRequest {
+        crate::task_request::SpecialistTaskRequest {
+            purpose: "change".to_owned(),
+            brief: brief.to_owned(),
+            contexts: (0..contexts)
+                .map(|index| crate::task_request::TaskContext {
+                    id: format!("ctx-{index}"),
+                    content: format!("context body {index}\n"),
+                    provenance: "caller".to_owned(),
+                })
+                .collect(),
+            criteria: Vec::new(),
+            expected_output: "structured_review_v3".to_owned(),
+        }
+    }
+
+    fn assign_request<'a>(
+        engagement_id: Uuid,
+        member_ref: Uuid,
+        key: &'a str,
+        intent: &'a str,
+    ) -> AssignExternalSpecialistTask<'a> {
+        AssignExternalSpecialistTask {
+            engagement_id,
+            member_ref,
+            task: review_task(2, "Assess the accepted candidate.\n"),
+            execution_intent: intent,
+            target: None,
+            deadline_seconds: 600,
+            idempotency_key: key,
+            expected_revision: None,
+        }
+    }
+
+    /// After a release admission settles, no assignment is
+    /// accepted: the revision fence refuses the pre-release counter, the
+    /// in-transaction membership gate refuses the retired member, and no task
+    /// row is ever created.
+    #[test]
+    fn an_assignment_after_a_release_admission_is_fenced() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "fence-spawn", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        // The release's durable effects: the admitted row, the terminal
+        // member state and the scoped counter the terminal commit advanced.
+        let scope_ref = session.to_string();
+        let now = now_ms().unwrap();
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        store
+            .transact(|transaction| {
+                let admitted = crate::engagement::scope_membership_revision(
+                    transaction,
+                    &fixture.view.workspace_id,
+                    "orchestrated_session",
+                    &scope_ref,
+                )?;
+                crate::engagement::admit_member_release(
+                    transaction,
+                    crate::engagement::MemberReleaseAdmission {
+                        operation_ref: Uuid::now_v7(),
+                        workspace_ref: &fixture.view.workspace_id,
+                        scope_kind: "orchestrated_session",
+                        scope_ref: &scope_ref,
+                        member_ref: member,
+                        run_ref: member,
+                        controller_principal: "controller:fixture",
+                        controller_generation: 1,
+                        admitted_membership_revision: admitted,
+                        now_ms: now,
+                    },
+                )
+            })
+            .unwrap();
+        drop(store);
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute(
+                "UPDATE brokered_members SET membership_state='retired',actor_residency='terminal'
+                  WHERE run_id=?1",
+                [member.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE scope_membership_revisions SET revision=revision+1
+                  WHERE workspace_ref=?1 AND scope_kind='orchestrated_session' AND scope_ref=?2",
+                rusqlite::params![fixture.view.workspace_id, scope_ref],
+            )
+            .unwrap();
+        let revision: i64 = connection
+            .query_row(
+                "SELECT revision FROM scope_membership_revisions
+                  WHERE workspace_ref=?1 AND scope_kind='orchestrated_session' AND scope_ref=?2",
+                rusqlite::params![fixture.view.workspace_id, scope_ref],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+        // The stale revision meets the fence inside the acceptance
+        // transaction; the current revision meets the membership gate — both
+        // before any dispatch and without a task row.
+        let fenced = fixture
+            .assign(
+                session,
+                "fence-stale",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    Some((revision - 1) as u64),
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(fenced.code, "REVISION_CONFLICT");
+        let gated = fixture
+            .assign(
+                session,
+                "fence-current",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(gated.code, "SPECIALIST_NOT_MEMBER");
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let tasks: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM brokered_tasks WHERE target_run_id=?1 AND
+                    idempotency_key IN ('fence-stale','fence-current')",
+                [member.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(tasks, 0, "no task was accepted after the release admission");
+    }
+
+    /// A close intent that commits between a successor spawn's pre-check
+    /// and its acceptance transaction stops the admission at the durable
+    /// boundary — a Case A refusal, no member row, no counter advance and the
+    /// minted credential discarded.
+    #[test]
+    fn a_spawn_refused_when_a_close_intent_commits_after_its_precheck() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let candidate = fixture.install();
+        let before_revision = fixture.session_membership_revision(session);
+        let state_root = fixture.state_root.clone();
+        // The interleaved close commits between the spawn's pre-check and its
+        // acceptance transaction; the session has no successor member yet, so
+        // the close guard itself admits the intent.
+        let interleave = set_pre_acceptance_interleave(move || {
+            crate::orchestration::OrchestrationStore::open(&state_root)
+                .unwrap()
+                .begin_session_close(session, false, 1)
+                .unwrap();
+        });
+        let refused = fixture
+            .spawn(session, &candidate, "spawn-close-race", None, &port)
+            .unwrap_err();
+        drop(interleave);
+        assert_eq!(refused.code, "RUN_STATE_CONFLICT");
+        assert_eq!(refused.details["required_action"], "fix_request");
+        assert_eq!(refused.details["effect"], "none");
+        // The intent answers not_accepted; nothing was admitted.
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "spawn-close-race",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "not_accepted");
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let members: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM brokered_members WHERE session_id=?1",
+                [session.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(members, 0, "no member row was created");
+        drop(connection);
+        assert_eq!(
+            fixture.session_membership_revision(session),
+            before_revision,
+            "the scoped counter did not advance"
+        );
+        let credentials = fixture
+            .state_root
+            .join("orchestration/broker-credentials")
+            .read_dir()
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .map(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
+                    .unwrap_or(true)
+            })
+            .count();
+        assert_eq!(credentials, 0, "the minted credential was discarded");
+    }
+
+    /// The same durable boundary stops a successor assignment whose
+    /// pre-check preceded a committed close intent — a Case A refusal, no task
+    /// row and no revision advance.
+    #[test]
+    fn an_assign_refused_when_a_close_intent_commits_after_its_precheck() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "assign-race-spawn", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let before_revision = fixture.session_membership_revision(session);
+        let before_tasks = fixture.broker_task_rows();
+        let database = fixture.database();
+        // The interleaved durable close intent — the state a close reaches
+        // after every member was released. It is modelled directly because
+        // begin_session_close refuses to create it while the unreleased member
+        // exists (the close guard).
+        let interleave = set_pre_acceptance_interleave(move || {
+            let connection = rusqlite::Connection::open(&database).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO orchestrated_session_closes(
+                       operation_id,session_id,interrupt,initiating_controller_generation,
+                       progress,safe_error_code,created_at_ms,updated_at_ms
+                     ) VALUES(?1,?2,false,1,'settling',NULL,1,1)",
+                    rusqlite::params![Uuid::now_v7().to_string(), session.to_string()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE orchestrated_sessions SET status='completing' WHERE session_id=?1",
+                    [session.to_string()],
+                )
+                .unwrap();
+        });
+        let mut task = fixture_task();
+        task.expected_output = "complete_result".to_owned();
+        let refused = fixture
+            .assign(
+                session,
+                "assign-close-race",
+                &caller,
+                &port,
+                AssignSpecialistTask {
+                    member_ref: member,
+                    task,
+                    execution_intent: "read_only",
+                    target: None,
+                    deadline_seconds: 600,
+                    expected_revision: None,
+                },
+            )
+            .unwrap_err();
+        drop(interleave);
+        assert_eq!(refused.code, "RUN_STATE_CONFLICT");
+        assert_eq!(refused.details["required_action"], "fix_request");
+        assert_eq!(refused.details["effect"], "none");
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "assign-close-race",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "not_accepted");
+        assert_eq!(
+            fixture.broker_task_rows(),
+            before_tasks,
+            "no task row was created"
+        );
+        assert_eq!(
+            fixture.session_membership_revision(session),
+            before_revision,
+            "the scoped counter did not advance"
+        );
+    }
+
+    fn caller(max_rounds: u64) -> crate::caller_scope::TrustedCallerScope {
+        crate::caller_scope::fixture(max_rounds)
+    }
+
+    /// The retained accepted receipt of one managed assignment, byte for byte.
+    ///
+    /// A managed Case B refusal must leave exactly this text untouched.
+    fn accepted_managed_receipt(database: &std::path::Path, session_id: Uuid) -> Option<String> {
+        let store = EngagementStore::open_read_only(database).ok()?;
+        use rusqlite::OptionalExtension as _;
+        store
+            .connection()
+            .query_row(
+                "SELECT receipt_json FROM delegation_operations
+                  WHERE scope_kind='orchestrated_session' AND scope_ref=?1
+                    AND state='accepted'
+                  ORDER BY sequence DESC LIMIT 1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()?
+    }
+
+    /// A checked v4 review requires an explicit admitted target.
+    #[test]
+    fn a_structured_review_v4_task_requires_a_target_before_acceptance() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "v4-hire");
+        let scope = fixture.scope();
+        let caller = caller(3);
+        let port = FakePort::new();
+        let mut request = assign_request(engagement_id, member, "v4-assign", "read_only");
+        request.task.purpose = "change".to_owned();
+        request.task.expected_output = "structured_review_v4".to_owned();
+        let refused = assign_external_specialist_task(&scope, &caller, &port, request).unwrap_err();
+        assert_eq!(refused.code, "INVALID_ARGUMENT");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["required_action"], "fix_request");
+        assert_eq!(refused.message, "invalid command arguments");
+        assert_eq!(fixture.task_count(), 0);
+        assert_eq!(port.calls(), 0);
+        let lookup = lookup_operation(
+            &scope,
+            "assign_external_specialist_task",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "v4-assign",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "absent");
+    }
+
+    struct TargetAssignment {
+        fixture: Fixture,
+        owner: SettlementOwner,
+        member: Uuid,
+        port: FakePort,
+    }
+
+    impl TargetAssignment {
+        fn new(managed: bool) -> Self {
+            let fixture = Fixture::new();
+            fixture.set_up_namespace();
+            let owner = if managed {
+                SettlementOwner::Managed {
+                    session_id: fixture.managed_session(),
+                }
+            } else {
+                SettlementOwner::External {
+                    engagement_id: fixture.open(),
+                }
+            };
+            let candidate = fixture.install();
+            let member = match owner {
+                SettlementOwner::External { engagement_id } => {
+                    fixture.hire_member(engagement_id, &candidate, "target-member")
+                }
+                SettlementOwner::Managed { session_id } => Uuid::parse_str(
+                    &fixture
+                        .spawn(
+                            session_id,
+                            &candidate,
+                            "target-member",
+                            None,
+                            &FakePort::new(),
+                        )
+                        .unwrap()
+                        .member
+                        .member_ref,
+                )
+                .unwrap(),
+            };
+            Self {
+                fixture,
+                owner,
+                member,
+                port: FakePort::new(),
+            }
+        }
+
+        fn workspace(&self) -> std::path::PathBuf {
+            self.fixture.view.canonical_path.to_path_buf().unwrap()
+        }
+        fn git(&self, args: &[&str]) -> String {
+            let output = std::process::Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(self.workspace())
+                .args([
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "user.name=Dolgorae Test",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+        fn selection(kind: &str, revision: Option<&str>) -> crate::review::ReviewTargetRequest {
+            crate::review::ReviewTargetRequest {
+                kind: kind.to_owned(),
+                revision: revision.map(str::to_owned),
+            }
+        }
+        fn assign(
+            &self,
+            key: &str,
+            target: Option<crate::review::ReviewTargetRequest>,
+            task: crate::task_request::SpecialistTaskRequest,
+        ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+            self.assign_input(key, self.member, target, task, 600, "read_only")
+        }
+        fn assign_input(
+            &self,
+            key: &str,
+            member: Uuid,
+            target: Option<crate::review::ReviewTargetRequest>,
+            task: crate::task_request::SpecialistTaskRequest,
+            deadline: u64,
+            intent: &str,
+        ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+            match self.owner {
+                SettlementOwner::External { engagement_id } => assign_external_specialist_task(
+                    &self.fixture.scope(),
+                    &caller(32),
+                    &self.port,
+                    AssignExternalSpecialistTask {
+                        engagement_id,
+                        member_ref: member,
+                        task,
+                        execution_intent: intent,
+                        target,
+                        deadline_seconds: deadline,
+                        idempotency_key: key,
+                        expected_revision: None,
+                    },
+                ),
+                SettlementOwner::Managed { session_id } => assign_specialist_task(
+                    &self.fixture.scope(),
+                    &self.fixture.managed_context(session_id, key),
+                    &caller(32),
+                    &self.port,
+                    AssignSpecialistTask {
+                        member_ref: member,
+                        task,
+                        execution_intent: intent,
+                        target,
+                        deadline_seconds: deadline,
+                        expected_revision: None,
+                    },
+                ),
+            }
+        }
+        fn retained(
+            &self,
+            observation: &DelegationTaskObservation,
+        ) -> (
+            crate::delegation_identity::AcceptedTask,
+            crate::direct_review_target::DirectTarget,
+            Vec<u8>,
+        ) {
+            let task = Uuid::parse_str(&observation.task_ref).unwrap();
+            let store = EngagementStore::open(&self.fixture.database()).unwrap();
+            let accepted = match self.owner {
+                SettlementOwner::External { engagement_id } => store
+                    .external_task_identity(engagement_id, task)
+                    .unwrap()
+                    .unwrap(),
+                SettlementOwner::Managed { session_id } => {
+                    crate::successor_capture::retained_accepted_task(
+                        &crate::orchestration::successor_task(store.connection(), session_id, task)
+                            .unwrap()
+                            .unwrap()
+                            .accepted_request_json,
+                    )
+                    .unwrap()
+                }
+            };
+            let (task_body, contexts, target) =
+                engagement::accepted_task_content(store.connection(), task)
+                    .unwrap()
+                    .unwrap();
+            let bytes = target.unwrap();
+            let manifest: crate::direct_review_target::DirectTarget =
+                serde_json::from_slice(&bytes).unwrap();
+            let contents = crate::successor_capture::AcceptedTaskContents {
+                task_body,
+                contexts,
+                target: Some(bytes.clone()),
+            };
+            contents.prompt(&accepted, "read_only", 600).unwrap();
+            let reference = accepted.contexts.last().unwrap();
+            assert_eq!(reference.identity, manifest.target_sha256);
+            assert_eq!(reference.content.byte_length, bytes.len() as u64);
+            assert_eq!(
+                reference.content.sha256,
+                format!("sha256:{}", sha256_hex(&bytes))
+            );
+            assert_eq!(bytes, manifest.metadata_bytes().unwrap());
+            (accepted, manifest, bytes)
+        }
+        fn receipt_bytes(&self) -> String {
+            EngagementStore::open(&self.fixture.database()).unwrap().connection().query_row("SELECT receipt_json FROM delegation_operations WHERE operation_kind IN ('assign_specialist_task','assign_external_specialist_task')",[],|row|row.get(0)).unwrap()
+        }
+    }
+
+    #[test]
+    fn direct_target_capture_distinguishes_index_and_worktree_for_both_owners() {
+        for managed in [false, true] {
+            let scene = TargetAssignment::new(managed);
+            fs::write(scene.workspace().join("README.md"), b"index\n").unwrap();
+            scene.git(&["add", "README.md"]);
+            fs::write(scene.workspace().join("README.md"), b"worktree\n").unwrap();
+            let mut manifests = Vec::new();
+            for (i, kind, source, bytes) in [
+                (0, "staged", "index", b"index\n".as_slice()),
+                (1, "dirty", "worktree", b"worktree\n".as_slice()),
+            ] {
+                let member =
+                    if i == 0 {
+                        scene.member
+                    } else {
+                        let candidate = scene.fixture.install();
+                        match scene.owner {
+                            SettlementOwner::External { engagement_id } => scene
+                                .fixture
+                                .hire_member(engagement_id, &candidate, "other-target-member"),
+                            SettlementOwner::Managed { session_id } => Uuid::parse_str(
+                                &scene
+                                    .fixture
+                                    .spawn(
+                                        session_id,
+                                        &candidate,
+                                        "other-target-member",
+                                        None,
+                                        &FakePort::new(),
+                                    )
+                                    .unwrap()
+                                    .member
+                                    .member_ref,
+                            )
+                            .unwrap(),
+                        }
+                    };
+                let (observation, _) = scene
+                    .assign_input(
+                        kind,
+                        member,
+                        Some(TargetAssignment::selection(kind, None)),
+                        review_task(2, "capture sources"),
+                        600,
+                        "read_only",
+                    )
+                    .unwrap();
+                let (_, manifest, _) = scene.retained(&observation);
+                let before = manifest
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == "README.md" && entry.side == "before")
+                    .unwrap();
+                assert_eq!(before.sha256, sha256_hex(b"baseline\n"));
+                let after = manifest
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == "README.md" && entry.side == "after")
+                    .unwrap();
+                assert_eq!(after.source, source);
+                assert_eq!(after.sha256, sha256_hex(bytes));
+                if kind == "staged" {
+                    assert_eq!(
+                        after.blob_oid.as_deref(),
+                        Some(scene.git(&["rev-parse", ":README.md"]).as_str())
+                    );
+                }
+                manifests.push(manifest.target_sha256);
+            }
+            assert_ne!(manifests[0], manifests[1]);
+        }
+    }
+
+    #[test]
+    fn accepted_target_manifest_survives_ref_movement_and_replay_checks_input() {
+        for managed in [false, true] {
+            for kind in ["commit", "range"] {
+                let scene = TargetAssignment::new(managed);
+                scene.git(&["branch", "base"]);
+                fs::write(scene.workspace().join("README.md"), b"selected\n").unwrap();
+                scene.git(&["add", "README.md"]);
+                scene.git(&["commit", "-q", "-m", "selected"]);
+                scene.git(&["branch", "chosen"]);
+                let revision = if kind == "commit" {
+                    "chosen"
+                } else {
+                    "base...chosen"
+                };
+                let selection = TargetAssignment::selection(kind, Some(revision));
+                let task = review_task(2, "retained input");
+                let (observation, receipt) = scene
+                    .assign("pinned", Some(selection.clone()), task.clone())
+                    .unwrap();
+                let (_, original, bytes) = scene.retained(&observation);
+                assert_eq!(
+                    original.resolved_head.as_deref(),
+                    Some(scene.git(&["rev-parse", "chosen"]).as_str())
+                );
+                let receipt_bytes = scene.receipt_bytes();
+                fs::write(scene.workspace().join("README.md"), b"later\n").unwrap();
+                scene.git(&["add", "README.md"]);
+                scene.git(&["commit", "-q", "-m", "later"]);
+                scene.git(&["branch", "-f", "chosen", "HEAD"]);
+                fs::remove_file(scene.workspace().join("README.md")).unwrap();
+                assert_ne!(
+                    original.resolved_head.as_deref(),
+                    Some(scene.git(&["rev-parse", "chosen"]).as_str())
+                );
+                assert_eq!(
+                    scene
+                        .assign("pinned", Some(selection.clone()), task.clone())
+                        .unwrap()
+                        .1,
+                    receipt
+                );
+                assert_eq!(scene.receipt_bytes(), receipt_bytes);
+                assert_eq!(scene.retained(&observation).2, bytes);
+                assert_eq!(scene.port.calls(), 1);
+                for (member, deadline, intent, target, changed_task) in [
+                    (
+                        scene.member,
+                        601,
+                        "read_only",
+                        Some(selection.clone()),
+                        task.clone(),
+                    ),
+                    (
+                        Uuid::now_v7(),
+                        600,
+                        "read_only",
+                        Some(selection.clone()),
+                        task.clone(),
+                    ),
+                    (
+                        scene.member,
+                        600,
+                        "canonical_workspace_write",
+                        Some(selection.clone()),
+                        task.clone(),
+                    ),
+                    (
+                        scene.member,
+                        600,
+                        "read_only",
+                        Some(TargetAssignment::selection(
+                            "commit",
+                            Some("missing-new-selection"),
+                        )),
+                        task.clone(),
+                    ),
+                    (
+                        scene.member,
+                        600,
+                        "read_only",
+                        Some(TargetAssignment::selection("workspace", None)),
+                        task.clone(),
+                    ),
+                    (scene.member, 600, "read_only", None, task.clone()),
+                    (scene.member, 600, "read_only", Some(selection.clone()), {
+                        let mut t = task.clone();
+                        t.brief.push_str("changed");
+                        t
+                    }),
+                ] {
+                    assert_eq!(
+                        scene
+                            .assign_input("pinned", member, target, changed_task, deadline, intent)
+                            .unwrap_err()
+                            .code,
+                        "IDEMPOTENCY_CONFLICT"
+                    );
+                }
+                assert_eq!(scene.receipt_bytes(), receipt_bytes);
+                assert_eq!(scene.port.calls(), 1);
+                assert!(!scene.fixture.state_root.join("direct-reviews").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn mutable_target_capture_does_not_follow_later_bytes_or_modes() {
+        for managed in [false, true] {
+            for kind in ["workspace", "dirty"] {
+                let scene = TargetAssignment::new(managed);
+                let target = TargetAssignment::selection(kind, None);
+                let task = review_task(2, "mutable capture");
+                let (observation, receipt) = scene
+                    .assign("mutable", Some(target.clone()), task.clone())
+                    .unwrap();
+                let (_, manifest, bytes) = scene.retained(&observation);
+                let reader = crate::direct_review_target::DirectTargetReader::create(
+                    &scene.fixture.state_root,
+                    &scene.workspace(),
+                    scene.fixture.view.mode,
+                    Uuid::now_v7(),
+                    scene.member,
+                    manifest,
+                )
+                .unwrap();
+                let path = scene.workspace().join("README.md");
+                let original_mode = fs::metadata(&path).unwrap().permissions().mode();
+                for mode_only in [true, false] {
+                    if mode_only {
+                        fs::set_permissions(
+                            &path,
+                            fs::Permissions::from_mode(original_mode ^ 0o100),
+                        )
+                        .unwrap();
+                    } else {
+                        fs::set_permissions(&path, fs::Permissions::from_mode(original_mode))
+                            .unwrap();
+                        fs::write(&path, b"changed\n").unwrap();
+                    }
+                    assert_eq!(
+                        reader.check_acceptance().unwrap_err().code,
+                        "REVIEW_TARGET_DRIFTED"
+                    );
+                    if !mode_only {
+                        assert_eq!(
+                            reader
+                                .read(
+                                    "thread",
+                                    "turn",
+                                    "bytes",
+                                    &crate::direct_review_target::CandidateReadRequest {
+                                        side: if kind == "workspace" {
+                                            "current"
+                                        } else {
+                                            "after"
+                                        }
+                                        .to_owned(),
+                                        path: "README.md".to_owned(),
+                                        byte_offset: 0,
+                                        byte_length: 1,
+                                    }
+                                )
+                                .unwrap_err()
+                                .code,
+                            "REVIEW_TARGET_DRIFTED"
+                        );
+                    }
+                    assert_eq!(scene.retained(&observation).2, bytes);
+                }
+                assert_eq!(
+                    scene.assign("mutable", Some(target), task).unwrap().1,
+                    receipt
+                );
+                fs::remove_file(scene.workspace().join("README.md")).unwrap();
+                assert_eq!(scene.retained(&observation).2, bytes);
+                assert_eq!(scene.port.calls(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn review_target_is_last_and_counts_toward_the_context_limit() {
+        for managed in [false, true] {
+            for (count, with_target, ok) in [(63, true, true), (64, true, false), (64, false, true)]
+            {
+                let scene = TargetAssignment::new(managed);
+                let mut task = review_task(count, "ordered contexts");
+                task.contexts.reverse();
+                let expected = task
+                    .contexts
+                    .iter()
+                    .map(|context| context.id.clone())
+                    .collect::<Vec<_>>();
+                let result = scene.assign(
+                    "slots",
+                    with_target.then(|| TargetAssignment::selection("workspace", None)),
+                    task,
+                );
+                if !ok {
+                    assert_eq!(result.unwrap_err().code, "INVALID_ARGUMENT");
+                    assert_eq!(scene.port.calls(), 0);
+                    continue;
+                }
+                let (observation, _) = result.unwrap();
+                if with_target {
+                    let (accepted, target, _) = scene.retained(&observation);
+                    assert_eq!(
+                        accepted.contexts[..count]
+                            .iter()
+                            .map(|reference| reference.identity.clone())
+                            .collect::<Vec<_>>(),
+                        expected
+                    );
+                    assert_eq!(
+                        accepted.contexts.last().unwrap().identity,
+                        target.target_sha256
+                    );
+                    assert_eq!(accepted.contexts.last().unwrap().kind, "review_target");
+                    assert_eq!(
+                        accepted.contexts.last().unwrap().media_type,
+                        "application/json"
+                    );
+                    assert_eq!(accepted.contexts.len(), 64);
+                }
+                assert_eq!(scene.port.calls(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn direct_target_refusal_precedes_intent_task_round_reader_and_dispatch() {
+        for managed in [false, true] {
+            for failure in 0..5 {
+                let scene = TargetAssignment::new(managed);
+                let selection = match failure {
+                    0 => TargetAssignment::selection("not-a-target", None),
+                    1 => TargetAssignment::selection(
+                        "commit",
+                        Some("ffffffffffffffffffffffffffffffffffffffff"),
+                    ),
+                    2 => TargetAssignment::selection("commit", Some("missing-revision")),
+                    3 => TargetAssignment::selection("range", Some("bad....range")),
+                    _ => {
+                        std::os::unix::fs::symlink(
+                            scene.fixture.root.join("codex-home"),
+                            scene.workspace().join("escape"),
+                        )
+                        .unwrap();
+                        TargetAssignment::selection("workspace", None)
+                    }
+                };
+                let error = scene
+                    .assign(
+                        "refused",
+                        Some(selection),
+                        review_task(1, "refused capture"),
+                    )
+                    .unwrap_err();
+                assert_eq!(
+                    error.code,
+                    match failure {
+                        0 | 3 => "INVALID_ARGUMENT",
+                        1 | 2 => "REVIEW_TARGET_UNAVAILABLE",
+                        _ => "REVIEW_TARGET_UNSAFE_FILE",
+                    }
+                );
+                let operation = match scene.owner {
+                    SettlementOwner::External { .. } => "assign_external_specialist_task",
+                    SettlementOwner::Managed { .. } => "assign_specialist_task",
+                };
+                assert_eq!(scene.fixture.intent_rows(operation), 0);
+                let store = EngagementStore::open(&scene.fixture.database()).unwrap();
+                for table in [
+                    if managed { "brokered_tasks" } else { "tasks" },
+                    "caller_scope_assignments",
+                ] {
+                    assert_eq!(
+                        store
+                            .connection()
+                            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                                .get::<_, u64>(0))
+                            .unwrap(),
+                        0
+                    );
+                }
+                assert!(!scene.fixture.state_root.join("direct-reviews").exists());
+                assert_eq!(scene.port.calls(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn assign_records_the_exact_task_and_counts_one_round() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "assign-hire");
+        let scope = fixture.scope();
+        let caller = caller(3);
+        let port = FakePort::new();
+        let (observation, receipt) = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "assign-key", "read_only"),
+        )
+        .unwrap();
+        assert_eq!(observation.state, "queued");
+        assert_eq!(observation.member_ref, member.to_string());
+        assert_eq!(observation.required_action, "await_task");
+        assert_eq!(observation.content_availability, "pending");
+        // The receipt names the accepted task and the member Run.
+        assert_eq!(
+            receipt.accepted_subjects.task_ref.as_deref(),
+            Some(observation.task_ref.as_str())
+        );
+        assert_eq!(
+            receipt.accepted_subjects.member_ref.as_deref(),
+            Some(member.to_string().as_str())
+        );
+        // The retained accepted-task identity is the exact captured identity.
+        let task_id = Uuid::parse_str(&observation.task_ref).unwrap();
+        let retained = EngagementStore::open(&fixture.database())
+            .unwrap()
+            .external_task_identity(engagement_id, task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.digest().unwrap(), observation.accepted_task_digest);
+        assert_eq!(retained.contexts.len(), 2);
+        assert_eq!(
+            crate::caller_scope::rounds_used(
+                EngagementStore::open_read_only(&fixture.database())
+                    .unwrap()
+                    .connection(),
+                &caller
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(fixture.assignment_rows(), 1);
+    }
+
+    #[test]
+    fn rounds_are_counted_across_every_aggregate_under_one_binding() {
+        let port = FakePort::new();
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let first = fixture.hire_member(engagement_id, &candidate, "rounds-a");
+        let second = fixture.hire_member(engagement_id, &candidate, "rounds-b");
+        let scope = fixture.scope();
+        let caller = caller(4);
+        assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, first, "rounds-1", "read_only"),
+        )
+        .unwrap();
+        assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, second, "rounds-2", "read_only"),
+        )
+        .unwrap();
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn an_exhausted_budget_refuses_without_a_task_or_an_accounting_row() {
+        let port = FakePort::new();
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let first = fixture.hire_member(engagement_id, &candidate, "exhaust-a");
+        let second = fixture.hire_member(engagement_id, &candidate, "exhaust-b");
+        let scope = fixture.scope();
+        let caller = caller(1);
+        assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, first, "exhaust-1", "read_only"),
+        )
+        .unwrap();
+        let refused = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, second, "exhaust-2", "read_only"),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "ROUNDS_EXHAUSTED");
+        assert_eq!(refused.details["classification"], "Rejected");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(fixture.task_count(), 1);
+        assert_eq!(fixture.assignment_rows(), 1);
+        let lookup = lookup_operation(
+            &scope,
+            "assign_external_specialist_task",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "exhaust-2",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "not_accepted");
+        assert_eq!(lookup["refusal_code"], "ROUNDS_EXHAUSTED");
+    }
+
+    #[test]
+    fn case_b_keeps_the_receipt_and_releases_the_round() {
+        let port = FakePort::refusing_dispatch("DISPATCH_REFUSED");
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install_write();
+        let member = fixture.hire_member(engagement_id, &candidate, "case-b-hire");
+        fixture.initialize_writer_authority();
+        let scope = fixture.scope();
+        let caller = caller(2);
+        // The dispatch index cannot be recorded: the acceptance is preserved and
+        // only the dispatch refusal plus the accounting transition are written.
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER refuse_dispatch_index BEFORE INSERT ON dispatch_indexes
+                 BEGIN SELECT RAISE(ABORT,'refused'); END;",
+            )
+            .unwrap();
+        drop(connection);
+        let refused = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "case-b", "canonical_workspace_write"),
+        )
+        .unwrap_err();
+        assert_eq!(refused.details["effect"], "accepted");
+        assert_eq!(refused.details["classification"], "RecoveryNeeded");
+        let lookup = lookup_operation(
+            &scope,
+            "assign_external_specialist_task",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "case-b",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "accepted");
+        let task_id =
+            Uuid::parse_str(lookup["accepted_subjects"]["task_ref"].as_str().unwrap()).unwrap();
+        assert_eq!(fixture.task_state(task_id), "failed");
+        // The round is released and the retained receipt still replays.
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            0
+        );
+        let replay = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "case-b", "canonical_workspace_write"),
+        )
+        .unwrap();
+        assert_eq!(replay.1.receipt_digest, lookup["receipt"]["receipt_digest"]);
+        // Awaiting never changes the accounting.
+        let (_, timed_out) = await_external_specialist_tasks(
+            &scope,
+            AwaitExternalSpecialistTasks {
+                engagement_id,
+                member_ref: member,
+                tasks: &[task_id],
+                predicate: AwaitPredicate::All,
+                timeout_seconds: 0,
+            },
+        )
+        .unwrap();
+        assert!(!timed_out);
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_write_task_dispatches_through_the_port_from_the_preserved_bytes() {
+        let port = FakePort::new();
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install_write();
+        let member = fixture.hire_member(engagement_id, &candidate, "index-hire");
+        let scope = fixture.scope();
+        let (observation, _) = assign_external_specialist_task(
+            &scope,
+            &caller(2),
+            &port,
+            assign_request(
+                engagement_id,
+                member,
+                "index-task",
+                "canonical_workspace_write",
+            ),
+        )
+        .unwrap();
+        let dispatched = port.dispatched_tasks();
+        assert_eq!(dispatched.len(), 1);
+        assert_eq!(dispatched[0].0.to_string(), observation.task_ref);
+        assert_eq!(dispatched[0].1, "canonical_workspace_write");
+        // The Turn is rendered from the preserved accepted bytes.
+        assert!(dispatched[0].2.contains("context body 0"));
+        assert!(dispatched[0].2.contains("Task deadline: 600 seconds"));
+        // The accepted bytes are retained with the acceptance.
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        let task_id = Uuid::parse_str(&observation.task_ref).unwrap();
+        assert!(
+            crate::engagement::accepted_task_content(store.connection(), task_id)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(observation.state, "queued");
+    }
+
+    #[test]
+    fn a_non_git_writable_delegation_is_refused_before_acceptance() {
+        let port = FakePort::new();
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "nongit-hire");
+        let mut view = fixture.view.clone();
+        view.mode = WorkspaceMode::NonGit;
+        let scope = DelegationScope {
+            view: &view,
+            state_root: &fixture.state_root,
+            controller: &fixture.controller,
+        };
+        let refused = assign_external_specialist_task(
+            &scope,
+            &caller(2),
+            &port,
+            assign_request(engagement_id, member, "nongit", "canonical_workspace_write"),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "CAPABILITY_UNSUPPORTED");
+        // The closed successor error carries no extra fields; the capability is
+        // named in the message.
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["classification"], "Rejected");
+        assert_eq!(refused.details["required_action"], "renegotiate");
+        assert!(
+            refused
+                .message
+                .contains("canonical_workspace_write_delegation")
+        );
+        assert!(refused.message.contains("recognized_unsupported"));
+        assert_eq!(
+            refused.details.as_object().map(|fields| fields.len()),
+            Some(8)
+        );
+        assert_eq!(fixture.task_count(), 0);
+        assert_eq!(fixture.assignment_rows(), 0);
+        let lookup = lookup_operation(
+            &scope,
+            "assign_external_specialist_task",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "nongit",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "absent");
+    }
+
+    #[test]
+    fn an_uncapturable_task_is_refused_before_any_intent_row() {
+        let port = FakePort::new();
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "bound-hire");
+        let scope = fixture.scope();
+        let mut request = assign_request(engagement_id, member, "too-many-slots", "read_only");
+        request.task = review_task(65, "Over the slot bound.\n");
+        let refused =
+            assign_external_specialist_task(&scope, &caller(2), &port, request).unwrap_err();
+        assert_eq!(refused.code, "INVALID_ARGUMENT");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(fixture.task_count(), 0);
+        let lookup = lookup_operation(
+            &scope,
+            "assign_external_specialist_task",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "too-many-slots",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "absent");
+    }
+
+    #[test]
+    fn a_reused_key_replays_or_conflicts_and_a_legacy_key_is_refused() {
+        let port = FakePort::new();
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "reuse-hire");
+        let scope = fixture.scope();
+        let caller = caller(4);
+        let first = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "reuse", "read_only"),
+        )
+        .unwrap();
+        // A lost acknowledgement replays the identical receipt and task.
+        let replay = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "reuse", "read_only"),
+        )
+        .unwrap();
+        assert_eq!(replay.1, first.1);
+        assert_eq!(replay.0, first.0);
+        assert_eq!(fixture.task_count(), 1);
+        // The same key with another task is a conflict.
+        let mut changed = assign_request(engagement_id, member, "reuse", "read_only");
+        changed.task = review_task(1, "Another task body.\n");
+        assert_eq!(
+            assign_external_specialist_task(&scope, &caller, &port, changed)
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        // A legacy facade-v4 key is never admitted as a new successor intent.
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO operations(scope_id,operation,idempotency_key,request_sha256,response_json)
+                 VALUES(?1,'assign_external_specialist_task','legacy-assign',?2,'{}')",
+                rusqlite::params![engagement_id.to_string(), format!("sha256:{}", "a".repeat(64))],
+            )
+            .unwrap();
+        drop(connection);
+        let legacy = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "legacy-assign", "read_only"),
+        )
+        .unwrap_err();
+        assert_eq!(legacy.code, "RECOVERY_REQUIRED");
+        assert_eq!(
+            lookup_operation(
+                &scope,
+                "assign_external_specialist_task",
+                Some(("external_engagement", &engagement_id.to_string())),
+                "legacy-assign",
+            )
+            .unwrap_err()
+            .code,
+            "RECOVERY_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn await_supports_any_all_and_k_within_its_bounded_timeout() {
+        let port = FakePort::new();
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "await-a");
+        let scope = fixture.scope();
+        let caller = caller(4);
+        let (first, _) = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "await-1", "read_only"),
+        )
+        .unwrap();
+        let task_a = Uuid::parse_str(&first.task_ref).unwrap();
+        // A queued task cannot satisfy `all`, so the wait times out bounded.
+        let (observations, timed_out) = await_external_specialist_tasks(
+            &scope,
+            AwaitExternalSpecialistTasks {
+                engagement_id,
+                member_ref: member,
+                tasks: &[task_a],
+                predicate: AwaitPredicate::All,
+                timeout_seconds: 0,
+            },
+        )
+        .unwrap();
+        assert!(timed_out);
+        assert_eq!(observations[0].state, "queued");
+        // The one-active-task wall frees the member once the task is terminal.
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        store
+            .finish_external_task(
+                engagement_id,
+                task_a,
+                None,
+                "failed",
+                Some("EXECUTION_FAILED"),
+            )
+            .unwrap();
+        drop(store);
+        let (second, _) = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "await-2", "read_only"),
+        )
+        .unwrap();
+        let task_b = Uuid::parse_str(&second.task_ref).unwrap();
+        // `any` and `k = 1` are satisfied by the terminal first task.
+        for predicate in [AwaitPredicate::Any, AwaitPredicate::AtLeast(1)] {
+            let (_, timed_out) = await_external_specialist_tasks(
+                &scope,
+                AwaitExternalSpecialistTasks {
+                    engagement_id,
+                    member_ref: member,
+                    tasks: &[task_a, task_b],
+                    predicate,
+                    timeout_seconds: 0,
+                },
+            )
+            .unwrap();
+            assert!(!timed_out, "{predicate:?}");
+        }
+        let (_, timed_out) = await_external_specialist_tasks(
+            &scope,
+            AwaitExternalSpecialistTasks {
+                engagement_id,
+                member_ref: member,
+                tasks: &[task_a, task_b],
+                predicate: AwaitPredicate::All,
+                timeout_seconds: 0,
+            },
+        )
+        .unwrap();
+        assert!(timed_out);
+        // An out-of-range predicate and a foreign member set are refused.
+        assert_eq!(
+            await_external_specialist_tasks(
+                &scope,
+                AwaitExternalSpecialistTasks {
+                    engagement_id,
+                    member_ref: member,
+                    tasks: &[task_a, task_b],
+                    predicate: AwaitPredicate::AtLeast(3),
+                    timeout_seconds: 0,
+                },
+            )
+            .unwrap_err()
+            .code,
+            "INVALID_ARGUMENT"
+        );
+        assert_eq!(
+            await_external_specialist_tasks(
+                &scope,
+                AwaitExternalSpecialistTasks {
+                    engagement_id,
+                    member_ref: Uuid::now_v7(),
+                    tasks: &[task_b],
+                    predicate: AwaitPredicate::All,
+                    timeout_seconds: 0,
+                },
+            )
+            .unwrap_err()
+            .code,
+            "INVALID_ARGUMENT"
+        );
+        // Awaiting never changes the retained rounds.
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn an_uncertain_dispatch_keeps_the_round_counted() {
+        let port = FakePort::uncertain_dispatch("CONTROL_TIMEOUT");
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "uncertain-hire");
+        let scope = fixture.scope();
+        let caller = caller(2);
+        let refused = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "uncertain", "read_only"),
+        )
+        .unwrap_err();
+        // The accepted effect is reported, and the round stays counted (MDC:138).
+        assert_eq!(refused.details["effect"], "accepted");
+        assert_eq!(refused.details["classification"], "RecoveryNeeded");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            1
+        );
+        drop(store);
+        let lookup = lookup_operation(
+            &scope,
+            "assign_external_specialist_task",
+            Some(("external_engagement", &engagement_id.to_string())),
+            "uncertain",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "accepted");
+        assert_eq!(lookup["current_outcome"], "pending");
+        // A same-key retry replays the receipt and never dispatches twice.
+        let replay = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "uncertain", "read_only"),
+        )
+        .unwrap();
+        assert_eq!(replay.0.state, "queued");
+        assert_eq!(port.calls(), 1);
+    }
+
+    /// Successor quiescence counts the execution facts and never idles on
+    /// uncertain work, while a settled member idles again.
+    #[test]
+    fn successor_quiescence_blocks_idle_on_uncertain_work_only() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "quiescence-hire");
+        let scope = fixture.scope();
+        let caller = caller(2);
+        let port = FakePort::uncertain_dispatch("CONTROL_TIMEOUT");
+        let refused = assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "quiescence", "read_only"),
+        )
+        .unwrap_err();
+        assert_eq!(refused.details["effect"], "accepted");
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        let scope_ref = engagement_id.to_string();
+        let member_ref = member.to_string();
+        let quiescence = |store: &EngagementStore| {
+            crate::engagement::successor_member_quiescence(
+                store.connection(),
+                &fixture.view.workspace_id,
+                "external_engagement",
+                &scope_ref,
+                &member_ref,
+            )
+            .unwrap()
+        };
+        let held = quiescence(&store);
+        // The accepted task is queued work and the assignment is uncertain.
+        assert_eq!(held.queued, 1);
+        assert_eq!(held.unresolved, 1);
+        assert!(!held.idle());
+        drop(store);
+        // A settled task with its accounting released is idle again.
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        let task_id: String = store
+            .connection()
+            .query_row("SELECT task_id FROM tasks", [], |row| row.get(0))
+            .unwrap();
+        let task_id = Uuid::parse_str(&task_id).unwrap();
+        store
+            .transact(|transaction| {
+                crate::engagement::terminalize_external_task_in(
+                    transaction,
+                    crate::engagement::TaskTerminal {
+                        engagement_id,
+                        task_id,
+                        state: "failed",
+                        safe_error_code: Some("CONTROL_TIMEOUT"),
+                        result_sha256: None,
+                        artifact_id: None,
+                        diagnostic_json: None,
+                        now_ms: 1,
+                    },
+                )?;
+                crate::caller_scope::proved_nondispatch(transaction, task_id)
+            })
+            .unwrap();
+        let settled = quiescence(&store);
+        assert_eq!(settled.queued, 0);
+        assert_eq!(settled.unresolved, 0);
+        assert!(settled.idle());
+    }
+
+    #[test]
+    fn the_assign_fence_is_the_scoped_membership_revision() {
+        let port = FakePort::new();
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "fence-hire");
+        let scope = fixture.scope();
+        let caller = caller(2);
+        let revision = fixture.membership_revision(engagement_id);
+        let mut stale = assign_request(engagement_id, member, "fence", "read_only");
+        stale.expected_revision = Some(revision + 7);
+        let refused = assign_external_specialist_task(&scope, &caller, &port, stale).unwrap_err();
+        assert_eq!(refused.code, "REVISION_CONFLICT");
+        assert_eq!(fixture.task_count(), 0);
+        // The current membership revision is admitted, and the receipt records it.
+        let mut current = assign_request(engagement_id, member, "fence", "read_only");
+        current.expected_revision = Some(revision);
+        let (_, receipt) =
+            assign_external_specialist_task(&scope, &caller, &port, current).unwrap();
+        // The assignment reads the membership revision and never advances it.
+        assert_eq!(receipt.accepted_revision, revision);
+        assert_eq!(fixture.membership_revision(engagement_id), revision);
+    }
+
+    #[test]
+    fn a_changed_deadline_under_the_same_key_conflicts() {
+        let port = FakePort::new();
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "deadline-hire");
+        let scope = fixture.scope();
+        let caller = caller(2);
+        assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            assign_request(engagement_id, member, "deadline", "read_only"),
+        )
+        .unwrap();
+        let mut changed = assign_request(engagement_id, member, "deadline", "read_only");
+        changed.deadline_seconds = 900;
+        assert_eq!(
+            assign_external_specialist_task(&scope, &caller, &port, changed)
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        // The retained deadline is the requested one, not a fixed default.
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let recorded: i64 = connection
+            .query_row("SELECT deadline_seconds FROM tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(recorded, 600);
+    }
+
+    #[test]
+    fn rounds_are_counted_across_two_engagements_under_one_binding() {
+        let port = FakePort::new();
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let candidate = fixture.install();
+        let caller = caller(4);
+        for (open_key, hire_key, assign_key) in [
+            ("open-one", "hire-one", "assign-one"),
+            ("open-two", "hire-two", "assign-two"),
+        ] {
+            let (view, _) = open_external_engagement(&fixture.scope(), open_key, None).unwrap();
+            let engagement_id = Uuid::parse_str(&view.engagement_ref).unwrap();
+            let member = fixture.hire_member(engagement_id, &candidate, hire_key);
+            assign_external_specialist_task(
+                &fixture.scope(),
+                &caller,
+                &port,
+                assign_request(engagement_id, member, assign_key, "read_only"),
+            )
+            .unwrap();
+        }
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            2
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Managed Broker services
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_managed_spawn_admits_an_installed_snapshot_over_the_session() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        let view = fixture
+            .spawn(session, &candidate, "spawn-key", None, &port)
+            .unwrap();
+        assert_eq!(view.member.scope_kind, "orchestrated_session");
+        assert_eq!(view.member.scope_ref, session.to_string());
+        assert_eq!(view.member.member_ref, view.member.run_ref);
+        assert_eq!(view.member.role_ref, "reviewer");
+        assert_eq!(
+            view.member.role_snapshot_digest,
+            candidate.role_snapshot_digest
+        );
+        assert_eq!(
+            view.member.agent_configuration_digest,
+            candidate.agent_configuration_digest
+        );
+        assert_eq!(view.member.state, "idle");
+        assert_eq!(view.member.revision, 1);
+        // The receipt names the accepted member and the accepted snapshot.
+        assert_eq!(view.receipt.accepted_revision, 1);
+        assert_eq!(
+            view.receipt.accepted_subjects.provisioning_ref.as_deref(),
+            Some(candidate.provisioning_ref.as_str())
+        );
+        assert_eq!(
+            view.receipt.accepted_subjects.member_ref.as_deref(),
+            Some(view.member.member_ref.as_str())
+        );
+        assert_eq!(fixture.session_membership_revision(session), 1);
+        assert_eq!(fixture.intent_rows("spawn_specialist"), 1);
+        assert_eq!(fixture.broker_spawn_rows(), 1);
+        assert_eq!(fixture.broker_member_rows(), 1);
+        let member = Uuid::parse_str(&view.member.member_ref).unwrap();
+        assert_eq!(
+            fixture.member_broker_state(session, member),
+            ("active".to_owned(), "resident".to_owned())
+        );
+        // The caller's key is never a Broker key: the row carries an internal key.
+        assert_eq!(fixture.broker_key_rows("spawn-key"), 0);
+        assert_eq!(
+            fixture.broker_key_rows(&format!("successor:{}", view.receipt.operation_ref)),
+            1
+        );
+        // The member Run starts from the accepted bytes with the session
+        // aggregate and the member's own Broker credential.
+        let starts = port.start_records();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].run_id, member);
+        assert_eq!(
+            starts[0].aggregate.aggregate_kind,
+            crate::domain::AggregateKind::OrchestratedSession
+        );
+        assert_eq!(starts[0].aggregate.aggregate_id, session);
+        assert_eq!(
+            starts[0].aggregate.operation_id,
+            replay_operation_ref(&view.receipt)
+        );
+        assert_eq!(starts[0].access, CallerWorkspaceAccess::ReadOnly);
+        assert!(starts[0].broker);
+    }
+
+    #[test]
+    fn a_managed_spawn_admits_a_writable_configuration() {
+        // Spawn records the writable configuration before any task acquires it.
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install_write();
+        let port = FakePort::new();
+        let view = fixture
+            .spawn(session, &candidate, "spawn-write", None, &port)
+            .unwrap();
+        assert_eq!(view.member.state, "idle");
+        let starts = port.start_records();
+        assert_eq!(starts[0].access, CallerWorkspaceAccess::Writable);
+    }
+
+    #[test]
+    fn a_managed_spawn_replay_returns_the_retained_member_before_the_revision_fence() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        let first = fixture
+            .spawn(session, &candidate, "spawn-key", Some(0), &port)
+            .unwrap();
+        // A stale revision never replaces the retained receipt of the same key.
+        let replay = fixture
+            .spawn(session, &candidate, "spawn-key", Some(99), &port)
+            .unwrap();
+        assert_eq!(replay.receipt, first.receipt);
+        assert_eq!(replay.member, first.member);
+        // No second start, no second member, no second membership revision.
+        assert_eq!(port.calls(), 1);
+        assert_eq!(fixture.broker_member_rows(), 1);
+        assert_eq!(fixture.session_membership_revision(session), 1);
+        assert_eq!(fixture.intent_rows("spawn_specialist"), 1);
+    }
+
+    #[test]
+    fn a_changed_managed_spawn_identity_under_the_same_key_conflicts() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        fixture
+            .spawn(session, &candidate, "spawn-key", None, &port)
+            .unwrap();
+        let mut changed = fixture.sources();
+        changed.admission.model = "gpt-5.6-mini".to_owned();
+        let other = install_provisioning(&fixture.scope(), &changed, "install-other", None)
+            .unwrap()
+            .0;
+        let conflict = fixture
+            .spawn(session, &other, "spawn-key", None, &port)
+            .unwrap_err();
+        assert_eq!(conflict.code, "IDEMPOTENCY_CONFLICT");
+        assert_eq!(fixture.broker_member_rows(), 1);
+        assert_eq!(port.calls(), 1);
+    }
+
+    #[test]
+    fn a_managed_spawn_refuses_a_missing_or_mismatched_snapshot_before_any_allocation() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        let runs = fixture.run_directories();
+        // Never installed: the retained snapshot is the only instruction source.
+        let caller = fixture.managed_context(session, "spawn-missing");
+        let missing = spawn_specialist(
+            &fixture.scope(),
+            &caller,
+            &port,
+            SpawnSpecialist {
+                provisioning_ref: "provisioning:sha256:does-not-exist",
+                role_ref: "reviewer",
+                agent_configuration_digest: &candidate.agent_configuration_digest,
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(missing.code, "PROVISIONING_REF_NOT_INSTALLED");
+        // Installed, but the requested admitted configuration is another one.
+        let caller = fixture.managed_context(session, "spawn-drift");
+        let drifted = spawn_specialist(
+            &fixture.scope(),
+            &caller,
+            &port,
+            SpawnSpecialist {
+                provisioning_ref: &candidate.provisioning_ref,
+                role_ref: "reviewer",
+                agent_configuration_digest: &format!("sha256:{}", "0".repeat(64)),
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(drifted.code, "INVALID_ARGUMENT");
+        // Nothing was allocated or accepted by either refusal.
+        assert_eq!(fixture.intent_rows("spawn_specialist"), 0);
+        assert_eq!(fixture.broker_spawn_rows(), 0);
+        assert_eq!(fixture.broker_member_rows(), 0);
+        assert_eq!(fixture.run_directories(), runs);
+        assert_eq!(port.calls(), 0);
+        assert_eq!(fixture.session_membership_revision(session), 0);
+    }
+
+    #[test]
+    fn a_revision_fence_refusal_leaves_no_member_allocation() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        fixture
+            .spawn(session, &candidate, "spawn-one", None, &port)
+            .unwrap();
+        let other = fixture.install();
+        // The session membership revision is 1 after the first admission.
+        let refused = fixture
+            .spawn(session, &other, "spawn-two", Some(0), &port)
+            .unwrap_err();
+        assert_eq!(refused.code, "REVISION_CONFLICT");
+        assert_eq!(fixture.broker_member_rows(), 1);
+        assert_eq!(fixture.session_membership_revision(session), 1);
+        assert_eq!(port.calls(), 1);
+        // Case A is durable: the refused key reads not_accepted, never absent.
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "spawn-two",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "not_accepted");
+        assert_eq!(lookup["refusal_code"], "REVISION_CONFLICT");
+        assert_eq!(lookup["exact_key_retry_permitted"], true);
+    }
+
+    #[test]
+    fn a_broker_owned_key_is_refused_at_admission_and_at_lookup() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        fixture.seed_legacy_broker_key(session, "legacy-key");
+        // Admission: the successor namespace never adopts a Broker-owned key.
+        let refused = fixture
+            .spawn(session, &candidate, "legacy-key", None, &port)
+            .unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        assert_eq!(refused.details["schema"], SUCCESSOR_ERROR_SCHEMA);
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        assert_eq!(fixture.intent_rows("spawn_specialist"), 0);
+        assert_eq!(fixture.broker_spawn_rows(), 1);
+        assert_eq!(port.calls(), 0);
+        // Lookup: the same key is a typed refusal, never `absent`.
+        let looked = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "legacy-key",
+        )
+        .unwrap_err();
+        assert_eq!(looked.code, "RECOVERY_REQUIRED");
+        // Another key in the same namespace is still authoritatively absent.
+        let absent = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "another-key",
+        )
+        .unwrap();
+        assert_eq!(absent["state"], "absent");
+    }
+
+    #[test]
+    fn a_managed_spawn_receipt_is_readable_through_the_shared_lookup() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        let view = fixture
+            .spawn(session, &candidate, "spawn-key", None, &port)
+            .unwrap();
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "spawn-key",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "accepted");
+        assert_eq!(lookup["operation_ref"], view.receipt.operation_ref);
+        assert_eq!(
+            lookup["accepted_input_digest"],
+            view.receipt.accepted_input_digest
+        );
+        assert_eq!(
+            lookup["receipt"]["receipt_digest"],
+            view.receipt.receipt_digest
+        );
+        assert_eq!(lookup["current_outcome"], "completed");
+        // The receipt belongs to this Controller and workspace only.
+        assert_eq!(
+            lookup["namespace"]["workspace_ref"],
+            Value::String(fixture.view.workspace_id.clone())
+        );
+        // A foreign key in the same namespace is absent.
+        let other = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "other-key",
+        )
+        .unwrap();
+        assert_eq!(other["state"], "absent");
+    }
+
+    #[test]
+    fn a_managed_spawn_that_cannot_start_its_member_reports_the_accepted_effect() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::failing("SPECIALIST_PUBLICATION_UNKNOWN");
+        let error = fixture
+            .spawn(session, &candidate, "spawn-key", None, &port)
+            .unwrap_err();
+        assert_eq!(error.code, "SPAWN_START_UNRESOLVED");
+        assert_eq!(error.details["schema"], SUCCESSOR_ERROR_SCHEMA);
+        assert_eq!(error.details["effect"], "accepted");
+        assert_eq!(error.details["classification"], "RecoveryNeeded");
+        assert_eq!(error.details["required_action"], "recover_run");
+        // The accepted spawn keeps its member as the cleanup owner, degraded.
+        assert_eq!(fixture.broker_member_rows(), 1);
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let (spawn_state, member_state, residency): (String, String, String) = connection
+            .query_row(
+                "SELECT s.state,m.membership_state,m.actor_residency
+                   FROM brokered_spawn_operations s
+                   JOIN brokered_members m ON m.spawn_operation_id=s.operation_id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(spawn_state, "recovery_required");
+        assert_eq!(member_state, "degraded");
+        assert_eq!(residency, "unavailable");
+        // The key stays accepted, so a retry replays the retained receipt.
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "spawn-key",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "accepted");
+        assert_eq!(lookup["current_outcome"], "failed");
+    }
+
+    #[test]
+    fn a_managed_call_from_another_root_run_or_controller_is_refused() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        // Another source Run than the session's root Run.
+        let caller = ManagedCallContext {
+            session_id: session,
+            source_run_id: Uuid::now_v7(),
+            source_turn_id: "turn-primary",
+            source_tool_call_id: "tool-call-primary",
+            idempotency_key: "spawn-key",
+        };
+        let refused = spawn_specialist(
+            &fixture.scope(),
+            &caller,
+            &port,
+            SpawnSpecialist {
+                provisioning_ref: &candidate.provisioning_ref,
+                role_ref: "reviewer",
+                agent_configuration_digest: &candidate.agent_configuration_digest,
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "RUN_STATE_CONFLICT");
+        // The session's root Controller, but another Controller presents the call.
+        let stranger = ControllerBinding {
+            identity: ControllerIdentity {
+                controller_id: Uuid::now_v7(),
+                kind: ControllerKind::Automation,
+                instance_id: "stranger-host".to_owned(),
+                subject_id: None,
+                generation: 1,
+            },
+            capability_sha256: "f".repeat(64),
+        };
+        let stranger_scope = DelegationScope {
+            view: &fixture.view,
+            state_root: &fixture.state_root,
+            controller: &stranger,
+        };
+        let caller = fixture.managed_context(session, "spawn-key");
+        let refused = spawn_specialist(
+            &stranger_scope,
+            &caller,
+            &port,
+            SpawnSpecialist {
+                provisioning_ref: &candidate.provisioning_ref,
+                role_ref: "reviewer",
+                agent_configuration_digest: &candidate.agent_configuration_digest,
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "SESSION_OWNER_MISMATCH");
+        assert_eq!(fixture.intent_rows("spawn_specialist"), 0);
+        assert_eq!(fixture.broker_spawn_rows(), 0);
+        assert_eq!(port.calls(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Managed assignment
+    // -----------------------------------------------------------------------
+
+    /// One accepted task whose output is an unchecked complete result.
+    fn plain_task(brief: &str) -> crate::task_request::SpecialistTaskRequest {
+        let mut task = review_task(2, brief);
+        task.expected_output = "complete_result".to_owned();
+        task
+    }
+
+    fn plain_assign<'a>(
+        member_ref: Uuid,
+        brief: &str,
+        execution_intent: &'a str,
+    ) -> AssignSpecialistTask<'a> {
+        AssignSpecialistTask {
+            member_ref,
+            task: plain_task(brief),
+            execution_intent,
+            target: None,
+            deadline_seconds: 600,
+            expected_revision: None,
+        }
+    }
+
+    fn managed_assign<'a>(
+        member_ref: Uuid,
+        brief: &str,
+        execution_intent: &'a str,
+        expected_revision: Option<u64>,
+    ) -> AssignSpecialistTask<'a> {
+        AssignSpecialistTask {
+            member_ref,
+            task: review_task(2, brief),
+            execution_intent,
+            target: None,
+            deadline_seconds: 600,
+            expected_revision,
+        }
+    }
+
+    #[test]
+    fn a_managed_assign_is_accepted_and_counts_one_round() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let caller = caller(4);
+        let (observation, receipt) = fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        let task_id = Uuid::parse_str(&observation.task_ref).unwrap();
+        assert_eq!(observation.member_ref, member.to_string());
+        assert_eq!(observation.state, "running");
+        assert_eq!(observation.content_availability, "pending");
+        assert_eq!(observation.result_digest, None);
+        assert_eq!(observation.accepted_task_digest, {
+            let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+            let accepted: crate::delegation_identity::AcceptedTask = serde_json::from_str(
+                &connection
+                    .query_row(
+                        "SELECT accepted_request_json FROM brokered_task_acceptances
+                          WHERE task_id=?1",
+                        [task_id.to_string()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+            accepted.digest().unwrap()
+        });
+        // The receipt names the accepted member and task, and the acceptance
+        // revision is the scoped membership counter.
+        assert_eq!(receipt.accepted_revision, 1);
+        assert_eq!(
+            receipt.accepted_subjects.member_ref.as_deref(),
+            Some(member.to_string().as_str())
+        );
+        assert_eq!(
+            receipt.accepted_subjects.task_ref.as_deref(),
+            Some(task_id.to_string().as_str())
+        );
+        // One task, one acceptance, one accounting row, one counted round.
+        assert_eq!(fixture.broker_task_rows(), 1);
+        assert_eq!(fixture.broker_acceptance_rows(), 1);
+        assert_eq!(fixture.accounting_rows(), 1);
+        assert_eq!(fixture.accounting_state(task_id), "counted_accepted");
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            1
+        );
+        // The caller key never enters a Broker key column.
+        assert_eq!(fixture.broker_task_key_rows("assign-key"), 0);
+        assert_eq!(
+            fixture.broker_task_key_rows(&format!("successor:{}", receipt.operation_ref)),
+            1
+        );
+        // Assignment advances the member workload revision only.
+        assert_eq!(fixture.workload_revision(session, member), 1);
+        assert_eq!(fixture.session_membership_revision(session), 1);
+        // The Turn was rendered from the retained acceptance bytes.
+        assert_eq!(port.calls(), 2);
+        let dispatched = port.dispatched_tasks();
+        assert_eq!(dispatched[0].0, task_id);
+        assert_eq!(dispatched[0].1, "read_only");
+        assert!(dispatched[0].2.contains("Assess the accepted candidate."));
+        // The accepted task bytes and its identity are retained.
+        let retained = fixture.retained_accepted_task(task_id).unwrap();
+        assert!(!retained.is_empty());
+    }
+
+    #[test]
+    fn a_managed_assign_replay_returns_the_receipt_without_a_second_task() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let caller = caller(4);
+        let first = fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        // A stale revision never replaces the retained receipt of the same key.
+        let replay = fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    Some(9),
+                ),
+            )
+            .unwrap();
+        assert_eq!(replay.0, first.0);
+        assert_eq!(replay.1, first.1);
+        assert_eq!(fixture.broker_task_rows(), 1);
+        assert_eq!(fixture.accounting_rows(), 1);
+        assert_eq!(port.calls(), 2);
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_changed_managed_assign_identity_under_the_same_key_conflicts() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let caller = caller(4);
+        fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        let conflict = fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(member, "Assess another candidate.\n", "read_only", None),
+            )
+            .unwrap_err();
+        assert_eq!(conflict.code, "IDEMPOTENCY_CONFLICT");
+        assert_eq!(fixture.broker_task_rows(), 1);
+        assert_eq!(fixture.accounting_rows(), 1);
+    }
+
+    #[test]
+    fn a_managed_assign_case_a_refusal_leaves_no_second_task_or_round() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let caller = caller(4);
+        fixture
+            .assign(
+                session,
+                "assign-one",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        // The one-active-task wall refuses inside the acceptance transaction.
+        let refused = fixture
+            .assign(
+                session,
+                "assign-two",
+                &caller,
+                &port,
+                managed_assign(member, "Assess the second candidate.\n", "read_only", None),
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "RUN_STATE_CONFLICT");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(fixture.broker_task_rows(), 1);
+        assert_eq!(fixture.accounting_rows(), 1);
+        // A durable refusal is reported as not_accepted, never absent.
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "assign-two",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "not_accepted");
+        assert_eq!(lookup["refusal_code"], "RUN_STATE_CONFLICT");
+    }
+
+    #[test]
+    fn a_managed_assign_case_b_keeps_the_receipt_and_releases_the_round() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let spawning = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &spawning)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let port = FakePort::capturing_receipt("SPECIALIST_NOT_MEMBER");
+        let caller = caller(4);
+        let refused = fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "SPECIALIST_NOT_MEMBER");
+        assert_eq!(refused.details["effect"], "accepted");
+        assert_eq!(refused.details["classification"], "RecoveryNeeded");
+        // The accepted receipt is unchanged and the refusal lowered the count.
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "assign-key",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "accepted");
+        assert_eq!(lookup["current_outcome"], "failed");
+        // The receipt the dispatch boundary already held is byte-identical
+        // to the retained row after the refusal, and it still replays.
+        let captured = port
+            .captured_receipt()
+            .expect("the receipt was captured at the dispatch boundary");
+        let retained = accepted_managed_receipt(&fixture.database(), session)
+            .expect("the accepted receipt is retained");
+        assert_eq!(captured, retained);
+        let replay = fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        assert_eq!(replay.1.receipt_digest, lookup["receipt"]["receipt_digest"]);
+        let task_ref = lookup["receipt"]["accepted_subjects"]["task_ref"]
+            .as_str()
+            .expect("the retained receipt names its task");
+        let task_id = Uuid::parse_str(task_ref).unwrap();
+        assert_eq!(fixture.broker_task_state(task_id), "failed");
+        assert_eq!(fixture.accounting_state(task_id), "proved_nondispatch");
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn an_exhausted_managed_budget_refuses_without_a_task_or_a_round() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let caller = crate::caller_scope::fixture(1);
+        fixture
+            .assign(
+                session,
+                "assign-one",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        let denied = fixture
+            .assign(
+                session,
+                "assign-two",
+                &caller,
+                &port,
+                managed_assign(member, "Assess the second candidate.\n", "read_only", None),
+            )
+            .unwrap_err();
+        assert_eq!(denied.code, "ROUNDS_EXHAUSTED");
+        assert_eq!(denied.details["effect"], "none");
+        assert_eq!(denied.details["classification"], "Rejected");
+        // No admission, no accounting row and no intent row for the denied key.
+        assert_eq!(fixture.broker_task_rows(), 1);
+        assert_eq!(fixture.accounting_rows(), 1);
+        assert_eq!(fixture.intent_rows("assign_specialist_task"), 1);
+    }
+
+    #[test]
+    fn a_managed_assign_to_an_inactive_member_leaves_no_task_row() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        // A failed member Run start leaves the member degraded, not active.
+        let failing = FakePort::failing("SPECIALIST_PUBLICATION_UNKNOWN");
+        fixture
+            .spawn(session, &candidate, "spawn-key", None, &failing)
+            .unwrap_err();
+        let member = fixture.broker_member_id(session);
+        let port = FakePort::new();
+        let caller = caller(4);
+        let refused = fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "SPECIALIST_NOT_MEMBER");
+        assert_eq!(fixture.broker_task_rows(), 0);
+        assert_eq!(fixture.broker_acceptance_rows(), 0);
+        assert_eq!(fixture.accounting_rows(), 0);
+        assert_eq!(port.calls(), 0);
+    }
+
+    #[test]
+    fn a_git_managed_write_task_accepts_and_replays_without_redispatch() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install_write();
+        let port = FakePort::new();
+        let admission = fixture
+            .spawn(session, &candidate, "writable-member", None, &port)
+            .unwrap();
+        let member = Uuid::parse_str(&admission.member.member_ref).unwrap();
+        let caller = caller(4);
+        let assign = || {
+            fixture.assign(
+                session,
+                "write-task",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Write the accepted change.",
+                    "canonical_workspace_write",
+                    None,
+                ),
+            )
+        };
+        let (task, receipt) = assign().unwrap();
+        let calls = port.calls();
+        assert_eq!(task.member_ref, member.to_string());
+        assert_eq!(assign().unwrap().1, receipt);
+        assert_eq!(port.calls(), calls);
+        assert_eq!(fixture.broker_task_rows(), 1);
+        assert_eq!(fixture.accounting_rows(), 1);
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        let task_ref = Uuid::parse_str(&task.task_ref).unwrap();
+        let retained = crate::orchestration::successor_task(store.connection(), session, task_ref)
+            .unwrap()
+            .unwrap();
+        let accepted: crate::delegation_identity::AcceptedTask =
+            serde_json::from_str(&retained.accepted_request_json).unwrap();
+        assert_eq!(accepted.execution_intent, "canonical_workspace_write");
+    }
+
+    #[test]
+    fn a_non_git_managed_write_task_is_refused_before_any_intent_row() {
+        let mut fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        fixture.view.mode = WorkspaceMode::NonGit;
+        let caller = caller(4);
+        let refused = fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "canonical_workspace_write",
+                    None,
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "CAPABILITY_UNSUPPORTED");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["required_action"], "renegotiate");
+        assert_eq!(fixture.intent_rows("assign_specialist_task"), 0);
+        assert_eq!(fixture.broker_task_rows(), 0);
+        assert_eq!(fixture.accounting_rows(), 0);
+        assert_eq!(port.calls(), 1);
+    }
+
+    #[test]
+    fn a_legacy_member_is_refused_by_a_successor_assign() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let legacy_member = fixture.seed_legacy_broker_member(session, "legacy-spawn-key");
+        let port = FakePort::new();
+        let caller = caller(4);
+        let refused = fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(
+                    legacy_member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "CAPABILITY_UNSUPPORTED");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(fixture.intent_rows("assign_specialist_task"), 0);
+        assert_eq!(fixture.broker_task_rows(), 0);
+        assert_eq!(fixture.accounting_rows(), 0);
+        assert_eq!(port.calls(), 0);
+    }
+
+    #[test]
+    fn the_managed_acceptance_retains_both_the_task_and_the_envelope_identity() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let caller = caller(4);
+        let (observation, receipt) = fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        let task_id = Uuid::parse_str(&observation.task_ref).unwrap();
+        // The accepted-task identity and the envelope identity are different facts.
+        assert_ne!(
+            observation.accepted_task_digest,
+            receipt.accepted_input_digest
+        );
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let (envelope_digest, accepted_json, accepted_sha): (String, String, String) = connection
+            .query_row(
+                "SELECT o.mutation_envelope_digest,a.accepted_request_json,
+                        a.accepted_request_sha256
+                   FROM delegation_operations o
+                   JOIN brokered_task_acceptances a ON a.task_id=?2
+                  WHERE o.operation_ref=?1",
+                rusqlite::params![receipt.operation_ref, task_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(envelope_digest, receipt.accepted_input_digest);
+        // The accepted identity re-derives from the retained accepted bytes, and
+        // the accepted request hash is the legacy column's own fact.
+        let retained: crate::delegation_identity::AcceptedTask =
+            serde_json::from_str(&accepted_json).unwrap();
+        assert_eq!(retained.digest().unwrap(), observation.accepted_task_digest);
+        assert_eq!(
+            crate::jcs::sha256_hex(accepted_json.as_bytes()),
+            accepted_sha
+        );
+        assert_ne!(accepted_sha, envelope_digest);
+    }
+
+    #[test]
+    fn a_managed_assign_receipt_is_readable_through_the_shared_lookup() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let caller = caller(4);
+        let (observation, receipt) = fixture
+            .assign(
+                session,
+                "assign-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "assign-key",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "accepted");
+        assert_eq!(lookup["operation_ref"], receipt.operation_ref);
+        assert_eq!(lookup["receipt"]["receipt_digest"], receipt.receipt_digest);
+        assert_eq!(lookup["current_outcome"], "running");
+        assert_eq!(
+            lookup["accepted_subjects"]["task_ref"],
+            Value::String(observation.task_ref.clone())
+        );
+    }
+
+    #[test]
+    fn a_broker_task_key_is_refused_at_managed_admission_and_at_lookup() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let task_id = fixture.seed_legacy_broker_task(session, member, "legacy-task-key");
+        let caller = caller(4);
+        let refused = fixture
+            .assign(
+                session,
+                "legacy-task-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        assert_eq!(fixture.intent_rows("assign_specialist_task"), 0);
+        assert_eq!(fixture.accounting_rows(), 0);
+        assert_eq!(fixture.broker_task_rows(), 1);
+        assert_eq!(fixture.broker_task_state(task_id), "running");
+        // Lookup reports the same conflict, never `absent`.
+        let looked = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "legacy-task-key",
+        )
+        .unwrap_err();
+        assert_eq!(looked.code, "RECOVERY_REQUIRED");
+        let absent = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "another-key",
+        )
+        .unwrap();
+        assert_eq!(absent["state"], "absent");
+    }
+
+    // -----------------------------------------------------------------------
+    // Managed R services
+    // -----------------------------------------------------------------------
+
+    fn managed_collect<'a>(member_ref: Uuid, task_ref: Uuid) -> CollectSpecialistTask<'a> {
+        CollectSpecialistTask {
+            member_ref,
+            task_ref,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        }
+    }
+
+    /// One settled managed task over a running member, ready for the R surface.
+    fn settled_task(
+        fixture: &Fixture,
+        session: Uuid,
+        port: &FakePort,
+        caller: &crate::caller_scope::TrustedCallerScope,
+        key: &str,
+    ) -> (Uuid, Uuid) {
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, &format!("{key}-spawn"), port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let (observation, _) = fixture
+            .assign(
+                session,
+                key,
+                caller,
+                port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        let task = Uuid::parse_str(&observation.task_ref).unwrap();
+        // The member Run's own manifest is what the identity surface reads.
+        fixture.publish_member_manifest(session, member);
+        fixture.settle_managed_task(session, member, task, "completed", Some("the answer"));
+        (member, task)
+    }
+
+    fn object_keys(value: &Value) -> std::collections::BTreeSet<String> {
+        value
+            .as_object()
+            .expect("the object is a JSON object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn managed_await_supports_any_all_and_k() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let mut tasks = Vec::new();
+        for (index, key) in ["await-one", "await-two"].iter().enumerate() {
+            let (observation, _) = fixture
+                .assign(
+                    session,
+                    key,
+                    &caller,
+                    &port,
+                    managed_assign(
+                        member,
+                        &format!("Assess candidate {index}.\n"),
+                        "read_only",
+                        None,
+                    ),
+                )
+                .unwrap();
+            let task = Uuid::parse_str(&observation.task_ref).unwrap();
+            fixture.settle_managed_task(session, member, task, "completed", Some("answered"));
+            tasks.push(task);
+        }
+        let context = fixture.managed_context(session, "await-key");
+        for (predicate, expected_terminal) in [
+            (AwaitPredicate::Any, 2),
+            (AwaitPredicate::All, 2),
+            (AwaitPredicate::AtLeast(1), 2),
+            (AwaitPredicate::AtLeast(2), 2),
+        ] {
+            let (observations, timed_out) = await_specialist_tasks(
+                &fixture.scope(),
+                &context,
+                AwaitSpecialistTasks {
+                    member_ref: member,
+                    tasks: &tasks,
+                    predicate,
+                    timeout_seconds: 60,
+                },
+            )
+            .unwrap();
+            assert!(!timed_out);
+            assert_eq!(observations.len(), expected_terminal);
+            assert!(
+                observations
+                    .iter()
+                    .all(|observation| observation.state == "completed")
+            );
+        }
+        // A single-task wait answers that task, and the task set is validated.
+        let (single, timed_out) = await_specialist_tasks(
+            &fixture.scope(),
+            &context,
+            AwaitSpecialistTasks {
+                member_ref: member,
+                tasks: &tasks[..1],
+                predicate: AwaitPredicate::All,
+                timeout_seconds: 60,
+            },
+        )
+        .unwrap();
+        assert!(!timed_out);
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].task_ref, tasks[0].to_string());
+        for (predicate, tasks) in [
+            (AwaitPredicate::AtLeast(0), &tasks[..1]),
+            (AwaitPredicate::AtLeast(2), &tasks[..1]),
+        ] {
+            let refused = await_specialist_tasks(
+                &fixture.scope(),
+                &context,
+                AwaitSpecialistTasks {
+                    member_ref: member,
+                    tasks,
+                    predicate,
+                    timeout_seconds: 60,
+                },
+            )
+            .unwrap_err();
+            assert_eq!(refused.code, "INVALID_ARGUMENT");
+        }
+    }
+
+    #[test]
+    fn a_managed_await_refusal_names_the_await_operation() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        // A task this member was never dispatched is refused on the await
+        // surface's own name, never the collect surface's.
+        let refused = await_specialist_tasks(
+            &fixture.scope(),
+            &fixture.managed_context(session, "await-unknown"),
+            AwaitSpecialistTasks {
+                member_ref: member,
+                tasks: &[Uuid::now_v7()],
+                predicate: AwaitPredicate::All,
+                timeout_seconds: 0,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "SPECIALIST_TASK_NOT_FOUND");
+        assert_eq!(refused.details["operation_kind"], "await_specialist_task");
+        assert_eq!(refused.details["effect"], "none");
+    }
+
+    #[test]
+    fn managed_await_times_out_without_settling_anything() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let (observation, _) = fixture
+            .assign(
+                session,
+                "await-running",
+                &caller,
+                &port,
+                managed_assign(
+                    Uuid::parse_str(
+                        &fixture
+                            .spawn_member(session, "spawn-key", &port)
+                            .member
+                            .member_ref,
+                    )
+                    .unwrap(),
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        let member = Uuid::parse_str(&observation.member_ref).unwrap();
+        let task = Uuid::parse_str(&observation.task_ref).unwrap();
+        let before = fixture.broker_task_state(task);
+        let (observations, timed_out) = await_specialist_tasks(
+            &fixture.scope(),
+            &fixture.managed_context(session, "await-key"),
+            AwaitSpecialistTasks {
+                member_ref: member,
+                tasks: &[task],
+                predicate: AwaitPredicate::All,
+                timeout_seconds: 1,
+            },
+        )
+        .unwrap();
+        // The wait ends, and it never settles, cancels or re-rounds the task.
+        assert!(timed_out);
+        assert_eq!(observations[0].state, "running");
+        assert_eq!(observations[0].required_action, "await_task");
+        assert_eq!(fixture.broker_task_state(task), before);
+        assert_eq!(fixture.accounting_state(task), "counted_accepted");
+    }
+
+    #[test]
+    fn managed_collect_returns_the_result_and_disposition_without_side_effects() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let (member, task) = settled_task(&fixture, session, &port, &caller, "collect-key");
+        let before = fixture.database_bytes();
+        let context = fixture.managed_context(session, "collect-call");
+        // Every R call of this member: await, collect, identity.
+        let (_, timed_out) = await_specialist_tasks(
+            &fixture.scope(),
+            &context,
+            AwaitSpecialistTasks {
+                member_ref: member,
+                tasks: &[task],
+                predicate: AwaitPredicate::All,
+                timeout_seconds: 60,
+            },
+        )
+        .unwrap();
+        assert!(!timed_out);
+        let collected = collect_specialist_task(
+            &fixture.scope(),
+            &context,
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap();
+        let view = get_managed_delegation_identity(
+            &fixture.scope(),
+            &context,
+            &caller,
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap();
+        let _ = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "collect-key",
+        )
+        .unwrap();
+        // The collect answered the committed result and its fresh disposition.
+        let complete: crate::delegation_identity::CompleteResult =
+            serde_json::from_value(collected.complete_result.clone().unwrap()).unwrap();
+        let digest = complete.digest().unwrap();
+        assert_eq!(collected.task.state, "completed");
+        assert_eq!(collected.task.content_availability, "available");
+        assert_eq!(collected.task.member_ref, member.to_string());
+        assert_eq!(collected.task.accepted_task_digest, {
+            let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+            let facts = crate::orchestration::successor_task(&connection, session, task)
+                .unwrap()
+                .unwrap();
+            let accepted: crate::delegation_identity::AcceptedTask =
+                serde_json::from_str(&facts.accepted_request_json).unwrap();
+            accepted.digest().unwrap()
+        });
+        assert_eq!(
+            collected.task.result_digest.as_deref(),
+            Some(digest.as_str())
+        );
+        assert_eq!(complete.terminal_outcome, "completed");
+        assert!(complete.changes.is_empty());
+        assert_eq!(collected.disposition.state, "idle");
+        assert_eq!(collected.disposition.observed_after_result_digest, digest);
+        assert!(!collected.disposition.cleanup_pending);
+        assert_eq!(collected.disposition.running, 0);
+        assert_eq!(collected.disposition.unresolved, 0);
+        // The workload revision advanced at the assignment and again at the
+        // settlement; the membership counter moved only at the spawn.
+        assert_eq!(collected.disposition.membership_revision, 1);
+        assert_eq!(collected.disposition.workload_revision, 2);
+        assert_eq!(view.identity.result_digest, digest);
+        // No R call wrote anything: the main database file is byte-identical.
+        assert_eq!(fixture.database_bytes(), before);
+    }
+
+    #[test]
+    fn a_managed_identity_export_matches_the_closed_identity_and_the_frozen_example() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let (member, task) = settled_task(&fixture, session, &port, &caller, "identity-key");
+        let view = get_managed_delegation_identity(
+            &fixture.scope(),
+            &fixture.managed_context(session, "identity-call"),
+            &caller,
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap();
+        let identity = &view.identity;
+        // MDC:604/Podway mapping: the managed host, its session scope and the root
+        // Primary Controller as the supervisor.
+        assert_eq!(identity.mapping_contract, "dolgorae.podway-managed/v1");
+        assert_eq!(identity.primary_host, "managed");
+        assert_eq!(identity.scope_kind, "orchestrated_session");
+        assert_eq!(identity.scope_ref, session.to_string());
+        assert_eq!(
+            identity.supervisor_ref,
+            format!("controller:{}", fixture.controller.identity.controller_id)
+        );
+        assert_eq!(identity.worker_ref, member.to_string());
+        assert_eq!(identity.task_ref, task.to_string());
+        assert_eq!(identity.rounds_used, 1);
+        assert_eq!(identity.accepted_assignments, 1);
+        assert_eq!(identity.unresolved_assignments, 0);
+        assert_eq!(identity.worker_disposition, "idle");
+        assert_eq!(identity.disposition_proof.state, "idle");
+        assert_eq!(
+            identity.disposition_proof.observed_after_result_digest,
+            identity.result_digest
+        );
+        // The closed object round-trips through its own type and validates.
+        let produced = serde_json::to_value(identity).unwrap();
+        let parsed: crate::delegation_identity::DelegationIdentity =
+            serde_json::from_value(produced.clone()).unwrap();
+        parsed.validate().unwrap();
+        // The frozen managed example names every object level of the same shape.
+        let example: Value = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/v014-identity-delegation-managed.valid.json"
+        ))
+        .unwrap();
+        for path in [
+            "",
+            "/complete_result",
+            "/complete_result/source",
+            "/caller_scope",
+            "/disposition_proof",
+        ] {
+            let produced_level = if path.is_empty() {
+                &produced
+            } else {
+                produced.pointer(path).unwrap()
+            };
+            let example_level = if path.is_empty() {
+                &example
+            } else {
+                example.pointer(path).unwrap()
+            };
+            assert_eq!(
+                object_keys(produced_level),
+                object_keys(example_level),
+                "object level {path:?} differs from the frozen managed example"
+            );
+        }
+        for field in ["schema", "mapping_contract", "primary_host", "scope_kind"] {
+            assert_eq!(produced[field], example[field], "{field} differs");
+        }
+        assert_eq!(
+            produced["complete_result"]["source"]["scope_kind"],
+            example["complete_result"]["source"]["scope_kind"]
+        );
+        assert_eq!(
+            produced["disposition_proof"]["state"],
+            produced["worker_disposition"]
+        );
+    }
+
+    #[test]
+    fn a_managed_identity_refuses_a_member_with_work_in_flight() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let (member, task) = settled_task(&fixture, session, &port, &caller, "idle-key");
+        // A later accepted task is still running, so the member is not idle.
+        let (running, _) = fixture
+            .assign(
+                session,
+                "idle-next",
+                &caller,
+                &port,
+                managed_assign(member, "Assess a second candidate.\n", "read_only", None),
+            )
+            .unwrap();
+        let refused = get_managed_delegation_identity(
+            &fixture.scope(),
+            &fixture.managed_context(session, "idle-call"),
+            &caller,
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "DISPOSITION_NOT_IDLE");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["required_action"], "none");
+        // The running task is still running: the refusal changed nothing.
+        assert_eq!(
+            fixture.broker_task_state(Uuid::parse_str(&running.task_ref).unwrap()),
+            "running"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_managed_result_refuses_collect_and_identity() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let (observation, _) = fixture
+            .assign(
+                session,
+                "unavailable-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        let task = Uuid::parse_str(&observation.task_ref).unwrap();
+        fixture.settle_managed_task_unavailable(session, member, task);
+        let context = fixture.managed_context(session, "unavailable-call");
+        let refused = collect_specialist_task(
+            &fixture.scope(),
+            &context,
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+        assert_eq!(refused.details["effect"], "none");
+        let refused = get_managed_delegation_identity(
+            &fixture.scope(),
+            &context,
+            &caller,
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+        assert_eq!(refused.details["effect"], "none");
+        // The task's own terminal fact is retained, never an identity with a
+        // substitute digest.
+        assert_eq!(fixture.broker_task_state(task), "failed");
+    }
+
+    #[test]
+    fn a_managed_identity_refuses_a_foreign_caller_scope() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let (member, task) = settled_task(&fixture, session, &port, &caller, "scope-key");
+        let refused = get_managed_delegation_identity(
+            &fixture.scope(),
+            &fixture.managed_context(session, "scope-call"),
+            &crate::caller_scope::fixture_alt(4),
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "CALLER_SCOPE_MISMATCH");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["required_action"], "none");
+    }
+
+    #[test]
+    fn a_substituted_managed_result_is_refused() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let (member, task) = settled_task(&fixture, session, &port, &caller, "substitute-key");
+        fixture.substitute_managed_result(task, Uuid::now_v7());
+        let refused = collect_specialist_task(
+            &fixture.scope(),
+            &fixture.managed_context(session, "substitute-call"),
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_MISMATCH");
+        assert_eq!(refused.details["effect"], "none");
+    }
+
+    #[test]
+    fn every_managed_r_error_carries_no_effect() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let (member, task) = settled_task(&fixture, session, &port, &caller, "effect-key");
+        let context = fixture.managed_context(session, "effect-call");
+        let mut errors = vec![
+            // await: an invalid predicate, and a task that is not this member's.
+            await_specialist_tasks(
+                &fixture.scope(),
+                &context,
+                AwaitSpecialistTasks {
+                    member_ref: member,
+                    tasks: &[],
+                    predicate: AwaitPredicate::All,
+                    timeout_seconds: 60,
+                },
+            )
+            .unwrap_err(),
+            await_specialist_tasks(
+                &fixture.scope(),
+                &context,
+                AwaitSpecialistTasks {
+                    member_ref: Uuid::now_v7(),
+                    tasks: &[task],
+                    predicate: AwaitPredicate::All,
+                    timeout_seconds: 60,
+                },
+            )
+            .unwrap_err(),
+            // collect: a task identity this member was never dispatched.
+            collect_specialist_task(
+                &fixture.scope(),
+                &context,
+                &port,
+                managed_collect(member, Uuid::now_v7()),
+            )
+            .unwrap_err(),
+            // identity: a foreign caller scope over a real task.
+            get_managed_delegation_identity(
+                &fixture.scope(),
+                &context,
+                &crate::caller_scope::fixture_alt(4),
+                &port,
+                managed_collect(member, task),
+            )
+            .unwrap_err(),
+            // lookup: a Broker-owned key in this session.
+            {
+                fixture.seed_legacy_broker_task(session, member, "effect-legacy-key");
+                lookup_operation(
+                    &fixture.scope(),
+                    "assign_specialist_task",
+                    Some(("orchestrated_session", &session.to_string())),
+                    "effect-legacy-key",
+                )
+                .unwrap_err()
+            },
+        ];
+        errors.retain(|error| {
+            assert_eq!(error.details["schema"], SUCCESSOR_ERROR_SCHEMA);
+            assert_eq!(
+                error.details["effect"], "none",
+                "{} carried an effect",
+                error.code
+            );
+            true
+        });
+        assert_eq!(errors.len(), 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // Managed residual cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_prepared_managed_spawn_reports_unresolved_and_replays_without_allocating() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        let body = json!({
+            "provisioning_ref": candidate.provisioning_ref,
+            "role_ref": "reviewer",
+            "agent_configuration_digest": candidate.agent_configuration_digest,
+        });
+        let prepared = fixture.prepare_managed_intent(
+            session,
+            "spawn_specialist",
+            "spawn-pending",
+            &body,
+            SPAWN_BODY_SCHEMA,
+        );
+        // A prepared intent is `unresolved`, never `absent` (MDC:186-200).
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "spawn-pending",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "unresolved");
+        assert_eq!(lookup["operation_ref"], prepared.to_string());
+        assert_eq!(lookup["effect"], "unresolved");
+        assert_eq!(lookup["required_action"], "reconcile_operation");
+        // The exact-key replay reports that same retained operation and neither
+        // allocates a member nor writes a second intent row.
+        let refused = fixture
+            .spawn(session, &candidate, "spawn-pending", None, &port)
+            .unwrap_err();
+        assert_eq!(refused.code, "OUTCOME_UNKNOWN");
+        assert_eq!(refused.details["operation_ref"], prepared.to_string());
+        assert_eq!(refused.details["effect"], "unresolved");
+        assert_eq!(refused.details["classification"], "Unknown");
+        assert_eq!(fixture.intent_rows("spawn_specialist"), 1);
+        assert_eq!(fixture.broker_spawn_rows(), 0);
+        assert_eq!(fixture.broker_member_rows(), 0);
+        assert_eq!(port.calls(), 0);
+    }
+
+    #[test]
+    fn a_prepared_managed_assign_reports_unresolved_and_replays_without_counting() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        fixture.publish_member_manifest(session, member);
+        let configuration = fixture.admitted_configuration();
+        let task = review_task(2, "Assess the accepted candidate.\n");
+        let (accepted, _) =
+            crate::successor_capture::capture_facade_task(&configuration, &task, "read_only", None)
+                .unwrap();
+        let body =
+            crate::successor_capture::assignment_body(member, &task, &accepted, 600).unwrap();
+        let prepared = fixture.prepare_managed_intent(
+            session,
+            "assign_specialist_task",
+            "assign-pending",
+            &body,
+            ASSIGN_MANAGED_BODY_SCHEMA,
+        );
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "assign-pending",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "unresolved");
+        assert_eq!(lookup["operation_ref"], prepared.to_string());
+        // The exact-key replay keeps the round, the task rows and the intent count.
+        let refused = fixture
+            .assign(
+                session,
+                "assign-pending",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "OUTCOME_UNKNOWN");
+        assert_eq!(refused.details["operation_ref"], prepared.to_string());
+        assert_eq!(refused.details["effect"], "unresolved");
+        assert_eq!(fixture.intent_rows("assign_specialist_task"), 1);
+        assert_eq!(fixture.broker_task_rows(), 0);
+        assert_eq!(fixture.accounting_rows(), 0);
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            0
+        );
+    }
+
+    /// One fault inside the managed assignment acceptance transaction, after the
+    /// Broker task row, its acceptance and its accounting row are written.
+    #[test]
+    fn a_managed_assign_acceptance_fault_rolls_back_every_row_it_wrote() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER refuse_workload BEFORE INSERT ON member_workload_revisions
+                 BEGIN SELECT RAISE(ABORT,'refused'); END;",
+            )
+            .unwrap();
+        drop(connection);
+        let refused = fixture
+            .assign(
+                session,
+                "atomic-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "INTERNAL_ERROR");
+        assert_eq!(refused.details["effect"], "unresolved");
+        assert_eq!(refused.details["classification"], "Unknown");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        assert!(Uuid::parse_str(refused.details["operation_ref"].as_str().unwrap()).is_ok());
+        // Nothing the transaction wrote survives: no task, no acceptance, no
+        // accounting row, no workload advance and no accepted receipt.
+        assert_eq!(fixture.broker_task_rows(), 0);
+        assert_eq!(fixture.broker_acceptance_rows(), 0);
+        assert_eq!(fixture.accounting_rows(), 0);
+        assert_eq!(fixture.workload_revision(session, member), 0);
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            0
+        );
+        // The durable intent keeps the failure visible, and it is not accepted.
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "atomic-key",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "unresolved");
+        assert_eq!(
+            lookup["operation_ref"],
+            refused.details["operation_ref"].clone()
+        );
+        let state: String = store
+            .connection()
+            .query_row(
+                "SELECT state FROM delegation_operations WHERE operation_kind='assign_specialist_task'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "unresolved");
+    }
+
+    #[test]
+    fn an_uncertain_managed_dispatch_keeps_the_accepted_boundary_and_the_round() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let spawning = FakePort::new();
+        let caller = caller(4);
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &spawning)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        fixture.publish_member_manifest(session, member);
+        let port = FakePort::uncertain_after_reservation("CODEX_SOCKET_UNAVAILABLE");
+        let refused = fixture
+            .assign(
+                session,
+                "uncertain-key",
+                &caller,
+                &port,
+                plain_assign(member, "Assess the accepted candidate.\n", "read_only"),
+            )
+            .unwrap_err();
+        // An unknown dispatch keeps the accepted effect and reports recovery.
+        assert_eq!(refused.code, "CODEX_SOCKET_UNAVAILABLE");
+        assert_eq!(refused.details["effect"], "accepted");
+        assert_eq!(refused.details["classification"], "RecoveryNeeded");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "uncertain-key",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "accepted");
+        let task = Uuid::parse_str(
+            lookup["receipt"]["accepted_subjects"]["task_ref"]
+                .as_str()
+                .expect("the retained receipt names its task"),
+        )
+        .unwrap();
+        // The reservation is durable, the round is counted conservatively and the
+        // receipt is unchanged.
+        assert_eq!(fixture.broker_task_state(task), "dispatching");
+        assert_eq!(fixture.accounting_state(task), "counted_unresolved");
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            1
+        );
+        drop(store);
+        // The dispatch never learned its Turn, so the reservation carries no Turn
+        // id yet: the settlement sweep converges on it as soon as one is known
+        // (covered by the managed settlement sweep test).
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let turn_id: Option<String> = connection
+            .query_row(
+                "SELECT target_turn_id FROM brokered_tasks WHERE task_id=?1",
+                [task.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(turn_id, None);
+    }
+
+    #[test]
+    fn a_running_managed_task_collects_no_partial_result() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let (observation, _) = fixture
+            .assign(
+                session,
+                "running-key",
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        let task = Uuid::parse_str(&observation.task_ref).unwrap();
+        let collected = collect_specialist_task(
+            &fixture.scope(),
+            &fixture.managed_context(session, "running-call"),
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap();
+        // A task still in flight publishes nothing: never a summary or a partial
+        // complete result.
+        assert_eq!(collected.task.state, "running");
+        assert_eq!(collected.task.result_digest, None);
+        assert_eq!(collected.task.complete_result, None);
+        assert_eq!(collected.task.content_availability, "pending");
+        assert_eq!(collected.task.required_action, "await_task");
+        assert_eq!(collected.disposition.state, "active");
+        assert_eq!(collected.disposition.running, 1);
+        assert_eq!(collected.disposition.unresolved, 0);
+        assert_eq!(fixture.accounting_state(task), "counted_accepted");
+    }
+
+    /// Once an uncertain dispatch settles, the member is idle again,
+    /// so collect and identity stop refusing with `DISPOSITION_NOT_IDLE`.
+    #[test]
+    fn a_settled_uncertain_managed_member_becomes_idle_again() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let spawning = FakePort::new();
+        let caller = caller(4);
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-key", &spawning)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        fixture.publish_member_manifest(session, member);
+        let port = FakePort::uncertain_after_reservation("CODEX_SOCKET_UNAVAILABLE");
+        let refused = fixture
+            .assign(
+                session,
+                "uncertain-idle",
+                &caller,
+                &port,
+                plain_assign(member, "Assess the accepted candidate.\n", "read_only"),
+            )
+            .unwrap_err();
+        assert_eq!(refused.details["effect"], "accepted");
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "uncertain-idle",
+        )
+        .unwrap();
+        let task = Uuid::parse_str(
+            lookup["receipt"]["accepted_subjects"]["task_ref"]
+                .as_str()
+                .expect("the retained receipt names its task"),
+        )
+        .unwrap();
+        // The uncertain reservation counts conservatively and blocks the export.
+        assert_eq!(fixture.accounting_state(task), "counted_unresolved");
+        let context = fixture.managed_context(session, "uncertain-idle-call");
+        let refused = get_managed_delegation_identity(
+            &fixture.scope(),
+            &context,
+            &caller,
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+        // The dispatch settles (the Turn the recovery learned completed).
+        fixture.settle_managed_task(session, member, task, "completed", Some("the answer"));
+        // The round resolved with it, so the member is idle and exports.
+        assert_eq!(fixture.accounting_state(task), "counted_accepted");
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            1
+        );
+        drop(store);
+        let collected = collect_specialist_task(
+            &fixture.scope(),
+            &context,
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap();
+        assert_eq!(collected.disposition.state, "idle");
+        assert_eq!(collected.disposition.unresolved, 0);
+        let view = get_managed_delegation_identity(
+            &fixture.scope(),
+            &context,
+            &caller,
+            &port,
+            managed_collect(member, task),
+        )
+        .unwrap();
+        assert_eq!(view.identity.worker_disposition, "idle");
+        assert_eq!(view.identity.rounds_used, 1);
+        assert_eq!(view.identity.accepted_assignments, 1);
+        assert_eq!(view.identity.unresolved_assignments, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Managed acceptance refusal coverage
+    // -----------------------------------------------------------------------
+
+    /// A definitive refusal that lands after the acceptance rows were written
+    /// rolls them back and is recorded in its own transaction.
+    #[test]
+    fn a_late_managed_refusal_by_a_budget_mismatch_leaves_no_partial_rows() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let owner = caller(4);
+        let first = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-one", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let second = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-two", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        fixture
+            .assign(
+                session,
+                "mismatch-one",
+                &owner,
+                &port,
+                plain_assign(first, "Assess the accepted candidate.\n", "read_only"),
+            )
+            .unwrap();
+        let retained = fixture.retained_accepted_content_rows();
+        assert!(retained > 0, "the accepted task retained its content");
+        // The same five references with another budget are refused inside the
+        // acceptance transaction, after its Broker rows were written.
+        let late = fixture
+            .assign(
+                session,
+                "mismatch-two",
+                &caller(5),
+                &port,
+                plain_assign(second, "Assess the accepted candidate.\n", "read_only"),
+            )
+            .unwrap_err();
+        assert_eq!(late.code, "SPECIALIST_POLICY_DENIED");
+        assert_eq!(late.details["effect"], "none");
+        assert_eq!(late.details["classification"], "Rejected");
+        assert!(Uuid::parse_str(late.details["operation_ref"].as_str().unwrap()).is_ok());
+        // Nothing of the refused attempt survives: one task, one acceptance, one
+        // accounting row and no workload advance for the second member.
+        assert_eq!(fixture.broker_task_rows(), 1);
+        assert_eq!(fixture.broker_acceptance_rows(), 1);
+        assert_eq!(fixture.accounting_rows(), 1);
+        assert_eq!(fixture.workload_revision(session, second), 0);
+        // The rolled-back acceptance retained no content rows either.
+        assert_eq!(fixture.retained_accepted_content_rows(), retained);
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &owner).unwrap(),
+            1
+        );
+        // The durable refusal is reported as not_accepted, never absent.
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "mismatch-two",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "not_accepted");
+        assert_eq!(lookup["refusal_code"], "SPECIALIST_POLICY_DENIED");
+        assert_eq!(lookup["exact_key_retry_permitted"], true);
+    }
+
+    /// A budget consumed at the prepare boundary is refused inside the
+    /// acceptance transaction, so its task, acceptance and content roll back.
+    #[test]
+    fn a_late_managed_refusal_by_an_exhausted_budget_leaves_no_partial_rows() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let owner = caller(2);
+        let first = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-one", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let second = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "spawn-two", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        fixture
+            .assign(
+                session,
+                "budget-one",
+                &owner,
+                &port,
+                plain_assign(first, "Assess the accepted candidate.\n", "read_only"),
+            )
+            .unwrap();
+        let retained = fixture.retained_accepted_content_rows();
+        assert!(retained > 0, "the accepted task retained its content");
+        // The last round is consumed by another member of the same caller scope
+        // between this attempt's prepare and its acceptance.
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TRIGGER exhaust_last_round BEFORE INSERT ON delegation_operations
+                 WHEN NEW.operation_kind='assign_specialist_task'
+                   AND NEW.idempotency_key='budget-two'
+                 BEGIN
+                   INSERT INTO caller_scope_assignments(
+                     assignment_id,binding_ref,podway_workspace_ref,podway_session_ref,
+                     podway_attempt_ref,delegated_placement_ref,workspace_ref,
+                     aggregate_scope_kind,aggregate_scope_ref,member_ref,max_rounds,
+                     accounting_state,created_at_ms,updated_at_ms)
+                   VALUES('0192f0a0-0000-7000-8000-000000000001','fixture:binding',
+                     'fixture:workspace','fixture:session','fixture:attempt',
+                     'fixture:placement','{}','orchestrated_session','{}','{}',2,
+                     'counted_unresolved',1,1);
+                 END;",
+                fixture.view.workspace_id, session, first
+            ))
+            .unwrap();
+        drop(connection);
+        let late = fixture
+            .assign(
+                session,
+                "budget-two",
+                &owner,
+                &port,
+                plain_assign(second, "Assess the accepted candidate.\n", "read_only"),
+            )
+            .unwrap_err();
+        assert_eq!(late.code, "ROUNDS_EXHAUSTED");
+        assert_eq!(late.details["effect"], "none");
+        assert!(Uuid::parse_str(late.details["operation_ref"].as_str().unwrap()).is_ok());
+        // The attempt's own rows rolled back; the synthetic round stays, so the
+        // caller scope holds exactly its two counted rounds.
+        assert_eq!(fixture.broker_task_rows(), 1);
+        assert_eq!(fixture.broker_acceptance_rows(), 1);
+        assert_eq!(fixture.accounting_rows(), 2);
+        assert_eq!(fixture.workload_revision(session, second), 0);
+        // The rolled-back acceptance retained no content rows either.
+        assert_eq!(fixture.retained_accepted_content_rows(), retained);
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &owner).unwrap(),
+            2
+        );
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "budget-two",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "not_accepted");
+        assert_eq!(lookup["refusal_code"], "ROUNDS_EXHAUSTED");
+    }
+
+    /// An error after the durable prepare reports the intent's operation
+    /// reference and the unresolved effect floor.
+    #[test]
+    fn a_failure_after_the_managed_prepare_reports_the_unresolved_floor() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        // The member's Broker credential cannot be minted here: the credential
+        // root is a regular file, so the mint fails after the prepared intent.
+        fs::write(
+            fixture.state_root.join("orchestration/broker-credentials"),
+            b"not a directory",
+        )
+        .unwrap();
+        let refused = fixture
+            .spawn(session, &candidate, "credential-failure", None, &port)
+            .unwrap_err();
+        assert_eq!(refused.details["effect"], "unresolved");
+        assert_eq!(refused.details["classification"], "Unknown");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        let operation_ref = refused.details["operation_ref"]
+            .as_str()
+            .map(Uuid::parse_str)
+            .expect("the unresolved effect names its operation")
+            .unwrap();
+        // The intent is durable and unresolved, and nothing was allocated.
+        assert_eq!(fixture.broker_spawn_rows(), 0);
+        assert_eq!(fixture.broker_member_rows(), 0);
+        assert_eq!(port.calls(), 0);
+        let lookup = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "credential-failure",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "unresolved");
+        assert_eq!(lookup["operation_ref"], operation_ref.to_string());
+    }
+
+    /// The managed lookup authenticates the session scope before any Broker
+    /// read, so a foreign Controller learns nothing about a key.
+    #[test]
+    fn a_foreign_controller_gets_the_same_lookup_refusal_for_any_managed_key() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        fixture.spawn_member(session, "used-key", &port);
+        let stranger = ControllerBinding {
+            identity: ControllerIdentity {
+                controller_id: Uuid::now_v7(),
+                kind: ControllerKind::Automation,
+                instance_id: "stranger-host".to_owned(),
+                subject_id: None,
+                generation: 1,
+            },
+            capability_sha256: "f".repeat(64),
+        };
+        let stranger_scope = DelegationScope {
+            view: &fixture.view,
+            state_root: &fixture.state_root,
+            controller: &stranger,
+        };
+        for operation_kind in ["spawn_specialist", "assign_specialist_task"] {
+            for key in ["used-key", "never-used-key"] {
+                let refused = lookup_operation(
+                    &stranger_scope,
+                    operation_kind,
+                    Some(("orchestrated_session", &session.to_string())),
+                    key,
+                )
+                .unwrap_err();
+                assert_eq!(refused.code, "SESSION_OWNER_MISMATCH", "{key}");
+                assert_eq!(refused.details["effect"], "none");
+                assert_eq!(refused.details["operation_kind"], operation_kind);
+            }
+        }
+        // The owner still reads the same two keys differently.
+        let used = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "used-key",
+        )
+        .unwrap();
+        assert_eq!(used["state"], "accepted");
+        let unused = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "never-used-key",
+        )
+        .unwrap();
+        assert_eq!(unused["state"], "absent");
+    }
+
+    /// The public release wrappers map the Run service's admission
+    /// outcome onto the closed successor facts, for both owners.
+    #[test]
+    fn the_release_wrappers_map_the_admission_outcome_to_the_closed_facts() {
+        use crate::delegation_identity::MemberReleaseOperation;
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "release-mapping");
+        let operation = |progress: &str| {
+            let terminal = progress == "terminal";
+            MemberReleaseOperation {
+                schema: "dolgorae.member-release-operation/v1".to_owned(),
+                operation_ref: Uuid::now_v7().to_string(),
+                operation_kind: "release_external_specialist".to_owned(),
+                workspace_ref: fixture.view.workspace_id.clone(),
+                scope_kind: "external_engagement".to_owned(),
+                scope_ref: engagement_id.to_string(),
+                member_ref: member.to_string(),
+                run_ref: member.to_string(),
+                controller_principal: format!(
+                    "controller:{}",
+                    fixture.controller.identity.controller_id
+                ),
+                controller_generation: 1,
+                admitted_membership_revision: 0,
+                owner_ref: Some("f".repeat(64)),
+                progress: progress.to_owned(),
+                safe_failure_code: None,
+                required_action: "none".to_owned(),
+                terminal_membership_revision: terminal.then_some(1),
+                settled_workload_revision: terminal.then_some(0),
+            }
+        };
+        let request = || ReleaseExternalSpecialist {
+            engagement_id,
+            member_ref: member,
+            expected_revision: 0,
+            allow_interrupt: true,
+        };
+        // A verified live owner of the same operation is a typed busy.
+        let refused = release_external_specialist(
+            &fixture.scope(),
+            &FakePort::releasing(Ok(MemberReleaseOutcome::Busy {
+                operation_ref: Uuid::parse_str(&operation("settling").operation_ref).unwrap(),
+            })),
+            request(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "RELEASE_IN_PROGRESS");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["classification"], "Rejected");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        assert!(refused.details["operation_ref"].is_string());
+        // An unprovable holder is recovery with `restore_state`, never a takeover.
+        let refused = release_external_specialist(
+            &fixture.scope(),
+            &FakePort::releasing(Ok(MemberReleaseOutcome::Recovery {
+                operation_ref: Uuid::now_v7(),
+            })),
+            request(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "RELEASE_OWNER_UNPROVEN");
+        assert_eq!(refused.details["effect"], "unresolved");
+        assert_eq!(refused.details["classification"], "Unknown");
+        assert_eq!(refused.details["required_action"], "restore_state");
+        // A pre-admission refusal passes through with no effect.
+        let refused = release_external_specialist(
+            &fixture.scope(),
+            &FakePort::releasing(Err(MemberReleaseFailure::BeforeAdmission(
+                MachineError::new(
+                    "REVISION_CONFLICT",
+                    "the scoped membership revision moved",
+                    false,
+                    json!({"effect":"none"}),
+                ),
+            ))),
+            request(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "REVISION_CONFLICT");
+        assert_eq!(refused.details["effect"], "none");
+        // A fault after the durable admission reports the unresolved floor.
+        let refused = release_external_specialist(
+            &fixture.scope(),
+            &FakePort::releasing(Err(MemberReleaseFailure::AfterAdmission {
+                operation_ref: Uuid::now_v7(),
+                error: MachineError::new("RECOVERY_REQUIRED", "lease fault", false, json!({})),
+            })),
+            request(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        assert_eq!(refused.details["effect"], "unresolved");
+        assert_eq!(refused.details["classification"], "Unknown");
+        // The retained operation is the admitted result, at its progress.
+        let port = FakePort::releasing(Ok(MemberReleaseOutcome::Operation(operation("settling"))));
+        let view = release_external_specialist(&fixture.scope(), &port, request()).unwrap();
+        assert_eq!(view.state, "releasing");
+        assert_eq!(view.member_ref, member);
+        assert_eq!(view.scope_ref, engagement_id);
+        assert_eq!(view.scope_kind, "external_engagement");
+        assert_eq!(view.operation.progress, "settling");
+        let released =
+            FakePort::releasing(Ok(MemberReleaseOutcome::Operation(operation("terminal"))));
+        let view = release_external_specialist(&fixture.scope(), &released, request()).unwrap();
+        assert_eq!(view.state, "released");
+        // A response-projection failure after the durable admission keeps
+        // the known operation reference and the unresolved floor.
+        let mut corrupted = operation("settling");
+        let original_ref = corrupted.operation_ref.clone();
+        corrupted.member_ref = "not-a-uuid".to_owned();
+        let refused = release_external_specialist(
+            &fixture.scope(),
+            &FakePort::releasing(Ok(MemberReleaseOutcome::Operation(corrupted))),
+            request(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "INVALID_ARGUMENT");
+        assert_eq!(refused.details["effect"], "unresolved");
+        assert_eq!(refused.details["classification"], "Unknown");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        assert_eq!(refused.details["operation_ref"], json!(original_ref));
+        // The wrapper hands the port the owner, the fence and the close choice.
+        let recorded = port.release_requests();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "external_engagement");
+        assert_eq!(recorded[0].1, engagement_id);
+        assert_eq!(recorded[0].2, 0);
+        assert!(recorded[0].3);
+        // The managed wrapper reaches the same mapping for its own scope.
+        let session = fixture.managed_session();
+        let spawning = FakePort::new();
+        let managed_member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "release-spawn", &spawning)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let port = FakePort::releasing(Ok(MemberReleaseOutcome::Busy {
+            operation_ref: Uuid::now_v7(),
+        }));
+        let context = fixture.managed_context(session, "release-call");
+        let refused = release_specialist(
+            &fixture.scope(),
+            &context,
+            &port,
+            ReleaseSpecialist {
+                member_ref: managed_member,
+                expected_revision: 1,
+                allow_interrupt: false,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "RELEASE_IN_PROGRESS");
+        assert_eq!(refused.details["effect"], "none");
+        let recorded = port.release_requests();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "orchestrated_session");
+        assert_eq!(recorded[0].1, session);
+        assert_eq!(recorded[0].2, 1);
+        assert!(!recorded[0].3);
+        // A legacy member keeps its legacy release owner.
+        let refused = release_specialist(
+            &fixture.scope(),
+            &context,
+            &FakePort::new(),
+            ReleaseSpecialist {
+                member_ref: Uuid::now_v7(),
+                expected_revision: 1,
+                allow_interrupt: false,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "SPECIALIST_NOT_MEMBER");
+    }
+
+    /// The external release authenticates the workspace and the
+    /// engagement owner before any member or eligibility lookup — a foreign
+    /// Controller gets the same owner refusal for a legacy, a modern and an
+    /// absent member, with no port call and no admitted row.
+    #[test]
+    fn a_foreign_controller_is_refused_before_member_eligibility() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement_id, &candidate, "foreign-owner-modern");
+        // One legacy member of the same engagement.
+        let configuration = AgentSnapshotFixture::legacy("Inspect the accepted candidate.");
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        let reservation = store
+            .reserve_external_hire(
+                engagement_id,
+                "reviewer",
+                &configuration,
+                "Inspect the accepted candidate.",
+                "read_only",
+                "foreign-owner-legacy",
+            )
+            .unwrap();
+        let legacy_member = reservation.specialist_run_id;
+        store
+            .finish_external_hire(
+                &reservation,
+                crate::engagement::RuntimeOutcome::Accepted,
+                "foreign-owner-legacy",
+            )
+            .unwrap();
+        drop(store);
+        let mut foreign = fixture.controller.clone();
+        foreign.identity.controller_id = Uuid::now_v7();
+        for member_ref in [member, legacy_member, Uuid::now_v7()] {
+            let scope = DelegationScope {
+                view: &fixture.view,
+                state_root: &fixture.state_root,
+                controller: &foreign,
+            };
+            let port = FakePort::releasing(Ok(MemberReleaseOutcome::Busy {
+                operation_ref: Uuid::now_v7(),
+            }));
+            let refused = release_external_specialist(
+                &scope,
+                &port,
+                ReleaseExternalSpecialist {
+                    engagement_id,
+                    member_ref,
+                    expected_revision: 0,
+                    allow_interrupt: false,
+                },
+            )
+            .unwrap_err();
+            assert_eq!(refused.code, "ENGAGEMENT_OWNER_MISMATCH");
+            assert_eq!(refused.details["effect"], "none");
+            assert_eq!(refused.details["classification"], "Rejected");
+            assert!(
+                port.release_requests().is_empty(),
+                "a foreign Controller never reaches the port"
+            );
+        }
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let release_rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM member_release_operations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(release_rows, 0);
+    }
+
+    /// The successor external release refuses a legacy facade-v4
+    /// member before admission, so the legacy release owner keeps it.
+    #[test]
+    fn the_successor_external_release_refuses_a_legacy_member() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement_id = fixture.open();
+        // One legacy hire: a members row no successor hire intent names.
+        let configuration = AgentSnapshotFixture::legacy("Inspect the accepted candidate.");
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        let reservation = store
+            .reserve_external_hire(
+                engagement_id,
+                "reviewer",
+                &configuration,
+                "Inspect the accepted candidate.",
+                "read_only",
+                "legacy-release-hire",
+            )
+            .unwrap();
+        let legacy_member = reservation.specialist_run_id;
+        store
+            .finish_external_hire(
+                &reservation,
+                crate::engagement::RuntimeOutcome::Accepted,
+                "legacy-release-hire",
+            )
+            .unwrap();
+        drop(store);
+        let port = FakePort::releasing(Ok(MemberReleaseOutcome::Busy {
+            operation_ref: Uuid::now_v7(),
+        }));
+        let refused = release_external_specialist(
+            &fixture.scope(),
+            &port,
+            ReleaseExternalSpecialist {
+                engagement_id,
+                member_ref: legacy_member,
+                expected_revision: 0,
+                allow_interrupt: false,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "CAPABILITY_UNSUPPORTED");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["classification"], "Rejected");
+        assert_eq!(refused.details["required_action"], "renegotiate");
+        // Nothing was admitted, the member is untouched and the port was never
+        // consulted: the legacy release owner keeps this member.
+        assert!(port.release_requests().is_empty());
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let release_rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM member_release_operations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(release_rows, 0);
+        let member_state: String = connection
+            .query_row(
+                "SELECT state FROM members WHERE specialist_run_id=?1",
+                [legacy_member.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(member_state, "active");
+    }
+
+    /// A close intent moves the session out of `active`, and lookup still
+    /// authenticates the owner and returns the retained receipt — while the
+    /// mutation paths keep the active precondition.
+    #[test]
+    fn a_managed_lookup_survives_a_close_intent() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let owner = caller(4);
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "close-lookup-spawn", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        fixture
+            .assign(
+                session,
+                "close-lookup",
+                &owner,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap();
+        let scope = fixture.scope();
+        let before = lookup_operation(
+            &scope,
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "close-lookup",
+        )
+        .unwrap();
+        assert_eq!(before["state"], "accepted");
+        // The trusted caller's close intent is committed first (orchestration
+        // :5069 moves the session to `aborting`/`completing`). The
+        // close intent guard refuses to create this state through
+        // `begin_session_close` while a successor member is unreleased, so the
+        // HEAD-era committed intent — the state this lookup must survive — is
+        // modelled directly.
+        let broker = crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        rusqlite::Connection::open(fixture.database())
+            .unwrap()
+            .execute(
+                "INSERT INTO orchestrated_session_closes(
+                   operation_id,session_id,interrupt,initiating_controller_generation,
+                   progress,safe_error_code,created_at_ms,updated_at_ms
+                 ) VALUES(?1,?2,true,1,'settling',NULL,1,1)",
+                rusqlite::params![Uuid::now_v7().to_string(), session.to_string()],
+            )
+            .unwrap();
+        rusqlite::Connection::open(fixture.database())
+            .unwrap()
+            .execute(
+                "UPDATE orchestrated_sessions SET status='aborting' WHERE session_id=?1",
+                [session.to_string()],
+            )
+            .unwrap();
+        assert_ne!(
+            broker.session(session).unwrap().status,
+            "active",
+            "the close intent must have moved the session"
+        );
+        // The retained result is still readable, byte-identically.
+        let after = lookup_operation(
+            &scope,
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "close-lookup",
+        )
+        .unwrap();
+        assert_eq!(after, before);
+        // The mutation paths keep the active precondition.
+        let refused = fixture
+            .assign(
+                session,
+                "close-lookup-second",
+                &owner,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None,
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "RUN_STATE_CONFLICT");
+        assert_eq!(refused.details["effect"], "none");
+        // A foreign Controller still learns nothing: the same owner refusal, not
+        // the session-state one, for a used and an unused key.
+        let stranger = ControllerBinding {
+            identity: ControllerIdentity {
+                controller_id: Uuid::now_v7(),
+                kind: ControllerKind::Automation,
+                instance_id: "stranger-host".to_owned(),
+                subject_id: None,
+                generation: 1,
+            },
+            capability_sha256: "f".repeat(64),
+        };
+        let stranger_scope = DelegationScope {
+            view: &fixture.view,
+            state_root: &fixture.state_root,
+            controller: &stranger,
+        };
+        for key in ["close-lookup", "close-lookup-unused"] {
+            let refused = lookup_operation(
+                &stranger_scope,
+                "assign_specialist_task",
+                Some(("orchestrated_session", &session.to_string())),
+                key,
+            )
+            .unwrap_err();
+            assert_eq!(refused.code, "SESSION_OWNER_MISMATCH", "{key}");
+        }
+    }
+}

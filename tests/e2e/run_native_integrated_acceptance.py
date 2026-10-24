@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -684,6 +685,118 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
                   file=sys.stderr)
 
 
+class SuccessorResponses(IntegratedResponses):
+    """Allow only the bounded successor writer task selected by this campaign."""
+
+    def respond(self, request: Any) -> list[dict[str, Any]]:
+        if not getattr(self, "pending", False):
+            markers = ["native-managed-writer", "native-external-writer"]
+            if self.steps >= len(markers):
+                raise ProbeCheckFailure("unexpected_successor_turn")
+            marker = markers[self.steps]
+            self.prepare(marker, GENERAL, command=f"printf '{self.steps + 1} after\\n' > file.txt; printf 'written\\n'",
+                         expected=b"written\n")
+        return super().respond(request)
+
+
+def assert_successor_dispatch(root: Path, fixture: SuccessorResponses) -> None:
+    assert_no_source_isolation(root / "home")
+    states = list((root / "home/.dolgorae/workspaces").glob("*"))
+    if len(states) != 1:
+        raise ProbeCheckFailure("successor_workspace_not_unique")
+    state = states[0]
+    with sqlite3.connect(f"file:{state / 'orchestration/orchestration.sqlite3'}?mode=ro", uri=True) as db:
+        rows = db.execute("SELECT task_id,run_ref FROM dispatch_indexes WHERE EXISTS (SELECT 1 FROM result_content_refs r WHERE r.owner_kind='dispatch_index' AND r.owner_id=dispatch_indexes.task_id AND r.representation='index') AND task_id IN "
+            "(SELECT assignment_id FROM caller_scope_assignments WHERE accounting_state IN "
+            "('counted_unresolved','counted_accepted'))").fetchall()
+    writer = json.loads((state / "runtime/writer.json").read_bytes())
+    if (writer["state"] != "active" or writer.get("holder") is None
+            or not any(run == writer["holder"]["run_id"] for _, run in rows)):
+        raise ProbeCheckFailure("successor_submit_preceded_index_or_writer")
+    fixture.dispatch_checks = getattr(fixture, "dispatch_checks", 0) + 1
+
+
+def successor_campaign(binary: Path, codex: Path) -> dict[str, Any]:
+    if os.environ.get(OPT_IN) != "1":
+        raise ValueError("explicit integrated native opt-in required")
+    if executable_identity(codex)["sha256"] != CODEX_SHA256:
+        raise ValueError("successor acceptance requires the pinned executable")
+    root = Path(tempfile.mkdtemp(prefix="dsn-", dir=os.environ["TMPDIR"])).resolve()
+    root.chmod(0o700)
+    fixture = None
+    driver = None
+    environment = None
+    passed = False
+    try:
+        for name in ("home", "tmp", "config", "cache", "profile", "workspace"):
+            (root / name).mkdir(mode=0o700)
+        environment = isolated_environment(root)
+        environment[OPT_IN] = "1"
+        environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+        checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
+        command = shlex.split(os.environ.get("CARGO", "cargo")) + [
+            "rustc", "--locked", "--example", "native_successor_pipeline", "--",
+            "--cfg", "dolgorae_native_acceptance", "--cfg", "test"]
+        build = subprocess.run(command, cwd=PROTOCOL.parents[1], capture_output=True,
+                               text=True, timeout=300)
+        private_file(root / "build.stdout", build.stdout.encode())
+        private_file(root / "build.stderr", build.stderr.encode())
+        if build.returncode:
+            raise ProbeCheckFailure("successor_driver_build_failed")
+        driver = root / "fixture-successor-driver"
+        shutil.copyfile(PROTOCOL.parents[1] / "target/debug/examples/native_successor_pipeline", driver)
+        driver.chmod(0o700)
+        fixture = SuccessorResponses()
+        fixture.source_check = lambda: assert_successor_dispatch(root, fixture)
+        private_file(root / "profile/config.toml", b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n'
+                     + fixture_config(fixture.base_url) + b"\n[features]\nplugins = false\nshell_snapshot = false\n")
+        private_file(root / "profile/AGENTS.md", (PROFILE + "\n").encode())
+        private_file(root / "fixture-owned", b"native-successor-pipeline/v1\n")
+        result = subprocess.run([str(driver), str(root), str(codex)], env=environment,
+                                capture_output=True, text=True, timeout=300)
+        private_file(root / "driver.stdout", result.stdout.encode())
+        private_file(root / "driver.stderr", result.stderr.encode())
+        if result.returncode or fixture.failure:
+            raise ProbeCheckFailure("successor_driver_failed", {"exit": result.returncode,
+                "loopback_posts": fixture.posts, "fixture_failure": fixture.failure})
+        value = json.loads(result.stdout)
+        if (value.get("schema") != "dolgorae.native-successor-pipeline/v1"
+                or not value.get("passed") or fixture.steps != 2 or fixture.posts != 4
+                or getattr(fixture, "dispatch_checks", 0) != 4
+                or (root / "cleanup-result").read_bytes() != b"complete\n"):
+            raise ProbeCheckFailure("successor_evidence_incomplete", {"native_turns":fixture.steps,"loopback_posts":fixture.posts,"dispatch_checks":getattr(fixture,"dispatch_checks",0)})
+        with patch.dict(os.environ, environment, clear=True):
+            cleanup_removed_root(binary, root, allow_existing_root=True)
+        inspected = subprocess.run([str(binary), "runtime", "orphan", "inspect",
+            "--owner-root-under", str(root)], env=environment, capture_output=True,
+            text=True, timeout=30)
+        observation = json.loads(inspected.stdout)
+        if inspected.returncode or not observation.get("ok"):
+            raise ProbeCheckFailure("successor_process_inventory_failed")
+        require_fixture_process_absence(observation["data"])
+        value.update(native_turns=fixture.steps, loopback_posts=fixture.posts,
+                     external_provider_requests=0, real_account_or_credentials_used=False,
+                     codex_sha256=CODEX_SHA256, owned_process_absence_verified=True)
+        passed = True
+        return value
+    finally:
+        if not passed and driver is not None and driver.is_file():
+            cleanup = subprocess.run([str(driver), "--cleanup", str(root)], env=environment,
+                                     capture_output=True, text=True, timeout=120)
+            private_file(root / "cleanup.stdout", cleanup.stdout.encode())
+            private_file(root / "cleanup.stderr", cleanup.stderr.encode())
+            if cleanup.returncode == 0:
+                with patch.dict(os.environ, environment, clear=True):
+                    cleanup_removed_root(binary, root, allow_existing_root=True)
+        if fixture is not None:
+            fixture.close()
+        if passed:
+            shutil.rmtree(root)
+        else:
+            print(json.dumps({"schema":"dolgorae.native-successor-pipeline-failure/v1",
+                              "owned_fixture_retained":str(root)}), file=sys.stderr)
+
+
 def main() -> int:
     if os.environ.get(OPT_IN) != "1":
         print("integrated native acceptance requires explicit opt-in")
@@ -693,11 +806,16 @@ def main() -> int:
     parser.add_argument("--codex", type=Path, required=True)
     parser.add_argument("--caller-driver", type=Path, required=True)
     parser.add_argument("--ordinary-close-only", action="store_true")
+    parser.add_argument("--successor-only", action="store_true")
     args = parser.parse_args()
     try:
-        result = campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True),
-                          args.caller_driver.resolve(strict=True),
-                          ordinary_close_only=args.ordinary_close_only)
+        if args.successor_only:
+            result = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True))
+        else:
+            result = campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True),
+                              args.caller_driver.resolve(strict=True), ordinary_close_only=args.ordinary_close_only)
+            if not args.ordinary_close_only:
+                result["successor_writer_acceptance"] = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True))
     except ProbeCheckFailure as error:
         print(json.dumps({"schema": "dolgorae.native-integrated-acceptance-failure/v1",
                           "passed": False, "check": error.kind,

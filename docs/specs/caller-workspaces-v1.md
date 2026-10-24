@@ -440,8 +440,11 @@ require that session, a qualified reading boundary and an explicit target;
 an existing general-purpose Thread cannot be upgraded implicitly. Each task
 owns an immutable reader and receipt history. The authenticated assignment
 binds that reader while the actor is idle, before Turn input, and subsequent
-tasks cannot reassign earlier receipts or histories. Other v4 tasks retain
-the bounded generic task/result contract.
+tasks cannot reassign earlier receipts or histories. Initial candidate-tool
+availability does not require a checked reader for generic or structured v3
+tasks. Their authenticated dispatch clears any preceding task's reader;
+restart never restores an earlier task's reader for them. They retain the
+bounded generic task/result contract.
 
 **CW-PROJECT**: Observer-safe successor output MUST expose resolved requested
 access, current effective access/verification, transition and writer state,

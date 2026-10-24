@@ -1128,6 +1128,7 @@ mod tests {
                     required_capabilities: Vec::new(),
                     role_reference: Some("reviewer".to_owned()),
                     normalized_instructions: normalized.clone(),
+                    admitted_configuration: None,
                     instructions: InstructionSnapshot {
                         schema: "dolgorae.instructions/v1".to_owned(),
                         common_prefix_version: 1,

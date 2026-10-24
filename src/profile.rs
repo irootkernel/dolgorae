@@ -5708,6 +5708,78 @@ fn read_state_if_running(path: &Path) -> Result<Option<ServerState>, MachineErro
     }
 }
 
+/// Observe a retained running Profile for history-only recovery. This neither
+/// resolves the registry nor creates lifecycle paths, locks or a Server.
+pub(crate) fn observe_history_server(
+    root: &Path,
+    binding: &crate::global_runtime::GlobalProfileBinding,
+) -> Result<ServerState, MachineError> {
+    binding.validate_for_recovery()?;
+    let context = Context {
+        registry_path: root.join("profiles.yaml"),
+        dolgorae_home_root: root.to_owned(),
+    };
+    let profile = profile_root(&context, &binding.launch_snapshot);
+    let home = home_root(&context, &binding.launch_snapshot.canonical_codex_home)?;
+    verify_private_directory(&profile)?;
+    verify_private_directory(&home)?;
+    let state = read_state_if_running(&profile.join("state.json"))?.ok_or_else(|| {
+        profile_server_busy(
+            &binding.selected_name,
+            &binding.server_key,
+            "history recovery requires the retained running Profile Server",
+        )
+    })?;
+    state.discover_global(binding)?;
+    verify_stop_home_active(
+        &binding.launch_snapshot,
+        &state,
+        read_home_active(&home.join("active.json"))?.as_ref(),
+    )?;
+    use std::os::unix::fs::MetadataExt as _;
+    let socket =
+        crate::codex_socket::inspect(Path::new(&state.socket_path), DarwinSystem.current_uid())
+            .map_err(|_| transport("history Profile socket is unverifiable"))?;
+    if socket.dev() != state.socket_device || socket.ino() != state.socket_inode {
+        return Err(transport("history Profile socket changed"));
+    }
+    Ok(state)
+}
+
+pub(crate) fn revalidate_history_server(
+    root: &Path,
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    expected: &ServerState,
+) -> Result<(), MachineError> {
+    let current = observe_history_server(root, binding)?;
+    let context = Context {
+        registry_path: root.join("profiles.yaml"),
+        dolgorae_home_root: root.to_owned(),
+    };
+    let active = read_home_active(
+        &home_root(&context, &binding.launch_snapshot.canonical_codex_home)?.join("active.json"),
+    )?;
+    validate_admission_lifetime(
+        &binding.selected_name,
+        &binding.launch_snapshot,
+        expected,
+        &current,
+        active.as_ref(),
+    )?;
+    if current.server_epoch != expected.server_epoch
+        || current.pid != expected.pid
+        || current.pgid != expected.pgid
+        || current.uid != expected.uid
+        || current.process_fingerprint != expected.process_fingerprint
+        || current.socket_path != expected.socket_path
+        || current.socket_device != expected.socket_device
+        || current.socket_inode != expected.socket_inode
+    {
+        return Err(transport("history Profile lifetime changed"));
+    }
+    Ok(())
+}
+
 fn read_state(path: &Path) -> Result<Option<ServerState>, MachineError> {
     let Some(mut file) =
         crate::workspace::open_secure_file_if_present(path, DarwinSystem.current_uid())?

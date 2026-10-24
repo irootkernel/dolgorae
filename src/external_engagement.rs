@@ -3536,6 +3536,7 @@ mod tests {
             required_capabilities: vec![],
             role_reference: Some("implementer".to_owned()),
             normalized_instructions: "Implement the task.".to_owned(),
+            admitted_configuration: None,
             instructions: InstructionSnapshot {
                 schema: "dolgorae-instruction-snapshot/v1".to_owned(),
                 common_prefix_version: 1,
@@ -4009,6 +4010,7 @@ mod tests {
             required_capabilities: vec![],
             role_reference: Some("reviewer".to_owned()),
             normalized_instructions: "Review the task.".to_owned(),
+            admitted_configuration: None,
             instructions: InstructionSnapshot {
                 schema: "dolgorae-instruction-snapshot/v1".to_owned(),
                 common_prefix_version: 1,

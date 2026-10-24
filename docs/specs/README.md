@@ -1739,6 +1739,16 @@ an envelope-only scanner may extract a unique top-level response ID solely to
 scope the failure; extracted content is never used semantically. A truncated or
 active-correlated line remains fail-closed generation quarantine.
 
+Successor member reconciliation uses this streamed history boundary to verify
+the accepted task's original root Thread and unique terminal Turn. Terminal
+proof and complete-response proof are separate: only the pinned full view can
+prove response absence, and a lost write stream cannot prove complete changes.
+Recovery finishes the existing ReconciliationRequired → Paused journal prefix
+once before response preservation and the task's atomic terminal transaction.
+An existing status-only observation or private response preparation never
+replaces fresh history when no final resolution exists. The delegation runtime
+specification owns the task, reader, artifact and owner-recovery rules.
+
 An asynchronous redaction or representation failure appends
 `payload_unrepresentable` even when no command is waiting. A later command that
 requires the missing semantic payload returns `REDACTION_FAILURE`; pure
@@ -2542,6 +2552,15 @@ be used across those identities, and V1 does not claim an atomic cross-
 Controller handoff. A competitor may win the intervening acquisition; the
 Orchestration Broker handles `WRITER_BUSY` by rescheduling rather than taking
 over or queueing.
+
+For captured successor delegation, a managed Specialist acquires its writer
+with its own Broker Controller credential after task acceptance. A proved
+dispatch refusal preserves the accepted receipt and releases only its round;
+an uncertain acquire or release retains conservative accounting. Complete
+change-byte retention commits with the task result before writer release.
+Normal close verifies Reader policy before sealing. A release retry for an
+already-Closed member may settle its writer only under the lifecycle lease,
+authenticated member authority and verified exact owned-generation cleanup.
 
 Start, resume, fork, and recovery otherwise create read-effective Runs and do
 not acquire writer authority.
@@ -5698,3 +5717,8 @@ remains authoritative for Dolgorae.
 - [v0.1.4 Profile Journal Maintenance and Close Cleanup](dolgorae-v014-profile-maintenance.md) owns TASK-073 retained membership generations, binding compaction and cleanup recovery.
 
 - [v0.1.4 Observation, Wait and Result Storage Runtime](dolgorae-v014-observation-runtime.md) owns TASK-075 component reuse, bounded waits and explicit result retention.
+- [v0.1.4 Delegation Runtime](dolgorae-v014-delegation-runtime.md) owns TASK-076
+  runtime choices the frozen H1 specs leave open: delegation capture and
+  identity with admitted direct-target manifests and task-scoped checked v4 reviews, the delegation namespace and Engagement store generation 6, keyed
+  intents and lookup, complete results with the changes producer, round
+  accounting, managed successor services and both member release owners.

@@ -572,6 +572,27 @@ struct LegacyBrokerCredentialWire {
     capability: String,
 }
 
+/// Remove one member's Broker credential file — the dead state a terminal
+/// release owns.
+///
+/// Idempotent: an absent credential is already retired. No path reclaims the
+/// crash orphan a process crash between the mint and its acceptance commit
+/// leaves — a close never deletes credential files — so that inert file
+/// remains.
+pub(crate) fn retire_member_credential(
+    root: &Path,
+    uid: u32,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
+    verify_secure_directory(root, uid)?;
+    let path = root.join(format!("{run_id}.json"));
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(internal(error.to_string())),
+    }
+}
+
 fn ensure_credential_root(root: &Path, uid: u32) -> Result<(), MachineError> {
     let parent = root
         .parent()
@@ -1219,6 +1240,9 @@ impl OrchestrationStore {
         faults: Arc<dyn OrchestrationFaultInjector>,
         clock: Arc<dyn OrchestrationClock>,
     ) -> Result<Self, MachineError> {
+        // The generation gate is `EngagementStore::open`'s: it validates the base
+        // `schema_version` and the `orchestration_schema_version` extension key
+        // before this opener performs any write.
         let path = EngagementStore::workspace_database_path(state_root);
         let mut connection = EngagementStore::open(&path)?.into_connection();
         connection
@@ -1338,6 +1362,11 @@ impl OrchestrationStore {
     /// any other logical write. Public observations use only this boundary.
     pub fn open_observer(state_root: &Path) -> Result<Self, MachineError> {
         let path = EngagementStore::workspace_database_path(state_root);
+        // Observation shares the effect-free generation gate with every other
+        // opener; it validates both generation keys and never creates state.
+        if crate::engagement::admit_generation(&path)?.is_none() {
+            return Err(integrity("orchestration observation source is unavailable"));
+        }
         let connection =
             crate::storage_observation::CheckedConnection::open(&path, true).map_err(|error| {
                 if matches!(
@@ -1490,8 +1519,10 @@ impl OrchestrationStore {
         run_id: Uuid,
         artifact_id: Uuid,
     ) -> Result<Option<File>, MachineError> {
+        // A base-only Engagement database (no orchestration extension) has no
+        // published results, exactly as in `logical_result_artifacts`.
         let normalized_namespace:bool=self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='result_content_refs')",[],|row|row.get(0),
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='brokered_result_publications') AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='result_content_refs')",[],|row|row.get(0),
         ).map_err(internal)?;
         if !normalized_namespace {
             return Ok(None);
@@ -2100,15 +2131,18 @@ impl OrchestrationStore {
             "SELECT COUNT(*) FROM brokered_spawn_operations
              WHERE session_id=?1 AND state='awaiting_approval'",
         )?;
-        let accepted_unfinished_task_count = count(
+        // The observation's task counts are the legacy rows' counts, exactly
+        // like every other legacy reader.
+        let accepted_unfinished_task_count = count(&format!(
             "SELECT COUNT(*) FROM brokered_tasks
              WHERE session_id=?1
-             AND state IN ('accepted','dispatching','running','result_publication_pending','interrupted_unknown')",
-        )?;
-        let unknown_outcome_task_count = count(
+             AND state IN ('accepted','dispatching','running','result_publication_pending','interrupted_unknown')
+             AND {LEGACY_TASK}",
+        ))?;
+        let unknown_outcome_task_count = count(&format!(
             "SELECT COUNT(*) FROM brokered_tasks
-             WHERE session_id=?1 AND state='interrupted_unknown'",
-        )?;
+             WHERE session_id=?1 AND state='interrupted_unknown' AND {LEGACY_TASK}",
+        ))?;
         let published_result_count = count(
             "SELECT COUNT(*) FROM brokered_result_publications
              WHERE session_id=?1 AND state='published'",
@@ -2816,6 +2850,12 @@ impl OrchestrationStore {
             .collect()
     }
 
+    /// The legacy session-policy members of one Session.
+    ///
+    /// A successor managed member is admitted by its own installed snapshot and
+    /// carries no session-policy Role, so it is not one of these rows: the
+    /// successor services read it through their own member facts and a legacy
+    /// close refuses rather than adopting it.
     pub fn members(&self, session_id: Uuid) -> Result<Vec<BrokeredMemberSnapshot>, MachineError> {
         let policy_json: String = self
             .connection
@@ -2837,7 +2877,8 @@ impl OrchestrationStore {
                         agent_configuration_json,agent_configuration_sha256,controller_binding_json,
                         spawn_operation_id,spawned_by_turn_id,membership_state,actor_residency,
                         activation_policy,requested_access
-                 FROM brokered_members WHERE session_id=?1 ORDER BY created_at_ms,run_id",
+                 FROM brokered_members WHERE session_id=?1 AND activation_policy<>'successor'
+                 ORDER BY created_at_ms,run_id",
             )
             .map_err(internal)?;
         let rows = statement
@@ -4514,11 +4555,13 @@ impl OrchestrationStore {
         let transaction = self.transaction()?;
         let already_delivered = {
             let mut statement = transaction
-                .prepare(
+                .prepare(&format!(
                     "SELECT task_id FROM brokered_delivery_receipts r
-                     JOIN brokered_tasks t USING(task_id)
-                     WHERE t.session_id=?1 AND r.sequence>?2 ORDER BY r.sequence LIMIT ?3",
-                )
+                         JOIN brokered_tasks USING(task_id)
+                         WHERE brokered_tasks.session_id=?1 AND r.sequence>?2
+                           AND {LEGACY_TASK}
+                         ORDER BY r.sequence LIMIT ?3"
+                ))
                 .map_err(internal)?;
             statement
                 .query_map(
@@ -4535,8 +4578,14 @@ impl OrchestrationStore {
         } else {
             let mut statement = transaction
                 .prepare(
-                    "SELECT task_id FROM brokered_tasks WHERE session_id=?1
-                     AND state='completed_not_delivered' ORDER BY created_at_ms,task_id LIMIT ?2",
+                    // The legacy collect enumeration never names a successor row:
+                    // its result lives in the content store and has no legacy
+                    // decoding.
+                    &format!(
+                        "SELECT task_id FROM brokered_tasks WHERE session_id=?1
+                         AND state='completed_not_delivered' AND {LEGACY_TASK}
+                         ORDER BY created_at_ms,task_id LIMIT ?2"
+                    ),
                 )
                 .map_err(internal)?;
             statement
@@ -5005,6 +5054,12 @@ impl OrchestrationStore {
         if matches!(status.as_str(), "completing" | "aborting") {
             return Err(integrity("closing session has no durable close record"));
         }
+        // A successor member is released by its own release owner, never by the
+        // legacy session-policy release, so the close intent itself is refused
+        // while one is unreleased — before any durable effect of this path.
+        if successor_member_count(&transaction, session_id)? != 0 {
+            return Err(successor_member_unreleased(session_id));
+        }
         if !interrupt {
             let spawn_count: u64 = transaction
                 .query_row(
@@ -5148,6 +5203,12 @@ impl OrchestrationStore {
             .ok_or_else(|| session_conflict(session_id, "session close intent is missing"))?;
         if matches!(close.progress.as_str(), "completed" | "aborted") {
             return Ok(close);
+        }
+        // A successor member is released by its own release owner, never by the
+        // legacy session-policy release, so this guard precedes every
+        // read-for-mutation and every write of this path.
+        if successor_member_count(&self.connection, session_id)? != 0 {
+            return Err(successor_member_unreleased(session_id));
         }
         if close.interrupt {
             let now = self.now_ms()?;
@@ -5315,6 +5376,11 @@ impl OrchestrationStore {
         if matches!(session.status.as_str(), "completed" | "aborted") {
             return Ok(session);
         }
+        // The legacy release owner cannot settle a successor member, so this
+        // guard precedes every read-for-mutation and every write of this path.
+        if successor_member_count(&self.connection, session_id)? != 0 {
+            return Err(successor_member_unreleased(session_id));
+        }
         let active_tasks = self.session_tasks(session_id)?;
         if !abort
             && active_tasks
@@ -5425,9 +5491,12 @@ impl OrchestrationStore {
         let task_changes = if include_tasks {
             transaction
                 .execute(
-                    "UPDATE brokered_tasks SET state='interrupted_unknown',
-                     safe_error_code='TARGET_TURN_OUTCOME_UNKNOWN',updated_at_ms=?2
-                     WHERE session_id=?1 AND state IN ('dispatching','running')",
+                    &format!(
+                        "UPDATE brokered_tasks SET state='interrupted_unknown',
+                         safe_error_code='TARGET_TURN_OUTCOME_UNKNOWN',updated_at_ms=?2
+                         WHERE session_id=?1 AND state IN ('dispatching','running')
+                           AND {LEGACY_TASK}"
+                    ),
                     params![session_id.to_string(), now],
                 )
                 .map_err(internal)?
@@ -5622,11 +5691,13 @@ impl OrchestrationStore {
     ) -> Result<SpecialistTaskSnapshot, MachineError> {
         let row = connection
             .query_row(
-                "SELECT target_run_id,state,target_turn_id,result_json,result_sha256,
-                        result_artifact_id,safe_error_code,
-                        (SELECT sequence FROM brokered_delivery_receipts
-                         WHERE task_id=brokered_tasks.task_id)
-                 FROM brokered_tasks WHERE task_id=?1",
+                &format!(
+                    "SELECT target_run_id,state,target_turn_id,result_json,result_sha256,
+                            result_artifact_id,safe_error_code,
+                            (SELECT sequence FROM brokered_delivery_receipts
+                             WHERE task_id=brokered_tasks.task_id)
+                     FROM brokered_tasks WHERE task_id=?1 AND {LEGACY_TASK}"
+                ),
                 [task_id.to_string()],
                 |row| {
                     Ok((
@@ -5690,16 +5761,26 @@ impl OrchestrationStore {
         session_id: Uuid,
         key: &str,
     ) -> Result<Option<SpecialistTaskSnapshot>, MachineError> {
-        self.connection
+        let row: Option<(String, bool)> = self
+            .connection
             .query_row(
-                "SELECT task_id FROM brokered_tasks WHERE session_id=?1 AND idempotency_key=?2",
+                &format!(
+                    "SELECT task_id, NOT ({LEGACY_TASK}) FROM brokered_tasks
+                      WHERE session_id=?1 AND idempotency_key=?2"
+                ),
                 params![session_id.to_string(), key],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
-            .map_err(internal)?
-            .map(|id| self.task(parse_uuid(&id)?))
-            .transpose()
+            .map_err(internal)?;
+        match row {
+            None => Ok(None),
+            // A successor task owns its key in the successor namespace, so a
+            // legacy replay of that key is a conflict. The successor row is never
+            // decoded here.
+            Some((_, true)) => Err(idempotency_conflict(key)),
+            Some((id, false)) => Ok(Some(self.task(parse_uuid(&id)?)?)),
+        }
     }
 
     fn task_request_digest(&self, task_id: Uuid) -> Result<String, MachineError> {
@@ -5745,7 +5826,9 @@ impl OrchestrationStore {
         let value: String = self
             .connection
             .query_row(
-                "SELECT session_id FROM brokered_tasks WHERE task_id=?1",
+                &format!(
+                    "SELECT session_id FROM brokered_tasks WHERE task_id=?1 AND {LEGACY_TASK}"
+                ),
                 [task_id.to_string()],
                 |row| row.get(0),
             )
@@ -5757,7 +5840,11 @@ impl OrchestrationStore {
         let ids = {
             let mut statement = self
                 .connection
-                .prepare("SELECT task_id FROM brokered_tasks WHERE session_id=?1 ORDER BY created_at_ms,task_id")
+                .prepare(&format!(
+                    "SELECT task_id FROM brokered_tasks
+                      WHERE session_id=?1 AND {LEGACY_TASK}
+                      ORDER BY created_at_ms,task_id"
+                ))
                 .map_err(internal)?;
             statement
                 .query_map([session_id.to_string()], |row| row.get::<_, String>(0))
@@ -6470,6 +6557,966 @@ fn insert_member(
     Ok(())
 }
 
+/// The predicate that keeps a successor task row out of the legacy readers.
+///
+/// A successor managed task belongs to the successor namespace: its member is a
+/// successor member, its result lives in the content store rather than in the
+/// legacy publication tables, and a legacy replay of its key is a conflict rather
+/// than a decode. `members()` excludes successor members the same way.
+const LEGACY_TASK: &str = "NOT EXISTS (
+    SELECT 1 FROM brokered_members m
+     WHERE m.run_id=brokered_tasks.target_run_id
+       AND m.activation_policy='successor')";
+
+/// The marker a successor managed spawn carries in its Broker request payload.
+///
+/// A successor spawn owns its idempotency key in the successor namespace only, so
+/// the Broker row must still be identifiable as a successor row.
+pub(crate) const SUCCESSOR_SPAWN_MARKER_SCHEMA: &str = "dolgorae.successor-spawn/v1";
+
+/// One successor managed spawn admitted into the Broker execution tables.
+///
+/// The caller's idempotency key is never written into a Broker key column: the
+/// row carries an internal key derived from the successor operation reference and
+/// the successor marker in `request_json`, so a legacy replay that names the
+/// internal key fails its own digest comparison instead of adopting this row.
+pub(crate) struct SuccessorSpawn<'a> {
+    pub operation_ref: Uuid,
+    pub session_id: Uuid,
+    pub member_run_id: Uuid,
+    pub parent_run_id: Uuid,
+    pub internal_key: &'a str,
+    pub request_sha256: &'a str,
+    pub request_json: &'a str,
+    pub role_ref: &'a str,
+    pub role_snapshot_sha256: &'a str,
+    pub agent_configuration_json: &'a str,
+    pub agent_configuration_sha256: &'a str,
+    pub controller_binding_json: &'a str,
+    pub requested_access: &'a str,
+    pub source_turn_id: &'a str,
+    pub source_tool_call_id: &'a str,
+    pub now_ms: i64,
+}
+
+/// Write one successor spawn and its member in the acceptance transaction.
+///
+/// The member is `provisioning`/`unstarted` until the Run service reports whether
+/// the member Run started; the acceptance receipt is written by the caller in the
+/// same transaction.
+pub(crate) fn admit_successor_spawn(
+    transaction: &Transaction<'_>,
+    spawn: SuccessorSpawn<'_>,
+) -> Result<(), MachineError> {
+    checked(spawn.internal_key, 256, "idempotency_key")?;
+    checked(spawn.role_ref, 256, "role_ref")?;
+    checked(spawn.source_turn_id, 256, "source_turn_id")?;
+    checked(spawn.source_tool_call_id, 256, "source_tool_call_id")?;
+    checked(spawn.requested_access, 64, "requested_access")?;
+    digest(spawn.request_sha256, "request_sha256")?;
+    digest(spawn.role_snapshot_sha256, "role_snapshot_sha256")?;
+    digest(
+        spawn.agent_configuration_sha256,
+        "agent_configuration_sha256",
+    )?;
+    transaction
+        .execute(
+            "INSERT INTO brokered_spawn_operations(
+               operation_id,session_id,idempotency_key,request_sha256,request_json,role_ref,
+               parent_run_id,child_run_id,approval_request_id,state,safe_error_code,
+               source_turn_id,source_tool_call_id,created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,NULL,'requested',NULL,?9,?10,?11,?11)",
+            params![
+                spawn.operation_ref.to_string(),
+                spawn.session_id.to_string(),
+                spawn.internal_key,
+                spawn.request_sha256,
+                spawn.request_json,
+                spawn.role_ref,
+                spawn.parent_run_id.to_string(),
+                spawn.member_run_id.to_string(),
+                spawn.source_turn_id,
+                spawn.source_tool_call_id,
+                spawn.now_ms
+            ],
+        )
+        .map_err(internal)?;
+    // `activation_policy` carries the successor marker: a successor spawn
+    // re-applies no session Specialist Policy, so there is no legacy
+    // activation policy name to record.
+    transaction
+        .execute(
+            "INSERT INTO brokered_members(
+               run_id,session_id,parent_run_id,role_ref,role_snapshot_sha256,
+               agent_configuration_json,agent_configuration_sha256,controller_binding_json,
+               spawn_operation_id,spawned_by_turn_id,membership_state,actor_residency,
+               activation_policy,requested_access,created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'provisioning','unstarted','successor',
+               ?11,?12,?12)",
+            params![
+                spawn.member_run_id.to_string(),
+                spawn.session_id.to_string(),
+                spawn.parent_run_id.to_string(),
+                spawn.role_ref,
+                spawn.role_snapshot_sha256,
+                spawn.agent_configuration_json,
+                spawn.agent_configuration_sha256,
+                spawn.controller_binding_json,
+                spawn.operation_ref.to_string(),
+                spawn.source_turn_id,
+                spawn.requested_access,
+                spawn.now_ms
+            ],
+        )
+        .map_err(internal)?;
+    append_event(
+        transaction,
+        spawn.session_id,
+        "specialist_spawn_accepted",
+        &sha256_hex(spawn.operation_ref.as_bytes()),
+        spawn.now_ms,
+    )
+}
+
+/// Settle the member Run start of one accepted successor spawn.
+///
+/// A failure keeps the accepted spawn as `recovery_required` with its member
+/// `degraded`/`unavailable`, exactly as the legacy publication recovery does: the
+/// member Run may exist, so the cleanup owner is preserved and never replaced.
+pub(crate) fn settle_successor_spawn(
+    transaction: &Transaction<'_>,
+    session_id: Uuid,
+    operation_ref: Uuid,
+    member_run_id: Uuid,
+    started: bool,
+    safe_error_code: Option<&str>,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    let (spawn_state, membership_state, residency) = if started {
+        ("ready", "active", "resident")
+    } else {
+        ("recovery_required", "degraded", "unavailable")
+    };
+    let changed = transaction
+        .execute(
+            "UPDATE brokered_spawn_operations SET state=?2,safe_error_code=?3,updated_at_ms=?4
+              WHERE operation_id=?1 AND state='requested'",
+            params![
+                operation_ref.to_string(),
+                spawn_state,
+                safe_error_code,
+                now_ms
+            ],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(integrity("the successor spawn is not startable"));
+    }
+    transaction
+        .execute(
+            "UPDATE brokered_members SET membership_state=?2,actor_residency=?3,updated_at_ms=?4
+              WHERE run_id=?1",
+            params![
+                member_run_id.to_string(),
+                membership_state,
+                residency,
+                now_ms
+            ],
+        )
+        .map_err(internal)?;
+    append_event(
+        transaction,
+        session_id,
+        "specialist_provisioning_settled",
+        &sha256_hex(spawn_state.as_bytes()),
+        now_ms,
+    )
+}
+
+/// Mark one successor member `retiring` inside the release admission.
+///
+/// The membership predicate the legacy close guards read counts only `retired`
+/// as released, so a release that ends in another state leaves the session
+/// fenced; the terminal state stays with `release_specialist` (RPC:388-394).
+// The release owner is constructed by the semantic release admission.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn mark_successor_member_retiring(
+    transaction: &Transaction<'_>,
+    session_id: Uuid,
+    member_run_id: Uuid,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    let changed = transaction
+        .execute(
+            "UPDATE brokered_members SET membership_state='retiring',updated_at_ms=?3
+              WHERE session_id=?1 AND run_id=?2 AND membership_state!='retired'",
+            params![session_id.to_string(), member_run_id.to_string(), now_ms],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(session_conflict(
+            session_id,
+            "the member cannot enter release",
+        ));
+    }
+    append_event(
+        transaction,
+        session_id,
+        "specialist_release_requested",
+        &sha256_hex(member_run_id.as_bytes()),
+        now_ms,
+    )
+}
+
+/// Transition one successor member to terminally `retired` inside the release
+/// terminal transaction (RPC:388-394).
+///
+/// `successor_member_count` treats only `retired` as released, so this exact
+/// state is what lifts the legacy close guard for this member.
+// The release settlement is constructed by the semantic release owner.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn retire_successor_member_released(
+    transaction: &Transaction<'_>,
+    session_id: Uuid,
+    member_run_id: Uuid,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    let changed = transaction
+        .execute(
+            "UPDATE brokered_members SET membership_state='retired',
+                    actor_residency='terminal',updated_at_ms=?3
+              WHERE session_id=?1 AND run_id=?2
+                AND membership_state IN ('retiring','active')",
+            params![session_id.to_string(), member_run_id.to_string(), now_ms],
+        )
+        .map_err(internal)?;
+    if changed == 0 {
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT membership_state FROM brokered_members
+                  WHERE session_id=?1 AND run_id=?2",
+                params![session_id.to_string(), member_run_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        if existing.as_deref() != Some("retired") {
+            return Err(session_conflict(
+                session_id,
+                "the member cannot be released",
+            ));
+        }
+    }
+    append_event(
+        transaction,
+        session_id,
+        "specialist_released",
+        &sha256_hex(member_run_id.as_bytes()),
+        now_ms,
+    )
+}
+
+/// The marker a successor managed task carries in its Broker request row.
+pub(crate) const SUCCESSOR_TASK_MARKER_SCHEMA: &str = "dolgorae.successor-task/v1";
+
+/// One successor managed task admitted into the Broker execution tables.
+///
+/// The caller's key never enters a Broker key column: the row carries an internal
+/// key derived from the successor operation reference and the successor marker,
+/// so a legacy replay that names the internal key conflicts on its own digest.
+pub(crate) struct SuccessorTask<'a> {
+    pub session_id: Uuid,
+    pub task_id: Uuid,
+    pub member_run_id: Uuid,
+    pub internal_key: &'a str,
+    pub request_sha256: &'a str,
+    pub request_json: &'a str,
+    pub accepted_request_json: &'a str,
+    pub accepted_request_sha256: &'a str,
+    pub source_run_id: Uuid,
+    pub source_turn_id: &'a str,
+    pub source_tool_call_id: &'a str,
+    pub deadline_origin_ms: i64,
+    pub now_ms: i64,
+}
+
+/// Write one successor task and its acceptance in the accepting transaction.
+pub(crate) fn admit_successor_task(
+    transaction: &Transaction<'_>,
+    task: SuccessorTask<'_>,
+) -> Result<(), MachineError> {
+    checked(task.internal_key, 256, "idempotency_key")?;
+    checked(task.source_turn_id, 256, "source_turn_id")?;
+    checked(task.source_tool_call_id, 256, "source_tool_call_id")?;
+    digest(task.request_sha256, "request_sha256")?;
+    digest(task.accepted_request_sha256, "accepted_request_sha256")?;
+    transaction
+        .execute(
+            "INSERT INTO brokered_tasks(
+               task_id,session_id,idempotency_key,request_sha256,source_run_id,source_turn_id,
+               source_tool_call_id,target_run_id,request_json,target_turn_id,result_json,
+               result_sha256,result_artifact_id,state,safe_error_code,created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,NULL,NULL,NULL,'accepted',NULL,?10,?10)",
+            params![
+                task.task_id.to_string(),
+                task.session_id.to_string(),
+                task.internal_key,
+                task.request_sha256,
+                task.source_run_id.to_string(),
+                task.source_turn_id,
+                task.source_tool_call_id,
+                task.member_run_id.to_string(),
+                task.request_json,
+                task.now_ms
+            ],
+        )
+        .map_err(|error| {
+            // The one-active-task wall refuses inside the transaction, so the
+            // caller records it as a definitive pre-acceptance refusal.
+            let message = error.to_string();
+            if message.contains("UNIQUE constraint failed") && message.contains("brokered_tasks") {
+                session_conflict(task.session_id, "Specialist already has active work")
+            } else {
+                internal(error)
+            }
+        })?;
+    transaction
+        .execute(
+            "INSERT INTO brokered_task_acceptances(
+               task_id,source_request_sha256,accepted_request_sha256,
+               accepted_request_json,deadline_origin_ms
+             ) VALUES(?1,?2,?3,?4,?5)",
+            params![
+                task.task_id.to_string(),
+                task.request_sha256,
+                task.accepted_request_sha256,
+                task.accepted_request_json,
+                task.deadline_origin_ms
+            ],
+        )
+        .map_err(internal)?;
+    append_event(
+        transaction,
+        task.session_id,
+        "specialist_task_accepted",
+        &sha256_hex(task.task_id.as_bytes()),
+        task.now_ms,
+    )
+}
+
+/// Reserve one accepted successor task for dispatch.
+// The dispatch port is constructed by the TASK-077 adapters; the unit tests
+// already exercise this transition.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn mark_successor_task_dispatching(
+    transaction: &Transaction<'_>,
+    session_id: Uuid,
+    task_id: Uuid,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    let changed = transaction
+        .execute(
+            "UPDATE brokered_tasks SET state='dispatching',updated_at_ms=?2
+              WHERE task_id=?1 AND state='accepted'",
+            params![task_id.to_string(), now_ms],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        let current: Option<String> = transaction
+            .query_row(
+                "SELECT state FROM brokered_tasks WHERE task_id=?1",
+                [task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        if current.as_deref() == Some("dispatching") {
+            return Ok(());
+        }
+        return Err(session_conflict(
+            session_id,
+            "task is not at the accepted dispatch boundary",
+        ));
+    }
+    append_event(
+        transaction,
+        session_id,
+        "specialist_task_dispatch_started",
+        &sha256_hex(format!("{session_id}\0{task_id}").as_bytes()),
+        now_ms,
+    )
+}
+
+/// Record the Turn the executor accepted for one dispatched successor task.
+// The dispatch port is constructed by the TASK-077 adapters; the unit tests
+// already exercise this transition.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn mark_successor_task_running(
+    transaction: &Transaction<'_>,
+    session_id: Uuid,
+    task_id: Uuid,
+    turn_id: &str,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    let changed = transaction
+        .execute(
+            "UPDATE brokered_tasks SET state='running',target_turn_id=?3,updated_at_ms=?4
+              WHERE task_id=?1 AND session_id=?2 AND state IN ('accepted','dispatching','queued')",
+            params![task_id.to_string(), session_id.to_string(), turn_id, now_ms],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(session_conflict(
+            session_id,
+            "task is not at an admissible dispatch boundary",
+        ));
+    }
+    append_event(
+        transaction,
+        session_id,
+        "specialist_task_running",
+        &sha256_hex(format!("{session_id}\0{task_id}\0{turn_id}").as_bytes()),
+        now_ms,
+    )
+}
+
+/// Record one proved non-dispatch of a successor task (Case B).
+pub(crate) fn terminalize_successor_task(
+    transaction: &Transaction<'_>,
+    session_id: Uuid,
+    task_id: Uuid,
+    safe_error_code: &str,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    checked(safe_error_code, 128, "safe_error_code")?;
+    let changed = transaction
+        .execute(
+            "UPDATE brokered_tasks SET state='failed',safe_error_code=?2,updated_at_ms=?3
+              WHERE task_id=?1 AND session_id=?4
+                AND state IN ('accepted','queued','dispatching','running')",
+            params![
+                task_id.to_string(),
+                safe_error_code,
+                now_ms,
+                session_id.to_string()
+            ],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(session_conflict(
+            session_id,
+            "task is not at a settlable dispatch boundary",
+        ));
+    }
+    append_event(
+        transaction,
+        session_id,
+        "specialist_task_settled",
+        &sha256_hex(b"failed"),
+        now_ms,
+    )
+}
+
+/// The Broker facts of one successor task.
+pub(crate) struct SuccessorTaskFacts {
+    pub state: String,
+    pub member_ref: String,
+    pub target_turn_id: Option<String>,
+    pub result_sha256: Option<String>,
+    pub accepted_request_json: String,
+    /// The marker the acceptance retained: the requested intent and deadline.
+    pub request_json: String,
+    /// The canonical assignment body digest the acceptance froze.
+    pub source_request_sha256: String,
+}
+
+/// Read active task acceptances in the caller's observation transaction.
+pub(crate) fn successor_active_task_acceptances(
+    connection: &Connection,
+    session_id: Uuid,
+    member_ref: Uuid,
+) -> Result<Vec<String>, MachineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT a.accepted_request_json,a.accepted_request_sha256 FROM brokered_tasks t
+             LEFT JOIN brokered_task_acceptances a USING(task_id)
+             WHERE t.session_id=?1 AND t.target_run_id=?2
+               AND t.state IN ('dispatching','running')",
+        )
+        .map_err(internal)?;
+    let rows = statement
+        .query_map(
+            params![session_id.to_string(), member_ref.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(internal)?;
+    rows.map(|row| {
+        let (json, digest) = row.map_err(internal)?;
+        if sha256_hex(json.as_bytes()) != digest {
+            return Err(internal("the active task acceptance digest is invalid"));
+        }
+        Ok(json)
+    })
+    .collect()
+}
+
+/// Read one successor task and its retained acceptance without writing anything.
+pub(crate) fn successor_task(
+    connection: &Connection,
+    session_id: Uuid,
+    task_id: Uuid,
+) -> Result<Option<SuccessorTaskFacts>, MachineError> {
+    connection
+        .query_row(
+            "SELECT t.state,t.target_run_id,t.target_turn_id,t.result_sha256,
+                    a.accepted_request_json,t.request_json,a.source_request_sha256
+               FROM brokered_tasks t
+               JOIN brokered_task_acceptances a USING(task_id)
+              WHERE t.session_id=?1 AND t.task_id=?2",
+            params![session_id.to_string(), task_id.to_string()],
+            |row| {
+                Ok(SuccessorTaskFacts {
+                    state: row.get(0)?,
+                    member_ref: row.get(1)?,
+                    target_turn_id: row.get(2)?,
+                    result_sha256: row.get(3)?,
+                    accepted_request_json: row.get(4)?,
+                    request_json: row.get(5)?,
+                    source_request_sha256: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(internal)
+}
+
+/// One managed member's quiescence, read from the Broker tables.
+///
+/// The successor managed analogue of `engagement::successor_member_quiescence`:
+/// the member's tasks live in the Broker extension tables, so the disposition an
+/// R call reports and a release binds come from the same facts.
+pub(crate) fn successor_member_quiescence(
+    connection: &Connection,
+    workspace_ref: &str,
+    session_id: Uuid,
+    member_ref: Uuid,
+) -> Result<crate::engagement::MemberQuiescence, MachineError> {
+    let member = member_ref.to_string();
+    let scope = session_id.to_string();
+    let count = |state: &str| -> Result<u64, MachineError> {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM brokered_tasks
+                  WHERE session_id=?1 AND target_run_id=?2 AND state=?3",
+                params![scope, member, state],
+                |row| row.get(0),
+            )
+            .map_err(internal)
+    };
+    let unresolved_tasks: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM brokered_tasks
+              WHERE session_id=?1 AND target_run_id=?2
+                AND state IN ('interrupted_unknown','unknown')",
+            params![scope, member],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    // A counted-unresolved assignment is an uncertain dispatch even when its task
+    // row settled, exactly as the external owner counts it.
+    let uncertain: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM caller_scope_assignments a
+               JOIN brokered_tasks t ON t.task_id = a.assignment_id
+              WHERE t.session_id=?1 AND t.target_run_id=?2
+                AND a.accounting_state='counted_unresolved'",
+            params![scope, member],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    let membership_state: Option<String> = connection
+        .query_row(
+            "SELECT membership_state FROM brokered_members WHERE session_id=?1 AND run_id=?2",
+            params![scope, member],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    Ok(crate::engagement::MemberQuiescence {
+        member_active: membership_state.as_deref() == Some("active"),
+        running: count("running")?,
+        queued: count("accepted")?.saturating_add(count("queued")?),
+        claimed: count("claimed")?,
+        dispatching: count("dispatching")?,
+        unresolved: unresolved_tasks.saturating_add(uncertain),
+        pending_interaction: false,
+        cleanup_pending: false,
+        membership_revision: crate::engagement::scope_membership_revision(
+            connection,
+            workspace_ref,
+            "orchestrated_session",
+            &scope,
+        )?,
+        workload_revision: crate::engagement::member_workload_revision(
+            connection,
+            workspace_ref,
+            "orchestrated_session",
+            &scope,
+            &member,
+        )?,
+    })
+}
+
+/// Every unsettled successor task of one member, with its accepted identity.
+///
+/// Selection is by the task's own Turn id, so the sweep never settles from the
+/// Run's last terminal.
+pub(crate) fn active_successor_task_refs(
+    connection: &Connection,
+    session: Uuid,
+    member: Uuid,
+) -> Result<Vec<(Uuid, bool)>, MachineError> {
+    let mut statement = connection.prepare("SELECT task_id,target_turn_id IS NOT NULL FROM brokered_tasks WHERE session_id=?1 AND target_run_id=?2 AND state IN ('queued','claimed','dispatching','running')").map_err(internal)?;
+    statement
+        .query_map(params![session.to_string(), member.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+        })
+        .map_err(internal)?
+        .map(|row| {
+            let (id, recorded) = row.map_err(internal)?;
+            Ok((Uuid::parse_str(&id).map_err(internal)?, recorded))
+        })
+        .collect()
+}
+
+pub(crate) fn unsettled_successor_tasks(
+    connection: &Connection,
+    session_id: Uuid,
+    member_run_id: Uuid,
+) -> Result<Vec<(Uuid, String, String)>, MachineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT t.task_id,a.accepted_request_json,t.target_turn_id
+               FROM brokered_tasks t
+               JOIN brokered_task_acceptances a USING(task_id)
+              WHERE t.session_id=?1 AND t.target_run_id=?2
+                AND t.state IN ('dispatching','running') AND t.target_turn_id IS NOT NULL
+              ORDER BY t.created_at_ms,t.task_id",
+        )
+        .map_err(internal)?;
+    let rows = statement
+        .query_map(
+            params![session_id.to_string(), member_run_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(internal)?;
+    let mut tasks = Vec::new();
+    for row in rows {
+        let (task, accepted, turn) = row.map_err(internal)?;
+        tasks.push((
+            Uuid::parse_str(&task)
+                .map_err(|_| integrity("the retained task reference is invalid"))?,
+            accepted,
+            turn,
+        ));
+    }
+    Ok(tasks)
+}
+
+/// The unsettled successor task one Turn is bound to, if any.
+pub(crate) fn successor_task_for_turn(
+    connection: &Connection,
+    session_id: Uuid,
+    member_run_id: Uuid,
+    turn_id: &str,
+) -> Result<Option<(Uuid, String)>, MachineError> {
+    let row: Option<(String, String)> = connection
+        .query_row(
+            "SELECT t.task_id,a.accepted_request_json
+               FROM brokered_tasks t
+               JOIN brokered_task_acceptances a USING(task_id)
+              WHERE t.session_id=?1 AND t.target_run_id=?2 AND t.target_turn_id=?3
+                AND t.state IN ('dispatching','running')
+              ORDER BY t.created_at_ms DESC LIMIT 1",
+            params![session_id.to_string(), member_run_id.to_string(), turn_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((task, accepted)) = row else {
+        return Ok(None);
+    };
+    Ok(Some((
+        Uuid::parse_str(&task).map_err(|_| integrity("the retained task reference is invalid"))?,
+        accepted,
+    )))
+}
+
+/// Retain one successor task's published complete-result bytes.
+///
+/// The content store is the authority for the bytes; the Broker task row links the
+/// digest, so no `artifacts` row (whose engagement key is external-only) is used.
+pub(crate) fn retain_successor_task_result(
+    transaction: &Transaction<'_>,
+    task_id: Uuid,
+    bytes: &[u8],
+) -> Result<(), MachineError> {
+    crate::storage_observation::put_content(
+        transaction,
+        "successor_task_result",
+        &task_id.to_string(),
+        "complete_result",
+        bytes,
+    )
+    .map(|_| ())
+}
+
+/// Read one successor task's published complete-result bytes.
+// The managed collect surface that reads this arrives with the TASK-077 adapters;
+// the unit tests already exercise it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn successor_task_result(
+    connection: &Connection,
+    task_id: Uuid,
+) -> Result<Option<Vec<u8>>, MachineError> {
+    crate::storage_observation::read_content(
+        connection,
+        "successor_task_result",
+        &task_id.to_string(),
+        "complete_result",
+    )
+}
+
+/// Record one successor task's terminal fact and its published result.
+///
+/// The guarded transition is the exactly-once boundary: only a task still in
+/// `dispatching` or `running` settles, and the caller rolls its whole transaction
+/// back when this returns `false`.
+pub(crate) fn settle_successor_task_result(
+    transaction: &Transaction<'_>,
+    session_id: Uuid,
+    task_id: Uuid,
+    state: &str,
+    safe_error_code: Option<&str>,
+    result_sha256: Option<&str>,
+    now_ms: i64,
+) -> Result<bool, MachineError> {
+    if !matches!(
+        state,
+        "completed_not_delivered" | "failed" | "cancelled" | "expired"
+    ) {
+        return Err(integrity("the successor task terminal state is invalid"));
+    }
+    if let Some(code) = safe_error_code {
+        checked(code, 128, "safe_error_code")?;
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE brokered_tasks SET state=?3,safe_error_code=?4,result_sha256=?5,
+                    updated_at_ms=?6
+              WHERE task_id=?1 AND session_id=?2 AND state IN ('dispatching','running')",
+            params![
+                task_id.to_string(),
+                session_id.to_string(),
+                state,
+                safe_error_code,
+                result_sha256,
+                now_ms
+            ],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Ok(false);
+    }
+    append_event(
+        transaction,
+        session_id,
+        "specialist_task_settled",
+        &sha256_hex(state.as_bytes()),
+        now_ms,
+    )?;
+    Ok(true)
+}
+
+/// The Broker facts of one member Run.
+pub(crate) struct SuccessorMemberFacts {
+    pub membership_state: String,
+    pub actor_residency: String,
+    pub role_ref: String,
+    pub spawn_operation_id: Uuid,
+    pub agent_configuration: crate::run::AgentConfigurationSnapshot,
+}
+
+/// Read one member's Broker row without writing anything (R calls).
+pub(crate) fn successor_member(
+    connection: &Connection,
+    session_id: Uuid,
+    member_run_id: Uuid,
+) -> Result<Option<SuccessorMemberFacts>, MachineError> {
+    let row: Option<(String, String, String, String, String, String)> = connection
+        .query_row(
+            "SELECT membership_state,actor_residency,role_ref,agent_configuration_json,
+                    agent_configuration_sha256,spawn_operation_id
+               FROM brokered_members WHERE session_id=?1 AND run_id=?2",
+            params![session_id.to_string(), member_run_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((
+        membership_state,
+        actor_residency,
+        role_ref,
+        configuration_json,
+        sha256,
+        spawn_operation_id,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let agent_configuration: crate::run::AgentConfigurationSnapshot =
+        serde_json::from_str(&configuration_json)
+            .map_err(|_| integrity("member Agent Configuration is invalid"))?;
+    if crate::run::agent_configuration_digest(&agent_configuration).map_err(internal)? != sha256 {
+        return Err(integrity(
+            "member Agent Configuration differs from its digest",
+        ));
+    }
+    Ok(Some(SuccessorMemberFacts {
+        membership_state,
+        actor_residency,
+        role_ref,
+        spawn_operation_id: parse_uuid(&spawn_operation_id)?,
+        agent_configuration,
+    }))
+}
+
+/// Which Broker owner already holds one idempotency key of this Session, if any.
+///
+/// A legacy `request_specialist` / `assign_specialist_task` key is owned by the
+/// Broker tables, so a successor admission or lookup of the same key is a typed
+/// compatibility refusal rather than a second owner. A base-only
+/// database has no Broker tables and therefore owns no key here.
+pub(crate) fn broker_key_owner(
+    connection: &Connection,
+    session_id: Uuid,
+    idempotency_key: &str,
+) -> Result<Option<&'static str>, MachineError> {
+    for (table, owner) in [
+        ("brokered_spawn_operations", "spawn"),
+        ("brokered_tasks", "task"),
+    ] {
+        if !table_present(connection, table)? {
+            continue;
+        }
+        let exists: bool = connection
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} WHERE session_id=?1 AND idempotency_key=?2)"
+                ),
+                params![session_id.to_string(), idempotency_key],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if exists {
+            return Ok(Some(owner));
+        }
+    }
+    Ok(None)
+}
+
+fn table_present(connection: &Connection, name: &str) -> Result<bool, MachineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(internal)
+}
+
+/// The non-retired successor members one Session still owns.
+///
+/// `activation_policy` is the successor marker: an installed Specialist Policy
+/// admits only `on_mail` or `keep_resident`, so no legacy member can carry it.
+fn successor_member_count(connection: &Connection, session_id: Uuid) -> Result<i64, MachineError> {
+    if !table_present(connection, "brokered_members")? {
+        return Ok(0);
+    }
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM brokered_members
+              WHERE session_id=?1 AND activation_policy='successor'
+                AND membership_state<>'retired'",
+            [session_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(internal)
+}
+
+impl OrchestrationStore {
+    /// Mint the member Run's own Broker controller credential.
+    ///
+    /// A managed member Run is controlled by the Broker, never by the root
+    /// Primary's Controller (MDC:604).
+    pub(crate) fn create_member_credential(
+        &self,
+        run_id: Uuid,
+    ) -> Result<BrokerCredential, MachineError> {
+        BrokerCredential::create(&self.credential_root, self.uid, run_id)
+    }
+
+    /// Discard the credential of a spawn whose acceptance never committed.
+    pub(crate) fn discard_member_credential(
+        &self,
+        credential: BrokerCredential,
+    ) -> Result<(), MachineError> {
+        credential.remove()
+    }
+
+    /// Load the member Run's own Broker controller credential.
+    ///
+    /// The managed dispatch submits its Turn under this credential, so no writer
+    /// handoff and no root carrier is involved.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn member_credential(&self, run_id: Uuid) -> Result<BrokerCredential, MachineError> {
+        BrokerCredential::load(&self.credential_root, self.uid, run_id)
+    }
+
+    /// Read one member's Broker facts without writing anything (R calls).
+    pub(crate) fn successor_member(
+        &self,
+        session_id: Uuid,
+        member_run_id: Uuid,
+    ) -> Result<Option<SuccessorMemberFacts>, MachineError> {
+        successor_member(&self.connection, session_id, member_run_id)
+    }
+
+    /// Read one successor task and its retained acceptance (R calls).
+    pub(crate) fn successor_task(
+        &self,
+        session_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<Option<SuccessorTaskFacts>, MachineError> {
+        successor_task(&self.connection, session_id, task_id)
+    }
+}
+
 fn task_state_from_transaction(
     transaction: &Transaction<'_>,
     task_id: Uuid,
@@ -6864,6 +7911,22 @@ fn session_conflict(session_id: Uuid, reason: &str) -> MachineError {
     )
 }
 
+/// The typed refusal a legacy close answers when a successor member is live.
+///
+/// The successor release owner must settle that member; a legacy close never
+/// adopts it.
+fn successor_member_unreleased(session_id: Uuid) -> MachineError {
+    MachineError::new(
+        "SUCCESSOR_MEMBER_UNRELEASED",
+        "a successor member must be released by its own release owner",
+        false,
+        serde_json::json!({
+            "session_id":session_id,
+            "required_action":"reconcile_operation"
+        }),
+    )
+}
+
 fn session_close_error(close: &SessionCloseSnapshot, code: &str, message: &str) -> MachineError {
     MachineError::new(
         code,
@@ -7228,6 +8291,7 @@ mod tests {
                     role_reference: Some("reviewer".to_owned()),
                     normalized_instructions: "Inspect the evidence and return a bounded result."
                         .to_owned(),
+                    admitted_configuration: None,
                     instructions: InstructionSnapshot {
                         schema: "dolgorae.instructions/v1".to_owned(),
                         common_prefix_version: 1,
@@ -11379,5 +12443,570 @@ mod tests {
             }
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    /// A successor spawn's internal key is not a legacy key, and its member
+    /// is not a legacy session-policy member.
+    #[test]
+    fn a_successor_spawn_keeps_the_legacy_broker_path_unchanged() {
+        let root = root();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = policy("fully_delegated");
+        let (mut store, session) = active_session_with_policy(&root, policy.clone());
+        let mut adapter = FakeAdapter::default();
+        // The legacy keyed spawn path is unchanged.
+        let legacy = store
+            .request_specialist(
+                &context(session.session_id, "legacy-key"),
+                &request("read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(legacy.role_ref, "reviewer");
+        assert_eq!(legacy.state, "ready");
+        assert_eq!(store.members(session.session_id).unwrap().len(), 1);
+
+        // One accepted successor spawn: internal key, successor marker, its own
+        // Broker credential and no caller key in any Broker key column.
+        let operation_ref = Uuid::now_v7();
+        let member_run_id = Uuid::now_v7();
+        let credential = store.create_member_credential(member_run_id).unwrap();
+        let role = &policy.roles[0];
+        let marker = serde_json::json!({
+            "schema": SUCCESSOR_SPAWN_MARKER_SCHEMA,
+            "operation_ref": operation_ref.to_string(),
+            "provisioning_ref": format!("provisioning:sha256:{}", "1".repeat(64)),
+            "role_ref": role.role_ref,
+            "agent_configuration_digest": format!("sha256:{}", "2".repeat(64)),
+            "requested_access": "read_only",
+        });
+        let transaction = store.transaction().unwrap();
+        admit_successor_spawn(
+            &transaction,
+            SuccessorSpawn {
+                operation_ref,
+                session_id: session.session_id,
+                member_run_id,
+                parent_run_id: session.root_run_id,
+                internal_key: &format!("successor:{operation_ref}"),
+                request_sha256: &sha256_hex(b"successor normalized body"),
+                request_json: &canonical_string(&marker).unwrap(),
+                role_ref: role.role_ref.as_str(),
+                role_snapshot_sha256: &sha256_hex(b"successor role snapshot"),
+                agent_configuration_json: &canonical_string(&role.agent_configuration).unwrap(),
+                agent_configuration_sha256: &crate::run::agent_configuration_digest(
+                    &role.agent_configuration,
+                )
+                .unwrap(),
+                controller_binding_json: &canonical_string(&credential.binding).unwrap(),
+                requested_access: "read_only",
+                source_turn_id: "turn-primary",
+                source_tool_call_id: "tool-call-primary",
+                now_ms: 1_700_000_000_000,
+            },
+        )
+        .unwrap();
+        crate::storage_observation::commit(transaction).unwrap();
+
+        // The successor member is not a legacy session-policy member, so the
+        // legacy readers keep their exact behaviour.
+        assert_eq!(store.members(session.session_id).unwrap().len(), 1);
+        assert_eq!(store.session(session.session_id).unwrap().members.len(), 1);
+        let facts = store
+            .successor_member(session.session_id, member_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(facts.membership_state, "provisioning");
+        assert_eq!(facts.actor_residency, "unstarted");
+        assert_eq!(facts.role_ref, "reviewer");
+
+        // A legacy replay that names the internal key fails its own digest
+        // comparison before any state branch, and creates no second row.
+        let error = store
+            .request_specialist(
+                &context(session.session_id, &format!("successor:{operation_ref}")),
+                &request("read_only"),
+                &mut adapter,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "IDEMPOTENCY_CONFLICT");
+        let spawn_rows: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM brokered_spawn_operations WHERE session_id=?1",
+                [session.session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(spawn_rows, 2);
+
+        // The same key is nevertheless a reconciled conflict for the successor.
+        assert_eq!(
+            broker_key_owner(&store.connection, session.session_id, "legacy-key")
+                .unwrap()
+                .unwrap(),
+            "spawn"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // The legacy session paths and successor rows
+    // -----------------------------------------------------------------------
+
+    /// The legacy-visible state of the database, for byte-identity assertions.
+    fn legacy_state(store: &OrchestrationStore) -> Vec<String> {
+        let rows = |query: &str| -> Vec<String> {
+            let mut statement = store.connection.prepare(query).unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        [
+            "SELECT task_id||':'||state||':'||COALESCE(safe_error_code,'-')||':'||COALESCE(target_turn_id,'-')||':'||COALESCE(result_sha256,'-') FROM brokered_tasks ORDER BY task_id",
+            "SELECT operation_id||':'||state||':'||COALESCE(safe_error_code,'-') FROM brokered_spawn_operations ORDER BY operation_id",
+            "SELECT assignment_id||':'||accounting_state||':'||max_rounds FROM caller_scope_assignments ORDER BY assignment_id",
+            "SELECT session_id||':'||status||':'||revision FROM orchestrated_sessions ORDER BY session_id",
+            "SELECT operation_id||':'||progress||':'||COALESCE(safe_error_code,'-') FROM orchestrated_session_closes ORDER BY operation_id",
+        ]
+        .into_iter()
+        .flat_map(rows)
+        .collect()
+    }
+
+    /// One accepted successor spawn and its Broker member row.
+    fn admit_successor_member(
+        store: &mut OrchestrationStore,
+        session_id: Uuid,
+        member_run_id: Uuid,
+    ) -> Uuid {
+        let policy = policy("fully_delegated");
+        let role = &policy.roles[0];
+        let binding = ControllerBinding {
+            identity: crate::domain::ControllerIdentity {
+                controller_id: new_uuid_v7(),
+                kind: crate::domain::ControllerKind::Automation,
+                instance_id: "fixture-broker".to_owned(),
+                subject_id: None,
+                generation: 1,
+            },
+            capability_sha256: "d".repeat(64),
+        };
+        let spawn_ref = new_uuid_v7();
+        let now = store.now_ms().unwrap();
+        let transaction = store.transaction().unwrap();
+        admit_successor_spawn(
+            &transaction,
+            SuccessorSpawn {
+                operation_ref: spawn_ref,
+                session_id,
+                member_run_id,
+                parent_run_id: session_id,
+                internal_key: &format!("successor:{spawn_ref}"),
+                request_sha256: &sha256_hex(b"fixture successor spawn"),
+                request_json: &canonical_string(&serde_json::json!({
+                    "schema": SUCCESSOR_SPAWN_MARKER_SCHEMA,
+                    "operation_ref": spawn_ref.to_string(),
+                    "role_ref": role.role_ref,
+                    "requested_access": "read_only",
+                }))
+                .unwrap(),
+                role_ref: &role.role_ref,
+                role_snapshot_sha256: &sha256_hex(b"fixture successor role"),
+                agent_configuration_json: &canonical_string(&role.agent_configuration).unwrap(),
+                agent_configuration_sha256: &crate::run::agent_configuration_digest(
+                    &role.agent_configuration,
+                )
+                .unwrap(),
+                controller_binding_json: &canonical_string(&binding).unwrap(),
+                requested_access: "read_only",
+                source_turn_id: "turn-root",
+                source_tool_call_id: "tool-call-root",
+                now_ms: now,
+            },
+        )
+        .unwrap();
+        settle_successor_spawn(
+            &transaction,
+            session_id,
+            spawn_ref,
+            member_run_id,
+            true,
+            None,
+            now,
+        )
+        .unwrap();
+        crate::storage_observation::commit(transaction).unwrap();
+        spawn_ref
+    }
+
+    /// One successor task row for a successor member.
+    fn admit_successor_task_row(
+        store: &mut OrchestrationStore,
+        session_id: Uuid,
+        member_run_id: Uuid,
+        account: bool,
+    ) -> Uuid {
+        let accepted = serde_json::json!({"fixture": "successor accepted task"});
+        let accepted_json = canonical_string(&accepted).unwrap();
+        let task_id = new_uuid_v7();
+        let now = store.now_ms().unwrap();
+        let transaction = store.transaction().unwrap();
+        admit_successor_task(
+            &transaction,
+            SuccessorTask {
+                session_id,
+                task_id,
+                member_run_id,
+                internal_key: &format!("successor:{task_id}"),
+                request_sha256: &sha256_hex(b"fixture successor task"),
+                request_json: &canonical_string(&serde_json::json!({
+                    "schema": SUCCESSOR_TASK_MARKER_SCHEMA,
+                    "member_ref": member_run_id.to_string(),
+                    "execution_intent": "read_only",
+                    "deadline_seconds": 60,
+                }))
+                .unwrap(),
+                accepted_request_json: &accepted_json,
+                accepted_request_sha256: &sha256_hex(accepted_json.as_bytes()),
+                source_run_id: session_id,
+                source_turn_id: "turn-root",
+                source_tool_call_id: "tool-call-root",
+                deadline_origin_ms: now,
+                now_ms: now,
+            },
+        )
+        .unwrap();
+        if account {
+            crate::caller_scope::admit(
+                &transaction,
+                &crate::caller_scope::CallerAssignment {
+                    assignment_id: task_id,
+                    workspace_ref: "workspace",
+                    aggregate_scope_kind: "orchestrated_session",
+                    aggregate_scope_ref: &session_id.to_string(),
+                    member_ref: member_run_id,
+                },
+                &crate::caller_scope::fixture(3),
+                now,
+            )
+            .unwrap();
+        }
+        mark_successor_task_dispatching(&transaction, session_id, task_id, now).unwrap();
+        crate::storage_observation::commit(transaction).unwrap();
+        task_id
+    }
+
+    /// A completed successor task never reaches the legacy readers, and the
+    /// legacy replay of its key is a typed conflict rather than a decode failure.
+    #[test]
+    fn successor_task_rows_are_invisible_to_the_legacy_readers() {
+        let root = root();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mut store, session, member) = active_member(&root);
+        let mut adapter = FakeAdapter::default();
+        let legacy = store
+            .assign_task(
+                &context(session.session_id, "legacy-task"),
+                &task_request(member, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(legacy.state, "completed_not_delivered");
+        // One successor member with a task that completes without a legacy
+        // publication row: its result lives in the content store only.
+        let successor_member = new_uuid_v7();
+        admit_successor_member(&mut store, session.session_id, successor_member);
+        let successor_task =
+            admit_successor_task_row(&mut store, session.session_id, successor_member, true);
+        let now = store.now_ms().unwrap();
+        let transaction = store.transaction().unwrap();
+        mark_successor_task_running(
+            &transaction,
+            session.session_id,
+            successor_task,
+            "turn-successor",
+            now,
+        )
+        .unwrap();
+        retain_successor_task_result(&transaction, successor_task, b"the result").unwrap();
+        settle_successor_task_result(
+            &transaction,
+            session.session_id,
+            successor_task,
+            "completed_not_delivered",
+            None,
+            Some(&sha256_hex(b"the result")),
+            now,
+        )
+        .unwrap();
+        crate::storage_observation::commit(transaction).unwrap();
+        // The legacy readers see the legacy task only, and decode it.
+        let tasks = store.session_tasks(session.session_id).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, legacy.task_id);
+        assert!(store.task(successor_task).is_err());
+        // The legacy close answers its typed refusal, never an INTERNAL_ERROR.
+        let refused = store
+            .finish_session(session.session_id, true, &mut adapter)
+            .unwrap_err();
+        assert_eq!(refused.code, "SUCCESSOR_MEMBER_UNRELEASED");
+        // A legacy replay of the successor task's key is a typed conflict.
+        let refused = store
+            .assign_task(
+                &context(session.session_id, &format!("successor:{successor_task}")),
+                &task_request(member, "read_only"),
+                &mut adapter,
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "IDEMPOTENCY_CONFLICT");
+        // The legacy collect enumeration returns and delivers the legacy row
+        // only, even though a successor task sits at the same state.
+        let collected = store.collect_results(session.session_id, 0, 8).unwrap();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].task_id, legacy.task_id);
+        assert_eq!(collected[0].state, "delivered");
+        let successor_state: String = store
+            .connection
+            .query_row(
+                "SELECT state FROM brokered_tasks WHERE task_id=?1",
+                [successor_task.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            successor_state, "completed_not_delivered",
+            "the legacy delivery never touches a successor row"
+        );
+        // The observation's task counts are the legacy rows' counts: a
+        // running and an unknown-outcome successor task stay invisible.
+        let running_successor =
+            admit_successor_task_row(&mut store, session.session_id, successor_member, true);
+        let observed = store.observe_session(session.session_id).unwrap();
+        assert_eq!(observed.accepted_unfinished_task_count, 0);
+        assert_eq!(observed.unknown_outcome_task_count, 0);
+        store
+            .connection
+            .execute(
+                "UPDATE brokered_tasks SET state='interrupted_unknown' WHERE task_id=?1",
+                [running_successor.to_string()],
+            )
+            .unwrap();
+        let observed = store.observe_session(session.session_id).unwrap();
+        assert_eq!(observed.accepted_unfinished_task_count, 0);
+        assert_eq!(observed.unknown_outcome_task_count, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Both legacy close paths refuse a live successor member before any
+    /// read-for-mutation or write, and leave the state byte-identical.
+    #[test]
+    fn legacy_closes_refuse_a_live_successor_member_without_side_effects() {
+        let root = root();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mut store, session) = active_session(&root, "fully_delegated");
+        let mut adapter = FakeAdapter::default();
+        // The caller's close intent is committed first (a session that
+        // already carries one while a successor member exists is exactly the
+        // committed-intent state this path owns), then the successor member
+        // and its running task follow; the close attempt comes last.
+        store
+            .begin_session_close(session.session_id, true, 1)
+            .unwrap();
+        let successor_member = new_uuid_v7();
+        admit_successor_member(&mut store, session.session_id, successor_member);
+        let successor_task =
+            admit_successor_task_row(&mut store, session.session_id, successor_member, true);
+        let now = store.now_ms().unwrap();
+        let transaction = store.transaction().unwrap();
+        mark_successor_task_running(
+            &transaction,
+            session.session_id,
+            successor_task,
+            "turn-successor",
+            now,
+        )
+        .unwrap();
+        crate::storage_observation::commit(transaction).unwrap();
+        let before = legacy_state(&store);
+        let refused = store
+            .settle_session_close(session.session_id, &mut adapter)
+            .unwrap_err();
+        assert_eq!(refused.code, "SUCCESSOR_MEMBER_UNRELEASED");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        assert_eq!(legacy_state(&store), before);
+        let refused = store
+            .finish_session(session.session_id, true, &mut adapter)
+            .unwrap_err();
+        assert_eq!(refused.code, "SUCCESSOR_MEMBER_UNRELEASED");
+        assert_eq!(legacy_state(&store), before);
+        // The successor reserved work is untouched by both refusals.
+        let facts = store
+            .successor_task(session.session_id, successor_task)
+            .unwrap()
+            .unwrap();
+        assert_eq!(facts.state, "running");
+        assert_eq!(facts.target_turn_id.as_deref(), Some("turn-successor"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The close intent itself refuses an unreleased successor member
+    /// before any durable effect; once every successor member is retired the
+    /// same session closes, and that close never touches credential files —
+    /// including one no row references yet, the window another session's
+    /// spawn sits in between its mint and its commit.
+    #[test]
+    fn session_close_guards_successor_members_and_keeps_unattributed_credentials() {
+        let root = root();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mut store, session) = active_session(&root, "fully_delegated");
+        let mut adapter = FakeAdapter::default();
+        let successor_member = new_uuid_v7();
+        admit_successor_member(&mut store, session.session_id, successor_member);
+        // The close intent refuses the unreleased successor member with no
+        // durable effect: no close record, the session still active.
+        let refused = store
+            .begin_session_close(session.session_id, false, 1)
+            .unwrap_err();
+        assert_eq!(refused.code, "SUCCESSOR_MEMBER_UNRELEASED");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        let closes: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM orchestrated_session_closes WHERE session_id=?1",
+                [session.session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(closes, 0, "no close intent was committed");
+        let status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM orchestrated_sessions WHERE session_id=?1",
+                [session.session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "active");
+        // One credential no row references yet — another session's spawn
+        // between its mint and its commit — and one the retired member's row
+        // still references.
+        store.create_member_credential(new_uuid_v7()).unwrap();
+        store.create_member_credential(successor_member).unwrap();
+        let credential_root = root.join("orchestration/broker-credentials");
+        let unattributed = credential_root
+            .read_dir()
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_stem().and_then(|stem| stem.to_str())
+                    != Some(&successor_member.to_string())
+            })
+            .unwrap();
+        let referenced = credential_root.join(format!("{successor_member}.json"));
+        assert!(referenced.exists());
+        let unattributed_before = std::fs::read(&unattributed).unwrap();
+        let referenced_before = std::fs::read(&referenced).unwrap();
+        // Every successor member released by its own owner: the guard lifts.
+        store
+            .connection
+            .execute(
+                "UPDATE brokered_members SET membership_state='retired'
+                  WHERE session_id=?1 AND activation_policy='successor'",
+                [session.session_id.to_string()],
+            )
+            .unwrap();
+        store
+            .begin_session_close(session.session_id, false, 1)
+            .unwrap();
+        store
+            .settle_session_close(session.session_id, &mut adapter)
+            .unwrap();
+        assert_eq!(
+            store
+                .complete_session_close(session.session_id)
+                .unwrap()
+                .status,
+            "completed"
+        );
+        // The close never deletes a credential file: the in-flight spawn's
+        // unattributed credential and the referenced one are byte-identical.
+        assert_eq!(
+            std::fs::read(&unattributed).unwrap(),
+            unattributed_before,
+            "a session close never deletes another spawn's in-flight credential"
+        );
+        assert_eq!(
+            std::fs::read(&referenced).unwrap(),
+            referenced_before,
+            "a credential a member row still references is never removed"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A keyed legacy member still closes and releases exactly as
+    /// before — the successor guards leave a successor-free session's order
+    /// untouched.
+    #[test]
+    fn a_keyed_legacy_member_still_closes_and_releases() {
+        let root = root();
+        let (mut store, session, member) = active_member(&root);
+        let mut adapter = FakeAdapter::default();
+        let task = store
+            .assign_task(
+                &context(session.session_id, "legacy-close"),
+                &task_request(member, "read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(task.state, "completed_not_delivered");
+        let delivered = store.collect_results(session.session_id, 0, 8).unwrap();
+        assert_eq!(delivered.len(), 1);
+        let spawn_before = store
+            .connection
+            .query_row(
+                "SELECT idempotency_key,state FROM brokered_spawn_operations
+                  WHERE session_id=?1",
+                [session.session_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        store
+            .begin_session_close(session.session_id, false, 1)
+            .unwrap();
+        store
+            .settle_session_close(session.session_id, &mut adapter)
+            .unwrap();
+        let closed = store.complete_session_close(session.session_id).unwrap();
+        assert_eq!(closed.status, "completed");
+        let membership: String = store
+            .connection
+            .query_row(
+                "SELECT membership_state FROM brokered_members WHERE run_id=?1",
+                [member.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(membership, "retired");
+        let spawn_after = store
+            .connection
+            .query_row(
+                "SELECT idempotency_key,state FROM brokered_spawn_operations
+                  WHERE session_id=?1",
+                [session.session_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            spawn_after, spawn_before,
+            "the keyed legacy rows are intact"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

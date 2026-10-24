@@ -692,6 +692,9 @@ fn read_artifact_range(
 /// Serializes the logical per-Run quota check with artifact publication.
 pub struct ArtifactQuotaLease(std::fs::File);
 impl ArtifactQuotaLease {
+    pub(crate) fn verify_for(&self, directory: &Path) -> Result<(), MachineError> {
+        verify_quota_lock(directory, &directory.join(".quota.lock"), &self.0)
+    }
     pub(crate) fn acquire_for_run(directory: &Path, run_id: Uuid) -> Result<Self, MachineError> {
         Self::acquire(directory).map_err(|mut error| {
             if error.code == "RUN_BUSY" {
@@ -1040,6 +1043,27 @@ mod tests {
     }
 
     #[test]
+    fn a_base_only_engagement_database_does_not_hide_run_artifacts() {
+        // `dolgorae init` now creates the generation-6 base database, so most
+        // workspaces carry one without the orchestration extension.
+        let tree = ArtifactTree::new(b"run artifact");
+        let orchestration = tree.root.join("orchestration");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&orchestration)
+            .unwrap();
+        drop(
+            crate::engagement::EngagementStore::open(&orchestration.join("orchestration.sqlite3"))
+                .unwrap(),
+        );
+        assert_eq!(
+            specialist_result_reference(&tree.root, tree.run_id, tree.id).unwrap(),
+            None
+        );
+        assert_eq!(tree.read((0, 12)).unwrap(), b"run artifact");
+    }
+
+    #[test]
     fn published_specialist_result_is_a_primary_owned_artifact_projection() {
         let tree = ArtifactTree::new(b"specialist result");
         let orchestration = tree.root.join("orchestration");
@@ -1047,16 +1071,15 @@ mod tests {
             .mode(0o700)
             .create(&orchestration)
             .unwrap();
-        let connection =
-            rusqlite::Connection::open(orchestration.join("orchestration.sqlite3")).unwrap();
-        std::fs::set_permissions(
-            orchestration.join("orchestration.sqlite3"),
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        // The fixture database must be a verified generation-6 database: every
+        // opener gates on the accepted generation and the namespace record.
+        let database = orchestration.join("orchestration.sqlite3");
+        drop(crate::engagement::EngagementStore::open(&database).unwrap());
+        let connection = rusqlite::Connection::open(&database).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE brokered_result_publications(
+                   task_id TEXT PRIMARY KEY,
                    primary_run_id TEXT NOT NULL,
                    artifact_id TEXT NOT NULL,
                    created_at TEXT NOT NULL,
@@ -1068,8 +1091,11 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO brokered_result_publications VALUES(?1,?2,?3,?4,?5,'published')",
+                "INSERT INTO brokered_result_publications(
+                   task_id,primary_run_id,artifact_id,created_at,byte_length,result_sha256,state
+                 ) VALUES(?1,?2,?3,?4,?5,?6,'published')",
                 rusqlite::params![
+                    Uuid::now_v7().to_string(),
                     tree.run_id.to_string(),
                     tree.id.to_string(),
                     "2026-09-22T00:00:00.000000Z",

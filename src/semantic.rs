@@ -10,6 +10,7 @@ use crate::controller::{
     presented_controller_from_carrier,
 };
 use crate::darwin::DarwinSystem;
+use crate::delegation_service::SettlementOwner;
 use crate::domain::{
     Access, AggregateKind, Assurance, ControlMode, ExecutionLane, Purpose, PurposeKind,
     RunLifecycle,
@@ -887,6 +888,7 @@ fn prepare_external_specialist_with(
     let agent_configuration = AgentConfigurationSnapshot {
         schema_version: 2,
         runtime_profile: input.runtime_profile,
+        admitted_configuration: None,
         runtime_profile_snapshot_sha256: global_profile_binding.digest()?,
         model,
         default_effort: input.default_effort,
@@ -1026,11 +1028,28 @@ pub(crate) struct CallerMemberStart<'a> {
 pub(crate) fn start_caller_member_run(
     input: CallerMemberStart<'_>,
 ) -> Result<RunStartReceipt, MachineError> {
+    start_caller_member_run_generation::<crate::instructions::InstructionSnapshot>(input)
+}
+
+// The successor adapters that start a delegated member arrive with TASK-077;
+// the settlement port and its unit test already use this entry point.
+/// Start one delegated member Run from its retained capture.
+///
+/// The manifest-4 generation reads exactly the accepted bytes the retained
+/// provisioning snapshot holds; the Role home is never consulted (MDC:304-306).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn start_delegated_member_run(
+    input: CallerMemberStart<'_>,
+) -> Result<RunStartReceipt, MachineError> {
+    start_caller_member_run_generation::<crate::delegation_identity::InstructionSnapshot>(input)
+}
+
+fn start_caller_member_run_generation<I: CallerStartGeneration>(
+    input: CallerMemberStart<'_>,
+) -> Result<RunStartReceipt, MachineError> {
     let configuration = input.configuration;
-    let instructions = configuration
-        .instructions
-        .caller()
-        .ok_or_else(|| internal("caller member requires captured Markdown instructions"))?;
+    let instructions = I::from_run_capture(&configuration.instructions)
+        .ok_or_else(|| internal("caller member requires captured instructions"))?;
     let request = CallerRunStartRequest {
         schema: "dolgorae-run-start-request/v2".to_owned(),
         workspace: Some(
@@ -1052,7 +1071,7 @@ pub(crate) fn start_caller_member_run(
         profile: input.global_profile_binding.selected_name.clone(),
         control_mode: ControlMode::ManagedAgent,
         access: input.access,
-        role: instructions.role.name.clone(),
+        role: instructions.role_name().to_owned(),
         model: Some(configuration.model.clone()),
         effort: Some(configuration.default_effort.clone()),
         purpose: configuration.purpose.clone(),
@@ -1072,7 +1091,762 @@ pub(crate) fn start_caller_member_run(
     }
     .resolve_member(input.aggregate)?;
     let carrier = CredentialCarrier::duplicate_fd(input.carrier.raw_fd())?;
-    start_caller_run_typed(request, carrier, Some(input))
+    start_caller_run_generation::<I>(request, carrier, Some(input))
+}
+
+#[cfg(test)]
+thread_local! {
+    static MANAGED_DISPATCH_PREPARATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+#[allow(dead_code, reason = "called by the opted-in native successor driver")]
+pub(crate) fn set_managed_dispatch_preparation(hook: impl FnOnce() + 'static) {
+    MANAGED_DISPATCH_PREPARATION.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+#[cfg(test)]
+fn managed_dispatch_preparation() {
+    let hook = MANAGED_DISPATCH_PREPARATION.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static MANAGED_SUBMIT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+#[allow(dead_code, reason = "observed by the opted-in native successor driver")]
+pub(crate) fn managed_submit_calls() -> u64 {
+    MANAGED_SUBMIT_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    static MEMBER_RELEASE_BEFORE_RETIREMENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+#[allow(dead_code, reason = "called by the opted-in native successor driver")]
+pub(crate) fn set_member_release_before_retirement(hook: impl FnOnce() + 'static) {
+    MEMBER_RELEASE_BEFORE_RETIREMENT.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+#[cfg(test)]
+fn member_release_before_retirement() {
+    let hook = MEMBER_RELEASE_BEFORE_RETIREMENT.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+// The successor adapters that construct this value arrive with TASK-077; the
+// unit tests already exercise it.
+/// The Run service's implementation of the successor settlement port.
+///
+/// The successor services declare the port and never name this module; the
+/// adapter owns the authenticated Controller carrier this value holds.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct SemanticRunSettlementPort<'a> {
+    pub(crate) carrier: &'a CredentialCarrier,
+}
+
+impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<'_> {
+    /// Dispatch one accepted member task inside its Run's authority.
+    ///
+    /// The authority is taken first, the dispatch index is captured and
+    /// recorded under it, and only then is the Turn submitted from the bytes
+    /// the acceptance retained.
+    fn dispatch_member_task(
+        &self,
+        request: crate::delegation_service::MemberTaskDispatch<'_>,
+    ) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
+        use crate::delegation_service::MemberDispatchOutcome;
+        let write = request.execution_intent == "canonical_workspace_write";
+        // A writer release that fails is surfaced, never treated as released:
+        // the caller keeps the accepted effect and the conservative round.
+        let release = |state_root: &Path| -> Result<(), MachineError> {
+            if write {
+                release_external_writer(
+                    request.view,
+                    state_root,
+                    request.member_ref,
+                    request.engagement_id,
+                    self.carrier,
+                )?;
+            }
+            Ok(())
+        };
+        // The next authorized mutation of this member resolves the guard a
+        // terminal left behind; a blocked guard stays for recovery.
+        release_stale_member_writer(
+            request.view,
+            request.state_root,
+            request.member_ref,
+            SettlementOwner::External {
+                engagement_id: request.engagement_id,
+            },
+            self.carrier,
+        )?;
+        if write {
+            if let Err(error) = acquire_external_writer(
+                request.view,
+                request.state_root,
+                request.member_ref,
+                request.engagement_id,
+                self.carrier,
+            ) {
+                // The acquire can fail after leaving a pending writer transition,
+                // so the durable record decides whether non-dispatch is proved.
+                let writer = crate::writer::WriterStore::new(
+                    request.state_root,
+                    &request.view.workspace_id,
+                    DarwinSystem.current_uid(),
+                )
+                .load();
+                return Ok(acquire_failure_outcome(
+                    writer.as_ref().ok(),
+                    request.member_ref,
+                    error,
+                ));
+            }
+        } else if let Err(error) =
+            ensure_external_specialist_worker(request.view, request.state_root, request.member_ref)
+        {
+            return Ok(MemberDispatchOutcome::Refused {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        let mut store = crate::engagement::EngagementStore::open(
+            &crate::engagement::EngagementStore::workspace_database_path(request.state_root),
+        )?;
+        if let Err(error) =
+            store.mark_external_member_resident(request.engagement_id, request.member_ref)
+        {
+            return refused_after_release(release(request.state_root), error.code, error.message);
+        }
+        // The Turn is built from the retained acceptance bytes, verified against
+        // the accepted identity, never from current caller input.
+        let stored =
+            crate::engagement::accepted_task_content(store.connection(), request.task_ref)?;
+        let Some((task_body, contexts, target)) = stored else {
+            return refused_after_release(
+                release(request.state_root),
+                "ACCEPTED_TASK_CONTENT_UNAVAILABLE".to_owned(),
+                "the accepted task bytes are no longer retained".to_owned(),
+            );
+        };
+        let contents = crate::successor_capture::AcceptedTaskContents {
+            task_body,
+            contexts,
+            target,
+        };
+        let prompt = match contents.prompt(
+            request.accepted,
+            request.execution_intent,
+            request.deadline_seconds,
+        ) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                return refused_after_release(
+                    release(request.state_root),
+                    error.code,
+                    error.message,
+                );
+            }
+        };
+        let now = unix_time_ms_semantic()?;
+        if write {
+            // Capture under the held authority, then record and mark dispatching
+            // in one transaction before the Turn exists.
+            let workspace = request.view.canonical_path.to_path_buf()?;
+            let capture = match crate::successor_capture::capture_dispatch_index(
+                &workspace,
+                request.task_ref,
+            ) {
+                Ok(capture) => capture,
+                Err(error) => {
+                    return refused_after_release(
+                        release(request.state_root),
+                        error.code,
+                        error.message,
+                    );
+                }
+            };
+            let recorded = store.transact(|transaction| {
+                crate::engagement::record_dispatch_index_with_content(
+                    transaction,
+                    crate::engagement::DispatchIndexRecord {
+                        task_id: request.task_ref,
+                        workspace_ref: &request.view.workspace_id,
+                        run_ref: request.member_ref,
+                        head_commit: capture.head.as_deref(),
+                        index_sha256: &capture.sha256,
+                        index_byte_length: u64::try_from(capture.canonical.len()).map_err(
+                            |_| {
+                                MachineError::invalid_argument(
+                                    "dispatch_index",
+                                    "the index is unrepresentable",
+                                )
+                            },
+                        )?,
+                        file_count: capture.file_count,
+                        baseline_bytes: capture.baseline_bytes,
+                    },
+                    &capture.canonical,
+                    &capture.baseline,
+                    now,
+                )?;
+                crate::engagement::mark_external_task_dispatching_in(
+                    transaction,
+                    request.engagement_id,
+                    request.task_ref,
+                    now,
+                )
+                .map(|_| ())
+            });
+            if let Err(error) = recorded {
+                return refused_after_release(
+                    release(request.state_root),
+                    error.code,
+                    error.message,
+                );
+            }
+        } else if let Err(error) = store.transact(|transaction| {
+            crate::engagement::mark_external_task_dispatching_in(
+                transaction,
+                request.engagement_id,
+                request.task_ref,
+                now,
+            )
+            .map(|_| ())
+        }) {
+            return Ok(MemberDispatchOutcome::Refused {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        let uid = DarwinSystem.current_uid();
+        let key = request.idempotency_key.to_owned();
+        let response = crate::worker::call_run_worker(
+            request.state_root,
+            request.member_ref,
+            uid,
+            Some(self.carrier.raw_fd()),
+            |expected| crate::worker::ControlRequestV1::ExternalSubmit {
+                expected,
+                caller: None,
+                engagement_id: request.engagement_id,
+                request: crate::worker::TurnControlRequest {
+                    normalized_request_sha256: None,
+                    write: false,
+                    message: prompt,
+                    idempotency_key: key,
+                    effort: None,
+                    images: Vec::new(),
+                },
+            },
+        );
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let error = error.machine_error(request.member_ref, request.state_root);
+                return Ok(MemberDispatchOutcome::Uncertain {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+        };
+        // The settlement attempt below covers an immediate Terminal as well as a
+        // terminal that is already durable when the Turn id is recorded.
+        let turn_id = match response {
+            crate::worker::ControlResponseV1::Accepted { accepted } => accepted.turn_id,
+            crate::worker::ControlResponseV1::Terminal { terminal } => terminal.turn_id,
+            crate::worker::ControlResponseV1::Failed { code, message, .. } => {
+                // Case B needs an authoritative fact that the Turn was not
+                // accepted. Only a code that proves non-dispatch qualifies;
+                // everything else stays uncertain and conservative.
+                if !proved_non_dispatch(&code) {
+                    return Ok(MemberDispatchOutcome::Uncertain { code, message });
+                }
+                return refused_after_release(release(request.state_root), code, message);
+            }
+            _ => {
+                return Ok(MemberDispatchOutcome::Uncertain {
+                    code: "DISPATCH_OUTCOME_UNKNOWN".to_owned(),
+                    message: "the worker returned an unexpected dispatch response".to_owned(),
+                });
+            }
+        };
+        let now = unix_time_ms_semantic()?;
+        store.transact(|transaction| {
+            crate::engagement::mark_external_task_running_in(
+                transaction,
+                request.engagement_id,
+                request.task_ref,
+                &turn_id,
+                now,
+            )
+            .map(|_| ())
+        })?;
+        // The executor accepted the task: the round is now counted accepted.
+        store
+            .transact(|transaction| crate::caller_scope::accepted(transaction, request.task_ref))?;
+        // A durable terminal may already exist (fast completion); this settles
+        // it exactly once, otherwise it is a no-op and the worker hook or the
+        // restart sweep converges it.
+        settle_successor_task(
+            request.view,
+            request.state_root,
+            SettlementOwner::External {
+                engagement_id: request.engagement_id,
+            },
+            request.member_ref,
+            request.task_ref,
+            request.execution_intent,
+            Some(self.carrier),
+        )?;
+        Ok(MemberDispatchOutcome::Accepted { turn_ref: turn_id })
+    }
+
+    /// Settle one dispatched member task from the member Run's observed Turn.
+    ///
+    /// The observation source is the member Run's durable `turn_terminal` record
+    /// for exactly the Turn the dispatch recorded on the task; the settlement is
+    /// one guarded transaction (`terminalize_external_task_in` refuses a settled
+    /// row), and the writer authority is released only after that publication.
+    fn member_writer_observation(
+        &self,
+        request: crate::delegation_service::MemberCleanupObservation<'_>,
+    ) -> Result<crate::delegation_service::MemberWriterObservation, MachineError> {
+        member_writer_observation(request)
+    }
+
+    /// Admit or resume one `S` member release and settle it.
+    ///
+    /// The durable admission, the lease branch and the whole settlement are the
+    /// Run service's, because only it holds the member Run's lifecycle lease;
+    /// `carrier` is the adapter's authenticated Controller carrier, which the
+    /// external close and writer authority use (RPC:219-460).
+    fn settle_member_release(
+        &self,
+        request: crate::delegation_service::MemberReleaseRequest<'_>,
+    ) -> Result<
+        crate::delegation_service::MemberReleaseOutcome,
+        crate::delegation_service::MemberReleaseFailure,
+    > {
+        settle_member_release(request, self.carrier)
+    }
+
+    fn settle_member_task(
+        &self,
+        request: crate::delegation_service::MemberTaskSettlement<'_>,
+    ) -> Result<crate::delegation_service::MemberSettlement, MachineError> {
+        let broker_carrier = match request.owner {
+            SettlementOwner::Managed { .. }
+                if request.execution_intent == "canonical_workspace_write" =>
+            {
+                Some(
+                    crate::orchestration::BrokerCredential::load(
+                        &request.state_root.join("orchestration/broker-credentials"),
+                        DarwinSystem.current_uid(),
+                        request.member_ref,
+                    )?
+                    .controller_carrier()?,
+                )
+            }
+            _ => None,
+        };
+        settle_successor_task(
+            request.view,
+            request.state_root,
+            request.owner,
+            request.member_ref,
+            request.task_ref,
+            request.execution_intent,
+            Some(broker_carrier.as_ref().unwrap_or(self.carrier)),
+        )
+    }
+
+    fn reconcile_member_task(
+        &self,
+        request: crate::delegation_service::MemberTaskSettlement<'_>,
+    ) -> Result<crate::delegation_service::MemberSettlement, MachineError> {
+        let manifest = RunStore::new(SystemWorkspacePlatform, request.state_root)
+            .load_manifest(request.member_ref)?;
+        let binding = manifest
+            .aggregate_binding
+            .as_ref()
+            .ok_or_else(|| reconciliation_error("member_binding_missing"))?;
+        let kind = match request.owner {
+            SettlementOwner::External { .. } => AggregateKind::ExternalSpecialistEngagement,
+            SettlementOwner::Managed { .. } => AggregateKind::OrchestratedSession,
+        };
+        if manifest.schema_version != 4
+            || binding.member_kind != crate::run::AggregateMemberKind::Specialist
+            || binding.aggregate_kind != kind
+            || binding.aggregate_id != request.owner.scope_ref()
+            || manifest.workspace_id != request.view.workspace_id
+            || manifest.canonical_workspace != request.view.canonical_path
+            || manifest.workspace_mode != request.view.mode
+        {
+            return Err(reconciliation_error("foreign_member"));
+        }
+        let broker;
+        let carrier = match request.owner {
+            SettlementOwner::External { engagement_id } => {
+                let store = EngagementStore::open_read_only(
+                    &EngagementStore::workspace_database_path(request.state_root),
+                )?;
+                store.authorize_external_owner(
+                    &request.view.workspace_id,
+                    engagement_id,
+                    "run.reconcile",
+                    self.carrier,
+                )?;
+                self.carrier
+            }
+            SettlementOwner::Managed { session_id } => {
+                let session =
+                    crate::orchestration::OrchestrationStore::open_observer(request.state_root)?
+                        .session(session_id)?;
+                let root =
+                    load_reconciled_controller_binding(request.state_root, session.root_run_id)?;
+                authorize_controller(session.root_run_id, "run.reconcile", &root, self.carrier)?;
+                broker = crate::orchestration::OrchestrationStore::open(request.state_root)?
+                    .member_credential(request.member_ref)?
+                    .controller_carrier()?;
+                &broker
+            }
+        };
+        let executions =
+            successor_reconciliation_executions(request.state_root, request.member_ref)?;
+        let execution = executions
+            .iter()
+            .find(|execution| execution.task_ref == request.task_ref);
+        if execution.is_none() {
+            return match settle_successor_task(
+                request.view,
+                request.state_root,
+                request.owner,
+                request.member_ref,
+                request.task_ref,
+                request.execution_intent,
+                None,
+            )? {
+                crate::delegation_service::MemberSettlement::Terminal => {
+                    finish_settled_reconciliation_admission(
+                        request.view,
+                        request.state_root,
+                        request.member_ref,
+                        carrier,
+                    )?;
+                    Ok(crate::delegation_service::MemberSettlement::Terminal)
+                }
+                crate::delegation_service::MemberSettlement::Running => {
+                    Err(reconciliation_error("task_turn_unrecorded"))
+                }
+            };
+        }
+        if execution.is_some_and(|execution| {
+            execution.owner != request.owner || execution.intent != request.execution_intent
+        }) {
+            return Err(reconciliation_error("task_binding_mismatch"));
+        }
+        history_reconciliation_with_lifecycle(
+            request.view,
+            request.state_root,
+            request.member_ref,
+            carrier,
+            "run.reconcile",
+            None,
+            None,
+        )?;
+        match settle_successor_task(
+            request.view,
+            request.state_root,
+            request.owner,
+            request.member_ref,
+            request.task_ref,
+            request.execution_intent,
+            None,
+        )? {
+            crate::delegation_service::MemberSettlement::Terminal => {
+                Ok(crate::delegation_service::MemberSettlement::Terminal)
+            }
+            crate::delegation_service::MemberSettlement::Running => {
+                Err(reconciliation_error("task_still_unsettled"))
+            }
+        }
+    }
+
+    fn start_member_run(
+        &self,
+        request: crate::delegation_service::AdmittedMemberStart<'_>,
+    ) -> Result<crate::delegation_service::MemberRunStart, MachineError> {
+        let run_id = request.run_id;
+        // A managed member Run is controlled by its own Broker credential; the
+        // external path keeps the authenticated transport's carrier.
+        let broker_carrier;
+        let carrier = match request.broker {
+            Some(broker) => {
+                broker_carrier = broker.controller_carrier()?;
+                &broker_carrier
+            }
+            None => self.carrier,
+        };
+        start_delegated_member_run(CallerMemberStart {
+            view: request.view,
+            state_root: request.state_root,
+            configuration: request.configuration,
+            global_profile_binding: request.snapshot.profile_binding(),
+            run_id,
+            aggregate: request.aggregate,
+            carrier,
+            access: request.access,
+            idempotency_key: request.idempotency_key,
+            reviewer_plan: None,
+        })?;
+        Ok(crate::delegation_service::MemberRunStart { run_id })
+    }
+
+    /// Dispatch one accepted managed task under the member's Broker authority.
+    ///
+    /// The Turn is rendered from the retained acceptance bytes only, reserved
+    /// (`dispatching`) before it leaves, and accepted under the member Run's own
+    /// Broker credential. Writable tasks acquire their own writer before capture.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn dispatch_managed_task(
+        &self,
+        request: crate::delegation_service::ManagedTaskDispatch<'_>,
+    ) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
+        use crate::delegation_service::MemberDispatchOutcome;
+        let prompt = request.contents.prompt(
+            request.accepted,
+            request.execution_intent,
+            request.deadline_seconds,
+        )?;
+        let broker = crate::orchestration::OrchestrationStore::open(request.state_root)?;
+        let credential = broker.member_credential(request.member_ref)?;
+        let carrier = credential.controller_carrier()?;
+        let owner = SettlementOwner::Managed {
+            session_id: request.session_id,
+        };
+        let write = request.execution_intent == "canonical_workspace_write";
+        release_stale_member_writer(
+            request.view,
+            request.state_root,
+            request.member_ref,
+            owner,
+            &carrier,
+        )?;
+        let release = || {
+            if write {
+                release_writer_authorized(
+                    request.view,
+                    request.state_root,
+                    request.member_ref,
+                    &carrier,
+                    None,
+                    None,
+                )
+                .map(|_| ())
+            } else {
+                Ok(())
+            }
+        };
+        if write
+            && let Err(error) = acquire_writer_authorized(
+                request.view,
+                request.state_root,
+                request.member_ref,
+                &carrier,
+                true,
+                None,
+                None,
+                None,
+            )
+        {
+            let writer = crate::writer::WriterStore::new(
+                request.state_root,
+                &request.view.workspace_id,
+                DarwinSystem.current_uid(),
+            )
+            .load();
+            return Ok(acquire_failure_outcome(
+                writer.as_ref().ok(),
+                request.member_ref,
+                error,
+            ));
+        }
+        #[cfg(test)]
+        managed_dispatch_preparation();
+        let mut store = crate::engagement::EngagementStore::open(
+            &crate::engagement::EngagementStore::workspace_database_path(request.state_root),
+        )?;
+        let now = unix_time_ms_semantic()?;
+        let capture = if write {
+            match crate::successor_capture::capture_dispatch_index(
+                &request.view.canonical_path.to_path_buf()?,
+                request.task_ref,
+            ) {
+                Ok(capture) => Some(capture),
+                Err(error) => return refused_after_release(release(), error.code, error.message),
+            }
+        } else {
+            None
+        };
+        if let Err(error) = store.transact(|transaction| {
+            if let Some(capture) = &capture {
+                crate::engagement::record_dispatch_index_with_content(
+                    transaction,
+                    crate::engagement::DispatchIndexRecord {
+                        task_id: request.task_ref,
+                        workspace_ref: &request.view.workspace_id,
+                        run_ref: request.member_ref,
+                        head_commit: capture.head.as_deref(),
+                        index_sha256: &capture.sha256,
+                        index_byte_length: capture.canonical.len() as u64,
+                        file_count: capture.file_count,
+                        baseline_bytes: capture.baseline_bytes,
+                    },
+                    &capture.canonical,
+                    &capture.baseline,
+                    now,
+                )?;
+            }
+            crate::orchestration::mark_successor_task_dispatching(
+                transaction,
+                request.session_id,
+                request.task_ref,
+                now,
+            )
+        }) {
+            // The reservation is the dispatch boundary, so a refusal here proves
+            // the Turn never left.
+            return refused_after_release(release(), error.code, error.message);
+        }
+        #[cfg(test)]
+        MANAGED_SUBMIT_CALLS.with(|count| count.set(count.get() + 1));
+        let response = crate::worker::call_run_worker(
+            request.state_root,
+            request.member_ref,
+            DarwinSystem.current_uid(),
+            Some(carrier.raw_fd()),
+            |expected| crate::worker::ControlRequestV1::Submit {
+                expected,
+                caller: None,
+                request: crate::worker::TurnControlRequest {
+                    normalized_request_sha256: None,
+                    write: false,
+                    message: prompt,
+                    idempotency_key: format!("successor-task:{}", request.task_ref),
+                    effort: None,
+                    images: Vec::new(),
+                },
+            },
+        );
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let error = error.machine_error(request.member_ref, request.state_root);
+                return Ok(MemberDispatchOutcome::Uncertain {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+        };
+        let turn_id = match response {
+            crate::worker::ControlResponseV1::Accepted { accepted } => accepted.turn_id,
+            // The worker's fenced acknowledgement is an accepted dispatch too: it
+            // carries the Turn the executor took, exactly as the legacy adapter
+            // reads it.
+            crate::worker::ControlResponseV1::AcceptedReceipt { accepted, .. } => accepted.turn_id,
+            crate::worker::ControlResponseV1::Terminal { terminal } => terminal.turn_id,
+            crate::worker::ControlResponseV1::Failed { code, message, .. } => {
+                if !proved_non_dispatch(&code) {
+                    return Ok(MemberDispatchOutcome::Uncertain { code, message });
+                }
+                return refused_after_release(release(), code, message);
+            }
+            _ => {
+                return Ok(MemberDispatchOutcome::Uncertain {
+                    code: "DISPATCH_OUTCOME_UNKNOWN".to_owned(),
+                    message: "the worker returned an unexpected dispatch response".to_owned(),
+                });
+            }
+        };
+        let now = unix_time_ms_semantic()?;
+        store.transact(|transaction| {
+            crate::orchestration::mark_successor_task_running(
+                transaction,
+                request.session_id,
+                request.task_ref,
+                &turn_id,
+                now,
+            )
+        })?;
+        // The executor accepted the task: the round is now counted accepted.
+        store
+            .transact(|transaction| crate::caller_scope::accepted(transaction, request.task_ref))?;
+        // The K path attempts settlement once: a fast completion settles
+        // here, otherwise the worker hook or the restart sweep converges it.
+        settle_successor_task(
+            request.view,
+            request.state_root,
+            SettlementOwner::Managed {
+                session_id: request.session_id,
+            },
+            request.member_ref,
+            request.task_ref,
+            request.execution_intent,
+            Some(&carrier),
+        )?;
+        Ok(MemberDispatchOutcome::Accepted { turn_ref: turn_id })
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn finish_settled_reconciliation_admission(
+    view: &WorkspaceView,
+    state_root: &Path,
+    member: Uuid,
+    carrier: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    let Some(admission) = durable_pending_admission(state_root, member)? else {
+        return Ok(());
+    };
+    if admission.operation != "run.reconcile" {
+        return Err(reconciliation_error("different_mutation_pending"));
+    }
+    let projection =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_state_projection(member)?;
+    let _lifecycle = crate::worker::RunLifecycleLease::acquire(
+        state_root,
+        &view.workspace_id,
+        member,
+        projection.run_generation.max(1),
+    )
+    .map_err(|e| e.machine_error(member, state_root))?;
+    let startup = RunStartupLock::open(state_root, member)?;
+    startup.acquire()?;
+    let result = (|| {
+        let controller = load_reconciled_controller_binding(state_root, member)?;
+        authorize_controller(member, "run.reconcile", &controller, carrier)?;
+        if admission.controller_id != controller.identity.controller_id {
+            return Err(reconciliation_error("recovery_authority_changed"));
+        }
+        let mut ledger = crate::ledger::Ledger::open(run_root(state_root, member), member)
+            .map_err(|e| internal(e.to_string()))?;
+        complete_mutation_admission(&mut ledger, admission.admission_id)
+    })();
+    startup.release();
+    result
 }
 
 pub(crate) fn interrupt_reviewer_run(
@@ -2017,7 +2791,11 @@ impl CoreSemanticService {
         request: CallerRunStartRequest,
         carrier: CredentialCarrier,
     ) -> Result<RunStartReceipt, MachineError> {
-        start_caller_run_typed(request.resolve()?, carrier, None)
+        start_caller_run_generation::<crate::instructions::InstructionSnapshot>(
+            request.resolve()?,
+            carrier,
+            None,
+        )
     }
 }
 
@@ -2058,7 +2836,80 @@ fn admit_caller_orchestration_launch(
     Ok(())
 }
 
-fn start_caller_run_typed(
+/// One retained caller-start instruction generation.
+///
+/// Every step of the shared start path is generation independent except the
+/// manifest, whose Agent Configuration belongs to exactly one generation.
+trait CallerStartGeneration: crate::run::CallerInstructionGeneration {
+    fn build_manifest(
+        intent: &crate::run::CallerStartIntent<Self>,
+        view: &WorkspaceView,
+        state: &ServerState,
+        model: &str,
+        effort: &str,
+    ) -> Result<RunManifest, MachineError>;
+}
+
+impl CallerStartGeneration for crate::instructions::InstructionSnapshot {
+    fn build_manifest(
+        intent: &crate::run::CallerStartIntent<Self>,
+        view: &WorkspaceView,
+        state: &ServerState,
+        model: &str,
+        effort: &str,
+    ) -> Result<RunManifest, MachineError> {
+        build_caller_manifest(intent, view, state, model, effort)
+    }
+}
+
+impl CallerStartGeneration for crate::delegation_identity::InstructionSnapshot {
+    fn build_manifest(
+        intent: &crate::run::CallerStartIntent<Self>,
+        view: &WorkspaceView,
+        state: &ServerState,
+        model: &str,
+        effort: &str,
+    ) -> Result<RunManifest, MachineError> {
+        build_delegated_manifest(intent, view, state, model, effort)
+    }
+}
+
+/// Validate one admitted caller member start against the discovered
+/// workspace and its own admitted facts, then apply the discovery control.
+///
+/// This is the whole member validation of the caller start path: the
+/// identity checks, the Profile binding's recovery validation and the
+/// project/ancestor discovery suppression (`require_discovery_control`,
+/// CD-10) run here, in this order, for every caller member start — the
+/// legacy caller generation and the delegated one alike — before any
+/// reservation or allocation is taken.
+fn validate_caller_member_start<I: CallerStartGeneration>(
+    member: &CallerMemberStart<'_>,
+    view: &WorkspaceView,
+    state_root: &Path,
+) -> Result<(), MachineError> {
+    if member.view.workspace_id != view.workspace_id
+        || member.view.canonical_path != view.canonical_path
+        || member.state_root != state_root
+        || member.configuration.schema_version != I::MANIFEST_VERSION
+        || member.aggregate.member_kind != crate::run::AggregateMemberKind::Specialist
+        || member.aggregate.role_reference != member.configuration.role_reference
+        || member.aggregate.agent_configuration_sha256.as_deref()
+            != Some(
+                agent_configuration_digest(member.configuration)
+                    .map_err(internal)?
+                    .as_str(),
+            )
+    {
+        return Err(internal(
+            "caller member differs from its admitted aggregate configuration",
+        ));
+    }
+    member.global_profile_binding.validate_for_recovery()?;
+    crate::instructions::require_discovery_control(member.global_profile_binding)
+}
+
+fn start_caller_run_generation<I: CallerStartGeneration>(
     mut request: CallerRunStartRequest,
     carrier: CredentialCarrier,
     member: Option<CallerMemberStart<'_>>,
@@ -2071,31 +2922,14 @@ fn start_caller_run_typed(
     let controller = presented.binding;
     let state_root = workspace_state_root(&view)?;
     if let Some(member) = &member {
-        if member.view.workspace_id != view.workspace_id
-            || member.view.canonical_path != view.canonical_path
-            || member.state_root != state_root
-            || member.configuration.schema_version != 3
-            || member.aggregate.member_kind != crate::run::AggregateMemberKind::Specialist
-            || member.aggregate.role_reference != member.configuration.role_reference
-            || member.aggregate.agent_configuration_sha256.as_deref()
-                != Some(
-                    agent_configuration_digest(member.configuration)
-                        .map_err(internal)?
-                        .as_str(),
-                )
-        {
-            return Err(internal(
-                "caller member differs from its admitted aggregate configuration",
-            ));
-        }
-        member.global_profile_binding.validate_for_recovery()?;
-        crate::instructions::require_discovery_control(member.global_profile_binding)?;
+        validate_caller_member_start::<I>(member, &view, &state_root)?;
     }
     let reservations = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
     let _allocation = reservations.lock_allocation("run-start", &request.idempotency_key)?;
     let request_digest =
         crate::run::caller_start_request_digest(&request, &view.canonical_path, &controller)?;
-    let prior = reservations.load_caller(&request.idempotency_key, &request_digest)?;
+    let prior =
+        reservations.load_caller_generation::<I>(&request.idempotency_key, &request_digest)?;
     let replay = prior.is_some();
     let home = DolgoraeHome::system()?;
     let (reservation, state) = match prior {
@@ -2108,9 +2942,9 @@ fn start_caller_run_typed(
             let store = RunStore::new(SystemWorkspacePlatform, &state_root);
             match store.load_manifest(reservation.run_id) {
                 Ok(manifest) => {
-                    validate_caller_manifest_intent(&manifest, &reservation.accepted_intent)?;
+                    validate_caller_manifest_intent::<I>(&manifest, &reservation.accepted_intent)?;
                     validate_caller_member_manifest(&manifest, member.as_ref())?;
-                    validate_caller_primary_manifest(
+                    validate_caller_primary_manifest::<I>(
                         &state_root,
                         &manifest,
                         &reservation.accepted_intent,
@@ -2118,9 +2952,9 @@ fn start_caller_run_typed(
                     )?;
                     {
                         let _startup = ProcessRunStartup::acquire(&state_root, reservation.run_id)?;
-                        ensure_caller_bootstrap(&state_root, &manifest, &reservation)?;
+                        ensure_caller_bootstrap::<I>(&state_root, &manifest, &reservation)?;
                     }
-                    if let Some(receipt) = replay_published_caller_start(
+                    if let Some(receipt) = replay_published_caller_start::<I>(
                         &state_root,
                         &view,
                         &reservation,
@@ -2142,14 +2976,18 @@ fn start_caller_run_typed(
         }
         None => {
             let instructions = match &member {
-                Some(member) => member
-                    .configuration
-                    .instructions
-                    .caller()
-                    .ok_or_else(|| internal("member has no accepted instructions"))?
-                    .clone(),
-                None => crate::instructions::InstructionSourceStore::new(&home)
-                    .capture(&request.role)?,
+                Some(member) => I::from_run_capture(&member.configuration.instructions)
+                    .ok_or_else(|| internal("member has no accepted instructions"))?,
+                None => I::capture_source(
+                    &crate::instructions::InstructionSourceStore::new(&home),
+                    &request.role,
+                )?,
+            };
+            // A generation-4 manifest records its admitted Agent Configuration
+            // and the explicit start-receipt slot; generation 3 records neither.
+            let admitted_configuration = match I::MANIFEST_VERSION {
+                4 => member.as_ref().map(|member| member.configuration.clone()),
+                _ => None,
             };
             let binding = match &member {
                 Some(member) => member.global_profile_binding.clone(),
@@ -2202,6 +3040,7 @@ fn start_caller_run_typed(
                 controller,
                 global_profile_binding: binding,
                 instructions,
+                admitted_configuration,
                 orchestration,
                 readiness: crate::run::CallerProfileReadiness {
                     model,
@@ -2210,7 +3049,8 @@ fn start_caller_run_typed(
                 },
             };
             (
-                reservations.reserve_caller(&crate::run::CallerStartReservation::new(intent)?)?,
+                reservations
+                    .reserve_caller_generation(&crate::run::CallerStartReservation::new(intent)?)?,
                 state,
             )
         }
@@ -2236,19 +3076,24 @@ fn start_caller_run_typed(
         sessions.mark_primary_intent(run_id)?;
     }
     let _process_startup = ProcessRunStartup::acquire(&state_root, run_id)?;
-    let manifest = load_or_publish_caller_manifest(&store, intent, &view, &state, member.as_ref())?;
+    let manifest =
+        load_or_publish_caller_manifest::<I>(&store, intent, &view, &state, member.as_ref())?;
     let writer = crate::writer::WriterStore::new(
         &state_root,
         &view.workspace_id,
         DarwinSystem.current_uid(),
     );
-    ensure_caller_bootstrap(&state_root, &manifest, &reservation)?;
+    ensure_caller_bootstrap::<I>(&state_root, &manifest, &reservation)?;
     if replay {
         // The original Worker may have finished while Profile readiness was
         // checked. Reconcile that outcome rather than applying startup again.
-        if let Some(receipt) =
-            replay_published_caller_start(&state_root, &view, &reservation, &manifest, &carrier)?
-        {
+        if let Some(receipt) = replay_published_caller_start::<I>(
+            &state_root,
+            &view,
+            &reservation,
+            &manifest,
+            &carrier,
+        )? {
             return Ok(receipt);
         }
     }
@@ -2301,7 +3146,7 @@ fn start_caller_run_typed(
             return Err(error);
         }
     };
-    publish_caller_start_receipt(&state_root, &reservation, &proof)?;
+    publish_caller_start_receipt::<I>(&state_root, &reservation, &proof)?;
     if intent.orchestration.is_some() {
         crate::orchestration::OrchestrationStore::open(&state_root)?
             .finish_primary_publication(run_id, Ok(()))?;
@@ -2332,22 +3177,22 @@ fn caller_startup_refusal(mut error: MachineError, run_id: Uuid) -> MachineError
 }
 
 /// The allocation and process-startup serializers are held by the caller.
-fn load_or_publish_caller_manifest(
+fn load_or_publish_caller_manifest<I: CallerStartGeneration>(
     store: &RunStore<SystemWorkspacePlatform>,
-    intent: &crate::run::CallerStartIntent,
+    intent: &crate::run::CallerStartIntent<I>,
     view: &WorkspaceView,
     state: &ServerState,
     member: Option<&CallerMemberStart<'_>>,
 ) -> Result<RunManifest, MachineError> {
     match store.load_manifest(intent.run_id) {
         Ok(manifest) => {
-            validate_caller_manifest_intent(&manifest, intent)?;
+            validate_caller_manifest_intent::<I>(&manifest, intent)?;
             validate_caller_member_manifest(&manifest, member)?;
-            validate_caller_primary_manifest(store.state_root(), &manifest, intent, member)?;
+            validate_caller_primary_manifest::<I>(store.state_root(), &manifest, intent, member)?;
             Ok(manifest)
         }
         Err(error) if error.code == "RUN_NOT_FOUND" => {
-            let mut manifest = build_caller_manifest(
+            let mut manifest = I::build_manifest(
                 intent,
                 view,
                 state,
@@ -2361,7 +3206,8 @@ fn load_or_publish_caller_manifest(
                     plan.validate_manifest(&manifest)?;
                 }
             } else if intent.orchestration.is_some() {
-                manifest.aggregate_binding = caller_primary_binding(store.state_root(), intent)?;
+                manifest.aggregate_binding =
+                    caller_primary_binding::<I>(store.state_root(), intent)?;
             }
             store.publish(&manifest)?;
             Ok(manifest)
@@ -2370,9 +3216,9 @@ fn load_or_publish_caller_manifest(
     }
 }
 
-fn caller_primary_binding(
+fn caller_primary_binding<I: crate::run::CallerInstructionGeneration>(
     state_root: &Path,
-    intent: &crate::run::CallerStartIntent,
+    intent: &crate::run::CallerStartIntent<I>,
 ) -> Result<Option<AggregateBinding>, MachineError> {
     let Some(captures) = &intent.orchestration else {
         return Ok(None);
@@ -2402,13 +3248,14 @@ fn caller_primary_binding(
     }))
 }
 
-fn validate_caller_primary_manifest(
+fn validate_caller_primary_manifest<I: crate::run::CallerInstructionGeneration>(
     state_root: &Path,
     manifest: &RunManifest,
-    intent: &crate::run::CallerStartIntent,
+    intent: &crate::run::CallerStartIntent<I>,
     member: Option<&CallerMemberStart<'_>>,
 ) -> Result<(), MachineError> {
-    if member.is_none() && manifest.aggregate_binding != caller_primary_binding(state_root, intent)?
+    if member.is_none()
+        && manifest.aggregate_binding != caller_primary_binding::<I>(state_root, intent)?
     {
         return Err(internal("Primary aggregate differs from accepted startup"));
     }
@@ -2435,10 +3282,10 @@ fn validate_caller_member_manifest(
     Ok(())
 }
 
-fn replay_published_caller_start(
+fn replay_published_caller_start<I: crate::run::CallerInstructionGeneration>(
     state_root: &Path,
     view: &WorkspaceView,
-    reservation: &crate::run::CallerStartReservation,
+    reservation: &crate::run::CallerStartReservation<I>,
     manifest: &RunManifest,
     carrier: &CredentialCarrier,
 ) -> Result<Option<RunStartReceipt>, MachineError> {
@@ -2468,7 +3315,7 @@ fn replay_published_caller_start(
         .load_caller_start_receipt(reservation.run_id, &reservation.normalized_identity_sha256)?
         .is_none()
     {
-        reconcile_caller_start_receipt(state_root, view, reservation, manifest, carrier)?;
+        reconcile_caller_start_receipt::<I>(state_root, view, reservation, manifest, carrier)?;
     }
     if reservation.accepted_intent.orchestration.is_some() {
         crate::orchestration::OrchestrationStore::open(state_root)?
@@ -2484,11 +3331,11 @@ fn replay_published_caller_start(
     }))
 }
 
-fn validate_caller_manifest_intent(
+fn validate_caller_manifest_intent<I: crate::run::CallerInstructionGeneration>(
     manifest: &RunManifest,
-    intent: &crate::run::CallerStartIntent,
+    intent: &crate::run::CallerStartIntent<I>,
 ) -> Result<(), MachineError> {
-    if manifest.schema_version != 3
+    if manifest.schema_version != I::MANIFEST_VERSION
         || manifest.run_id != intent.run_id
         || manifest.workspace_id != intent.workspace_id
         || manifest.canonical_workspace != intent.canonical_workspace
@@ -2502,7 +3349,11 @@ fn validate_caller_manifest_intent(
         || manifest.requested_access != Some(intent.request.access)
         || manifest.selected_role.as_deref() != Some(intent.request.role.as_str())
         || manifest.global_profile_binding.as_ref() != Some(&intent.global_profile_binding)
-        || manifest.instructions.caller() != Some(&intent.instructions)
+        || I::from_run_capture(&manifest.instructions).as_ref() != Some(&intent.instructions)
+        || intent
+            .admitted_configuration
+            .as_ref()
+            .is_some_and(|configuration| manifest.agent_configuration != *configuration)
         || manifest.purpose != intent.request.purpose
         || manifest.parent_ref != intent.request.parent_ref
         || manifest.required_capabilities != intent.request.required_capabilities
@@ -2516,10 +3367,10 @@ fn validate_caller_manifest_intent(
 
 /// Complete only the exact original bootstrap prefix. Beyond that prefix,
 /// startup retries may observe verified history but never rebuild it.
-fn ensure_caller_bootstrap(
+fn ensure_caller_bootstrap<I: crate::run::CallerInstructionGeneration>(
     state_root: &Path,
     manifest: &RunManifest,
-    reservation: &crate::run::CallerStartReservation,
+    reservation: &crate::run::CallerStartReservation<I>,
 ) -> Result<(), MachineError> {
     let run_id = manifest.run_id;
     crate::writer::WriterStore::new(
@@ -2630,14 +3481,18 @@ fn validate_caller_start_catalog(
     Ok((model, effort))
 }
 
-fn build_caller_manifest(
-    intent: &crate::run::CallerStartIntent,
+/// The generation-independent part of one caller-workspace manifest.
+///
+/// Both instruction generations publish the same accepted startup identity;
+/// only the Agent Configuration and its successor-only fields differ.
+fn caller_manifest_base<I: crate::run::CallerInstructionGeneration>(
+    intent: &crate::run::CallerStartIntent<I>,
     view: &WorkspaceView,
     state: &ServerState,
     model: &str,
     effort: &str,
+    prefix: &str,
 ) -> Result<RunManifest, MachineError> {
-    let prefix = intent.instructions.developer_prefix()?;
     let mut manifest = build_manifest(
         intent.run_id,
         view,
@@ -2646,7 +3501,7 @@ fn build_caller_manifest(
         intent.global_profile_binding.clone(),
         model,
         effort,
-        &prefix,
+        prefix,
         intent.request.purpose.clone(),
         intent.request.parent_ref.clone(),
         intent.request.control_mode,
@@ -2656,7 +3511,7 @@ fn build_caller_manifest(
         intent.request.required_capabilities.clone(),
         intent.start_baseline.clone(),
     )?;
-    manifest.schema_version = 3;
+    manifest.schema_version = I::MANIFEST_VERSION;
     manifest.created_at = intent.created_at.clone();
     manifest.initial_access =
         if intent.request.access == crate::domain::CallerWorkspaceAccess::Writable {
@@ -2667,8 +3522,21 @@ fn build_caller_manifest(
     manifest.requested_access = Some(intent.request.access);
     manifest.selected_role = Some(intent.request.role.clone());
     manifest.start_contract = Some("caller_workspace/v1".to_owned());
-    manifest.instructions = intent.instructions.clone().into();
+    manifest.instructions = intent.instructions.run_capture();
     manifest.profile_capability_snapshot = intent.readiness.profile_capability_snapshot.clone();
+    Ok(manifest)
+}
+
+/// Generation 3: the caller Agent Configuration is built from its capture.
+fn build_caller_manifest(
+    intent: &crate::run::CallerStartIntent,
+    view: &WorkspaceView,
+    state: &ServerState,
+    model: &str,
+    effort: &str,
+) -> Result<RunManifest, MachineError> {
+    let prefix = intent.instructions.developer_prefix()?;
+    let mut manifest = caller_manifest_base(intent, view, state, model, effort, &prefix)?;
     manifest.agent_configuration = crate::run::CallerAgentConfigurationSnapshot {
         schema_version: 3,
         selected_profile: intent.request.profile.clone(),
@@ -2684,6 +3552,41 @@ fn build_caller_manifest(
         native_subagent_policy: "enabled".to_owned(),
     }
     .try_into()?;
+    Ok(manifest)
+}
+
+/// Generation 4: the accepted Agent Configuration is carried, never rebuilt.
+///
+/// The explicit nullable start-receipt slot records that this Run start owns no
+/// separate keyed receipt of its own; the delegated admission receipt does.
+fn build_delegated_manifest(
+    intent: &crate::run::CallerStartIntent<crate::delegation_identity::InstructionSnapshot>,
+    view: &WorkspaceView,
+    state: &ServerState,
+    model: &str,
+    effort: &str,
+) -> Result<RunManifest, MachineError> {
+    let prefix = intent.instructions.developer_prefix()?;
+    let mut manifest = caller_manifest_base(intent, view, state, model, effort, &prefix)?;
+    let configuration = intent
+        .admitted_configuration
+        .as_ref()
+        .ok_or_else(|| internal("delegated manifest has no admitted Agent Configuration"))?;
+    let admitted = configuration
+        .admitted_configuration
+        .as_ref()
+        .ok_or_else(|| internal("delegated manifest has no admitted configuration"))?;
+    manifest.agent_configuration = configuration.clone();
+    manifest.creation_mode = Some(
+        if intent.request.access == crate::domain::CallerWorkspaceAccess::Writable {
+            "writable"
+        } else {
+            "read_only"
+        }
+        .to_owned(),
+    );
+    manifest.admitted_configuration_digest = Some(admitted.digest()?);
+    manifest.start_operation_receipt = Some(None);
     Ok(manifest)
 }
 
@@ -2791,9 +3694,9 @@ fn start_caller_writer(
     result
 }
 
-fn publish_caller_start_receipt(
+fn publish_caller_start_receipt<I: crate::run::CallerInstructionGeneration>(
     state_root: &Path,
-    reservation: &crate::run::CallerStartReservation,
+    reservation: &crate::run::CallerStartReservation<I>,
     proof: &crate::worker::CallerPolicyProof,
 ) -> Result<(), MachineError> {
     RunStore::new(SystemWorkspacePlatform, state_root)
@@ -2859,10 +3762,10 @@ fn seal_caller_start_not_dispatched(
     result
 }
 
-fn reconcile_caller_start_receipt(
+fn reconcile_caller_start_receipt<I: crate::run::CallerInstructionGeneration>(
     state_root: &Path,
     view: &WorkspaceView,
-    reservation: &crate::run::CallerStartReservation,
+    reservation: &crate::run::CallerStartReservation<I>,
     manifest: &RunManifest,
     carrier: &CredentialCarrier,
 ) -> Result<(), MachineError> {
@@ -2947,7 +3850,7 @@ fn reconcile_caller_start_receipt(
         }
         Ok(())
     })?;
-    publish_caller_start_receipt(state_root, reservation, &proof)
+    publish_caller_start_receipt::<I>(state_root, reservation, &proof)
 }
 
 fn call_caller_policy_proof(
@@ -4095,14 +4998,54 @@ fn history_reconciliation_with_lifecycle(
     expected_state_revision: Option<u64>,
     lifecycle: Option<&crate::worker::RunLifecycleLease>,
 ) -> Result<Value, MachineError> {
-    if let Some(value) = handoff_quiescent_build(
-        view,
-        state_root,
-        run_id,
-        carrier,
-        expected_state_revision,
-        lifecycle,
-    )? {
+    let member_manifest =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
+    let successor = member_manifest.schema_version == 4
+        && member_manifest
+            .aggregate_binding
+            .as_ref()
+            .is_some_and(|binding| {
+                binding.member_kind == crate::run::AggregateMemberKind::Specialist
+            });
+    let owned_lifecycle = if successor && lifecycle.is_none() {
+        let projection =
+            RunStore::new(SystemWorkspacePlatform, state_root).load_state_projection(run_id)?;
+        Some(
+            crate::worker::RunLifecycleLease::acquire(
+                state_root,
+                &view.workspace_id,
+                run_id,
+                projection.run_generation.max(1),
+            )
+            .map_err(|error| error.machine_error(run_id, state_root))?,
+        )
+    } else {
+        None
+    };
+    let lifecycle = lifecycle.or(owned_lifecycle.as_ref());
+    if successor {
+        lifecycle
+            .expect("successor recovery owns its lease")
+            .verify_scope(state_root, &view.workspace_id, run_id)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+    }
+    let mut history_only_reader_loss = false;
+    if successor && successor_reconciliation_debt(state_root, run_id)? {
+        for execution in successor_reconciliation_executions(state_root, run_id)? {
+            history_only_reader_loss |=
+                successor_reader_definitively_lost(state_root, &member_manifest, &execution)?;
+        }
+    }
+    if !history_only_reader_loss
+        && let Some(value) = handoff_quiescent_build(
+            view,
+            state_root,
+            run_id,
+            carrier,
+            expected_state_revision,
+            lifecycle,
+        )?
+    {
         return Ok(value);
     }
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
@@ -4110,8 +5053,23 @@ fn history_reconciliation_with_lifecycle(
     let runtime_path =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
             .map_err(|error| error.machine_error(run_id, state_root))?;
-    let runtime =
-        crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid()).ok();
+    let runtime = if successor {
+        match std::fs::symlink_metadata(&runtime_path) {
+            Ok(_) => Some(
+                crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid())
+                    .map_err(|error| error.machine_error(run_id, &runtime_path))?,
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(MachineError::runtime_path_invalid(
+                    &runtime_path,
+                    error.to_string(),
+                ));
+            }
+        }
+    } else {
+        crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid()).ok()
+    };
     if projection.lifecycle == RunLifecycle::Idle
         && store.load_manifest(run_id)?.schema_version == 3
         && runtime.as_ref().is_some_and(|record| {
@@ -4149,9 +5107,11 @@ fn history_reconciliation_with_lifecycle(
     } else {
         false
     };
+    let successor_debt = successor && successor_reconciliation_debt(state_root, run_id)?;
     if !control_recovery
         && !idle_worker_lost
         && !paused_primary_unknown
+        && !successor_debt
         && durable_pending_admission(state_root, run_id)?.is_none()
         && !matches!(
             projection.lifecycle,
@@ -4185,16 +5145,44 @@ fn history_reconciliation_with_lifecycle(
             ));
         }
     };
+    if successor_debt {
+        let executions = successor_reconciliation_executions(state_root, run_id)?;
+        let mut lost = false;
+        for execution in &executions {
+            lost |= successor_reader_definitively_lost(state_root, &member_manifest, execution)?;
+        }
+        let absent = runtime.as_ref().is_none_or(|record| {
+            crate::worker::classify_worker_identity(record)
+                == crate::worker::ProcessIdentityVerdict::Absent
+        });
+        if lost && absent {
+            if control_recovery {
+                crate::worker::recover_control_runtime(&runtime_path, DarwinSystem.current_uid())
+                    .map_err(|error| error.machine_error(run_id, &runtime_path))?;
+            }
+            return reconcile_successor_history_only(
+                view,
+                state_root,
+                run_id,
+                carrier,
+                admission_id,
+                lifecycle.expect("successor recovery lease"),
+            );
+        }
+    }
     if control_recovery {
         crate::worker::recover_control_runtime(&runtime_path, DarwinSystem.current_uid())
             .map_err(|error| error.machine_error(run_id, &runtime_path))?;
-        if matches!(
-            projection.lifecycle,
-            RunLifecycle::Idle
-                | RunLifecycle::Paused
-                | RunLifecycle::Closed
-                | RunLifecycle::StartFailed
-        ) {
+        if !successor_debt
+            && !paused_primary_unknown
+            && matches!(
+                projection.lifecycle,
+                RunLifecycle::Idle
+                    | RunLifecycle::Paused
+                    | RunLifecycle::Closed
+                    | RunLifecycle::StartFailed
+            )
+        {
             let writer = crate::writer::WriterStore::new(
                 state_root,
                 &view.workspace_id,
@@ -4241,6 +5229,195 @@ fn history_reconciliation_with_lifecycle(
         SemanticResult::Run(value) => Ok(value),
         _ => Err(internal("reconciliation returned a non-run result")),
     }
+}
+
+fn successor_reader_definitively_lost(
+    state_root: &Path,
+    manifest: &RunManifest,
+    execution: &ReconciliationExecution,
+) -> Result<bool, MachineError> {
+    if !execution.checked {
+        return Ok(false);
+    }
+    let root = state_root
+        .join("direct-reviews")
+        .join(execution.task_ref.to_string());
+    match std::fs::symlink_metadata(&root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(MachineError::runtime_path_invalid(&root, error.to_string())),
+        Ok(_) => crate::workspace::verify_secure_directory(&root, DarwinSystem.current_uid())?,
+    }
+    if crate::workspace::open_secure_file_if_present(
+        &root.join("binding.json"),
+        DarwinSystem.current_uid(),
+    )?
+    .is_none()
+    {
+        return Ok(true);
+    }
+    // Lost issued-receipt backing is a storage fault, not reader absence.
+    crate::workspace::verify_secure_directory(&root.join("reads"), DarwinSystem.current_uid())?;
+    crate::delegation_service::successor_task_reader(
+        state_root,
+        manifest,
+        execution.task_ref,
+        false,
+    )?
+    .ok_or_else(|| reconciliation_error("checked_reader_missing"))?;
+    Ok(false)
+}
+
+fn reconcile_successor_history_only(
+    view: &WorkspaceView,
+    state_root: &Path,
+    member: Uuid,
+    carrier: &CredentialCarrier,
+    admission_id: Uuid,
+    lifecycle: &crate::worker::RunLifecycleLease,
+) -> Result<Value, MachineError> {
+    lifecycle
+        .verify_scope(state_root, &view.workspace_id, member)
+        .map_err(|error| error.machine_error(member, state_root))?;
+    let startup = RunStartupLock::open(state_root, member)?;
+    startup.acquire()?;
+    let result = (|| {
+        let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(member)?;
+        let current_controller = load_reconciled_controller_binding(state_root, member)?;
+        authorize_controller(member, "run.reconcile", &current_controller, carrier)?;
+        let executions = successor_reconciliation_executions(state_root, member)?;
+        if executions.is_empty() {
+            return Err(reconciliation_error("task_execution_missing"));
+        }
+        let (projection, _) = observe_run_ledger(state_root, member, true)?;
+        let path =
+            crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), member)
+                .map_err(|error| error.machine_error(member, state_root))?;
+        let generation = match std::fs::symlink_metadata(&path) {
+            Ok(_) => {
+                let runtime = crate::worker::read_runtime_record(&path, DarwinSystem.current_uid())
+                    .map_err(|error| error.machine_error(member, &path))?;
+                if runtime.identity.run_id != member
+                    || runtime.identity.workspace_id != view.workspace_id
+                    || runtime.identity.run_generation != projection.run_generation
+                {
+                    return Err(reconciliation_error("worker_generation_mismatch"));
+                }
+                crate::worker::prove_worker_generation_absent(&runtime)
+                    .map_err(|error| error.machine_error(member, &path))?;
+                runtime.identity.run_generation
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                prove_missing_locator_generation_absent_held(state_root, member, &startup)?
+            }
+            Err(error) => return Err(MachineError::runtime_path_invalid(&path, error.to_string())),
+        };
+        let home = state_root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| reconciliation_error("workspace_home_missing"))?;
+        let binding = manifest
+            .global_profile_binding
+            .as_ref()
+            .ok_or_else(|| reconciliation_error("profile_binding_missing"))?;
+        let server = crate::profile::observe_history_server(home, binding)?;
+        let context = crate::turn::TurnFailureContext {
+            run_id: member,
+            profile: binding.selected_name.clone(),
+            thread_id: executions.first().map(|e| e.thread_id.clone()),
+            turn_id: executions.first().map(|e| e.turn_id.clone()),
+        };
+        let mut connection =
+            JsonRpcConnection::connect(Path::new(&server.socket_path), Duration::from_secs(120))
+                .map_err(|error| {
+                    crate::turn::TurnError::from(error).into_machine_error(&context)
+                })?;
+        let initialized=connection.request("initialize",json!({"clientInfo":{"name":"dolgorae","title":"Dolgorae","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true,"optOutNotificationMethods":[]}})).map_err(|error|crate::turn::TurnError::from(error).into_machine_error(&context))?;
+        if initialized.get("codexHome").and_then(Value::as_str)
+            != Some(&binding.launch_snapshot.canonical_codex_home)
+        {
+            return Err(reconciliation_error("history_codex_home_mismatch"));
+        }
+        connection
+            .notify("initialized", json!({}))
+            .map_err(|error| crate::turn::TurnError::from(error).into_machine_error(&context))?;
+        for execution in executions {
+            if execution.started_generation > generation
+                || !successor_reader_definitively_lost(state_root, &manifest, &execution)?
+            {
+                return Err(reconciliation_error("history_only_reader_not_lost"));
+            }
+            if let Some(terminal) = resolved_terminal(state_root, member, &execution.turn_id)? {
+                verify_reconciliation_resolution(state_root, &execution, &terminal)?;
+            }
+            let mut sink =
+                crate::turn::ThreadTurnSink::for_recovery(&execution.thread_id, &execution.turn_id);
+            connection
+                .request_solicited(
+                    "thread/read",
+                    json!({"threadId":execution.thread_id,"includeTurns":true}),
+                    &mut sink,
+                )
+                .map_err(|error| {
+                    crate::turn::TurnError::from(error).into_machine_error(&context)
+                })?;
+            let history = sink
+                .into_recovery()
+                .map_err(|_| reconciliation_error("history_terminal_unverified"))?;
+            if let Some(terminal) = resolved_terminal(state_root, member, &execution.turn_id)? {
+                verify_recovered_terminal(&execution, &terminal, Some(&history.status))?;
+            }
+            crate::profile::revalidate_history_server(home, binding, &server)?;
+            if RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(member)? != manifest
+                || load_reconciled_controller_binding(state_root, member)? != current_controller
+            {
+                return Err(reconciliation_error("recovery_authority_changed"));
+            }
+            crate::writer::WriterStore::new(
+                state_root,
+                &view.workspace_id,
+                DarwinSystem.current_uid(),
+            )
+            .observe_locked(|writer| -> Result<(), MachineError> {
+                let mut ledger = crate::ledger::Ledger::open(run_root(state_root, member), member)
+                    .map_err(|error| internal(error.to_string()))?;
+                // The old generation's absence is proved above, including the
+                // abandon-before-journal crash window.
+                revalidate_reconciliation_execution(
+                    state_root,
+                    &execution,
+                    ledger
+                        .durable_records()
+                        .map_err(|error| internal(error.to_string()))?,
+                )?;
+                let mut event_context = bootstrap_event_context(&manifest, writer);
+                event_context.server_key = server.server_key.clone();
+                event_context.server_epoch = server.server_epoch;
+                ledger.with_event_context(event_context, |ledger| {
+                    complete_successor_reconciliation(
+                        ledger,
+                        &execution,
+                        &history,
+                        &server.server_key,
+                        server.server_epoch,
+                        generation,
+                        true,
+                    )
+                })?;
+                Ok(())
+            })??;
+            converge_successor_history(state_root, &execution, &history, true)?;
+        }
+        {
+            let mut ledger = crate::ledger::Ledger::open(run_root(state_root, member), member)
+                .map_err(|error| internal(error.to_string()))?;
+            complete_mutation_admission(&mut ledger, admission_id)?;
+        }
+        let sources = RunSources::load(state_root, member, 0)?;
+        let terminal = durable_last_terminal(state_root, member, &sources)?;
+        Ok(sources.run_value("Absent", terminal))
+    })();
+    startup.release_preserving_records();
+    result
 }
 
 fn assurance_rank(assurance: Assurance) -> u8 {
@@ -4890,6 +6067,12 @@ impl crate::orchestration::OrchestrationAdapter for ProductionOrchestrationEffec
         let snapshot = crate::snapshot::RunSnapshot::load(self.state_root, member.run_id, 0)
             .map_err(|_| AdapterFailure::Unknown)?;
         if snapshot.projection.lifecycle == RunLifecycle::Closed {
+            // The member's global Profile retirement is the release's own
+            // effect even when the projection is already Closed
+            // (RPC:373-384): complete it instead of returning early, so a
+            // closed-on-retry member still reaches `closed_membership_released`.
+            retire_closed_profile_membership(self.state_root, member.run_id, RunVerb::Close)
+                .map_err(|error| AdapterFailure::Rejected(error.code))?;
             return Ok(());
         }
         let workspace = snapshot
@@ -6246,15 +7429,7 @@ fn run_control_admitted(
             .is_ok_and(|projection| projection.lifecycle == RunLifecycle::Closed)
         && let SemanticResult::Run(value) = &mut result
     {
-        let settled = RunStore::new(SystemWorkspacePlatform, state_root)
-            .load_manifest(run_id)
-            .and_then(|manifest| {
-                if verb == RunVerb::Close {
-                    release_global_run_membership(state_root, &manifest, run_id)
-                } else {
-                    closed_membership_released(state_root, &manifest, run_id)
-                }
-            });
+        let settled = retire_closed_profile_membership(state_root, run_id, verb);
         if settled.is_err() && value.get("state").is_none() {
             let snapshot = RunSources::load(state_root, run_id, 0)?;
             return Err(MachineError::new(
@@ -6273,6 +7448,56 @@ fn run_control_admitted(
         }
     }
     Ok((result, response))
+}
+
+/// Retire (Close) or observe (Status) the Profile membership of a closed Run.
+///
+/// The retirement is the second half of the admitted control path so that the
+/// successor release can close a member Run without it: every existing
+/// caller still runs `run_control_admitted`, which keeps this order unchanged.
+fn retire_closed_profile_membership(
+    state_root: &Path,
+    run_id: Uuid,
+    verb: RunVerb,
+) -> Result<(), MachineError> {
+    let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
+    if verb == RunVerb::Close {
+        release_global_run_membership(state_root, &manifest, run_id)
+    } else {
+        closed_membership_released(state_root, &manifest, run_id)
+    }
+}
+
+/// Close one member Run without retiring its Profile membership.
+///
+/// The successor release owns the retirement order — non-retiring close, owned
+/// cleanup, writer verification, explicit Profile retirement, terminal commit —
+/// so this entry point stops at the close itself. `mutate_run`,
+/// `mutate_bound_run`, `run_control_admitted` and `run_control_typed` keep the
+/// retiring order unchanged.
+// The successor release owner is constructed by the release admission.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn successor_close_run(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    interrupt: bool,
+) -> Result<SemanticResult, MachineError> {
+    // The close is fenced exactly as the retiring path fences it; a missing
+    // caller-supplied revision resolves to the durable head inside the inner
+    // control path.
+    let (result, _) = run_control_admitted_inner(
+        view,
+        state_root,
+        run_id,
+        RunVerb::Close,
+        Some(carrier),
+        Prepared::Close { interrupt },
+        false,
+        None,
+    )?;
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6391,10 +7616,11 @@ fn run_control_admitted_inner(
     // A caller Run must durably become a verified Reader before its terminal
     // seal. Retiring the Writer after sealing cannot change the sealed policy.
     if verb == RunVerb::Close
-        && RunStore::new(SystemWorkspacePlatform, state_root)
-            .load_manifest(run_id)?
-            .schema_version
-            == 3
+        && crate::run::is_caller_workspace_generation(
+            RunStore::new(SystemWorkspacePlatform, state_root)
+                .load_manifest(run_id)?
+                .schema_version,
+        )
     {
         let mut current = RunSources::load(state_root, run_id, 0)?;
         if current
@@ -6710,7 +7936,7 @@ fn retire_absent_generation_writer(
     crate::worker::prove_worker_generation_absent(record)
         .map_err(|error| error.machine_error(run_id, state_root))?;
     let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
-    let caller = manifest.schema_version == 3;
+    let caller = crate::run::is_caller_workspace_generation(manifest.schema_version);
     if manifest.workspace_id != record.identity.workspace_id {
         return Err(internal("absent generation crossed the manifest workspace"));
     }
@@ -6866,12 +8092,78 @@ fn retire_absent_generation_writer(
         .map(|_| ())
 }
 
-pub(crate) fn finish_external_run_close(
+/// Verify the owned cleanup of one closed external Specialist Run.
+///
+/// The four legacy external close callers keep HEAD's behaviour exactly,
+/// including the missing-locator rule: a missing runtime record is skipped
+/// (`MissingLocatorRule::Skip`), so a Run an older binary already cleaned —
+/// locator removed, before verified-absence markers existed — still closes
+/// and retires exactly as before. `finish_external_run_close` keeps calling
+/// this and the explicit membership retirement in the current order, so
+/// every existing caller is behaviourally identical.
+pub(crate) fn verify_external_owned_cleanup(
     view: &WorkspaceView,
     state_root: &Path,
     run_id: Uuid,
     engagement_id: Uuid,
     owner: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    verify_member_owned_cleanup(
+        view,
+        state_root,
+        run_id,
+        MemberReleaseCleanup::External {
+            engagement_id,
+            carrier: owner,
+        },
+        MissingLocatorRule::Skip,
+    )
+}
+
+/// What the shared owned-cleanup verifier does when the runtime locator is
+/// missing (the non-retiring close split keeps legacy behaviour unchanged).
+enum MissingLocatorRule {
+    /// HEAD's legacy external close behaviour: the missing record is skipped
+    /// and the verifier continues with the writer observation.
+    Skip,
+    /// The successor member release settlement's strict rule: the locator's
+    /// only remover durably records a verified-absence marker for exactly the
+    /// highest evidenced generation before removing it, so a missing locator
+    /// must be proven absent from the startup-range probe, that marker and
+    /// the process-inventory registrations before the release settles.
+    ProveGenerationAbsent,
+}
+
+/// The owned-cleanup authority one release settlement closes under.
+enum MemberReleaseCleanup<'a> {
+    /// The external owner: a held writer is released through the engagement's
+    /// own authority, authorized by the engagement owner's carrier.
+    External {
+        engagement_id: Uuid,
+        carrier: &'a CredentialCarrier,
+    },
+    /// Already-Closed cleanup is confined to the authenticated release lease.
+    Managed {
+        session_id: Uuid,
+        lease: &'a crate::worker::RunLifecycleLease,
+    },
+}
+
+/// The shared owned-cleanup verifier of both release owners.
+///
+/// The Run projection must be `Closed` and its exact owned runtime generation
+/// verified — present (stopped and absent), absent (record removed, proven
+/// absent only under the successor settlement's strict rule), or classified
+/// as recovery on any identity or generation fact that cannot be proven —
+/// and this runs even when the Run was already `Closed` on retry or recovery
+/// (RPC:349-366). A writer guard the member still holds is settled under the
+/// owner's own authority.
+fn verify_member_owned_cleanup(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    cleanup: MemberReleaseCleanup<'_>,
+    missing_locator: MissingLocatorRule,
 ) -> Result<(), MachineError> {
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let projection = store.load_state_projection(run_id)?;
@@ -6907,6 +8199,12 @@ pub(crate) fn finish_external_run_close(
                 ));
             }
         }
+    } else if matches!(missing_locator, MissingLocatorRule::ProveGenerationAbsent) {
+        // The successor settlement's strict rule (RPC:349): a
+        // lost, dangling or never-written record must not let an owned
+        // runtime generation slip past the verifier. The legacy external
+        // close callers keep HEAD's skip.
+        prove_missing_locator_generation_absent(state_root, run_id)?;
     }
     let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid).load()?;
     if writer
@@ -6914,9 +8212,1368 @@ pub(crate) fn finish_external_run_close(
         .as_ref()
         .is_some_and(|holder| holder.run_id == run_id)
     {
-        release_external_writer(view, state_root, run_id, engagement_id, owner)?;
+        match cleanup {
+            MemberReleaseCleanup::External {
+                engagement_id,
+                carrier,
+            } => {
+                release_external_writer(view, state_root, run_id, engagement_id, carrier)?;
+            }
+            MemberReleaseCleanup::Managed { session_id, lease } => {
+                // This branch follows exact owned-generation verification above.
+                // It never admits an ordinary Closed-Run writer operation.
+                lease
+                    .owner_ref()
+                    .map_err(|error| error.machine_error(run_id, state_root))?;
+                // A present locator may have named an older generation than the
+                // projection or startup witnesses. Recheck the remover's marker
+                // against those authorities before retiring the held guard.
+                prove_missing_locator_generation_absent(state_root, run_id)?;
+                let manifest = store.load_manifest(run_id)?;
+                if manifest.schema_version != 4
+                    || !manifest.aggregate_binding.as_ref().is_some_and(|binding| {
+                        binding.aggregate_kind == AggregateKind::OrchestratedSession
+                            && binding.aggregate_id == session_id
+                            && binding.member_kind == crate::run::AggregateMemberKind::Specialist
+                    })
+                {
+                    return Err(internal("managed cleanup crossed its accepted member"));
+                }
+                let credential = crate::orchestration::BrokerCredential::load(
+                    &state_root.join("orchestration/broker-credentials"),
+                    uid,
+                    run_id,
+                )?;
+                let carrier = credential.controller_carrier()?;
+                let binding = store.load_controller_binding(run_id)?;
+                authorize_controller(run_id, "run.release_write", &binding, &carrier)?;
+                crate::writer::WriterStore::new(state_root, &view.workspace_id, uid).transact(
+                    |record| {
+                        let Some(holder) = &record.holder else {
+                            return Ok(());
+                        };
+                        if holder.run_id != run_id {
+                            return Ok(());
+                        }
+                        if holder.run_generation != projection.run_generation.max(1)
+                            || holder.worker_generation != holder.run_generation
+                            || holder.controller_id != binding.identity.controller_id
+                            || holder.controller_generation != binding.identity.generation
+                        {
+                            return Err(internal("managed writer cleanup identity changed"));
+                        }
+                        if record.state == crate::writer::WriterAuthorityState::Active {
+                            let transaction = Uuid::now_v7();
+                            record.prepare_release(run_id, transaction)?;
+                            record.commit_release(transaction)
+                        } else {
+                            let transaction = record.transaction_id.ok_or_else(|| {
+                                internal("managed cleanup guard has no transaction")
+                            })?;
+                            record.retire_verified_reader_guard(transaction)
+                        }
+                    },
+                )?;
+            }
+        }
     }
-    release_global_run_membership(state_root, &store.load_manifest(run_id)?, run_id)
+    Ok(())
+}
+
+/// Establish whether a locator-missing Run's owned generation is proven absent
+/// (RPC:349-366).
+///
+/// The runtime locator has exactly one remover — `remove_verified_absent_runtime`
+/// — which proves the whole recorded generation absent, retires the Run's
+/// process-inventory registrations and durably records a verified-absence
+/// marker for exactly that generation BEFORE removing the locator. A missing
+/// locator is therefore explained only by that verified cleanup, a Run that
+/// never started a worker generation, or an out-of-band loss.
+///
+/// The proof binds the marker to `G`, the highest generation evidenced by the
+/// durable facts that exist before any process of a generation runs: the
+/// parent writes the prepared generation into the startup lock's slot-0
+/// StartupOwnerRecord before spawning (the projection advances only with the
+/// child's first ledger append, after registration), and the child claims
+/// slot-1 with its identity before registering. So:
+///
+/// * the startup range is held and the worker range is unowned, and the Run
+///   has no remaining process-inventory registration of any state;
+/// * `G = max(projection run_generation, slot-0 generation if present, slot-1
+///   generation if present)` — an unreadable slot record is not "absent": it
+///   blocks;
+/// * `G == 0` (no evidence of any attempt) is proven; otherwise a
+///   verified-absence marker for exactly `G` — identity-bound to the slot-1
+///   record of `G` when one exists — is proven;
+/// * anything else is `OWNED_CLEANUP_UNVERIFIED` / `recover_run`, never
+///   terminal.
+///
+/// No census of recorded process groups is claimed: detached descendants in
+/// other sessions or groups cannot be enumerated without the locator's
+/// recorded scopes. Residual (recorded verbatim for the runtime spec): a
+/// generation whose only durable trace was its runtime locator — it shut down
+/// cleanly (clearing its slot records) before any ledger append, and its
+/// locator was then removed out of band — cannot be detected; out-of-band
+/// deletion of Dolgorae's private runtime state is outside this guarantee.
+/// The in-band remover always leaves the marker.
+///
+/// The proof mutates no evidence: `hold_startup_range` writes no owner
+/// record, and the range is released with the slot-preserving unlock, so a
+/// slot record that blocks one attempt blocks them all.
+fn prove_missing_locator_generation_absent(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
+    let lock = RunStartupLock::open(state_root, run_id)?;
+    lock.acquire()?;
+    let result =
+        prove_missing_locator_generation_absent_held(state_root, run_id, &lock).map(|_| ());
+    lock.release_preserving_records();
+    result
+}
+
+/// The caller already owns the startup range; opening it again would drop
+/// process-owned byte locks and would invalidate the proof's serialization.
+fn prove_missing_locator_generation_absent_held(
+    state_root: &Path,
+    run_id: Uuid,
+    lock: &RunStartupLock,
+) -> Result<u64, MachineError> {
+    lock.lock.require_unowned_worker_range().map_err(|error| {
+        locator_generation_unprovable(
+            run_id,
+            match error {
+                crate::worker::WorkerProtocolError::StartupBusy => "worker_range_still_owned",
+                _ => "worker_range_unverifiable",
+            },
+        )
+    })?;
+    if crate::process_inventory::run_registration_count(run_id)? > 0 {
+        return Err(locator_generation_unprovable(
+            run_id,
+            "registration_remains",
+        ));
+    }
+    // G: the highest generation the durable pre-spawn facts evidence. The
+    // projection's generation only reaches a live generation with the
+    // child's first ledger append, so the startup owner records are what
+    // a crashed newer generation cannot hide behind.
+    let mut generation = RunStore::new(SystemWorkspacePlatform, state_root)
+        .load_state_projection(run_id)
+        .map_err(|_| locator_generation_unprovable(run_id, "projection_unreadable"))?
+        .run_generation;
+    let mut claimed: Option<crate::worker::StartupOwnerRecord> = None;
+    for slot in [0_u8, 1_u8] {
+        match lock.lock.read_owner(slot) {
+            Ok(Some(owner)) => {
+                generation = generation.max(owner.identity.run_generation);
+                if slot == 1 {
+                    claimed = Some(owner);
+                }
+            }
+            // An unreadable slot record is not "absent": it blocks.
+            Ok(None) => {}
+            Err(_) => {
+                let reason = if slot == 0 {
+                    "slot0_record_unreadable"
+                } else {
+                    "slot1_record_unreadable"
+                };
+                return Err(locator_generation_unprovable(run_id, reason));
+            }
+        }
+    }
+    if generation == 0 {
+        // No evidence that any worker generation was ever attempted.
+        return Ok(0);
+    }
+    let Some(marker) =
+        crate::worker::verified_absence_marker(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|_| locator_generation_unprovable(run_id, "absence_marker_unreadable"))?
+    else {
+        return Err(locator_generation_unprovable(
+            run_id,
+            "no_verified_absence_marker",
+        ));
+    };
+    if marker.run_generation != generation {
+        return Err(locator_generation_unprovable(
+            run_id,
+            "absence_marker_generation_mismatch",
+        ));
+    }
+    // When a slot-1 record for exactly G survives, the marker must be
+    // identity-bound to it.
+    if let Some(owner) = claimed
+        .as_ref()
+        .filter(|owner| owner.identity.run_generation == generation)
+        && crate::worker::worker_identity_digest(&owner.identity).as_deref()
+            != Some(marker.worker_identity_sha256.as_str())
+    {
+        return Err(locator_generation_unprovable(
+            run_id,
+            "absence_marker_identity_mismatch",
+        ));
+    }
+    Ok(generation)
+}
+
+/// The typed unprovable-generation refusal the failure mapping records.
+fn locator_generation_unprovable(run_id: Uuid, reason: &'static str) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the member Run's owned runtime generation cannot be proven absent",
+        false,
+        json!({"run_id":run_id,"locator":"missing","reason":reason,
+            "required_action":"recover_run"}),
+    )
+}
+
+/// Finish one external Specialist Run's close by retiring its membership.
+///
+/// The legacy order — verify the owned cleanup, then retire the Profile
+/// membership — is unchanged for every existing caller.
+pub(crate) fn finish_external_run_close(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    engagement_id: Uuid,
+    owner: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    verify_external_owned_cleanup(view, state_root, run_id, engagement_id, owner)?;
+    release_global_run_membership(
+        state_root,
+        &RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?,
+        run_id,
+    )
+}
+
+/// One `S` member-release input (RPC:219-325).
+// The release settlement owns this value from admission to the terminal
+// commit; the member Run's lifecycle lease is held across all of it.
+#[cfg_attr(not(test), allow(dead_code))]
+struct MemberReleaseInput<'a> {
+    view: &'a WorkspaceView,
+    state_root: &'a Path,
+    owner: crate::delegation_service::SettlementOwner,
+    workspace_ref: &'a str,
+    member_ref: Uuid,
+    controller: &'a crate::run::ControllerBinding,
+    /// The adapter's close preference; the settlement's close of the member Run
+    /// carries it.
+    allow_interrupt: bool,
+    expected_revision: u64,
+}
+
+// Test-only interleave point between a release's pre-lease row read and its
+// lifecycle-lease acquire; never compiled into the real build.
+#[cfg(test)]
+thread_local! {
+    static RELEASE_PRE_LEASE_INTERLEAVE: std::cell::RefCell<Option<Box<dyn Fn() + 'static>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install one test interleave; the guard clears it when the test ends.
+#[cfg(test)]
+struct ReleasePreLeaseHookGuard;
+
+#[cfg(test)]
+impl Drop for ReleasePreLeaseHookGuard {
+    fn drop(&mut self) {
+        RELEASE_PRE_LEASE_INTERLEAVE.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+fn set_release_pre_lease_interleave(hook: impl Fn() + 'static) -> ReleasePreLeaseHookGuard {
+    RELEASE_PRE_LEASE_INTERLEAVE.with(|cell| *cell.borrow_mut() = Some(Box::new(hook)));
+    ReleasePreLeaseHookGuard
+}
+
+#[cfg(test)]
+fn run_release_pre_lease_interleave() {
+    RELEASE_PRE_LEASE_INTERLEAVE.with(|cell| {
+        if let Some(hook) = cell.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
+/// The dead states of one member's owned work: blocked states no execution
+/// path settles on its own, so a release blocked by them ends in the typed
+/// recovery row instead of the endless settling answer.
+///
+/// * a `dispatching` task whose Turn id was never recorded — only the
+///   dispatch's own response path records it;
+/// * a bound Turn whose durable terminal record exists without its resolution
+///   record — only the worker writes the resolution.
+///
+/// A Turn that is merely still running (no durable terminal yet) is not dead:
+/// the settling answer stands. This deliberately proves nothing from
+/// generation absence and settles nothing with a typed-unavailable marker; the
+/// Turn-existence check reads the ledger's durable terminal lazily — only
+/// once a candidate task carries a Turn id — and decides by the terminal the
+/// Run last journalled naming that Turn.
+fn unresolvable_member_work(
+    state_root: &Path,
+    connection: &rusqlite::Connection,
+    owner: SettlementOwner,
+    member_ref: Uuid,
+) -> Result<Option<&'static str>, MachineError> {
+    let tasks: Vec<(String, Option<String>)> = match owner {
+        SettlementOwner::External { engagement_id } => {
+            let mut statement = connection
+                .prepare(
+                    "SELECT state,turn_id FROM tasks
+                      WHERE engagement_id=?1 AND specialist_run_id=?2
+                        AND state IN ('dispatching','running')",
+                )
+                .map_err(|_| internal("the member task rows are unreadable"))?;
+            let rows = statement
+                .query_map(
+                    rusqlite::params![engagement_id.to_string(), member_ref.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|_| internal("the member task rows are unreadable"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|_| internal("the member task rows are unreadable"))?
+        }
+        SettlementOwner::Managed { session_id } => {
+            let mut statement = connection
+                .prepare(
+                    "SELECT state,target_turn_id FROM brokered_tasks
+                      WHERE session_id=?1 AND target_run_id=?2
+                        AND state IN ('dispatching','running')",
+                )
+                .map_err(|_| internal("the member task rows are unreadable"))?;
+            let rows = statement
+                .query_map(
+                    rusqlite::params![session_id.to_string(), member_ref.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|_| internal("the member task rows are unreadable"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|_| internal("the member task rows are unreadable"))?
+        }
+    };
+    // The Run's recorded terminal payloads are read lazily — only once a
+    // candidate task actually carries a Turn id — and the terminal check is per
+    // task Turn id against every recorded terminal, not only the Run's last
+    // one: a Turn that ended earlier than a later terminal still has
+    // its own record.
+    let mut terminal_payloads: Option<Vec<serde_json::Value>> = None;
+    for (state, turn_id) in tasks {
+        let Some(turn_id) = turn_id else {
+            if state == "dispatching" {
+                return Ok(Some("dispatch_without_turn"));
+            }
+            continue;
+        };
+        let payloads = match terminal_payloads {
+            Some(ref payloads) => payloads,
+            None => terminal_payloads.insert(durable_terminal_payloads(state_root, member_ref)?),
+        };
+        let has_terminal = payloads.iter().any(|payload| {
+            payload
+                .get("turn_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|recorded| recorded == turn_id)
+        });
+        if has_terminal && resolved_terminal(state_root, member_ref, &turn_id)?.is_none() {
+            return Ok(Some("terminal_without_resolution"));
+        }
+    }
+    Ok(None)
+}
+
+/// Every durable `turn_terminal` payload the Run's ledger recorded.
+///
+/// The per-task terminal check needs the whole recorded set — a Turn that ended
+/// earlier than the Run's last terminal still has its own record — so this
+/// reads the observed ledger once through the same reader the last-terminal
+/// reconstruction uses.
+fn durable_terminal_payloads(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<Vec<serde_json::Value>, MachineError> {
+    let projection =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_state_projection(run_id)?;
+    let head = projection.ledger_head.sequence;
+    // A Run that never started a Turn has no terminal to reconstruct, and the
+    // projection already knows that, so the ledger is not reopened to be told.
+    if head == 0 || projection.latest_turn_id.is_none() {
+        return Ok(Vec::new());
+    }
+    let ledger = crate::ledger::ObservedLedger::open_run(state_root, run_id, head)?;
+    ledger
+        .payloads_of_kind(crate::audit::AuditKind::TurnTerminal)
+        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))
+}
+
+/// Admit (or resume) one `S` member release and settle it while holding the
+/// member Run's lifecycle lease.
+///
+/// The order is the contracted one (RPC:433-456, :338-394): authenticate
+/// the scope authority, read the retained release row **before any lease**,
+/// admit one `requested` row in one transaction, then take the member Run's
+/// lifecycle lease and branch on that result. The attempt that acquires the
+/// lease owns the freshly written witness and runs the whole settlement —
+/// quiescence, the non-retiring close, the shared owned-cleanup verifier,
+/// writer verification, explicit Profile retirement and the one atomic
+/// terminal commit — before the lease drops.
+// The release settlement owns this value from admission to the terminal
+// commit; the member Run's lifecycle lease is held across all of it.
+#[cfg_attr(not(test), allow(dead_code))]
+fn settle_member_release(
+    request: crate::delegation_service::MemberReleaseRequest<'_>,
+    carrier: &CredentialCarrier,
+) -> Result<
+    crate::delegation_service::MemberReleaseOutcome,
+    crate::delegation_service::MemberReleaseFailure,
+> {
+    use crate::delegation_service::{MemberReleaseFailure, MemberReleaseOutcome};
+    let input = MemberReleaseInput {
+        view: request.view,
+        state_root: request.state_root,
+        owner: request.owner,
+        workspace_ref: request.workspace_ref,
+        member_ref: request.member_ref,
+        controller: request.controller,
+        allow_interrupt: request.allow_interrupt,
+        expected_revision: request.expected_revision,
+    };
+    let scope_kind = input.owner.scope_kind();
+    let scope_ref = input.owner.scope_ref().to_string();
+    let before = MemberReleaseFailure::BeforeAdmission;
+
+    // 1. Current authority over the scope, before any durable read (RPC §7.1).
+    authenticate_member_release_scope(&input).map_err(before)?;
+    // 2. The retained row, before any lease (RPC §7.1-§7.2).
+    let mut store =
+        EngagementStore::open(&EngagementStore::workspace_database_path(input.state_root))
+            .map_err(before)?;
+    let read = |store: &EngagementStore| {
+        crate::engagement::member_release_operation(
+            store.connection(),
+            input.workspace_ref,
+            scope_kind,
+            &scope_ref,
+            &input.member_ref.to_string(),
+        )
+    };
+    let existing = read(&store).map_err(before)?;
+    let operation = match existing {
+        Some(operation) => operation,
+        None => {
+            let now = unix_time_ms_semantic().map_err(before)?;
+            let operation_ref = Uuid::now_v7();
+            let principal = format!("controller:{}", input.controller.identity.controller_id);
+            store
+                .transact(|transaction| {
+                    admit_release_transaction(
+                        transaction,
+                        &input,
+                        scope_kind,
+                        &scope_ref,
+                        operation_ref,
+                        &principal,
+                        now,
+                    )
+                })
+                .map_err(before)?
+        }
+    };
+    let operation_ref = Uuid::parse_str(&operation.operation_ref)
+        .map_err(|_| before(internal("the release operation identity is invalid")))?;
+    // A row that is already terminal answers here — from the pre-lease read or
+    // from a concurrent attempt joined inside the admission transaction: the
+    // settled projection, no lease, a stale `expected_revision` ignored
+    // (RPC:433-441). The repeat re-runs only the idempotent post-terminal
+    // cleanup, which is a post-commit cleanup failure's retry path.
+    if operation.progress == "terminal" {
+        if let Err(error) = finish_terminal_release(&input, operation_ref) {
+            return Err(MemberReleaseFailure::AfterAdmission {
+                operation_ref,
+                error,
+            });
+        }
+        return Ok(MemberReleaseOutcome::Operation(operation));
+    }
+    let after = |error: MachineError| MemberReleaseFailure::AfterAdmission {
+        operation_ref,
+        error,
+    };
+
+    // 3. The member Run's lifecycle lease, and the lease verdict branch on that
+    //    result.
+    //    A successful acquire means this attempt owns the freshly written
+    //    witness, so the held-owner verdict is never evaluated against it.
+    //    A member Run whose durable state cannot be read for its generation —
+    //    the hire crash and the recovery_required spawn — fails through
+    //    the close-stage mapping, never as an unrecorded escape.
+    #[cfg(test)]
+    run_release_pre_lease_interleave();
+    let mut retried = false;
+    let lease = loop {
+        let generation = match RunStore::new(SystemWorkspacePlatform, input.state_root)
+            .load_state_projection(input.member_ref)
+        {
+            Ok(projection) => projection.run_generation.max(1),
+            Err(error) => {
+                record_member_release_failure(
+                    input.state_root,
+                    operation_ref,
+                    "recovery_needed",
+                    "MEMBER_RUN_CLOSE_UNVERIFIED",
+                    "recover_run",
+                );
+                return Err(after(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the member Run could not reach Closed for release",
+                    false,
+                    json!({"operation_ref":operation_ref,"run_id":input.member_ref,
+                        "reason":error.code,"required_action":"recover_run"}),
+                )));
+            }
+        };
+        match crate::worker::RunLifecycleLease::acquire(
+            input.state_root,
+            input.workspace_ref,
+            input.member_ref,
+            generation,
+        ) {
+            Ok(lease) => break lease,
+            Err(crate::worker::WorkerProtocolError::StartupBusy) => {
+                // Re-read the row under contention: a concurrent attempt may
+                // have recorded its own digest after this attempt's pre-lease
+                // read, and that recorded digest is a verified active owner of
+                // this very operation — typed busy, never recovery
+                // (RPC:442-446).
+                let current = read(&store).map_err(after)?;
+                let reference = current.as_ref().unwrap_or(&operation);
+                match crate::worker::lifecycle_owner_verdict(
+                    input.state_root,
+                    input.workspace_ref,
+                    input.member_ref,
+                ) {
+                    // The lock was released between the failed acquire and the
+                    // verdict: one retry, and only that acquire proceeds.
+                    crate::worker::LifecycleOwnerVerdict::Free if !retried => {
+                        retried = true;
+                        continue;
+                    }
+                    verdict => {
+                        let outcome = busy_release_outcome(operation_ref, reference, verdict);
+                        // The busy branch's terminal answer runs the same
+                        // post-terminal cleanup as every other terminal answer
+                        // point: a pending isolated-root or member
+                        // credential cleanup is never skipped behind a success
+                        // answer, the frozen row itself never changes, and a
+                        // cleanup failure surfaces the typed restore answer.
+                        if let MemberReleaseOutcome::Operation(operation) = &outcome
+                            && operation.progress == "terminal"
+                        {
+                            finish_terminal_release(&input, operation_ref).map_err(after)?;
+                        }
+                        return Ok(outcome);
+                    }
+                }
+            }
+            Err(error) => {
+                let error = error.machine_error(input.member_ref, input.state_root);
+                record_member_release_failure(
+                    input.state_root,
+                    operation_ref,
+                    "recovery_needed",
+                    "RELEASE_LEASE_UNVERIFIED",
+                    "restore_state",
+                );
+                return Err(after(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the member Run's lifecycle lease cannot be taken for release",
+                    false,
+                    json!({"operation_ref":operation_ref,"reason":error.code}),
+                )));
+            }
+        }
+    };
+    // Our acquire wrote the witness, so `owner_ref` is this attempt's digest.
+    let owner_ref = lease
+        .owner_ref()
+        .map_err(|error| after(error.machine_error(input.member_ref, input.state_root)))?;
+    // Re-read under the owning serialization: a settled row keeps its owner and
+    // is returned as it stands (RPC:433-441).
+    let current = read(&store).map_err(after)?;
+    let Some(current) = current else {
+        return Err(after(internal(
+            "the admitted release operation disappeared",
+        )));
+    };
+    if current.progress == "terminal" {
+        if let Err(error) = finish_terminal_release(&input, operation_ref) {
+            return Err(after(error));
+        }
+        return Ok(MemberReleaseOutcome::Operation(current));
+    }
+    let now = unix_time_ms_semantic().map_err(after)?;
+    store
+        .transact(|transaction| {
+            crate::engagement::record_member_release_progress(
+                transaction,
+                operation_ref,
+                crate::engagement::MemberReleaseProgress::Owned {
+                    owner_ref: &owner_ref,
+                },
+                now,
+            )
+        })
+        .map_err(|error| {
+            record_member_release_failure(
+                input.state_root,
+                operation_ref,
+                "recovery_needed",
+                "RELEASE_OWNER_UNRECORDED",
+                "restore_state",
+            );
+            after(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "the release owner could not be recorded",
+                false,
+                json!({"operation_ref":operation_ref,"reason":error.code}),
+            ))
+        })?;
+    // The settlement runs while this attempt still holds the lease;
+    // the lease drops only after the terminal commit or the recorded failure.
+    let settled = settle_admitted_release(&input, carrier, &mut store, operation_ref, &lease)
+        .map_err(after)?;
+    drop(lease);
+    // The post-terminal cleanup one release owns: the external member's
+    // isolated Specialist root, the managed member's Broker credential. The
+    // settled row itself is frozen and never rewritten by a cleanup failure;
+    // a repeat release re-runs exactly this, which is the failure's retry
+    // path (RPC:433-441). A blocked or failed settlement still owns its
+    // isolated work, so only a terminal row cleans.
+    if settled.progress == "terminal" {
+        finish_terminal_release(&input, operation_ref).map_err(after)?;
+    }
+    Ok(MemberReleaseOutcome::Operation(settled))
+}
+
+/// The post-terminal cleanup one release owns.
+///
+/// External: the isolated Specialist root, only after the terminal commit —
+/// never a blocked or failed settlement, whose member still owns its isolated
+/// work. Managed: the retired member's Broker credential, the dead state
+/// the terminal release removes. The cleanup is
+/// idempotent, so the terminal-answer paths of `settle_member_release` re-run
+/// it for a repeat release; a failure surfaces the typed recovery answer with
+/// the recorded `required_action` and rewrites no frozen row.
+fn finish_terminal_release(
+    input: &MemberReleaseInput<'_>,
+    operation_ref: Uuid,
+) -> Result<(), MachineError> {
+    match input.owner {
+        crate::delegation_service::SettlementOwner::External { engagement_id } => {
+            let canonical = input.view.canonical_path.to_path_buf()?;
+            crate::workspace::cleanup_isolated_root(
+                &canonical,
+                input.state_root,
+                engagement_id,
+                input.member_ref,
+            )
+            .map_err(|error| {
+                MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the isolated Specialist root cannot be cleaned after release",
+                    false,
+                    json!({"operation_ref":operation_ref,"run_id":input.member_ref,
+                        "reason":error.code,"required_action":"restore_isolated_worktree"}),
+                )
+            })
+        }
+        crate::delegation_service::SettlementOwner::Managed { .. } => {
+            crate::orchestration::retire_member_credential(
+                &input.state_root.join("orchestration/broker-credentials"),
+                DarwinSystem.current_uid(),
+                input.member_ref,
+            )
+            .map_err(|error| {
+                MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the retired member's Broker credential cannot be removed",
+                    false,
+                    json!({"operation_ref":operation_ref,"run_id":input.member_ref,
+                        "reason":error.code,"required_action":"restore_state"}),
+                )
+            })
+        }
+    }
+}
+
+/// Run the shared settlement of both release owners while the member Run's
+/// lifecycle lease is held (RPC:338-394).
+///
+/// The order is the contracted one: the quiescence gate, the non-retiring
+/// close, the shared owned-cleanup verifier (run even when the Run is already
+/// `Closed`), writer verification, explicit Profile retirement, then ONE
+/// atomic terminal commit. Every classified failure records its failure row
+/// in its own small transaction with the completion revisions left null;
+/// blocked quiescence leaves the owned row settling and is not a failure.
+// The release settlement owns this value from admission to the terminal
+// commit; the member Run's lifecycle lease is held across all of it.
+#[cfg_attr(not(test), allow(dead_code))]
+fn settle_admitted_release(
+    input: &MemberReleaseInput<'_>,
+    carrier: &CredentialCarrier,
+    store: &mut EngagementStore,
+    operation_ref: Uuid,
+    lease: &crate::worker::RunLifecycleLease,
+) -> Result<crate::delegation_identity::MemberReleaseOperation, MachineError> {
+    let member = input.member_ref;
+    let workspace_ref = input.workspace_ref;
+    let scope_kind = input.owner.scope_kind();
+    let scope_ref = input.owner.scope_ref().to_string();
+    // The quiescence gate: unresolved or uncertain work and pending
+    // interactions block the terminal; the row stays owned and settling, and
+    // the call answers with that durable state (RPC:346-348). An owned state
+    // that cannot be observed at all is an unverifiable execution fact:
+    // recovery, never a silent skip (RPC §5.2).
+    let blocked = (|| -> Result<bool, MachineError> {
+        let quiescence = match input.owner {
+            crate::delegation_service::SettlementOwner::External { .. } => {
+                crate::engagement::successor_member_quiescence(
+                    store.connection(),
+                    workspace_ref,
+                    scope_kind,
+                    &scope_ref,
+                    &member.to_string(),
+                )?
+            }
+            crate::delegation_service::SettlementOwner::Managed { session_id } => {
+                crate::orchestration::successor_member_quiescence(
+                    store.connection(),
+                    workspace_ref,
+                    session_id,
+                    member,
+                )?
+            }
+        };
+        Ok(quiescence.running
+            + quiescence.queued
+            + quiescence.claimed
+            + quiescence.dispatching
+            + quiescence.unresolved
+            > 0
+            || quiescence.pending_interaction
+            || member_interaction_pending(input.state_root, member)?)
+    })();
+    match blocked {
+        Ok(true) => {
+            // Two blocked states can never settle on their own — a
+            // dispatching task whose Turn id was never recorded, and a bound
+            // Turn whose durable terminal exists without its resolution record
+            // (that window). They end in the typed recovery row instead of
+            // the endless settling answer; a Turn still running keeps today's
+            // settling answer, and a repeat release resumes from the durable
+            // state once the dispatch's response path records the Turn id or
+            // the worker writes the resolution. An observation that fails
+            // instead of deciding is recorded exactly like the match's
+            // Err(error) arm — never an unrecorded escape.
+            match unresolvable_member_work(
+                input.state_root,
+                store.connection(),
+                input.owner,
+                member,
+            ) {
+                Ok(Some(reason)) => {
+                    record_member_release_failure(
+                        input.state_root,
+                        operation_ref,
+                        "recovery_needed",
+                        "OWNED_CLEANUP_UNVERIFIED",
+                        "recover_run",
+                    );
+                    return Err(MachineError::new(
+                        "RECOVERY_REQUIRED",
+                        "the member Run's owned work can never settle for release",
+                        false,
+                        json!({"operation_ref":operation_ref,"run_id":member,
+                            "reason":reason,"required_action":"recover_run"}),
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    record_member_release_failure(
+                        input.state_root,
+                        operation_ref,
+                        "recovery_needed",
+                        "OWNED_CLEANUP_UNVERIFIED",
+                        "recover_run",
+                    );
+                    return Err(MachineError::new(
+                        "RECOVERY_REQUIRED",
+                        "the member Run's owned execution state cannot be observed for release",
+                        false,
+                        json!({"operation_ref":operation_ref,"run_id":member,
+                            "reason":error.code,"required_action":"recover_run"}),
+                    ));
+                }
+            }
+            return crate::engagement::member_release_operation(
+                store.connection(),
+                workspace_ref,
+                scope_kind,
+                &scope_ref,
+                &member.to_string(),
+            )?
+            .ok_or_else(|| internal("the owned release operation is missing"));
+        }
+        Ok(false) => {}
+        Err(error) => {
+            record_member_release_failure(
+                input.state_root,
+                operation_ref,
+                "recovery_needed",
+                "OWNED_CLEANUP_UNVERIFIED",
+                "recover_run",
+            );
+            return Err(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "the member Run's owned execution state cannot be observed for release",
+                false,
+                json!({"operation_ref":operation_ref,"run_id":member,
+                    "reason":error.code,"required_action":"recover_run"}),
+            ));
+        }
+    }
+    // The non-retiring close: managed runs close through
+    // `successor_close_run` under the member's own Broker credential; external
+    // runs answer the `ExternalClose` control request when a runtime record
+    // exists and otherwise take the same durable offline close. Neither path
+    // ever calls the retiring wrappers (RPC:349-366).
+    //
+    // A member Run whose durable state cannot even be read — the hire
+    // crash and the recovery_required spawn left no readable Run — fails
+    // through the same close-stage mapping, never as an unrecorded escape.
+    let closed = (|| -> Result<(), MachineError> {
+        let projection = RunStore::new(SystemWorkspacePlatform, input.state_root)
+            .load_state_projection(member)?;
+        if projection.lifecycle == RunLifecycle::Closed {
+            return Ok(());
+        }
+        match input.owner {
+            crate::delegation_service::SettlementOwner::Managed { .. } => {
+                let credential = crate::orchestration::BrokerCredential::load(
+                    &input.state_root.join("orchestration/broker-credentials"),
+                    DarwinSystem.current_uid(),
+                    member,
+                )?;
+                let broker = credential.controller_carrier()?;
+                successor_close_run(
+                    input.view,
+                    input.state_root,
+                    member,
+                    &broker,
+                    input.allow_interrupt,
+                )
+                .map(|_| ())
+            }
+            crate::delegation_service::SettlementOwner::External { engagement_id } => {
+                let record = crate::worker::runtime_record_path(
+                    &crate::worker::runtime_root(input.state_root),
+                    member,
+                )
+                .map_err(|error| error.machine_error(member, input.state_root))?;
+                if record.exists() {
+                    let manifest = RunStore::new(SystemWorkspacePlatform, input.state_root)
+                        .load_manifest(member)?;
+                    if crate::run::is_caller_workspace_generation(manifest.schema_version)
+                        && crate::writer::WriterStore::new(
+                            input.state_root,
+                            &input.view.workspace_id,
+                            DarwinSystem.current_uid(),
+                        )
+                        .load()?
+                        .holder
+                        .as_ref()
+                        .is_some_and(|holder| holder.run_id == member)
+                    {
+                        // ExternalClose reaches the worker directly. Prepare its
+                        // verified Reader policy before that worker can seal,
+                        // under this release's lease and external authority.
+                        release_external_writer(
+                            input.view,
+                            input.state_root,
+                            member,
+                            engagement_id,
+                            carrier,
+                        )?;
+                    }
+                    external_close_control_request(input, carrier, engagement_id)
+                } else {
+                    successor_close_run(
+                        input.view,
+                        input.state_root,
+                        member,
+                        carrier,
+                        input.allow_interrupt,
+                    )
+                    .map(|_| ())
+                }
+            }
+        }
+    })();
+    if let Err(error) = closed {
+        record_member_release_failure(
+            input.state_root,
+            operation_ref,
+            "recovery_needed",
+            "MEMBER_RUN_CLOSE_UNVERIFIED",
+            "recover_run",
+        );
+        return Err(MachineError::new(
+            "RECOVERY_REQUIRED",
+            "the member Run could not reach Closed for release",
+            false,
+            json!({"operation_ref":operation_ref,"run_id":member,
+                "reason":error.code,"required_action":"recover_run"}),
+        ));
+    }
+    // The shared owned-cleanup verifier, run even when the Run was already
+    // `Closed`: present, absent, mismatching and generation-absent runtime
+    // records are classified, never skipped (RPC:362-366).
+    let cleanup = match input.owner {
+        crate::delegation_service::SettlementOwner::External { engagement_id } => {
+            MemberReleaseCleanup::External {
+                engagement_id,
+                carrier,
+            }
+        }
+        crate::delegation_service::SettlementOwner::Managed { session_id } => {
+            MemberReleaseCleanup::Managed { session_id, lease }
+        }
+    };
+    if let Err(error) = verify_member_owned_cleanup(
+        input.view,
+        input.state_root,
+        member,
+        cleanup,
+        MissingLocatorRule::ProveGenerationAbsent,
+    ) {
+        // A guard the member still holds after the verifier's own release
+        // attempt — including a blocked-unknown one — is a cleanup fact; every
+        // other verifier failure is an unverifiable owned runtime.
+        let held = member_writer_observation(crate::delegation_service::MemberCleanupObservation {
+            view: input.view,
+            state_root: input.state_root,
+            owner: input.owner,
+            member_ref: member,
+        })
+        .is_ok_and(|observation| observation.holds || observation.blocked_unknown);
+        if held {
+            record_member_release_failure(
+                input.state_root,
+                operation_ref,
+                "cleanup_failed",
+                "WRITER_CLEANUP_UNSETTLED",
+                "restore_state",
+            );
+            return Err(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "the member Run's writer authority did not settle for release",
+                false,
+                json!({"operation_ref":operation_ref,"run_id":member,
+                    "reason":error.code,"required_action":"restore_state"}),
+            ));
+        }
+        record_member_release_failure(
+            input.state_root,
+            operation_ref,
+            "recovery_needed",
+            "OWNED_CLEANUP_UNVERIFIED",
+            "recover_run",
+        );
+        return Err(MachineError::new(
+            "RECOVERY_REQUIRED",
+            "the member Run's owned cleanup cannot be verified for release",
+            false,
+            json!({"operation_ref":operation_ref,"run_id":member,
+                "reason":error
+                    .details
+                    .get("reason")
+                    .cloned()
+                    .unwrap_or_else(|| json!(error.code)),
+                "required_action":"recover_run"}),
+        ));
+    }
+    // Writer verification: after the verifier settled what the owner's own
+    // authority may settle, any guard this member still holds — or a
+    // blocked-unknown one — is unresolved owned cleanup and blocks the
+    // terminal (RPC:365).
+    let observation =
+        member_writer_observation(crate::delegation_service::MemberCleanupObservation {
+            view: input.view,
+            state_root: input.state_root,
+            owner: input.owner,
+            member_ref: member,
+        })?;
+    if observation.holds || observation.blocked_unknown {
+        record_member_release_failure(
+            input.state_root,
+            operation_ref,
+            "cleanup_failed",
+            "WRITER_CLEANUP_UNSETTLED",
+            "restore_state",
+        );
+        return Err(MachineError::new(
+            "RECOVERY_REQUIRED",
+            "the member Run's writer authority did not settle for release",
+            false,
+            json!({"operation_ref":operation_ref,"run_id":member,
+                "blocked_unknown":observation.blocked_unknown,
+                "required_action":"restore_state"}),
+        ));
+    }
+    #[cfg(test)]
+    member_release_before_retirement();
+    // Explicit Profile retirement through the Profile authority; a shared
+    // Profile Server is never stopped, restarted or replaced for one member
+    // (RPC:367-387).
+    let manifest =
+        RunStore::new(SystemWorkspacePlatform, input.state_root).load_manifest(member)?;
+    if let Err(error) = release_global_run_membership(input.state_root, &manifest, member) {
+        record_member_release_failure(
+            input.state_root,
+            operation_ref,
+            "cleanup_failed",
+            "PROFILE_RETIREMENT_FAILED",
+            "restore_state",
+        );
+        return Err(MachineError::new(
+            "RECOVERY_REQUIRED",
+            "the member Run's global Profile membership cannot be retired",
+            false,
+            json!({"operation_ref":operation_ref,"run_id":member,
+                "reason":error.code,"required_action":"restore_state"}),
+        ));
+    }
+    // ONE atomic terminal commit: the member's terminal state and event, the
+    // scoped membership counter +1, and the release row frozen with both
+    // completion revisions (RPC:388-394). The quiescence proof is retaken
+    // inside the transaction, so unsettled work cannot slip into the commit.
+    let owner_kind = match input.owner {
+        crate::delegation_service::SettlementOwner::External { .. } => "external",
+        crate::delegation_service::SettlementOwner::Managed { .. } => "managed",
+    };
+    let now = unix_time_ms_semantic()?;
+    store
+        .transact(|transaction| {
+            crate::caller_scope::require_member_settled(
+                transaction,
+                owner_kind,
+                &scope_ref,
+                member,
+            )?;
+            let workload = crate::engagement::member_workload_revision(
+                transaction,
+                workspace_ref,
+                scope_kind,
+                &scope_ref,
+                &member.to_string(),
+            )?;
+            match input.owner {
+                crate::delegation_service::SettlementOwner::External { engagement_id } => {
+                    crate::engagement::retire_external_member_released(
+                        transaction,
+                        engagement_id,
+                        member,
+                        now,
+                    )?;
+                }
+                crate::delegation_service::SettlementOwner::Managed { session_id } => {
+                    crate::orchestration::retire_successor_member_released(
+                        transaction,
+                        session_id,
+                        member,
+                        now,
+                    )?;
+                }
+            }
+            let terminal = crate::engagement::advance_scope_membership_revision(
+                transaction,
+                workspace_ref,
+                scope_kind,
+                &scope_ref,
+            )?;
+            crate::engagement::commit_member_release_terminal(
+                transaction,
+                operation_ref,
+                terminal,
+                workload,
+                now,
+            )
+        })
+        .map_err(|error| {
+            record_member_release_failure(
+                input.state_root,
+                operation_ref,
+                "recovery_needed",
+                "RELEASE_TERMINAL_UNSETTLED",
+                "reconcile_operation",
+            );
+            MachineError::new(
+                "RECOVERY_REQUIRED",
+                "the member release could not commit its terminal settlement",
+                false,
+                json!({"operation_ref":operation_ref,"reason":error.code,
+                    "required_action":"reconcile_operation"}),
+            )
+        })
+}
+
+/// Whether one member Run still has a pending interaction (RPC:346-348).
+fn member_interaction_pending(state_root: &Path, run_id: Uuid) -> Result<bool, MachineError> {
+    Ok(interaction_pending_at(state_root, run_id)?
+        .get("items")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty()))
+}
+
+/// The `ExternalClose` control request one external member Run answers.
+fn external_close_control_request(
+    input: &MemberReleaseInput<'_>,
+    carrier: &CredentialCarrier,
+    engagement_id: Uuid,
+) -> Result<(), MachineError> {
+    let member = input.member_ref;
+    let response = crate::worker::call_run_worker(
+        input.state_root,
+        member,
+        DarwinSystem.current_uid(),
+        Some(carrier.raw_fd()),
+        |expected| ControlRequestV1::ExternalClose {
+            expected,
+            caller: None,
+            engagement_id,
+            interrupt: input.allow_interrupt,
+        },
+    )
+    .map_err(|error| error.machine_error(member, input.state_root))?;
+    match response {
+        ControlResponseV1::Closed { .. } => Ok(()),
+        ControlResponseV1::Failed {
+            code,
+            message,
+            retryable,
+            details,
+        } => Err(MachineError::new(code, message, retryable, details)),
+        _ => Err(internal(
+            "the member Run's external close returned an unexpected response",
+        )),
+    }
+}
+
+/// The admission transaction of one fresh release attempt.
+///
+/// The existing row decides **before** the revision fence: a concurrent
+/// admission — terminal or not — is joined and answered from even when the
+/// scoped counter has moved past this attempt's `expected_revision`
+/// (RPC:433-456). Only a genuinely fresh admission fences the counter, inserts
+/// the row (still converging with a winner that commits inside this very
+/// transaction's window) and flips the member into its release state exactly
+/// once.
+fn admit_release_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    input: &MemberReleaseInput<'_>,
+    scope_kind: &str,
+    scope_ref: &str,
+    operation_ref: Uuid,
+    principal: &str,
+    now: i64,
+) -> Result<crate::delegation_identity::MemberReleaseOperation, MachineError> {
+    if let Some(existing) = crate::engagement::member_release_operation(
+        transaction,
+        input.workspace_ref,
+        scope_kind,
+        scope_ref,
+        &input.member_ref.to_string(),
+    )? {
+        return Ok(existing);
+    }
+    let current = crate::engagement::scope_membership_revision(
+        transaction,
+        input.workspace_ref,
+        scope_kind,
+        scope_ref,
+    )?;
+    if input.expected_revision != current {
+        // A fresh admission fences the scoped membership counter; a mismatch
+        // has no effect at all (RPC:253-259).
+        return Err(MachineError::new(
+            "REVISION_CONFLICT",
+            "the scoped membership revision moved before release admission",
+            false,
+            json!({"scope_kind":scope_kind,"expected_revision":input.expected_revision,
+                "observed_revision":current,"effect":"none"}),
+        ));
+    }
+    let operation = crate::engagement::admit_or_join_member_release(
+        transaction,
+        crate::engagement::MemberReleaseAdmission {
+            operation_ref,
+            workspace_ref: input.workspace_ref,
+            scope_kind,
+            scope_ref,
+            member_ref: input.member_ref,
+            run_ref: input.member_ref,
+            controller_principal: principal,
+            controller_generation: input.controller.identity.generation,
+            admitted_membership_revision: current,
+            now_ms: now,
+        },
+    )?;
+    if operation.operation_ref == operation_ref.to_string() {
+        // Only the attempt that inserted the row flips the member into its
+        // release state and appends the event.
+        match input.owner {
+            crate::delegation_service::SettlementOwner::External { engagement_id } => {
+                crate::engagement::mark_external_member_releasing(
+                    transaction,
+                    engagement_id,
+                    input.member_ref,
+                    now,
+                )?;
+            }
+            crate::delegation_service::SettlementOwner::Managed { session_id } => {
+                crate::orchestration::mark_successor_member_retiring(
+                    transaction,
+                    session_id,
+                    input.member_ref,
+                    now,
+                )?;
+            }
+        }
+    }
+    Ok(operation)
+}
+
+/// The busy-branch answer, decided by the row as it stands after the failed
+/// acquire (RPC:442-446).
+///
+/// `HeldVerified` matching the row's current `owner_ref` is a verified active
+/// owner of this very operation — typed busy with no mutation. A mismatching
+/// digest, an unprovable witness, or a still-free lock after the one retry are
+/// recovery or busy respectively, never a takeover (RPC:316-318).
+fn busy_release_outcome(
+    operation_ref: Uuid,
+    row: &crate::delegation_identity::MemberReleaseOperation,
+    verdict: crate::worker::LifecycleOwnerVerdict,
+) -> crate::delegation_service::MemberReleaseOutcome {
+    // A row another attempt settled while this one contended answers from that
+    // terminal row (RPC:433-441).
+    if row.progress == "terminal" {
+        return crate::delegation_service::MemberReleaseOutcome::Operation(row.clone());
+    }
+    match verdict {
+        crate::worker::LifecycleOwnerVerdict::HeldVerified(digest)
+            if row.owner_ref.as_deref() == Some(digest.as_str()) =>
+        {
+            crate::delegation_service::MemberReleaseOutcome::Busy { operation_ref }
+        }
+        // Still acquirable after one retry: no attempt proved itself, so this
+        // call never claims the lock.
+        crate::worker::LifecycleOwnerVerdict::Free => {
+            crate::delegation_service::MemberReleaseOutcome::Busy { operation_ref }
+        }
+        _ => crate::delegation_service::MemberReleaseOutcome::Recovery { operation_ref },
+    }
+}
+
+/// Prove the caller's current authority over the release scope.
+///
+/// The adapter authenticated the Controller; this compares it with the scope's
+/// own durable authority: the engagement's owner binding, or the session's root
+/// Primary binding.
+// The release owner is constructed by the release admission in the
+// successors' adapter turn; settlement itself is the next step.
+#[cfg_attr(not(test), allow(dead_code))]
+fn authenticate_member_release_scope(input: &MemberReleaseInput<'_>) -> Result<(), MachineError> {
+    match input.owner {
+        crate::delegation_service::SettlementOwner::External { engagement_id } => {
+            let store = EngagementStore::open_read_only(
+                &EngagementStore::workspace_database_path(input.state_root),
+            )?;
+            let (workspace, owner) = store.external_owner_binding(engagement_id)?;
+            if workspace != input.workspace_ref || owner != *input.controller {
+                return Err(MachineError::new(
+                    "ENGAGEMENT_OWNER_MISMATCH",
+                    "the trusted Controller is not this engagement's authenticated owner",
+                    false,
+                    json!({"operation":"release_external_specialist","effect":"none"}),
+                ));
+            }
+        }
+        crate::delegation_service::SettlementOwner::Managed { session_id } => {
+            let broker = crate::orchestration::OrchestrationStore::open_observer(input.state_root)?;
+            let session = broker.session(session_id)?;
+            if session.workspace_id != input.workspace_ref {
+                return Err(MachineError::new(
+                    "RUN_STATE_CONFLICT",
+                    "the session belongs to another workspace",
+                    false,
+                    json!({"session_id":session_id,"operation":"release_specialist","effect":"none"}),
+                ));
+            }
+            let binding = RunStore::new(SystemWorkspacePlatform, input.state_root)
+                .load_controller_binding(session.root_run_id)?;
+            if binding != *input.controller {
+                return Err(MachineError::new(
+                    "SESSION_OWNER_MISMATCH",
+                    "the trusted Controller is not this session's authenticated root Primary",
+                    false,
+                    json!({"session_id":session_id,"operation":"release_specialist","effect":"none"}),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Record one classified release failure in its own small transaction.
+///
+/// Completion revisions stay null; the row remains resumable by an attempt that
+/// can prove the lease.
+// The release owner is constructed by the release admission in the
+// successors' adapter turn; settlement itself is the next step.
+#[cfg_attr(not(test), allow(dead_code))]
+fn record_member_release_failure(
+    state_root: &Path,
+    operation_ref: Uuid,
+    progress: &str,
+    safe_failure_code: &str,
+    required_action: &str,
+) {
+    let Ok(now) = unix_time_ms_semantic() else {
+        return;
+    };
+    let Ok(mut store) =
+        EngagementStore::open(&EngagementStore::workspace_database_path(state_root))
+    else {
+        return;
+    };
+    let _ = store.transact(|transaction| {
+        crate::engagement::record_member_release_progress(
+            transaction,
+            operation_ref,
+            crate::engagement::MemberReleaseProgress::Failed {
+                progress,
+                safe_failure_code,
+                required_action,
+            },
+            now,
+        )
+        .map(|_| ())
+    });
 }
 
 /// Quiesce one member selected by a durable Profile stop fence, then append
@@ -7379,7 +10036,7 @@ fn acquire_writer_authorized(
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let manifest = store.load_manifest(run_id)?;
-    if manifest.schema_version == 3 {
+    if matches!(manifest.schema_version, 3 | 4) {
         require_caller_runtime(&manifest)?;
     } else {
         manifest.require_legacy_adapter()?;
@@ -7403,7 +10060,7 @@ fn acquire_writer_authorized(
             "run.acquire_write",
         ));
     }
-    if manifest.schema_version == 3 && projection.lifecycle != RunLifecycle::Idle {
+    if matches!(manifest.schema_version, 3 | 4) && projection.lifecycle != RunLifecycle::Idle {
         return Err(run_state_conflict_error(
             run_id,
             projection.lifecycle,
@@ -7441,7 +10098,7 @@ fn acquire_writer_authorized(
         record.prepare_acquire(run_id, holder.clone(), transaction_id)
     })?;
     if replayed {
-        if manifest.schema_version == 3 {
+        if matches!(manifest.schema_version, 3 | 4) {
             let proof = call_admitted_caller_policy_proof(
                 state_root,
                 run_id,
@@ -7552,14 +10209,18 @@ fn acquire_writer_authorized(
         },
     );
     let caller_proof = match response {
-        Ok(ControlResponseV1::CallerPolicyVerified { proof }) if manifest.schema_version == 3 => {
+        Ok(ControlResponseV1::CallerPolicyVerified { proof })
+            if requires_caller_policy_proof(&manifest) =>
+        {
             Some(proof)
         }
         Ok(ControlResponseV1::WriterAccessChanged {
             write: true,
             writer_generation,
             ..
-        }) if manifest.schema_version != 3 && writer_generation == next_generation => None,
+        }) if !requires_caller_policy_proof(&manifest) && writer_generation == next_generation => {
+            None
+        }
         Ok(ControlResponseV1::Failed {
             code,
             message,
@@ -7684,7 +10345,7 @@ fn release_writer_authorized(
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let manifest = store.load_manifest(run_id)?;
-    if manifest.schema_version == 3 {
+    if matches!(manifest.schema_version, 3 | 4) {
         require_caller_runtime(&manifest)?;
     } else {
         manifest.require_legacy_adapter()?;
@@ -7724,7 +10385,7 @@ fn release_writer_authorized(
         record.prepare_release(run_id, transaction_id)
     })?;
     let Some(generation) = generation else {
-        if manifest.schema_version == 3 {
+        if matches!(manifest.schema_version, 3 | 4) {
             let proof = call_caller_policy_proof(state_root, run_id, carrier, transaction_id)?;
             return writer.observe_locked(|_| {
                 validate_caller_policy_current(
@@ -7756,8 +10417,14 @@ fn release_writer_authorized(
     let worker_record = match crate::worker::read_runtime_record(&runtime_record, uid) {
         Ok(record) => record,
         Err(error) => {
+            // A caller-policy Run whose runtime cannot be read has an unknown
+            // release effect, so its guard stays blocked.
             writer.transact(|record| {
-                record.rollback_release(transaction_id);
+                if requires_caller_policy_proof(&manifest) {
+                    record.block_unknown(transaction_id);
+                } else {
+                    record.rollback_release(transaction_id);
+                }
                 Ok(())
             })?;
             return Err(error.machine_error(run_id, &runtime_record));
@@ -7805,14 +10472,16 @@ fn release_writer_authorized(
         },
     );
     let caller_proof = match response {
-        Ok(ControlResponseV1::CallerPolicyVerified { proof }) if manifest.schema_version == 3 => {
+        Ok(ControlResponseV1::CallerPolicyVerified { proof })
+            if requires_caller_policy_proof(&manifest) =>
+        {
             Some(proof)
         }
         Ok(ControlResponseV1::WriterAccessChanged {
             write: false,
             writer_generation,
             ..
-        }) if manifest.schema_version != 3 && writer_generation == generation => None,
+        }) if !requires_caller_policy_proof(&manifest) && writer_generation == generation => None,
         Ok(ControlResponseV1::Failed {
             code,
             message,
@@ -7820,7 +10489,7 @@ fn release_writer_authorized(
             details,
         }) => {
             writer.transact(|record| {
-                if manifest.schema_version == 3 {
+                if requires_caller_policy_proof(&manifest) {
                     record.block_unknown(transaction_id);
                 } else {
                     record.rollback_release(transaction_id);
@@ -7871,8 +10540,33 @@ fn release_writer_authorized(
     committed.map(|(_, revision)| revision)
 }
 
+/// The session safety policy a Run's worker starts with.
+///
+/// A generation-4 successor member restarts into the same caller-workspace
+/// policy as a generation-3 caller Run; only the legacy generations take the
+/// Standard policy.
+fn caller_session_safety_policy(manifest: &RunManifest) -> crate::turn::SessionSafetyPolicy {
+    if crate::run::is_caller_workspace_generation(manifest.schema_version) {
+        crate::turn::SessionSafetyPolicy::CallerWorkspace
+    } else {
+        crate::turn::SessionSafetyPolicy::Standard
+    }
+}
+
+/// Whether a writer release completes only through the caller-policy proof.
+///
+/// A caller-workspace Run — generation 3 or its generation-4 successor — must
+/// present that proof: a legacy writer acknowledgement is not accepted for it,
+/// and a failed release keeps the unknown-effect guard rather than rolling the
+/// writer back as legacy runs do.
+fn requires_caller_policy_proof(manifest: &RunManifest) -> bool {
+    crate::run::is_caller_workspace_generation(manifest.schema_version)
+}
+
 fn require_caller_runtime(manifest: &RunManifest) -> Result<(), MachineError> {
-    if manifest.schema_version != 3
+    // Generation 4 (delegated) runs the same caller-workspace-lane machinery;
+    // only its instruction and Agent Configuration generations differ.
+    if !crate::run::is_caller_workspace_generation(manifest.schema_version)
         || manifest
             .global_profile_binding
             .as_ref()
@@ -9326,6 +12020,272 @@ fn read_durable_terminal(
         .map_err(|error| audit_integrity(run_id, head, &error.to_string()))
 }
 
+/// The normalized file-change payload one snapshot digest names (MD1).
+///
+/// A successor-bound Turn publishes these bytes atomically and write-once under
+/// the member Run's root before its terminal resolution. Absence is distinct from
+/// corruption: a missing payload is reported as absent, a present one that cannot
+/// be trusted is the typed content-unavailable condition, and a payload
+/// file that cannot be read at all propagates as the settlement fault it is.
+/// This form admits the plan's per-payload bound; the settlement reads with the
+/// smaller of that bound and its remaining aggregate.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn file_change_payload(
+    state_root: &Path,
+    run_id: Uuid,
+    snapshot_sha256: &str,
+) -> Result<Option<Vec<u8>>, MachineError> {
+    file_change_payload_within(
+        state_root,
+        run_id,
+        snapshot_sha256,
+        crate::review_target::MAX_FILE_BYTES,
+    )
+}
+
+/// The bounded payload read behind `file_change_payload`.
+///
+/// The read itself is bounded: `limit` bytes are admitted and one byte past it is
+/// refused instead of being buffered whole.
+fn file_change_payload_within(
+    state_root: &Path,
+    run_id: Uuid,
+    snapshot_sha256: &str,
+    limit: u64,
+) -> Result<Option<Vec<u8>>, MachineError> {
+    let path = run_root(state_root, run_id)
+        .join("file-changes")
+        .join(format!("{snapshot_sha256}.json"));
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(internal("the published file-change payload is unreadable")),
+    };
+    // Read at most one byte past the limit so an over-bound payload is refused
+    // without ever being held whole.
+    let mut bytes = Vec::new();
+    let mut reader = file.take(limit.saturating_add(1));
+    if reader.read_to_end(&mut bytes).is_err() {
+        return Err(internal("the published file-change payload is unreadable"));
+    }
+    if bytes.len() as u64 > limit {
+        return Err(crate::successor_capture::unavailable_change());
+    }
+    // The published payload must be canonical JSON whose own digest is the name
+    // it is stored under.
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Err(crate::successor_capture::unavailable_change());
+    };
+    let Ok(parsed) = crate::jcs::parse(text) else {
+        return Err(crate::successor_capture::unavailable_change());
+    };
+    let Ok(canonical) = crate::jcs::canonicalize(&parsed) else {
+        return Err(crate::successor_capture::unavailable_change());
+    };
+    if canonical != bytes || crate::jcs::sha256_hex(&bytes) != snapshot_sha256 {
+        return Err(crate::successor_capture::unavailable_change());
+    }
+    Ok(Some(bytes))
+}
+
+/// The file-change snapshot digests one Turn's executor recorded (MD1).
+///
+/// The Turn coordinator journals one snapshot per `fileChange` item and revision
+/// before the Turn can reach its terminal, so the Run's durable ledger — not a
+/// live coordinator's memory — says which ignored paths this task's executor
+/// edited. Only the latest revision of an item is that item's final content, and
+/// the selection is bounded by the same workspace enumeration bound the dispatch
+/// index uses.
+fn turn_file_change_snapshots(
+    state_root: &Path,
+    run_id: Uuid,
+    turn_id: &str,
+) -> Result<Vec<String>, MachineError> {
+    let projection =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_state_projection(run_id)?;
+    let head = projection.ledger_head.sequence;
+    // No committed record exists, so no Turn of this Run recorded a snapshot.
+    if head == 0 {
+        return Ok(Vec::new());
+    }
+    let ledger = crate::ledger::ObservedLedger::open_run(state_root, run_id, head)?;
+    let payloads = ledger
+        .payloads_of_kind(AuditKind::AppServerNotification)
+        .map_err(|error| audit_integrity(run_id, head, &error.to_string()))?;
+    // Each item keeps the journal order of its first appearance, and only
+    // that item's latest revision is its final content.
+    let mut snapshots: Vec<(String, u64, String)> = Vec::new();
+    let mut positions: BTreeMap<String, usize> = BTreeMap::new();
+    for payload in payloads {
+        if payload.get("method").and_then(Value::as_str) != Some("item/fileChange/patchUpdated")
+            || payload.get("turn_id").and_then(Value::as_str) != Some(turn_id)
+        {
+            continue;
+        }
+        let record = || audit_integrity(run_id, head, "the file-change snapshot record is corrupt");
+        let item_id = payload
+            .get("item_id")
+            .and_then(Value::as_str)
+            .ok_or_else(record)?;
+        let revision = payload
+            .get("snapshot_revision")
+            .and_then(Value::as_u64)
+            .ok_or_else(record)?;
+        let digest = payload
+            .get("snapshot_sha256")
+            .and_then(Value::as_str)
+            .ok_or_else(record)?;
+        match positions.get(item_id) {
+            Some(position) => {
+                // A position map keeps this lookup logarithmic over the
+                // bounded item list.
+                let entry = &mut snapshots[*position];
+                if revision > entry.1 {
+                    entry.1 = revision;
+                    entry.2 = digest.to_owned();
+                }
+            }
+            None => {
+                if snapshots.len() >= crate::review_target::MAX_FILES {
+                    return Err(crate::successor_capture::unavailable_change());
+                }
+                positions.insert(item_id.to_owned(), snapshots.len());
+                snapshots.push((item_id.to_owned(), revision, digest.to_owned()));
+            }
+        }
+    }
+    Ok(snapshots.into_iter().map(|(_, _, digest)| digest).collect())
+}
+
+/// Make the resolved terminal of one Turn durable before settlement.
+///
+/// The coordinator writes the ledger `turn_terminal` record before the history
+/// fallback resolves the final response, so the resolved value needs its own
+/// durable record: settlement and the restart sweep both read it, and neither can
+/// publish a null response where the coordinator had one.
+pub(crate) fn record_resolved_terminal(
+    state_root: &Path,
+    run_id: Uuid,
+    terminal: &crate::turn::TerminalTurn,
+) -> Result<(), MachineError> {
+    let directory = run_root(state_root, run_id).join("terminal-resolutions");
+    std::fs::create_dir_all(&directory).map_err(|error| internal(error.to_string()))?;
+    std::fs::set_permissions(
+        &directory,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .map_err(|error| internal(error.to_string()))?;
+    crate::workspace::sync_directory(&run_root(state_root, run_id))
+        .map_err(|error| internal(error.to_string()))?;
+    let text =
+        serde_json::to_string(terminal).map_err(|_| internal("the terminal is unrepresentable"))?;
+    let canonical = crate::jcs::canonicalize(
+        &crate::jcs::parse(&text).map_err(|_| internal("the terminal is unrepresentable"))?,
+    )
+    .map_err(|_| internal("the terminal is unrepresentable"))?;
+    let path = directory.join(resolution_record_name(&terminal.turn_id));
+    // The record is the settlement evidence: identical bytes are a no-op and a
+    // different response is refused, never overwritten.
+    if let Some(()) = existing_resolution(&path, &canonical)? {
+        return Ok(());
+    }
+    match crate::workspace::atomic_create(
+        &crate::workspace::SystemWorkspacePlatform,
+        &path,
+        &canonical,
+        0o600,
+    ) {
+        Ok(()) => Ok(()),
+        // A concurrent publisher won the exclusive rename: apply the same rule to
+        // the published bytes.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match existing_resolution(&path, &canonical)? {
+                Some(()) => Ok(()),
+                None => Err(resolution_conflict(&terminal.turn_id)),
+            }
+        }
+        Err(error) => Err(internal(error.to_string())),
+    }
+}
+
+/// The safe, path-independent record name of one Turn id.
+///
+/// A turn id is worker-supplied text, so the file name is its SHA-256: the id
+/// itself stays inside the record, and no id can name a path outside the
+/// resolution directory.
+fn resolution_record_name(turn_id: &str) -> String {
+    format!("{}.json", crate::jcs::sha256_hex(turn_id.as_bytes()))
+}
+
+/// The already-published resolution, if it is identical to the new bytes.
+fn existing_resolution(path: &Path, canonical: &[u8]) -> Result<Option<()>, MachineError> {
+    match std::fs::read(path) {
+        Ok(existing) if existing == canonical => Ok(Some(())),
+        Ok(_) => Err(resolution_conflict("")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(internal(error.to_string())),
+    }
+}
+
+/// A published resolution that names a different response is an integrity failure.
+fn resolution_conflict(turn_id: &str) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the terminal resolution record already names another response",
+        false,
+        serde_json::json!({"turn_id": turn_id, "required_action": "restore_state"}),
+    )
+}
+
+/// The resolved terminal of one Turn, from its resolution record only.
+///
+/// The ledger `turn_terminal` record is written before the history fallback
+/// resolves the final response, so a successor settlement never reads it: an
+/// absent record means the resolution is not durable yet (not yet resolvable),
+/// and an unreadable or corrupt record is a typed integrity failure.
+pub(crate) fn resolved_terminal(
+    state_root: &Path,
+    run_id: Uuid,
+    turn_id: &str,
+) -> Result<Option<crate::turn::TerminalTurn>, MachineError> {
+    let path = run_root(state_root, run_id)
+        .join("terminal-resolutions")
+        .join(resolution_record_name(turn_id));
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let terminal: crate::turn::TerminalTurn =
+                serde_json::from_slice(&bytes).map_err(|_| resolution_unreadable(turn_id))?;
+            if crate::jcs::canonicalize(
+                &crate::jcs::parse(
+                    std::str::from_utf8(&bytes).map_err(|_| resolution_unreadable(turn_id))?,
+                )
+                .map_err(|_| resolution_unreadable(turn_id))?,
+            )
+            .map_err(|_| resolution_unreadable(turn_id))?
+                != bytes
+            {
+                return Err(resolution_unreadable(turn_id));
+            }
+            if terminal.turn_id != turn_id {
+                return Err(resolution_unreadable(turn_id));
+            }
+            Ok(Some(terminal))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(resolution_unreadable(turn_id)),
+    }
+}
+
+/// A resolution record that exists but cannot be trusted.
+fn resolution_unreadable(turn_id: &str) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the terminal resolution record is unreadable or corrupt",
+        false,
+        serde_json::json!({"turn_id": turn_id, "required_action": "restore_state"}),
+    )
+}
+
 pub(crate) fn durable_terminal_turn(
     state_root: &Path,
     run_id: Uuid,
@@ -10316,6 +13276,7 @@ fn build_manifest(
     let agent_configuration = AgentConfigurationSnapshot {
         schema_version: 2,
         runtime_profile: profile.profile_name.clone(),
+        admitted_configuration: None,
         runtime_profile_snapshot_sha256: global_profile_binding.digest()?,
         model: model.to_owned(),
         default_effort: effort.to_owned(),
@@ -10340,6 +13301,9 @@ fn build_manifest(
         requested_access: None,
         selected_role: None,
         start_contract: None,
+        creation_mode: None,
+        admitted_configuration_digest: None,
+        start_operation_receipt: None,
         control_mode,
         execution_lane,
         requested_assurance: assurance,
@@ -10507,7 +13471,7 @@ fn ensure_run_worker(
     run_id: Uuid,
 ) -> Result<u64, MachineError> {
     let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
-    if manifest.schema_version == 3 {
+    if crate::run::is_caller_workspace_generation(manifest.schema_version) {
         require_caller_runtime(&manifest)?;
     }
     let mut startup = Some(RunStartupLock::open(state_root, run_id)?);
@@ -10616,14 +13580,6 @@ fn ensure_run_worker_locked(
     }
     let efforts = advertised_efforts(&state, &manifest.profile.profile_name, &manifest.model)?;
     let writer = crate::writer::WriterStore::new(state_root, &manifest.workspace_id, uid).load()?;
-    let owns_write = matches!(
-        writer.state,
-        crate::writer::WriterAuthorityState::Reserved | crate::writer::WriterAuthorityState::Active
-    ) && manifest.schema_version != 3
-        && writer
-            .holder
-            .as_ref()
-            .is_some_and(|holder| holder.run_id == run_id);
     let control_socket_epoch = observed_control_socket_epoch(state_root, run_id)
         .saturating_add(1)
         .max(1);
@@ -10638,13 +13594,10 @@ fn ensure_run_worker_locked(
             .allocate_server_epoch(state.server_epoch)?;
         Some(DedicatedServerBootstrap {
             socket_path,
-            argv: {
-                let mut argv = manifest.profile.normalized_argv.clone();
-                if manifest.schema_version == 3 {
-                    argv.extend(["-c".to_owned(), "project_doc_max_bytes=0".to_owned()]);
-                }
-                argv
-            },
+            // The owned-runtime qualification compares the launched server
+            // against this exact argv, so every caller generation composes it in
+            // one place.
+            argv: crate::worker::caller_workspace_argv(&manifest),
             cwd: PathBuf::from(&manifest.profile.derived_launch_cwd),
             environment: manifest.profile.sanitized_environment.clone(),
             log_path: state_root
@@ -10659,13 +13612,6 @@ fn ensure_run_worker_locked(
     } else {
         None
     };
-    let app_server_socket = dedicated_server.as_ref().map_or_else(
-        || PathBuf::from(&state.socket_path),
-        |server| server.socket_path.clone(),
-    );
-    let server_epoch = dedicated_server
-        .as_ref()
-        .map_or(state.server_epoch, |server| server.server_epoch);
     let mut session_cwd = workspace_path;
     let mut isolated_write = false;
     if let Some(binding) = manifest.aggregate_binding.as_ref()
@@ -10701,69 +13647,17 @@ fn ensure_run_worker_locked(
             }
         }
     }
-    let session = WorkerSessionBootstrap {
-        app_server_socket,
-        canonical_codex_home: state.snapshot.canonical_codex_home.clone(),
-        server_key: state.snapshot.server_key.clone(),
-        server_epoch,
-        controller_id: manifest.controller.identity.controller_id,
-        control_mode: manifest.control_mode.as_str().to_owned(),
-        fixed_model: manifest.model.clone(),
-        default_effort: projection
-            .default_effort
-            .clone()
-            .unwrap_or_else(|| manifest.default_reasoning_effort.clone()),
-        supported_efforts: efforts,
-        cwd: session_cwd,
-        developer_instructions: manifest.agent_configuration.normalized_instructions.clone(),
-        sandbox: if owns_write || isolated_write {
-            "workspace-write"
-        } else {
-            "read-only"
-        }
-        .to_owned(),
-        approval_policy: if owns_write || isolated_write {
-            "on-request"
-        } else {
-            "never"
-        }
-        .to_owned(),
-        safety_policy: if manifest.schema_version == 3 {
-            crate::turn::SessionSafetyPolicy::CallerWorkspace
-        } else {
-            crate::turn::SessionSafetyPolicy::Standard
-        },
-        artifact_root: run_root(state_root, run_id).join("artifacts"),
-        attach: match &manifest.fork_provenance {
-            Some(provenance) if provenance.mode == "history_copy" => SessionAttach::Fork {
-                source_thread_id: provenance
-                    .source_thread_id
-                    .clone()
-                    .ok_or_else(|| internal("history-copy fork lacks source thread"))?,
-                last_turn_id: provenance
-                    .source_turn_id
-                    .clone()
-                    .ok_or_else(|| internal("history-copy fork lacks source turn"))?,
-            },
-            _ => projection
-                .thread_id
-                .clone()
-                .map_or(SessionAttach::Start, |thread_id| SessionAttach::Resume {
-                    thread_id,
-                }),
-        },
-        eager_thread_operation_id: (manifest.schema_version == 3)
-            .then_some(run_id)
-            .or_else(|| {
-                manifest.aggregate_binding.as_ref().and_then(|binding| {
-                    (binding.aggregate_kind == AggregateKind::OrchestratedSession
-                        && binding.member_kind == crate::run::AggregateMemberKind::Specialist)
-                        .then_some(binding.operation_id)
-                })
-            }),
-        transport_timeout_seconds: 900,
+    let session = run_worker_session_bootstrap(
+        &manifest,
+        &projection,
+        &state,
+        &writer,
+        efforts,
+        session_cwd,
+        isolated_write,
         dedicated_server,
-    };
+        state_root,
+    )?;
     crate::profile::fence_global_run_worker_start(
         global_binding,
         &state,
@@ -10794,6 +13688,99 @@ fn ensure_run_worker_locked(
         return Err(worker_start_failure(run_id, manifest.execution_lane, error));
     }
     Ok(control_socket_epoch)
+}
+
+/// Construct the exact bootstrap used by first start and recovery after the
+/// Profile, writer and isolated-workspace authorities have been observed.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn run_worker_session_bootstrap(
+    manifest: &RunManifest,
+    projection: &crate::projection::RunStateProjection,
+    state: &ServerState,
+    writer: &crate::writer::WriterRecord,
+    efforts: Vec<String>,
+    session_cwd: PathBuf,
+    isolated_write: bool,
+    dedicated_server: Option<DedicatedServerBootstrap>,
+    state_root: &Path,
+) -> Result<WorkerSessionBootstrap, MachineError> {
+    let run_id = manifest.run_id;
+    let owns_write = matches!(
+        writer.state,
+        crate::writer::WriterAuthorityState::Reserved | crate::writer::WriterAuthorityState::Active
+    ) && !crate::run::is_caller_workspace_generation(manifest.schema_version)
+        && writer
+            .holder
+            .as_ref()
+            .is_some_and(|holder| holder.run_id == run_id);
+    Ok(WorkerSessionBootstrap {
+        app_server_socket: dedicated_server.as_ref().map_or_else(
+            || PathBuf::from(&state.socket_path),
+            |server| server.socket_path.clone(),
+        ),
+        canonical_codex_home: state.snapshot.canonical_codex_home.clone(),
+        server_key: state.snapshot.server_key.clone(),
+        server_epoch: dedicated_server
+            .as_ref()
+            .map_or(state.server_epoch, |server| server.server_epoch),
+        controller_id: manifest.controller.identity.controller_id,
+        control_mode: manifest.control_mode.as_str().to_owned(),
+        fixed_model: manifest.model.clone(),
+        default_effort: projection
+            .default_effort
+            .clone()
+            .unwrap_or_else(|| manifest.default_reasoning_effort.clone()),
+        supported_efforts: efforts,
+        cwd: session_cwd,
+        developer_instructions: manifest.agent_configuration.normalized_instructions.clone(),
+        sandbox: if owns_write || isolated_write {
+            "workspace-write"
+        } else {
+            "read-only"
+        }
+        .to_owned(),
+        approval_policy: if owns_write || isolated_write {
+            "on-request"
+        } else {
+            "never"
+        }
+        .to_owned(),
+        safety_policy: caller_session_safety_policy(manifest),
+        artifact_root: run_root(state_root, run_id).join("artifacts"),
+        attach: match &manifest.fork_provenance {
+            Some(provenance) if provenance.mode == "history_copy" => SessionAttach::Fork {
+                source_thread_id: provenance
+                    .source_thread_id
+                    .clone()
+                    .ok_or_else(|| internal("history-copy fork lacks source thread"))?,
+                last_turn_id: provenance
+                    .source_turn_id
+                    .clone()
+                    .ok_or_else(|| internal("history-copy fork lacks source turn"))?,
+            },
+            _ => projection
+                .thread_id
+                .clone()
+                .map_or(SessionAttach::Start, |thread_id| SessionAttach::Resume {
+                    thread_id,
+                }),
+        },
+        eager_thread_operation_id: manifest
+            .aggregate_binding
+            .as_ref()
+            .and_then(|binding| {
+                (binding.aggregate_kind == AggregateKind::OrchestratedSession
+                    && binding.member_kind == crate::run::AggregateMemberKind::Specialist)
+                    .then_some(binding.operation_id)
+            })
+            .or_else(|| {
+                crate::run::is_caller_workspace_generation(manifest.schema_version)
+                    .then_some(run_id)
+            }),
+        transport_timeout_seconds: 900,
+        dedicated_server,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -10849,6 +13836,2397 @@ fn start_worker(
         false,
         json!({"invariant": "per-Run workers are supported on macOS only"}),
     ))
+}
+
+/// The accepted execution a history observation is permitted to reconcile.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ReconciliationExecution {
+    pub task_ref: Uuid,
+    pub member_ref: Uuid,
+    pub owner: SettlementOwner,
+    pub operation_id: Uuid,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub effort: String,
+    pub intent: String,
+    pub checked: bool,
+    accepted_digest: String,
+    started_sequence: u64,
+    started_generation: u64,
+    server_key: String,
+}
+
+fn reconciliation_error(reason: &str) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the original task execution cannot be reconciled",
+        false,
+        json!({"reason":reason,"required_action":"restore_state"}),
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECOVERY_TEST_FAILURE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct RecoveryTestFailure(Option<&'static str>);
+
+#[cfg(test)]
+impl RecoveryTestFailure {
+    pub(crate) fn at(barrier: &'static str) -> Self {
+        Self(RECOVERY_TEST_FAILURE.with(|value| value.replace(Some(barrier))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for RecoveryTestFailure {
+    fn drop(&mut self) {
+        RECOVERY_TEST_FAILURE.with(|value| value.set(self.0));
+    }
+}
+
+#[cfg(test)]
+fn recovery_test_barrier(barrier: &'static str) -> Result<(), MachineError> {
+    if RECOVERY_TEST_FAILURE.with(|value| value.get() == Some(barrier)) {
+        Err(reconciliation_error(barrier))
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn revalidate_reconciliation_execution(
+    state_root: &Path,
+    execution: &ReconciliationExecution,
+    records: &[crate::audit::AuditRecord],
+) -> Result<(), MachineError> {
+    let current =
+        reconciliation_executions_from_records(state_root, execution.member_ref, records)?;
+    if current.iter().any(|task| task == execution) {
+        Ok(())
+    } else {
+        Err(reconciliation_error("task_changed"))
+    }
+}
+
+pub(crate) fn audit_value(record: &crate::audit::AuditRecord) -> Result<Value, MachineError> {
+    serde_json::from_slice(
+        &canonicalize(record.payload())
+            .map_err(|_| reconciliation_error("invalid_audit_payload"))?,
+    )
+    .map_err(|_| reconciliation_error("invalid_audit_payload"))
+}
+
+pub(crate) fn successor_reconciliation_executions(
+    state_root: &Path,
+    member: Uuid,
+) -> Result<Vec<ReconciliationExecution>, MachineError> {
+    let (_, observed) = observe_run_ledger(state_root, member, true)?;
+    reconciliation_executions_from_records(state_root, member, observed.records())
+}
+
+pub(crate) fn reconciliation_executions_from_records(
+    state_root: &Path,
+    member: Uuid,
+    records: &[crate::audit::AuditRecord],
+) -> Result<Vec<ReconciliationExecution>, MachineError> {
+    let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(member)?;
+    let Some(binding) = manifest.aggregate_binding.as_ref().filter(|binding| {
+        manifest.schema_version == 4
+            && binding.member_kind == crate::run::AggregateMemberKind::Specialist
+    }) else {
+        return Ok(Vec::new());
+    };
+    let owner = match binding.aggregate_kind {
+        AggregateKind::ExternalSpecialistEngagement => SettlementOwner::External {
+            engagement_id: binding.aggregate_id,
+        },
+        AggregateKind::OrchestratedSession => SettlementOwner::Managed {
+            session_id: binding.aggregate_id,
+        },
+    };
+    let store =
+        EngagementStore::open_read_only(&EngagementStore::workspace_database_path(state_root))?;
+    let tasks = match owner {
+        SettlementOwner::External { engagement_id } => {
+            store.unsettled_member_tasks(engagement_id, member)?
+        }
+        SettlementOwner::Managed { session_id } => {
+            crate::orchestration::unsettled_successor_tasks(store.connection(), session_id, member)?
+                .into_iter()
+                .map(|(task, accepted, turn)| {
+                    let accepted: crate::delegation_identity::AcceptedTask =
+                        serde_json::from_str(&accepted)
+                            .map_err(|_| reconciliation_error("accepted_task_invalid"))?;
+                    Ok((task, accepted.execution_intent, turn))
+                })
+                .collect::<Result<Vec<_>, MachineError>>()?
+        }
+    };
+    let mut result = Vec::new();
+    for (task_ref, intent, turn) in tasks {
+        let (accepted, deadline, digest) = match owner {
+            SettlementOwner::External { engagement_id } => {
+                let task = store.external_task(engagement_id, task_ref)?;
+                if task.specialist_run_id != member || task.turn_id.as_deref() != Some(&turn) {
+                    return Err(reconciliation_error("foreign_task"));
+                }
+                let accepted = store
+                    .external_task_identity(engagement_id, task_ref)?
+                    .ok_or_else(|| reconciliation_error("accepted_task_missing"))?;
+                let key:String = store.connection().query_row("SELECT idempotency_key FROM delegation_operations WHERE workspace_ref=?1 AND scope_kind='external_engagement' AND scope_ref=?2 AND operation_kind='assign_external_specialist_task' AND state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref')=?3",rusqlite::params![manifest.workspace_id,engagement_id.to_string(),task_ref.to_string()],|row|row.get(0)).map_err(|_| reconciliation_error("accepted_assignment_missing"))?;
+                let digest = store
+                    .accepted_assignment_body_digest(&manifest.workspace_id, engagement_id, &key)?
+                    .ok_or_else(|| reconciliation_error("accepted_assignment_missing"))?;
+                (
+                    accepted,
+                    store
+                        .external_task_dispatch_facts(engagement_id, task_ref)?
+                        .1,
+                    digest,
+                )
+            }
+            SettlementOwner::Managed { session_id } => {
+                let task =
+                    crate::orchestration::successor_task(store.connection(), session_id, task_ref)?
+                        .ok_or_else(|| reconciliation_error("task_missing"))?;
+                if task.member_ref != member.to_string()
+                    || task.target_turn_id.as_deref() != Some(&turn)
+                {
+                    return Err(reconciliation_error("foreign_task"));
+                }
+                let accepted =
+                    crate::successor_capture::retained_accepted_task(&task.accepted_request_json)?;
+                let marker: Value = serde_json::from_str(&task.request_json)
+                    .map_err(|_| reconciliation_error("accepted_assignment_invalid"))?;
+                (
+                    accepted,
+                    marker["deadline_seconds"]
+                        .as_u64()
+                        .ok_or_else(|| reconciliation_error("deadline_missing"))?,
+                    format!("sha256:{}", task.source_request_sha256),
+                )
+            }
+        };
+        let (body, _, _) = crate::engagement::accepted_task_content(store.connection(), task_ref)?
+            .ok_or_else(|| reconciliation_error("accepted_content_missing"))?;
+        let task: crate::task_request::SpecialistTaskRequest = serde_json::from_slice(&body)
+            .map_err(|_| reconciliation_error("accepted_content_invalid"))?;
+        if intent != accepted.execution_intent
+            || !crate::successor_capture::verify_accepted_assignment(
+                member, &task, &accepted, deadline, &digest,
+            )?
+            || manifest
+                .agent_configuration
+                .admitted_configuration
+                .as_ref()
+                .ok_or_else(|| reconciliation_error("configuration_missing"))?
+                .digest()?
+                != accepted.agent_configuration_digest
+            || manifest
+                .instructions
+                .delegation()
+                .ok_or_else(|| reconciliation_error("role_missing"))?
+                .role_snapshot_digest
+                != accepted.role_snapshot_digest
+        {
+            return Err(reconciliation_error("accepted_binding_mismatch"));
+        }
+        let mut started = None;
+        for record in records
+            .iter()
+            .filter(|record| record.kind() == AuditKind::TurnStarted)
+        {
+            let value = audit_value(record)?;
+            if value["turn_id"].as_str() == Some(&turn) {
+                if started.is_some() {
+                    return Err(reconciliation_error("duplicate_execution"));
+                }
+                started = Some((record, value));
+            }
+        }
+        let (record, value) =
+            started.ok_or_else(|| reconciliation_error("turn_started_missing"))?;
+        let operation_id = value["operation_id"]
+            .as_str()
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .filter(|id| id.get_version_num() == 7)
+            .ok_or_else(|| reconciliation_error("operation_missing"))?;
+        let thread_id = value["thread_id"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| reconciliation_error("thread_missing"))?
+            .to_owned();
+        let effort = value["effort"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| reconciliation_error("effort_missing"))?
+            .to_owned();
+        result.push(ReconciliationExecution {
+            task_ref,
+            member_ref: member,
+            owner,
+            operation_id,
+            thread_id,
+            turn_id: turn,
+            effort,
+            intent,
+            checked: accepted.expected_output_schema == "structured_review_v4",
+            accepted_digest: accepted.digest()?,
+            started_sequence: record.sequence(),
+            started_generation: record.run_generation(),
+            server_key: {
+                let binding = manifest
+                    .global_profile_binding
+                    .as_ref()
+                    .ok_or_else(|| reconciliation_error("profile_binding_missing"))?;
+                binding.validate_for_recovery()?;
+                binding.server_key.clone()
+            },
+        });
+    }
+    Ok(result)
+}
+
+pub(crate) fn successor_reconciliation_debt(
+    state_root: &Path,
+    member: Uuid,
+) -> Result<bool, MachineError> {
+    let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(member)?;
+    if manifest.schema_version != 4
+        || manifest
+            .aggregate_binding
+            .as_ref()
+            .is_none_or(|b| b.member_kind != crate::run::AggregateMemberKind::Specialist)
+    {
+        return Ok(false);
+    }
+    let (projection, ledger) = observe_run_ledger(state_root, member, true)?;
+    if !matches!(
+        projection.lifecycle,
+        RunLifecycle::Running
+            | RunLifecycle::WaitingInteraction
+            | RunLifecycle::OutcomeUnknown
+            | RunLifecycle::ReconciliationRequired
+            | RunLifecycle::Paused
+    ) {
+        return Ok(false);
+    }
+    let tasks = successor_reconciliation_executions(state_root, member)?;
+    for task in tasks {
+        for record in ledger
+            .records()
+            .iter()
+            .filter(|r| r.sequence() > task.started_sequence)
+        {
+            let value = audit_value(record)?;
+            if (record.kind() == AuditKind::OutcomeUnknown
+                && value["operation_id"] == task.operation_id.to_string())
+                || (record.kind() == AuditKind::Reconciliation
+                    && value["turn_id"] == task.turn_id
+                    && value["thread_id"] == task.thread_id)
+            {
+                return Ok(true);
+            }
+        }
+        if matches!(
+            projection.lifecycle,
+            RunLifecycle::Running | RunLifecycle::WaitingInteraction
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Finish only the missing journal suffix, using the actual durable prefix.
+pub(crate) fn complete_successor_reconciliation(
+    ledger: &mut crate::ledger::Ledger,
+    execution: &ReconciliationExecution,
+    history: &crate::turn::RecoveredHistory,
+    server_key: &str,
+    server_epoch: u64,
+    generation: u64,
+    generation_absent: bool,
+) -> Result<(), MachineError> {
+    if history.thread_id != execution.thread_id
+        || history.turn_id != execution.turn_id
+        || server_epoch == 0
+        || server_key != execution.server_key
+    {
+        return Err(reconciliation_error("foreign_history"));
+    }
+    let records = ledger
+        .durable_records()
+        .map_err(|error| reconciliation_journal_error(execution, error))?;
+    let report = crate::conformance::verify_ledger_records(execution.member_ref, records)
+        .map_err(|_| reconciliation_error("invalid_history"))?;
+    let started = records
+        .iter()
+        .find(|r| r.sequence() == execution.started_sequence)
+        .filter(|r| {
+            r.kind() == AuditKind::TurnStarted && r.run_generation() == execution.started_generation
+        })
+        .ok_or_else(|| reconciliation_error("turn_started_changed"))?;
+    let value = audit_value(started)?;
+    if value["operation_id"] != execution.operation_id.to_string()
+        || value["thread_id"] != execution.thread_id
+        || value["turn_id"] != execution.turn_id
+        || value["effort"] != execution.effort
+    {
+        return Err(reconciliation_error("turn_started_changed"));
+    }
+    let mut reconciliation = None;
+    let mut paused = None;
+    let mut unknown = false;
+    for record in records
+        .iter()
+        .filter(|record| record.sequence() > execution.started_sequence)
+    {
+        let value = audit_value(record)?;
+        match record.kind() {
+            AuditKind::OutcomeUnknown
+                if value["operation_id"] == execution.operation_id.to_string() =>
+            {
+                unknown = true
+            }
+            AuditKind::TurnStarted => return Err(reconciliation_error("later_execution")),
+            AuditKind::ThreadBound if value["thread_id"] != execution.thread_id => {
+                return Err(reconciliation_error("later_thread"));
+            }
+            AuditKind::Reconciliation if value["observed_status"].is_string() => {
+                if value["thread_id"] != execution.thread_id
+                    || value["turn_id"] != execution.turn_id
+                    || value["observed_status"] != history.status
+                    || value["server_key"] != server_key
+                    || value["server_epoch"].as_u64().is_none_or(|e| e == 0)
+                    || reconciliation.is_some()
+                {
+                    return Err(reconciliation_error("reconciliation_conflict"));
+                }
+                reconciliation = Some(record.sequence());
+            }
+            AuditKind::LifecycleTransition if reconciliation.is_some() => {
+                if value["previous"] != "reconciliation_required"
+                    || value["current"] != "paused"
+                    || value["terminal_seal"] != false
+                    || paused.is_some()
+                {
+                    return Err(reconciliation_error("later_lifecycle"));
+                }
+                paused = Some(record.sequence());
+            }
+            _ => {}
+        }
+    }
+    if reconciliation.is_none() {
+        if !matches!(
+            report.lifecycle,
+            RunLifecycle::Running | RunLifecycle::WaitingInteraction | RunLifecycle::OutcomeUnknown
+        ) || (!unknown && generation <= execution.started_generation && !generation_absent)
+        {
+            return Err(reconciliation_error("uncertain_execution_unproved"));
+        }
+        ledger.append_required_payload(AuditKind::Reconciliation,&json!({"thread_id":execution.thread_id,"turn_id":execution.turn_id,"observed_status":history.status,"server_key":server_key,"server_epoch":server_epoch,"read_only":true}),generation).map_err(|error|reconciliation_journal_error(execution,error))?;
+        #[cfg(test)]
+        recovery_test_barrier("after_reconciliation")?;
+    } else if !matches!(
+        report.lifecycle,
+        RunLifecycle::ReconciliationRequired | RunLifecycle::Paused
+    ) {
+        return Err(reconciliation_error("later_lifecycle"));
+    }
+    if paused.is_none() {
+        ledger.append_conformance_payload(AuditKind::LifecycleTransition,&json!({"previous":"reconciliation_required","current":"paused","terminal_seal":false}),generation).map_err(|error|reconciliation_journal_error(execution,error))?;
+        #[cfg(test)]
+        recovery_test_barrier("after_pause")?;
+    } else if report.lifecycle != RunLifecycle::Paused {
+        return Err(reconciliation_error("paused_binding_missing"));
+    }
+    Ok(())
+}
+
+fn reconciliation_journal_error(
+    execution: &ReconciliationExecution,
+    error: crate::ledger::LedgerError,
+) -> MachineError {
+    crate::turn::journal_ledger_error(error).into_machine_error(&crate::turn::TurnFailureContext {
+        run_id: execution.member_ref,
+        profile: String::new(),
+        thread_id: Some(execution.thread_id.clone()),
+        turn_id: Some(execution.turn_id.clone()),
+    })
+}
+
+fn verify_recovered_terminal(
+    execution: &ReconciliationExecution,
+    terminal: &crate::turn::TerminalTurn,
+    status: Option<&str>,
+) -> Result<(), MachineError> {
+    if terminal.thread_id != execution.thread_id
+        || terminal.turn_id != execution.turn_id
+        || terminal.effort != execution.effort
+        || !matches!(
+            terminal.status.as_str(),
+            "completed" | "failed" | "interrupted"
+        )
+        || status.is_some_and(|s| s != terminal.status)
+    {
+        return Err(reconciliation_error("terminal_resolution_conflict"));
+    }
+    Ok(())
+}
+
+fn verify_reconciliation_resolution(
+    state_root: &Path,
+    execution: &ReconciliationExecution,
+    terminal: &crate::turn::TerminalTurn,
+) -> Result<(), MachineError> {
+    verify_recovered_terminal(execution, terminal, None)?;
+    let manifest =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(execution.member_ref)?;
+    let (_, ledger) = observe_run_ledger(state_root, execution.member_ref, true)?;
+    let report = crate::conformance::verify_ledger_records(execution.member_ref, ledger.records())
+        .map_err(|_| reconciliation_error("invalid_history"))?;
+    if report.lifecycle != RunLifecycle::Paused {
+        return Err(reconciliation_error("reconciliation_not_paused"));
+    }
+    let mut found = false;
+    for record in ledger.records().iter().filter(|record| {
+        record.sequence() > execution.started_sequence && record.kind() == AuditKind::Reconciliation
+    }) {
+        let value = audit_value(record)?;
+        if value["turn_id"] == execution.turn_id
+            && value["thread_id"] == execution.thread_id
+            && value["observed_status"] == terminal.status
+            && value["server_key"].as_str()
+                == manifest
+                    .global_profile_binding
+                    .as_ref()
+                    .map(|binding| binding.server_key.as_str())
+            && value["server_epoch"]
+                .as_u64()
+                .is_some_and(|epoch| epoch > 0)
+        {
+            if found {
+                return Err(reconciliation_error("duplicate_reconciliation"));
+            }
+            found = true;
+        } else if value["observed_status"].is_string() {
+            return Err(reconciliation_error("reconciliation_conflict"));
+        }
+    }
+    if !found {
+        return Err(reconciliation_error("reconciliation_missing"));
+    }
+    if let Some(crate::turn::FinalResponse::Artifact {
+        artifact_id,
+        byte_length,
+        sha256,
+        ..
+    }) = &terminal.final_response
+    {
+        use std::io::Read as _;
+        let path = run_root(state_root, execution.member_ref)
+            .join("artifacts")
+            .join(format!("{artifact_id}.bin"));
+        let mut file =
+            crate::workspace::open_secure_file_if_present(&path, DarwinSystem.current_uid())?
+                .ok_or_else(|| reconciliation_error("response_artifact_missing"))?;
+        if *byte_length > crate::turn::MAX_FINAL_RESPONSE_ARTIFACT_BYTES as u64
+            || file
+                .metadata()
+                .map_err(|_| reconciliation_error("artifact_read_failed"))?
+                .len()
+                != *byte_length
+        {
+            return Err(reconciliation_error("artifact_length_conflict"));
+        }
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(*byte_length + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| reconciliation_error("artifact_read_failed"))?;
+        if bytes.len() as u64 != *byte_length
+            || sha256_hex(&bytes) != sha256.trim_start_matches("sha256:")
+        {
+            return Err(reconciliation_error("artifact_digest_conflict"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn reuse_successor_reconciliation_resolution(
+    state_root: &Path,
+    execution: &ReconciliationExecution,
+) -> Result<bool, MachineError> {
+    let Some(terminal) = resolved_terminal(state_root, execution.member_ref, &execution.turn_id)?
+    else {
+        return Ok(false);
+    };
+    verify_reconciliation_resolution(state_root, execution, &terminal)?;
+    let manifest =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(execution.member_ref)?;
+    let view = WorkspaceView {
+        workspace_id: manifest.workspace_id,
+        canonical_path: manifest.canonical_workspace,
+        mode: manifest.workspace_mode,
+        created: false,
+    };
+    settle_successor_task(
+        &view,
+        state_root,
+        execution.owner,
+        execution.member_ref,
+        execution.task_ref,
+        &execution.intent,
+        None,
+    )?;
+    Ok(true)
+}
+
+fn read_prepared_terminal(path: &Path) -> Result<Option<crate::turn::TerminalTurn>, MachineError> {
+    use std::io::Read as _;
+    let parent = path
+        .parent()
+        .ok_or_else(|| reconciliation_error("preparation_path_invalid"))?;
+    match std::fs::symlink_metadata(parent) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(reconciliation_error("preparation_directory_unobservable")),
+        Ok(_) => crate::workspace::verify_secure_directory(parent, DarwinSystem.current_uid())?,
+    }
+    let Some(mut file) =
+        crate::workspace::open_secure_file_if_present(path, DarwinSystem.current_uid())?
+    else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(2 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| reconciliation_error("preparation_read_failed"))?;
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Err(reconciliation_error("preparation_unbounded"));
+    }
+    let value: crate::turn::TerminalTurn =
+        serde_json::from_slice(&bytes).map_err(|_| reconciliation_error("preparation_invalid"))?;
+    if canonicalize(
+        &parse(
+            std::str::from_utf8(&bytes).map_err(|_| reconciliation_error("preparation_invalid"))?,
+        )
+        .map_err(|_| reconciliation_error("preparation_invalid"))?,
+    )
+    .map_err(|_| reconciliation_error("preparation_invalid"))?
+        != bytes
+    {
+        return Err(reconciliation_error("preparation_not_canonical"));
+    }
+    Ok(Some(value))
+}
+
+/// Preserve an exact response with one stable reference. No caller holds a
+/// ledger, writer or reader lock while this function waits for the quota lease.
+fn preserve_recovered_response(
+    state_root: &Path,
+    execution: &ReconciliationExecution,
+    history: &crate::turn::RecoveredHistory,
+    reader: Option<&crate::direct_review_target::DirectTargetReader>,
+) -> Result<crate::turn::TerminalTurn, MachineError> {
+    use crate::turn::{FinalResponse, StoredArtifact, TerminalTurn};
+    let text = history.response_text();
+    let root = run_root(state_root, execution.member_ref);
+    let artifacts =
+        crate::worker::FileArtifactStore::open(&root.join("artifacts"), DarwinSystem.current_uid())
+            .map_err(|_| reconciliation_error("artifact_store_unavailable"))?;
+    let _quota = crate::artifact::ArtifactQuotaLease::acquire_for_run(
+        &root.join("artifacts"),
+        execution.member_ref,
+    )?;
+    let resolved = resolved_terminal(state_root, execution.member_ref, &execution.turn_id)?;
+    let retained = reader
+        .map(|reader| reader.retained_history_response(&execution.thread_id, &execution.turn_id))
+        .transpose()?
+        .flatten();
+    let preparation = root.join("terminal-resolution-preparations");
+    let path = preparation.join(resolution_record_name(&execution.turn_id));
+    let prepared = read_prepared_terminal(&path)?;
+    let published = resolved.is_some() || retained.is_some();
+    let chosen = resolved.or(prepared.clone());
+    let response = if let Some(terminal) = &chosen {
+        verify_recovered_terminal(execution, terminal, Some(&history.status))?;
+        terminal.final_response.clone()
+    } else if let Some(response) = &retained {
+        response.clone()
+    } else {
+        text.as_ref().map(|text| {
+            if text.len() <= crate::turn::MAX_INLINE_FINAL_RESPONSE_BYTES {
+                FinalResponse::Inline { text: text.clone() }
+            } else {
+                FinalResponse::Artifact {
+                    artifact_id: Uuid::now_v7(),
+                    byte_length: text.len() as u64,
+                    sha256: sha256_hex(text.as_bytes()),
+                    created_at: SystemLedgerClock::default().timestamp(),
+                }
+            }
+        })
+    };
+    if retained.as_ref().is_some_and(|old| old != &response)
+        || prepared
+            .as_ref()
+            .is_some_and(|old| old.final_response != response)
+    {
+        return Err(reconciliation_error("stored_reference_conflict"));
+    }
+    let terminal = TerminalTurn {
+        thread_id: execution.thread_id.clone(),
+        turn_id: execution.turn_id.clone(),
+        status: history.status.clone(),
+        effort: execution.effort.clone(),
+        usage: history.usage.clone(),
+        final_response: response,
+    };
+    if chosen.as_ref().is_some_and(|old| old != &terminal) {
+        return Err(reconciliation_error("terminal_metadata_conflict"));
+    }
+    match (&terminal.final_response, &text) {
+        (None, None) => {}
+        (Some(FinalResponse::Inline { text: old }), Some(text)) if old == text => {}
+        (
+            Some(FinalResponse::Artifact {
+                artifact_id,
+                byte_length,
+                sha256,
+                created_at,
+            }),
+            Some(text),
+        ) if *byte_length == text.len() as u64
+            && sha256_hex(text.as_bytes()) == sha256.trim_start_matches("sha256:") =>
+        {
+            if artifact_id.get_version_num() != 7
+                || !crate::audit::is_microsecond_utc_timestamp(created_at)
+            {
+                return Err(reconciliation_error("artifact_reference_invalid"));
+            }
+            if published
+                && crate::workspace::open_secure_file_if_present(
+                    &root.join("artifacts").join(format!("{artifact_id}.bin")),
+                    DarwinSystem.current_uid(),
+                )?
+                .is_none()
+            {
+                return Err(reconciliation_error("published_artifact_missing"));
+            }
+            if !preparation.exists() {
+                crate::workspace::create_directory(&preparation, 0o700)
+                    .map_err(|_| reconciliation_error("preparation_directory_failed"))?;
+            }
+            crate::workspace::verify_secure_directory(&preparation, DarwinSystem.current_uid())?;
+            crate::workspace::sync_directory(&root)
+                .map_err(|_| reconciliation_error("preparation_directory_sync_failed"))?;
+            let bytes = canonicalize(
+                &parse(
+                    &serde_json::to_string(&terminal)
+                        .map_err(|_| reconciliation_error("terminal_invalid"))?,
+                )
+                .map_err(|_| reconciliation_error("terminal_invalid"))?,
+            )
+            .map_err(|_| reconciliation_error("terminal_invalid"))?;
+            match crate::workspace::atomic_create(&SystemWorkspacePlatform, &path, &bytes, 0o600) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if read_prepared_terminal(&path)?.as_ref() != Some(&terminal) {
+                        return Err(reconciliation_error("preparation_conflict"));
+                    }
+                }
+                Err(_) => return Err(reconciliation_error("preparation_publish_failed")),
+            }
+            #[cfg(test)]
+            recovery_test_barrier("after_preparation")?;
+            artifacts.store_prepared(
+                &_quota,
+                &StoredArtifact {
+                    artifact_id: *artifact_id,
+                    created_at: created_at.clone(),
+                },
+                text.as_bytes(),
+            )?;
+            #[cfg(test)]
+            recovery_test_barrier("after_body")?;
+        }
+        _ => return Err(reconciliation_error("response_bytes_conflict")),
+    }
+    if let Some(reader) = reader {
+        reader.begin_history(&execution.thread_id, &execution.turn_id)?;
+        reader.finish_history_response(
+            &execution.thread_id,
+            &execution.turn_id,
+            &history.items,
+            terminal.final_response.clone(),
+        )?;
+    }
+    record_resolved_terminal(state_root, execution.member_ref, &terminal)?;
+    #[cfg(test)]
+    recovery_test_barrier("after_resolution")?;
+    Ok(terminal)
+}
+
+pub(crate) fn converge_successor_history(
+    state_root: &Path,
+    execution: &ReconciliationExecution,
+    history: &crate::turn::RecoveredHistory,
+    reader_lost: bool,
+) -> Result<(), MachineError> {
+    if history.thread_id != execution.thread_id || history.turn_id != execution.turn_id {
+        return Err(reconciliation_error("foreign_history"));
+    }
+    let manifest =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(execution.member_ref)?;
+    let view = WorkspaceView {
+        workspace_id: manifest.workspace_id.clone(),
+        canonical_path: manifest.canonical_workspace.clone(),
+        mode: manifest.workspace_mode,
+        created: false,
+    };
+    let request = crate::delegation_service::MemberTaskSettlement {
+        view: &view,
+        state_root,
+        owner: execution.owner,
+        member_ref: execution.member_ref,
+        task_ref: execution.task_ref,
+        execution_intent: &execution.intent,
+    };
+    let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
+    let (body, _, _) =
+        crate::engagement::accepted_task_content(store.connection(), execution.task_ref)?
+            .ok_or_else(|| reconciliation_error("accepted_content_missing"))?;
+    let task: crate::task_request::SpecialistTaskRequest = serde_json::from_slice(&body)
+        .map_err(|_| reconciliation_error("accepted_content_invalid"))?;
+    let current = successor_reconciliation_executions(state_root, execution.member_ref)?;
+    if current
+        .iter()
+        .find(|task| task.task_ref == execution.task_ref)
+        .is_some_and(|task| {
+            task.accepted_digest != execution.accepted_digest
+                || task.turn_id != execution.turn_id
+                || task.operation_id != execution.operation_id
+        })
+    {
+        return Err(reconciliation_error("task_changed"));
+    }
+    let unavailable = execution.intent == "canonical_workspace_write"
+        || !history.full
+        || reader_lost
+        || history
+            .response_text()
+            .is_some_and(|s| s.len() > crate::turn::MAX_FINAL_RESPONSE_ARTIFACT_BYTES);
+    let terminal = if unavailable {
+        crate::turn::TerminalTurn {
+            thread_id: execution.thread_id.clone(),
+            turn_id: execution.turn_id.clone(),
+            status: history.status.clone(),
+            effort: execution.effort.clone(),
+            final_response: None,
+            usage: history.usage.clone(),
+        }
+    } else {
+        let reader = if execution.checked {
+            crate::delegation_service::successor_task_reader(
+                state_root,
+                &manifest,
+                execution.task_ref,
+                false,
+            )?
+        } else {
+            None
+        };
+        match preserve_recovered_response(state_root, execution, history, reader.as_ref()) {
+            Ok(terminal) => terminal,
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "REVIEW_TARGET_UNAVAILABLE"
+                        | "REVIEW_TARGET_DRIFTED"
+                        | "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                ) =>
+            {
+                let terminal = preserve_recovered_response(state_root, execution, history, None)?;
+                reject_successor_source(state_root, execution, &terminal, error.clone())?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let complete = if unavailable {
+        CompleteSettlement::Unavailable
+    } else {
+        let accepted = match execution.owner {
+            SettlementOwner::External { engagement_id } => store
+                .external_task_identity(engagement_id, execution.task_ref)?
+                .ok_or_else(|| reconciliation_error("accepted_task_missing"))?,
+            SettlementOwner::Managed { session_id } => {
+                crate::successor_capture::retained_accepted_task(
+                    &crate::orchestration::successor_task(
+                        store.connection(),
+                        session_id,
+                        execution.task_ref,
+                    )?
+                    .ok_or_else(|| reconciliation_error("task_missing"))?
+                    .accepted_request_json,
+                )?
+            }
+        };
+        settle_complete_result(&request, &accepted, &terminal, &task, Some(Vec::new()))?
+    };
+    let source_error = if let CompleteSettlement::SourceRejected(_, error) = &complete {
+        Some(error.clone())
+    } else {
+        None
+    };
+    settle_reconciled_terminal(
+        &mut store,
+        &request,
+        &terminal,
+        complete,
+        &[],
+        unix_time_ms_semantic()?,
+    )?;
+    #[cfg(test)]
+    recovery_test_barrier("after_settlement")?;
+    if let Some(error) = source_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Preserve a terminal the actor actually received, even if checking its
+/// receipts failed. This does not infer a terminal from a stale journal entry.
+pub(crate) fn preserve_observed_successor_terminal(
+    state_root: &Path,
+    member: Uuid,
+    history: &crate::turn::RecoveredHistory,
+    failure: Option<&MachineError>,
+    finish_history: bool,
+) -> Result<(), MachineError> {
+    let executions = successor_reconciliation_executions(state_root, member)?;
+    let Some(execution) = executions
+        .iter()
+        .find(|e| e.turn_id == history.turn_id && e.thread_id == history.thread_id)
+    else {
+        return Ok(());
+    };
+    let (_, observed) = observe_run_ledger(state_root, member, true)?;
+    crate::conformance::verify_ledger_records(member, observed.records())
+        .map_err(|_| reconciliation_error("invalid_history"))?;
+    let terminal = observed
+        .records()
+        .iter()
+        .filter(|r| r.kind() == AuditKind::TurnTerminal)
+        .map(audit_value)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|v| v["turn_id"] == history.turn_id)
+        .ok_or_else(|| reconciliation_error("observed_terminal_missing"))?;
+    let terminal: crate::turn::TerminalTurn = serde_json::from_value(terminal)
+        .map_err(|_| reconciliation_error("observed_terminal_invalid"))?;
+    verify_recovered_terminal(execution, &terminal, Some(&history.status))?;
+    let reader = if finish_history {
+        let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(member)?;
+        crate::delegation_service::successor_task_reader(
+            state_root,
+            &manifest,
+            execution.task_ref,
+            false,
+        )?
+    } else {
+        None
+    };
+    let terminal = preserve_recovered_response(state_root, execution, history, reader.as_ref())?;
+    if let Some(error) = failure.filter(|e| {
+        matches!(
+            e.code.as_str(),
+            "REVIEW_TARGET_UNAVAILABLE"
+                | "REVIEW_TARGET_DRIFTED"
+                | "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+        )
+    }) {
+        reject_successor_source(state_root, execution, &terminal, error.clone())?;
+    } else if finish_history {
+        let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(member)?;
+        let view = WorkspaceView {
+            workspace_id: manifest.workspace_id,
+            canonical_path: manifest.canonical_workspace,
+            mode: manifest.workspace_mode,
+            created: false,
+        };
+        settle_successor_task(
+            &view,
+            state_root,
+            execution.owner,
+            member,
+            execution.task_ref,
+            &execution.intent,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+fn reject_successor_source(
+    state_root: &Path,
+    execution: &ReconciliationExecution,
+    terminal: &crate::turn::TerminalTurn,
+    error: MachineError,
+) -> Result<(), MachineError> {
+    let manifest =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(execution.member_ref)?;
+    let view = WorkspaceView {
+        workspace_id: manifest.workspace_id,
+        canonical_path: manifest.canonical_workspace,
+        mode: manifest.workspace_mode,
+        created: false,
+    };
+    let request = crate::delegation_service::MemberTaskSettlement {
+        view: &view,
+        state_root,
+        owner: execution.owner,
+        member_ref: execution.member_ref,
+        task_ref: execution.task_ref,
+        execution_intent: &execution.intent,
+    };
+    let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
+    let accepted = match execution.owner {
+        SettlementOwner::External { engagement_id } => store
+            .external_task_identity(engagement_id, execution.task_ref)?
+            .ok_or_else(|| reconciliation_error("accepted_task_missing"))?,
+        SettlementOwner::Managed { session_id } => {
+            crate::successor_capture::retained_accepted_task(
+                &crate::orchestration::successor_task(
+                    store.connection(),
+                    session_id,
+                    execution.task_ref,
+                )?
+                .ok_or_else(|| reconciliation_error("task_missing"))?
+                .accepted_request_json,
+            )?
+        }
+    };
+    let result = crate::delegation_identity::CompleteResult {
+        schema: crate::delegation_identity::COMPLETE_RESULT_SCHEMA.to_owned(),
+        source: crate::delegation_identity::ResultSource {
+            scope_kind: execution.owner.scope_kind().to_owned(),
+            scope_ref: execution.owner.scope_ref().to_string(),
+            worker_ref: execution.member_ref.to_string(),
+            task_ref: execution.task_ref.to_string(),
+            role_snapshot_digest: accepted.role_snapshot_digest.clone(),
+            agent_configuration_digest: accepted.agent_configuration_digest.clone(),
+            accepted_task_digest: accepted.digest()?,
+        },
+        terminal_outcome: if terminal.status == "completed" {
+            "failed"
+        } else {
+            settle_terminal_outcome(&terminal.status).0
+        }
+        .to_owned(),
+        safe_failure_code: if terminal.status == "completed" {
+            Some(error.code.clone())
+        } else {
+            settle_terminal_outcome(&terminal.status)
+                .1
+                .map(str::to_owned)
+        },
+        final_response: None,
+        structured_output_schema: None,
+        structured_output: None,
+        changes: Vec::new(),
+        attachments: Vec::new(),
+    };
+    settle_reconciled_terminal(
+        &mut store,
+        &request,
+        terminal,
+        if terminal.status == "completed" {
+            CompleteSettlement::SourceRejected(result, error)
+        } else {
+            CompleteSettlement::Result(result)
+        },
+        &[],
+        unix_time_ms_semantic()?,
+    )
+}
+
+fn settle_reconciled_terminal(
+    store: &mut EngagementStore,
+    request: &crate::delegation_service::MemberTaskSettlement<'_>,
+    terminal: &crate::turn::TerminalTurn,
+    complete: CompleteSettlement,
+    retained: &[crate::successor_capture::RetainedChangeSide],
+    now: i64,
+) -> Result<(), MachineError> {
+    let expected = match &complete {
+        CompleteSettlement::Result(result) | CompleteSettlement::CheckedResult(result,_,_)
+            | CompleteSettlement::FindingsInvalid(result) | CompleteSettlement::SourceRejected(result,_) => {
+                crate::operation::canonical(&serde_json::to_value(result).map_err(|_|internal("invalid result"))?).map_err(|error|internal(error.to_string()))?
+            }
+        CompleteSettlement::Unavailable => crate::operation::canonical(&json!({
+            "schema":"dolgorae.complete-result-unavailable/v1","reason":"complete_result_unavailable",
+            "task_ref":request.task_ref.to_string(),
+        })).map_err(|error|internal(error.to_string()))?,
+    };
+    match settle_terminal_task(store, request, terminal, complete, retained, now) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code == "STATE_CONFLICT" => {
+            let matches = match request.owner {
+                SettlementOwner::External { engagement_id } => {
+                    let task = store.external_task(engagement_id, request.task_ref)?;
+                    task.specialist_run_id == request.member_ref
+                        && task.turn_id.as_deref() == Some(&terminal.turn_id)
+                        && matches!(
+                            task.state.as_str(),
+                            "completed_not_delivered"
+                                | "delivered"
+                                | "collected"
+                                | "failed"
+                                | "cancelled"
+                        )
+                        && store
+                            .task_complete_result(engagement_id, request.task_ref)?
+                            .is_some_and(|(_, bytes)| bytes == expected)
+                }
+                SettlementOwner::Managed { session_id } => crate::orchestration::successor_task(
+                    store.connection(),
+                    session_id,
+                    request.task_ref,
+                )?
+                .is_some_and(|task| {
+                    task.member_ref == request.member_ref.to_string()
+                        && task.target_turn_id.as_deref() == Some(&terminal.turn_id)
+                        && matches!(
+                            task.state.as_str(),
+                            "completed_not_delivered"
+                                | "delivered"
+                                | "collected"
+                                | "failed"
+                                | "cancelled"
+                        )
+                        && task.result_sha256.as_deref() == Some(sha256_hex(&expected).as_str())
+                }),
+            };
+            if matches { Ok(()) } else { Err(error) }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+// The dispatch-refusal classification runs inside the settlement port, which the
+// successor adapters construct at run time (TASK-077); the unit tests exercise it.
+/// A refusal is Case B only when the worker proves the Turn had no effect.
+#[cfg_attr(not(test), allow(dead_code))]
+fn proved_non_dispatch(code: &str) -> bool {
+    matches!(
+        code,
+        "WRITER_BUSY"
+            | "RUN_BUSY"
+            | "ENGAGEMENT_STATE_CONFLICT"
+            | "ENGAGEMENT_NOT_FOUND"
+            | "CONTROLLER_MISMATCH"
+            | "SPECIALIST_NOT_MEMBER"
+            | "STATE_CONFLICT"
+            | "INVALID_ARGUMENT"
+            | "RUN_STATE_CONFLICT"
+            | "THREADLESS_REQUIRES_WRITE_TURN"
+            | "CAPABILITY_UNSUPPORTED"
+            | "WORKSPACE_STARTUP_UNSUPPORTED"
+    )
+}
+
+/// Classify one failed writer acquire before a delegated dispatch.
+///
+/// An acquire can fail after leaving a pending transition of the same Run —
+/// reserved, releasing or blocked-unknown — in which case the effects are
+/// unknown and only recovery may settle them. A record that owns no transition
+/// of this Run proves the Turn was never dispatched.
+/// Whether one member Run owes an owned writer cleanup.
+///
+/// A caller-policy member's write dispatch acquires the workspace writer and an
+/// asynchronous terminal cannot release it (the worker holds no controller
+/// carrier, and R calls must not release). The held guard therefore stays as
+/// pending owned cleanup until the next authorized mutation of that member or
+/// a release owner resolves it.
+// The successor adapters that construct the settlement port arrive with TASK-077,
+// so this observation is reached from the port and the unit tests only.
+#[cfg_attr(not(test), allow(dead_code))]
+fn member_writer_observation(
+    request: crate::delegation_service::MemberCleanupObservation<'_>,
+) -> Result<crate::delegation_service::MemberWriterObservation, MachineError> {
+    use crate::writer::WriterAuthorityState;
+    let observation = |holds: bool, blocked_unknown: bool, fingerprint: String| {
+        crate::delegation_service::MemberWriterObservation {
+            holds,
+            blocked_unknown,
+            fingerprint,
+        }
+    };
+    let link = crate::writer::WriterStore::new(
+        request.state_root,
+        &request.view.workspace_id,
+        DarwinSystem.current_uid(),
+    );
+    // A confirmed absent record is no writer authority. Any other failure to read
+    // one is unobservable, so the member cannot be called idle.
+    if !link.record_exists() {
+        return Ok(observation(false, false, "writer:absent".to_owned()));
+    }
+    let writer = link.load().map_err(writer_unobservable)?;
+    let fingerprint = writer_fingerprint(&writer)?;
+    if writer
+        .holder
+        .as_ref()
+        .is_none_or(|holder| holder.run_id != request.member_ref)
+    {
+        return Ok(observation(false, false, fingerprint));
+    }
+    if writer.state == WriterAuthorityState::BlockedUnknown {
+        // A blocked guard is unresolved cleanup whatever the work is.
+        return Ok(observation(true, true, fingerprint));
+    }
+    let holds = matches!(
+        writer.state,
+        WriterAuthorityState::Reserved
+            | WriterAuthorityState::Active
+            | WriterAuthorityState::Releasing
+    );
+    // Whether a held guard is in use or cleanup is a database fact of the caller's
+    // attempt, never a read of this observation.
+    Ok(observation(holds, false, fingerprint))
+}
+
+/// The identity of one observed writer record.
+///
+/// Generation, state, holder, transaction and the content digest all participate,
+/// so a record that changed in any of them cannot be mistaken for the same fact.
+fn writer_fingerprint(writer: &crate::writer::WriterRecord) -> Result<String, MachineError> {
+    let holder = writer
+        .holder
+        .as_ref()
+        .map(|holder| {
+            format!(
+                "{}:{}:{}",
+                holder.run_id, holder.run_generation, holder.worker_generation
+            )
+        })
+        .unwrap_or_else(|| "none".to_owned());
+    let text = serde_json::to_string(writer)
+        .map_err(|_| internal("the writer record is unrepresentable"))?;
+    let canonical = crate::jcs::canonicalize(
+        &crate::jcs::parse(&text).map_err(|_| internal("the writer record is unrepresentable"))?,
+    )
+    .map_err(|_| internal("the writer record is unrepresentable"))?;
+    Ok(format!(
+        "writer:{}:{:?}:{}:{}:{}",
+        writer.writer_generation,
+        writer.state,
+        holder,
+        writer
+            .transaction_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_owned()),
+        crate::jcs::sha256_hex(&canonical)
+    ))
+}
+
+/// Release the writer guard this member Run left behind.
+///
+/// Only the next authorized mutation of the same member runs this, and only for a
+/// guard it still owns and can release; a blocked-unknown guard is left to
+/// recovery.
+#[cfg_attr(not(test), allow(dead_code))]
+fn release_stale_member_writer(
+    view: &WorkspaceView,
+    state_root: &Path,
+    member_ref: Uuid,
+    owner: SettlementOwner,
+    carrier: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    use crate::writer::WriterAuthorityState;
+    let link =
+        crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
+    // A confirmed absent record has nothing to release; an unreadable one is a
+    // typed recovery refusal, never a silent no-op.
+    if !link.record_exists() {
+        return Ok(());
+    }
+    let writer = link.load().map_err(writer_unobservable)?;
+    if writer
+        .holder
+        .as_ref()
+        .is_none_or(|holder| holder.run_id != member_ref)
+        || !matches!(
+            writer.state,
+            WriterAuthorityState::Reserved
+                | WriterAuthorityState::Active
+                | WriterAuthorityState::Releasing
+        )
+    {
+        return Ok(());
+    }
+    release_member_writer(view, state_root, member_ref, owner, carrier)
+}
+
+fn release_member_writer(
+    view: &WorkspaceView,
+    state_root: &Path,
+    member_ref: Uuid,
+    owner: SettlementOwner,
+    carrier: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    match owner {
+        SettlementOwner::External { engagement_id } => {
+            release_external_writer(view, state_root, member_ref, engagement_id, carrier)
+        }
+        SettlementOwner::Managed { .. } => {
+            release_writer_authorized(view, state_root, member_ref, carrier, None, None).map(|_| ())
+        }
+    }
+}
+
+/// Settle one successor task from the durable terminal of its bound Turn.
+///
+/// The observation is the ledger's `turn_terminal` record for exactly this Turn;
+/// the settlement is one guarded transaction (task terminal + retained result +
+/// workload revision) in the owner's own task store, and the writer is released
+/// only after that publication and only when the caller holds the member's own
+/// authority carrier.
+#[cfg_attr(not(test), allow(dead_code))]
+fn settle_successor_task(
+    view: &WorkspaceView,
+    state_root: &Path,
+    owner: SettlementOwner,
+    member_ref: Uuid,
+    task_ref: Uuid,
+    execution_intent: &str,
+    release_carrier: Option<&CredentialCarrier>,
+) -> Result<crate::delegation_service::MemberSettlement, MachineError> {
+    use crate::delegation_service::MemberSettlement;
+    let store = crate::engagement::EngagementStore::open_read_only(
+        &crate::engagement::EngagementStore::workspace_database_path(state_root),
+    )?;
+    let observed = match owner {
+        SettlementOwner::External { engagement_id } => {
+            let task = store.external_task(engagement_id, task_ref)?;
+            (task.state, task.turn_id)
+        }
+        SettlementOwner::Managed { session_id } => {
+            let Some(facts) =
+                crate::orchestration::successor_task(store.connection(), session_id, task_ref)?
+            else {
+                // No Broker task row means there is nothing of ours to settle.
+                return Ok(MemberSettlement::Terminal);
+            };
+            (facts.state, facts.target_turn_id)
+        }
+    };
+    let (state, turn_id) = observed;
+    if !matches!(state.as_str(), "dispatching" | "running") {
+        return Ok(MemberSettlement::Terminal);
+    }
+    let Some(turn_id) = turn_id else {
+        // The K path records the Turn id after the response; a terminal that
+        // already exists converges on the next attempt.
+        return Ok(MemberSettlement::Running);
+    };
+    drop(store);
+    settle_successor_task_from_turn(
+        view,
+        state_root,
+        owner,
+        member_ref,
+        task_ref,
+        execution_intent,
+        &turn_id,
+        release_carrier,
+    )
+}
+
+/// Settle one task from an explicit Turn id (the convergence entry point).
+#[allow(clippy::too_many_arguments)]
+fn settle_successor_task_from_turn(
+    view: &WorkspaceView,
+    state_root: &Path,
+    owner: SettlementOwner,
+    member_ref: Uuid,
+    task_ref: Uuid,
+    execution_intent: &str,
+    turn_id: &str,
+    release_carrier: Option<&CredentialCarrier>,
+) -> Result<crate::delegation_service::MemberSettlement, MachineError> {
+    use crate::delegation_service::MemberSettlement;
+    let mut store = crate::engagement::EngagementStore::open(
+        &crate::engagement::EngagementStore::workspace_database_path(state_root),
+    )?;
+    // The owner decides where the task state and its accepted identity live.
+    let (state, accepted) = match owner {
+        SettlementOwner::External { engagement_id } => {
+            let task = store.external_task(engagement_id, task_ref)?;
+            let accepted = store
+                .external_task_identity(engagement_id, task_ref)?
+                .ok_or_else(|| internal("the accepted task identity is unavailable"))?;
+            (task.state, accepted)
+        }
+        SettlementOwner::Managed { session_id } => {
+            let Some(facts) =
+                crate::orchestration::successor_task(store.connection(), session_id, task_ref)?
+            else {
+                return Ok(MemberSettlement::Terminal);
+            };
+            let accepted: crate::delegation_identity::AcceptedTask =
+                serde_json::from_str(&facts.accepted_request_json)
+                    .map_err(|_| internal("the accepted task identity is invalid"))?;
+            (facts.state, accepted)
+        }
+    };
+    if !matches!(state.as_str(), "dispatching" | "running") {
+        // Already terminal: a settlement retry, await, collect or replay observes
+        // the committed fact and never settles again.
+        return Ok(MemberSettlement::Terminal);
+    }
+    let Some(terminal) = resolved_terminal(state_root, member_ref, turn_id)? else {
+        return Ok(MemberSettlement::Running);
+    };
+    let (_, evidence) = observe_run_ledger(state_root, member_ref, true)?;
+    if evidence.records().iter().any(|record| {
+        record.kind() == AuditKind::Reconciliation
+            && audit_value(record).is_ok_and(|value| {
+                value["turn_id"] == turn_id && value["observed_status"].is_string()
+            })
+    }) {
+        let execution = successor_reconciliation_executions(state_root, member_ref)?
+            .into_iter()
+            .find(|execution| execution.task_ref == task_ref)
+            .ok_or_else(|| reconciliation_error("recovery_task_missing"))?;
+        verify_reconciliation_resolution(state_root, &execution, &terminal)?;
+    }
+    let request = crate::delegation_service::MemberTaskSettlement {
+        view,
+        state_root,
+        owner,
+        member_ref,
+        task_ref,
+        execution_intent,
+    };
+    // The after-capture runs here, while the member Run still holds the writer
+    // authority the dispatch acquired, for either owner.
+    let produced = if execution_intent == "canonical_workspace_write" {
+        match write_task_changes(&store, &request, turn_id) {
+            Ok(produced) => Some(produced),
+            // A deterministic content condition is the typed-unavailable result;
+            // any other fault fails this attempt so the hook or sweep
+            // retries it.
+            Err(error) if content_unavailable(&error) => None,
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    let read_only = execution_intent != "canonical_workspace_write";
+    let task_body = crate::engagement::accepted_task_content(store.connection(), task_ref)?
+        .map(|(task_body, _, _)| task_body)
+        .ok_or_else(|| internal("the accepted task bytes are unavailable"))?;
+    let task = serde_json::from_slice(&task_body)
+        .map_err(|_| internal("the accepted task bytes are invalid"))?;
+    let (changes, retained) = match produced {
+        Some(produced) => (Some(produced.changes), produced.retained),
+        // A read-only task publishes its empty change set; a writable task whose
+        // producer failed publishes the typed unavailable result.
+        None if read_only => (Some(Vec::new()), Vec::new()),
+        None => (None, Vec::new()),
+    };
+    let retained = retained.as_slice();
+    let settlement = settle_complete_result(&request, &accepted, &terminal, &task, changes)?;
+    let source_error = match &settlement {
+        CompleteSettlement::SourceRejected(_, error) => Some(error.clone()),
+        _ => None,
+    };
+    let now = unix_time_ms_semantic()?;
+    match settle_reconciled_terminal(&mut store, &request, &terminal, settlement, retained, now) {
+        Ok(()) => {}
+        // The retained change content would exceed the Run's aggregate. The
+        // attempt rolled back whole, so this publishes the typed unavailable
+        // result instead, with no orphan content rows.
+        Err(error) if error.code == "COMPLETE_RESULT_UNAVAILABLE" && !retained.is_empty() => {
+            settle_terminal_task(
+                &mut store,
+                &request,
+                &terminal,
+                CompleteSettlement::Unavailable,
+                &[],
+                now,
+            )?;
+        }
+        Err(error) => return Err(error),
+    }
+    if execution_intent == "canonical_workspace_write"
+        && let Some(carrier) = release_carrier
+    {
+        // Terminal publication precedes the release; a failed release is surfaced
+        // to the caller, never hidden.
+        release_member_writer(view, state_root, member_ref, owner, carrier)?;
+    }
+    if let Some(error) = source_error {
+        return Err(error);
+    }
+    Ok(MemberSettlement::Terminal)
+}
+
+/// Re-settle every unsettled task of one member whose Turn already completed.
+///
+/// The worker calls this at start and before accepting each new Turn, so a
+/// settlement the hook could not perform — or that raced the K path — always
+/// converges. Selection is by each task's own Turn id, never the Run's last
+/// terminal, and the owner decides which task store is read.
+pub(crate) fn resettle_member_tasks(
+    state_root: &Path,
+    member_run_id: Uuid,
+    owner: SettlementOwner,
+) -> Result<(), MachineError> {
+    let store = crate::engagement::EngagementStore::open_read_only(
+        &crate::engagement::EngagementStore::workspace_database_path(state_root),
+    )?;
+    let tasks = match owner {
+        SettlementOwner::External { engagement_id } => {
+            store.unsettled_member_tasks(engagement_id, member_run_id)?
+        }
+        SettlementOwner::Managed { session_id } => {
+            let mut settled = Vec::new();
+            for (task_ref, accepted_json, turn_id) in
+                crate::orchestration::unsettled_successor_tasks(
+                    store.connection(),
+                    session_id,
+                    member_run_id,
+                )?
+            {
+                let accepted: crate::delegation_identity::AcceptedTask =
+                    serde_json::from_str(&accepted_json)
+                        .map_err(|_| internal("the accepted task identity is invalid"))?;
+                settled.push((task_ref, accepted.execution_intent, turn_id));
+            }
+            settled
+        }
+    };
+    drop(store);
+    if tasks.is_empty() {
+        return Ok(());
+    }
+    let manifest =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(member_run_id)?;
+    let view = WorkspaceView {
+        workspace_id: manifest.workspace_id.clone(),
+        canonical_path: manifest.canonical_workspace.clone(),
+        mode: manifest.workspace_mode,
+        created: false,
+    };
+    for (task_ref, execution_intent, turn_id) in tasks {
+        settle_successor_task_from_turn(
+            &view,
+            state_root,
+            owner,
+            member_run_id,
+            task_ref,
+            &execution_intent,
+            &turn_id,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+/// The changes of one writable task (MD1).
+///
+/// The retained dispatch index and its baseline are the immutable before basis and
+/// the worktree is the after side; the Git-ignored paths this task's executor named
+/// in its `fileChange` items are merged in from the durable snapshots of its Turn.
+/// Every verification or bound failure is returned as an error so the caller can
+/// make the complete result typed unavailable, never an incomplete change set.
+fn write_task_changes(
+    store: &crate::engagement::EngagementStore,
+    request: &crate::delegation_service::MemberTaskSettlement<'_>,
+    turn_id: &str,
+) -> Result<crate::successor_capture::ProducedChanges, MachineError> {
+    let index = store
+        .dispatch_index_object(request.task_ref)?
+        .ok_or_else(crate::successor_capture::unavailable_change)?;
+    let index = crate::successor_capture::parse_dispatch_index(&index, request.task_ref)?;
+    let baseline = store.dispatch_index_baseline(request.task_ref)?;
+    let workspace = request.view.canonical_path.to_path_buf()?;
+    let domain = crate::successor_capture::complete_result_changes(&workspace, &index, &baseline)?;
+    // MD1: only the ignored-side paths this executor explicitly edited are result
+    // content; a path a shell command changed is not.
+    let payloads = file_change_payloads(
+        request.state_root,
+        request.member_ref,
+        turn_id,
+        crate::review_target::MAX_TARGET_BYTES,
+    )?;
+    // Every item of this Turn reaches the producer in one call and in journal
+    // order, so the changes of one path are chained instead of read separately.
+    let mut items = Vec::new();
+    for payload in &payloads {
+        items.extend(executor_file_changes(payload)?);
+    }
+    // A task that named no fileChange item has no ignored-side change to
+    // find, so the producer skips its own listing of the workspace.
+    let ignored = if items.is_empty() {
+        crate::successor_capture::ProducedChanges::empty()
+    } else {
+        crate::successor_capture::ignored_path_changes(
+            &workspace,
+            &index
+                .entries
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect(),
+            &items,
+        )?
+    };
+    let changes = crate::successor_capture::merge_changes(domain.changes, ignored.changes);
+    // A change set the closed complete result cannot carry is the typed
+    // unavailable condition, never a settlement that fails its validation forever.
+    crate::successor_capture::ensure_representable_changes(
+        &changes,
+        crate::delegation_identity::MAX_COMPLETE_RESULT_CHANGES,
+    )?;
+    // The exact bytes every surviving side names are retained with the
+    // settlement; the merge keeps only the changes the result publishes.
+    let published: std::collections::BTreeSet<(&str, &'static str)> = changes
+        .iter()
+        .flat_map(|change| {
+            [
+                change
+                    .before
+                    .as_ref()
+                    .map(|_| (change.path.as_str(), "before")),
+                change
+                    .after
+                    .as_ref()
+                    .map(|_| (change.path.as_str(), "after")),
+            ]
+            .into_iter()
+            .flatten()
+        })
+        .collect();
+    let retained: Vec<_> = domain
+        .retained
+        .into_iter()
+        .chain(ignored.retained)
+        .filter(|side| published.contains(&(side.path.as_str(), side.side)))
+        .collect();
+    // Each producer half bounded itself; the merged set is bounded once more
+    // before the settlement retains it.
+    crate::successor_capture::ensure_retained_within(
+        &retained,
+        crate::successor_capture::MAX_RETAINED_CHANGE_BYTES,
+    )?;
+    Ok(crate::successor_capture::ProducedChanges { changes, retained })
+}
+
+/// The published file-change payloads one Turn recorded, bounded in aggregate.
+///
+/// The item count and each payload are already bounded; the sum of the payload
+/// bytes read for one task is bounded by the existing workspace target bound so a
+/// settlement cannot hold thousands of 8 MiB payloads at once. A recorded digest
+/// without its payload, or an over-bound total, is the typed unavailable
+/// condition; an unreadable payload propagates.
+fn file_change_payloads(
+    state_root: &Path,
+    run_id: Uuid,
+    turn_id: &str,
+    bound: u64,
+) -> Result<Vec<Vec<crate::interaction_payload::FileChangePayload>>, MachineError> {
+    let mut total = 0u64;
+    let mut payloads = Vec::new();
+    for digest in turn_file_change_snapshots(state_root, run_id, turn_id)? {
+        // The bound is enforced while reading, not after the bytes are whole.
+        let remaining = bound.saturating_sub(total);
+        let limit = remaining.min(crate::review_target::MAX_FILE_BYTES);
+        let bytes = file_change_payload_within(state_root, run_id, &digest, limit)?
+            .ok_or_else(crate::successor_capture::unavailable_change)?;
+        total = total.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        if total > bound {
+            return Err(crate::successor_capture::unavailable_change());
+        }
+        // The payload is the worker's own normalization of the item
+        // (`FileChangePayload`); anything else is unavailable, never editable.
+        payloads.push(
+            serde_json::from_slice::<Vec<crate::interaction_payload::FileChangePayload>>(&bytes)
+                .map_err(|_| crate::successor_capture::unavailable_change())?,
+        );
+    }
+    Ok(payloads)
+}
+
+/// Whether one changes-producer error is a deterministic content condition.
+///
+/// Only these become the immutable typed-unavailable result. Every other
+/// error — a database or ledger read, an I/O failure, a git spawn failure — is a
+/// transient or integrity fault: the settlement attempt fails, the task stays
+/// running, and the worker hook or restart sweep retries it.
+fn content_unavailable(error: &MachineError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "COMPLETE_RESULT_UNAVAILABLE"
+            | "STORAGE_CAPACITY_EXCEEDED"
+            | "REVIEW_TARGET_UNSAFE_PATH"
+            | "REVIEW_TARGET_UNSAFE_FILE"
+            | "REVIEW_TARGET_LIMIT_EXCEEDED"
+    )
+}
+
+/// The executor change items one published snapshot payload names (MD1).
+fn executor_file_changes(
+    changes: &[crate::interaction_payload::FileChangePayload],
+) -> Result<Vec<crate::successor_capture::ExecutorFileChange<'_>>, MachineError> {
+    changes
+        .iter()
+        .map(|change| {
+            let LosslessPath::Utf8(path) = &change.path else {
+                return Err(crate::successor_capture::unavailable_change());
+            };
+            let move_path = match change.move_path.as_ref() {
+                None => None,
+                Some(LosslessPath::Utf8(path)) => Some(path.as_str()),
+                Some(LosslessPath::Bytes { .. }) => {
+                    return Err(crate::successor_capture::unavailable_change());
+                }
+            };
+            Ok(crate::successor_capture::ExecutorFileChange {
+                path: path.as_str(),
+                kind: change.kind.as_str(),
+                diff: change.diff.as_str(),
+                move_path,
+            })
+        })
+        .collect()
+}
+
+/// Settle the successor task one completed Turn is bound to (worker side).
+///
+/// The worker calls this from its terminal funnel, so an asynchronous completion
+/// is settled without any read call observing (or causing) it. A settlement fault
+/// leaves the task running for the restart sweep to re-settle by Turn id.
+pub(crate) fn settle_bound_successor_task(
+    state_root: &Path,
+    member_run_id: Uuid,
+    owner: SettlementOwner,
+    terminal: &crate::turn::TerminalTurn,
+) -> Result<(), MachineError> {
+    let turn_id = terminal.turn_id.as_str();
+    // The resolved response is durable before any settlement observes it.
+    record_resolved_terminal(state_root, member_run_id, terminal)?;
+    let store = crate::engagement::EngagementStore::open_read_only(
+        &crate::engagement::EngagementStore::workspace_database_path(state_root),
+    )?;
+    let bound = match owner {
+        SettlementOwner::External { engagement_id } => {
+            store.task_for_member_turn(engagement_id, member_run_id, turn_id)?
+        }
+        SettlementOwner::Managed { session_id } => {
+            match crate::orchestration::successor_task_for_turn(
+                store.connection(),
+                session_id,
+                member_run_id,
+                turn_id,
+            )? {
+                Some((task_ref, accepted_json)) => {
+                    let accepted: crate::delegation_identity::AcceptedTask =
+                        serde_json::from_str(&accepted_json)
+                            .map_err(|_| internal("the accepted task identity is invalid"))?;
+                    Some((task_ref, accepted.execution_intent))
+                }
+                None => None,
+            }
+        }
+    };
+    let Some((task_ref, execution_intent)) = bound else {
+        return Ok(());
+    };
+    drop(store);
+    let manifest =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(member_run_id)?;
+    let view = WorkspaceView {
+        workspace_id: manifest.workspace_id.clone(),
+        canonical_path: manifest.canonical_workspace.clone(),
+        mode: manifest.workspace_mode,
+        created: false,
+    };
+    settle_successor_task_from_turn(
+        &view,
+        state_root,
+        owner,
+        member_run_id,
+        task_ref,
+        &execution_intent,
+        turn_id,
+        None,
+    )
+    .map(|_| ())
+}
+
+/// Validate source assurance before output semantics, preserving storage failures.
+fn checked_successor_v4(
+    request: &crate::delegation_service::MemberTaskSettlement<'_>,
+    terminal: &crate::turn::TerminalTurn,
+    task: &crate::task_request::SpecialistTaskRequest,
+) -> Result<(Value, Vec<u8>), MachineError> {
+    let manifest = RunStore::new(SystemWorkspacePlatform, request.state_root)
+        .load_manifest(request.member_ref)?;
+    let invalid_state = |error: MachineError| {
+        if error.code == "REVIEW_CANDIDATE_PROVENANCE_INVALID" {
+            MachineError::new(
+                "RUNTIME_STATE_INVALID",
+                "the retained task reader or history binding is inconsistent",
+                false,
+                json!({"required_action":"restore_state"}),
+            )
+        } else {
+            error
+        }
+    };
+    let reader = crate::delegation_service::successor_task_reader(
+        request.state_root,
+        &manifest,
+        request.task_ref,
+        false,
+    )
+    .map_err(&invalid_state)?
+    .ok_or_else(|| crate::direct_review_target::provenance_invalid(request.task_ref))?;
+    let response = reader
+        .completed_history_response(&terminal.thread_id, &terminal.turn_id)
+        .map_err(&invalid_state)?;
+    reader.check_acceptance()?;
+    let bytes = match response {
+        Some(crate::turn::FinalResponse::Inline { text }) => Some(text.into_bytes()),
+        Some(crate::turn::FinalResponse::Artifact {
+            artifact_id,
+            byte_length,
+            sha256,
+            ..
+        }) => read_final_response_artifact(
+            request.state_root,
+            request.member_ref,
+            artifact_id,
+            byte_length,
+            &sha256,
+        )?,
+        _ => None,
+    };
+    let mut verdict = crate::specialist::parse_reviewer_output_v4(
+        bytes
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok()),
+        task,
+    )?;
+    for item in verdict["findings"]
+        .as_array()
+        .expect("checked findings")
+        .iter()
+        .chain(
+            verdict["criterion_assessments"]
+                .as_array()
+                .expect("checked assessments")
+                .iter()
+                .flat_map(|assessment| {
+                    assessment["evidence"]
+                        .as_array()
+                        .expect("checked evidence")
+                        .iter()
+                }),
+        )
+    {
+        if item.get("basis").is_none() || item["basis"] == "candidate" {
+            let id = item["read_receipt_id"]
+                .as_str()
+                .and_then(|id| Uuid::parse_str(id).ok())
+                .filter(|id| id.get_version_num() == 7)
+                .ok_or_else(|| crate::direct_review_target::provenance_invalid(request.task_ref))?;
+            reader.validate_location(
+                id,
+                item["path"].as_str().ok_or_else(|| {
+                    crate::direct_review_target::provenance_invalid(request.task_ref)
+                })?,
+                item["line_start"].as_u64(),
+                item["line_end"].as_u64(),
+            )?;
+        } else if !item["read_receipt_id"].is_null() {
+            return Err(crate::direct_review_target::provenance_invalid(
+                request.task_ref,
+            ));
+        }
+    }
+    if reader.target().assurance == "sampled_mutable" {
+        let limits = verdict["evidence_limits"]
+            .as_array_mut()
+            .expect("checked limits");
+        if !limits
+            .iter()
+            .any(|limit| limit == crate::direct_review_target::SAMPLED_SCOPE_LIMIT)
+        {
+            if limits.len() == 64 {
+                return Err(MachineError::new(
+                    "FINDINGS_OUTPUT_INVALID",
+                    "sampled source disclosure exceeds the output bound",
+                    false,
+                    json!({}),
+                ));
+            }
+            limits.push(json!(crate::direct_review_target::SAMPLED_SCOPE_LIMIT));
+        }
+    }
+    verdict["findings"]
+        .as_array_mut()
+        .expect("checked findings")
+        .sort_by(|a, b| a["severity"].as_str().cmp(&b["severity"].as_str()));
+    let encoded = serde_json::to_string(&verdict)
+        .map_err(|_| internal("checked output is unrepresentable"))?;
+    crate::specialist::parse_reviewer_output_v4(Some(&encoded), task)?;
+    reader.check_acceptance()?;
+    Ok((verdict, bytes.expect("validated response")))
+}
+
+/// The complete result one terminal Turn establishes.
+///
+/// `changes` is the changes producer's result: `None` when a writable task's change
+/// set could not be verified, so its result is the typed-unavailable condition
+/// rather than an incomplete object.
+fn settle_complete_result(
+    request: &crate::delegation_service::MemberTaskSettlement<'_>,
+    accepted: &crate::delegation_identity::AcceptedTask,
+    terminal: &crate::turn::TerminalTurn,
+    task: &crate::task_request::SpecialistTaskRequest,
+    changes: Option<Vec<crate::delegation_identity::ChangeRef>>,
+) -> Result<CompleteSettlement, MachineError> {
+    let Some(changes) = changes else {
+        return Ok(CompleteSettlement::Unavailable);
+    };
+    let (outcome, failure) = settle_terminal_outcome(&terminal.status);
+    // Every final response source the Turn coordinator resolves is a
+    // complete-result source; only an unavailable or unverifiable artifact is a
+    // typed-unavailable result. A failed or cancelled terminal with no response
+    // is a valid result with a null final response.
+    let mut final_bytes =
+        if outcome == "completed" && accepted.expected_output_schema == "structured_review_v4" {
+            None
+        } else {
+            match terminal.final_response.as_ref() {
+                None => None,
+                Some(crate::turn::FinalResponse::Inline { text }) => Some(text.as_bytes().to_vec()),
+                Some(crate::turn::FinalResponse::Artifact {
+                    artifact_id,
+                    byte_length,
+                    sha256,
+                    ..
+                }) => {
+                    match read_final_response_artifact(
+                        request.state_root,
+                        request.member_ref,
+                        *artifact_id,
+                        *byte_length,
+                        sha256,
+                    )? {
+                        Some(bytes) => Some(bytes),
+                        None => return Ok(CompleteSettlement::Unavailable),
+                    }
+                }
+                Some(crate::turn::FinalResponse::Unavailable { .. }) => {
+                    return Ok(CompleteSettlement::Unavailable);
+                }
+            }
+        };
+    // MDC:471-473: a checked-output task's findings are validated before they are
+    // published; an invalid output is the failed-output result, never a payload.
+    let mut findings_invalid = false;
+    let mut review_failure = None;
+    let mut source_error = None;
+    let mut checked_payload = None;
+    let (structured_output_schema, structured_output) = match (final_bytes.as_ref(), outcome) {
+        (_, "completed") if accepted.expected_output_schema == "structured_review_v4" => {
+            match checked_successor_v4(request, terminal, task) {
+                Ok((value, response)) => {
+                    final_bytes = Some(response);
+                    let canonical = crate::operation::canonical(&value)
+                        .map_err(|_| internal("checked output is unrepresentable"))?;
+                    let reference = crate::delegation_identity::BytesRef {
+                        byte_length: canonical.len() as u64,
+                        sha256: format!("sha256:{}", sha256_hex(&canonical)),
+                    };
+                    checked_payload = Some(canonical);
+                    (
+                        Some(accepted.expected_output_schema.clone()),
+                        Some(reference),
+                    )
+                }
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        "FINDINGS_OUTPUT_INVALID"
+                            | "REVIEW_OUTPUT_INVALID"
+                            | "REVIEW_TARGET_DRIFTED"
+                            | "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                            | "REVIEW_TARGET_UNAVAILABLE"
+                    ) =>
+                {
+                    findings_invalid = true;
+                    review_failure = Some(
+                        if matches!(
+                            error.code.as_str(),
+                            "FINDINGS_OUTPUT_INVALID" | "REVIEW_OUTPUT_INVALID"
+                        ) {
+                            "FINDINGS_OUTPUT_INVALID".to_owned()
+                        } else {
+                            error.code.clone()
+                        },
+                    );
+                    if matches!(
+                        error.code.as_str(),
+                        "REVIEW_TARGET_DRIFTED"
+                            | "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                            | "REVIEW_TARGET_UNAVAILABLE"
+                    ) {
+                        source_error = Some(error);
+                    }
+                    (None, None)
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        (Some(bytes), "completed") if accepted.expected_output_schema == "structured_review_v3" => {
+            let text = std::str::from_utf8(bytes).ok();
+            match crate::specialist::parse_reviewer_output_v3(text, task) {
+                Ok(output) => {
+                    let value = serde_json::to_value(&output)
+                        .map_err(|_| internal("the structured output is unrepresentable"))?;
+                    let canonical = crate::operation::canonical(&value)
+                        .map_err(|_| internal("the structured output is unrepresentable"))?;
+                    (
+                        Some(accepted.expected_output_schema.clone()),
+                        Some(crate::delegation_identity::BytesRef {
+                            byte_length: u64::try_from(canonical.len())
+                                .map_err(|_| internal("unbounded result"))?,
+                            sha256: format!("sha256:{}", crate::jcs::sha256_hex(&canonical)),
+                        }),
+                    )
+                }
+                Err(_) => {
+                    findings_invalid = true;
+                    (None, None)
+                }
+            }
+        }
+        _ => (None, None),
+    };
+    let (outcome, failure) = if findings_invalid {
+        (
+            "failed",
+            Some(
+                review_failure
+                    .as_deref()
+                    .unwrap_or("FINDINGS_OUTPUT_INVALID"),
+            ),
+        )
+    } else {
+        (outcome, failure)
+    };
+    let final_bytes = if findings_invalid { None } else { final_bytes };
+    let final_bytes_for_retention = if checked_payload.is_some() {
+        final_bytes.clone().expect("checked response")
+    } else {
+        Vec::new()
+    };
+    let result = crate::delegation_identity::CompleteResult {
+        schema: crate::delegation_identity::COMPLETE_RESULT_SCHEMA.to_owned(),
+        source: crate::delegation_identity::ResultSource {
+            scope_kind: request.owner.scope_kind().to_owned(),
+            scope_ref: request.owner.scope_ref().to_string(),
+            worker_ref: request.member_ref.to_string(),
+            task_ref: request.task_ref.to_string(),
+            role_snapshot_digest: accepted.role_snapshot_digest.clone(),
+            agent_configuration_digest: accepted.agent_configuration_digest.clone(),
+            accepted_task_digest: accepted.digest()?,
+        },
+        terminal_outcome: outcome.to_owned(),
+        final_response: final_bytes.map(|bytes| {
+            let byte_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            let sha256 = format!("sha256:{}", crate::jcs::sha256_hex(&bytes));
+            crate::delegation_identity::BytesRef {
+                byte_length,
+                sha256,
+            }
+        }),
+        structured_output_schema,
+        structured_output,
+        changes,
+        attachments: Vec::new(),
+        safe_failure_code: failure.map(str::to_owned),
+    };
+    result.digest()?;
+    Ok(if let Some(error) = source_error {
+        CompleteSettlement::SourceRejected(result, error)
+    } else if findings_invalid {
+        CompleteSettlement::FindingsInvalid(result)
+    } else if let Some(payload) = checked_payload {
+        CompleteSettlement::CheckedResult(result, payload, final_bytes_for_retention)
+    } else {
+        CompleteSettlement::Result(result)
+    })
+}
+
+/// What one terminal Turn established for its task's complete result.
+pub(crate) enum CompleteSettlement {
+    SourceRejected(crate::delegation_identity::CompleteResult, MachineError),
+    CheckedResult(crate::delegation_identity::CompleteResult, Vec<u8>, Vec<u8>),
+    /// A complete result to publish with the Turn's own outcome.
+    Result(crate::delegation_identity::CompleteResult),
+    /// Checked findings failed validation: the failed-output result (MDC:471-473).
+    FindingsInvalid(crate::delegation_identity::CompleteResult),
+    /// No complete result can be published.
+    Unavailable,
+}
+
+/// A writer record that exists but cannot be read is unobservable.
+fn writer_unobservable(error: MachineError) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the workspace writer authority cannot be observed",
+        false,
+        serde_json::json!({
+            "reason": error.message,
+            "required_action": "restore_state",
+        }),
+    )
+}
+
+/// Read one artifact-backed final response, bounded and digest-verified.
+///
+/// The worker's artifact store writes `<run_dir>/artifacts/<id>.bin`; the reference
+/// names the exact length and digest, so an unreadable, oversized or mismatched
+/// artifact is a typed-unavailable result rather than fabricated bytes.
+fn read_final_response_artifact(
+    state_root: &Path,
+    run_id: Uuid,
+    artifact_id: Uuid,
+    byte_length: u64,
+    sha256: &str,
+) -> Result<Option<Vec<u8>>, MachineError> {
+    const MAX_FINAL_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
+    if byte_length > MAX_FINAL_RESPONSE_BYTES {
+        return Ok(None);
+    }
+    let path = run_root(state_root, run_id)
+        .join("artifacts")
+        .join(format!("{artifact_id}.bin"));
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return Ok(None);
+    };
+    if !metadata.is_file() || metadata.len() != byte_length {
+        return Ok(None);
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Ok(None);
+    };
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != byte_length
+        || crate::jcs::sha256_hex(&bytes) != sha256.trim_start_matches("sha256:")
+    {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+fn settle_terminal_outcome(status: &str) -> (&'static str, Option<&'static str>) {
+    match status {
+        "completed" => ("completed", None),
+        "failed" => ("failed", Some("TURN_FAILED")),
+        "interrupted" => ("cancelled", Some("TURN_INTERRUPTED")),
+        _ => ("failed", Some("TURN_TERMINAL_UNKNOWN")),
+    }
+}
+
+/// Record one terminal settlement and its complete result exactly once.
+fn settle_terminal_task(
+    store: &mut crate::engagement::EngagementStore,
+    request: &crate::delegation_service::MemberTaskSettlement<'_>,
+    terminal: &crate::turn::TerminalTurn,
+    complete: CompleteSettlement,
+    retained: &[crate::successor_capture::RetainedChangeSide],
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    let (outcome, failure) = settle_terminal_outcome(&terminal.status);
+    let mut state = match outcome {
+        "completed" => "completed_not_delivered",
+        "cancelled" => "cancelled",
+        _ => "failed",
+    };
+    let mut failure = failure.map(str::to_owned);
+    let mut checked_payload = None;
+    // Checked findings that failed validation settle as the failed-output result.
+    let complete = match complete {
+        CompleteSettlement::Result(result) => Some(result),
+        CompleteSettlement::CheckedResult(result, payload, response) => {
+            checked_payload = Some((payload, response));
+            Some(result)
+        }
+        CompleteSettlement::FindingsInvalid(result)
+        | CompleteSettlement::SourceRejected(result, _) => {
+            state = "failed";
+            failure = result.safe_failure_code.clone();
+            Some(result)
+        }
+        CompleteSettlement::Unavailable => None,
+    };
+    // The terminal row always carries its published bytes: the complete result,
+    // or the typed-unavailable condition. A partial change set is never one.
+    let (digest, canonical, _complete_result) = match complete {
+        Some(result) => {
+            let value = serde_json::to_value(&result)
+                .map_err(|_| internal("the complete result is unrepresentable"))?;
+            let canonical = crate::operation::canonical(&value)
+                .map_err(|_| internal("the complete result is unrepresentable"))?;
+            // The row keeps the content digest of the published bytes; the
+            // complete-result domain digest is re-derived from the object.
+            result.digest()?;
+            (crate::jcs::sha256_hex(&canonical), canonical, true)
+        }
+        None => {
+            let marker = serde_json::json!({
+                "schema": "dolgorae.complete-result-unavailable/v1",
+                // Every cause of an unavailable result shares one reason: the
+                // marker states the condition, not which producer noticed it.
+                "reason": "complete_result_unavailable",
+                "task_ref": request.task_ref.to_string(),
+            });
+            let canonical = crate::operation::canonical(&marker)
+                .map_err(|_| internal("the unavailable result is unrepresentable"))?;
+            (crate::jcs::sha256_hex(&canonical), canonical, false)
+        }
+    };
+    let checked_reader = if checked_payload.is_some() {
+        let manifest = RunStore::new(SystemWorkspacePlatform, request.state_root)
+            .load_manifest(request.member_ref)?;
+        crate::delegation_service::successor_task_reader(
+            request.state_root,
+            &manifest,
+            request.task_ref,
+            false,
+        )?
+    } else {
+        None
+    };
+    store.transact(|transaction| {
+        // The immediate transaction owns the task transition before any result
+        // rows are inserted. A concurrent loser rolls back without colliding
+        // with the winner's unique retained artifact.
+        let task_matches: bool=match request.owner {
+            SettlementOwner::External {engagement_id} => transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE engagement_id=?1 AND task_id=?2 AND specialist_run_id=?3 AND turn_id=?4 AND state IN ('dispatching','running'))",
+                rusqlite::params![engagement_id.to_string(),request.task_ref.to_string(),request.member_ref.to_string(),terminal.turn_id],|row|row.get(0)),
+            SettlementOwner::Managed {session_id} => transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM brokered_tasks WHERE session_id=?1 AND task_id=?2 AND target_run_id=?3 AND target_turn_id=?4 AND state IN ('dispatching','running'))",
+                rusqlite::params![session_id.to_string(),request.task_ref.to_string(),request.member_ref.to_string(),terminal.turn_id],|row|row.get(0)),
+        }.map_err(|error|internal(error.to_string()))?;
+        if !task_matches {
+            return Err(MachineError::new("STATE_CONFLICT","the task settled before its terminal publication",false,json!({"required_action":"reconcile_operation"})));
+        }
+        if let Some((payload, response)) = &checked_payload {
+            crate::engagement::retain_checked_task_output(
+                transaction,
+                request.task_ref,
+                payload,
+                response,
+            )?;
+        }
+        // Both owners retain complete sides in the terminal transaction. Only
+        // the deterministic quota refusal is re-settled as unavailable; SQL or
+        // integrity failures propagate and roll back this entire attempt.
+        if !retained.is_empty() {
+            let retained_total = retained.iter().try_fold(0u64, |total, side| {
+                let length = u64::try_from(side.bytes.len())
+                    .map_err(|_| internal("a retained change side is unbounded"))?;
+                total
+                    .checked_add(length)
+                    .ok_or_else(|| internal("the retained change sides are unbounded"))
+            })?;
+            let already = crate::engagement::run_retained_bytes(transaction, request.member_ref)?;
+            if already.saturating_add(retained_total) > crate::engagement::MAX_RUN_BASELINE_BYTES {
+                return Err(crate::successor_capture::unavailable_change());
+            }
+            for side in retained {
+                crate::engagement::retain_change_side(
+                    transaction,
+                    request.task_ref,
+                    &side.path,
+                    side.side,
+                    &side.bytes,
+                )?;
+            }
+        }
+        match request.owner {
+            SettlementOwner::External { engagement_id } => {
+                let artifact_id = crate::engagement::retain_task_result(
+                    transaction,
+                    engagement_id,
+                    request.task_ref,
+                    &canonical,
+                    &digest,
+                )?;
+                let settled = crate::engagement::terminalize_external_task_in(
+                    transaction,
+                    crate::engagement::TaskTerminal {
+                        engagement_id,
+                        task_id: request.task_ref,
+                        state,
+                        safe_error_code: failure.as_deref(),
+                        result_sha256: Some(digest.as_str()),
+                        artifact_id: Some(artifact_id),
+                        diagnostic_json: None,
+                        now_ms,
+                    },
+                )?;
+                if settled.is_none() {
+                    return Err(MachineError::new(
+                        "STATE_CONFLICT",
+                        "the task settled before its terminal publication",
+                        false,
+                        serde_json::json!({"required_action": "reconcile_operation"}),
+                    ));
+                }
+                // The durable terminal of this task's own Turn proves the
+                // dispatch happened, so the conservative round is resolved to
+                // `counted_accepted` (idempotent when the dispatch already proved
+                // it). Without this a once-uncertain member could never be idle,
+                // because a counted-unresolved row outlived its settled task.
+                crate::caller_scope::accepted(transaction, request.task_ref)?;
+                // The member workload revision advances with the terminal
+                // transition, so a release binds to the settled revision.
+                crate::engagement::advance_member_workload_revision(
+                    transaction,
+                    &request.view.workspace_id,
+                    "external_engagement",
+                    &engagement_id.to_string(),
+                    &request.member_ref.to_string(),
+                )?;
+            }
+            SettlementOwner::Managed { session_id } => {
+                // The published bytes live in the content store and the Broker task
+                // row links their digest: no `artifacts` row is used, because that
+                // table's engagement key is external-only. A typed-unavailable
+                // marker is published the same way, as the task's own bytes.
+                crate::orchestration::retain_successor_task_result(
+                    transaction,
+                    request.task_ref,
+                    &canonical,
+                )?;
+                let settled = crate::orchestration::settle_successor_task_result(
+                    transaction,
+                    session_id,
+                    request.task_ref,
+                    state,
+                    failure.as_deref(),
+                    Some(digest.as_str()),
+                    now_ms,
+                )?;
+                if !settled {
+                    return Err(MachineError::new(
+                        "STATE_CONFLICT",
+                        "the task settled before its terminal publication",
+                        false,
+                        serde_json::json!({"required_action": "reconcile_operation"}),
+                    ));
+                }
+                // The durable terminal of this task's own Turn proves the
+                // dispatch happened, so the conservative round is resolved to
+                // `counted_accepted` (idempotent when the dispatch already proved
+                // it). Without this a once-uncertain member could never be idle,
+                // because a counted-unresolved row outlived its settled task.
+                crate::caller_scope::accepted(transaction, request.task_ref)?;
+                // The member workload revision advances with the terminal
+                // transition, so a release binds to the settled revision.
+                crate::engagement::advance_member_workload_revision(
+                    transaction,
+                    &request.view.workspace_id,
+                    "orchestrated_session",
+                    &session_id.to_string(),
+                    &request.member_ref.to_string(),
+                )?;
+            }
+        }
+        if let Some(reader) = &checked_reader {
+            reader.check_acceptance()?;
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn acquire_failure_outcome(
+    writer: Option<&crate::writer::WriterRecord>,
+    run_id: Uuid,
+    error: MachineError,
+) -> crate::delegation_service::MemberDispatchOutcome {
+    use crate::delegation_service::MemberDispatchOutcome;
+    let pending = writer.is_none_or(|record| {
+        matches!(
+            record.state,
+            crate::writer::WriterAuthorityState::Reserved
+                | crate::writer::WriterAuthorityState::Releasing
+                | crate::writer::WriterAuthorityState::BlockedUnknown
+        ) && record
+            .holder
+            .as_ref()
+            .is_some_and(|holder| holder.run_id == run_id)
+    });
+    if pending {
+        return MemberDispatchOutcome::Uncertain {
+            code: error.code,
+            message: format!(
+                "the writer acquire left an unknown effect: {}",
+                error.message
+            ),
+        };
+    }
+    MemberDispatchOutcome::Refused {
+        code: error.code,
+        message: error.message,
+    }
+}
+
+/// A definitive dispatch refusal whose writer release must succeed first.
+#[cfg_attr(not(test), allow(dead_code))]
+fn refused_after_release(
+    released: Result<(), MachineError>,
+    code: String,
+    message: String,
+) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
+    use crate::delegation_service::MemberDispatchOutcome;
+    match released {
+        Ok(()) => Ok(MemberDispatchOutcome::Refused { code, message }),
+        Err(error) => Ok(MemberDispatchOutcome::Uncertain {
+            code: error.code,
+            message: format!(
+                "the dispatch was refused ({code}) but its writer release failed: {}",
+                error.message
+            ),
+        }),
+    }
+}
+
+fn unix_time_ms_semantic() -> Result<i64, MachineError> {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| internal("system clock is unavailable"))?
+            .as_millis(),
+    )
+    .map_err(|_| internal("system clock is unavailable"))
 }
 
 fn current_binary_sha256() -> Result<String, MachineError> {
@@ -11418,6 +16796,10 @@ struct RunStartupLock {
 }
 
 impl RunStartupLock {
+    fn release_preserving_records(&self) {
+        let _ = self.lock.unlock_startup_range_preserving_records();
+    }
+
     fn open(state_root: &Path, run_id: Uuid) -> Result<Self, MachineError> {
         let process_guard = ProcessRunStartup::acquire(state_root, run_id)?;
         let uid = DarwinSystem.current_uid();
@@ -11453,6 +16835,3665 @@ impl RunMutationLock for RunStartupLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The admitted control path still retires a closed Run's Profile
+    /// membership after the close, and its Status half only observes it.
+    #[test]
+    fn a_legacy_close_still_retires_the_profile_membership() {
+        let fixture = super::release_fixture::ClosedMemberRun::new();
+        assert!(!fixture.membership_released());
+        // Status before the retirement observes the gap and reports recovery,
+        // exactly as the pre-split path did (it never releases anything).
+        let (status, _) = run_control_admitted(
+            &fixture.view,
+            &fixture.state_root,
+            fixture.run_id,
+            RunVerb::Status,
+            Some(&fixture.owner),
+            Prepared::Plain,
+            false,
+            None,
+        )
+        .unwrap();
+        let SemanticResult::Run(status) = status else {
+            panic!("Status answers with the Run projection");
+        };
+        assert_eq!(status["recovery"]["status"], "recovery_required");
+        assert!(!fixture.membership_released());
+        // Close still does both halves in order: the close, then retirement.
+        let (closed, _) = run_control_admitted(
+            &fixture.view,
+            &fixture.state_root,
+            fixture.run_id,
+            RunVerb::Close,
+            Some(&fixture.owner),
+            Prepared::Close { interrupt: false },
+            false,
+            None,
+        )
+        .unwrap();
+        let SemanticResult::Run(closed) = closed else {
+            panic!("Close answers with the Run projection");
+        };
+        assert_eq!(closed["state"], "closed");
+        assert!(fixture.membership_released());
+        // Status after the retirement observes the released membership.
+        let (status, _) = run_control_admitted(
+            &fixture.view,
+            &fixture.state_root,
+            fixture.run_id,
+            RunVerb::Status,
+            Some(&fixture.owner),
+            Prepared::Plain,
+            false,
+            None,
+        )
+        .unwrap();
+        let SemanticResult::Run(status) = status else {
+            panic!("Status answers with the Run projection");
+        };
+        assert_eq!(status["state"], "closed");
+        assert!(fixture.membership_released());
+    }
+
+    /// The non-retiring close used by the successor release stops at the
+    /// close, so the retirement stays with the release owner.
+    #[test]
+    fn the_successor_close_leaves_the_profile_membership_to_the_release_owner() {
+        let fixture = super::release_fixture::ClosedMemberRun::new();
+        let result = successor_close_run(
+            &fixture.view,
+            &fixture.state_root,
+            fixture.run_id,
+            &fixture.owner,
+            false,
+        )
+        .unwrap();
+        let SemanticResult::Run(result) = result else {
+            panic!("Close answers with the Run projection");
+        };
+        assert_eq!(result["state"], "closed");
+        assert!(
+            !fixture.membership_released(),
+            "the non-retiring close never retires the membership"
+        );
+        // The explicit step the release owner performs afterwards is the same
+        // one the legacy wrapper performs, so the split is only the order.
+        release_global_run_membership(&fixture.state_root, &fixture.manifest, fixture.run_id)
+            .unwrap();
+        assert!(fixture.membership_released());
+    }
+
+    /// The external close verification never retires by itself, and the
+    /// legacy wrapper still retires immediately after it.
+    #[test]
+    fn the_external_close_verification_precedes_the_membership_release() {
+        let fixture = super::release_fixture::ClosedMemberRun::new();
+        verify_external_owned_cleanup(
+            &fixture.view,
+            &fixture.state_root,
+            fixture.run_id,
+            fixture.engagement_id,
+            &fixture.owner,
+        )
+        .unwrap();
+        assert!(
+            !fixture.membership_released(),
+            "the owned-cleanup verification never retires the membership"
+        );
+        finish_external_run_close(
+            &fixture.view,
+            &fixture.state_root,
+            fixture.run_id,
+            fixture.engagement_id,
+            &fixture.owner,
+        )
+        .unwrap();
+        assert!(fixture.membership_released());
+    }
+
+    /// The strict locator-missing proof belongs to the
+    /// successor member release settlement only. The legacy external close
+    /// callers keep HEAD's behaviour — a missing runtime record is skipped —
+    /// so a Run an older binary already cleaned (locator removed, no
+    /// verified-absence marker, generation evidence present) still closes and
+    /// retires exactly as before.
+    #[test]
+    fn a_legacy_external_close_skips_a_missing_runtime_record_without_a_marker() {
+        let fixture = super::release_fixture::ClosedMemberRun::new();
+        let record = crate::worker::runtime_record_path(
+            &crate::worker::runtime_root(&fixture.state_root),
+            fixture.run_id,
+        )
+        .unwrap();
+        assert!(!record.exists(), "the Run carries no runtime locator");
+        assert!(
+            crate::worker::verified_absence_marker(
+                &crate::worker::runtime_root(&fixture.state_root),
+                fixture.run_id
+            )
+            .unwrap()
+            .is_none(),
+            "an older binary's cleanup left no verified-absence marker"
+        );
+        assert_eq!(
+            RunStore::new(SystemWorkspacePlatform, &fixture.state_root)
+                .load_state_projection(fixture.run_id)
+                .unwrap()
+                .run_generation,
+            1,
+            "generation evidence exists, yet the legacy close still skips"
+        );
+        finish_external_run_close(
+            &fixture.view,
+            &fixture.state_root,
+            fixture.run_id,
+            fixture.engagement_id,
+            &fixture.owner,
+        )
+        .unwrap();
+        assert!(fixture.membership_released());
+    }
+
+    /// One `S` release target of the Run service's settlement.
+    struct ReleaseTarget {
+        scene: super::release_fixture::ReleasableMember,
+    }
+
+    impl ReleaseTarget {
+        fn external() -> Self {
+            Self {
+                scene: super::release_fixture::ReleasableMember::external(
+                    super::release_fixture::ReleaseScene::CloseSettlement,
+                ),
+            }
+        }
+
+        fn managed() -> Self {
+            Self {
+                scene: super::release_fixture::ReleasableMember::managed(
+                    super::release_fixture::ReleaseScene::CloseSettlement,
+                ),
+            }
+        }
+
+        /// Leave unresolved work on the member, so the settlement's quiescence
+        /// gate holds the admitted row at `settling`.
+        fn block_quiescence(&self) {
+            self.scene.unresolved_task();
+        }
+
+        fn release(
+            &self,
+            expected_revision: u64,
+        ) -> Result<
+            crate::delegation_service::MemberReleaseOutcome,
+            crate::delegation_service::MemberReleaseFailure,
+        > {
+            self.scene.release(expected_revision)
+        }
+
+        fn row(&self) -> Vec<String> {
+            self.scene.row()
+        }
+
+        fn member_state(&self) -> String {
+            self.scene.member_state()
+        }
+
+        /// The admission events of this member (`requested` only here; the
+        /// terminal event belongs to the full-settlement tests).
+        fn event_count(&self) -> i64 {
+            match self.scene.owner {
+                crate::delegation_service::SettlementOwner::External { .. } => {
+                    super::release_probe::engagement_event_count(
+                        &self.scene.state_root,
+                        "member_release_requested",
+                    )
+                }
+                crate::delegation_service::SettlementOwner::Managed { session_id } => {
+                    super::release_probe::session_event_count(
+                        &self.scene.state_root,
+                        session_id,
+                        "specialist_release_requested",
+                    )
+                }
+            }
+        }
+
+        fn hold_lease(&self) -> crate::worker::RunLifecycleLease {
+            self.scene.hold_lease()
+        }
+    }
+
+    /// The admission writes exactly the requested row, the member state
+    /// and the event, and records the acquiring attempt's own witness digest.
+    /// The member carries unresolved work, so the settlement's quiescence gate
+    /// holds the row at `settling` and the admission facts stand alone.
+    #[test]
+    fn a_release_admission_writes_the_requested_row_state_and_event() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        for target in [ReleaseTarget::external(), ReleaseTarget::managed()] {
+            target.block_quiescence();
+            let MemberReleaseOutcome::Operation(operation) =
+                target.release(target.scene.revision).unwrap()
+            else {
+                panic!("a fresh admission returns the durable operation");
+            };
+            assert_eq!(operation.progress, "settling");
+            assert_eq!(operation.member_ref, target.scene.member_ref.to_string());
+            assert_eq!(operation.run_ref, target.scene.member_ref.to_string());
+            assert_eq!(
+                operation.admitted_membership_revision,
+                target.scene.revision
+            );
+            let row = target.row();
+            assert_eq!(row.len(), 16, "{row:?}");
+            let expected_kind = match target.scene.owner {
+                crate::delegation_service::SettlementOwner::External { .. } => {
+                    "release_external_specialist"
+                }
+                crate::delegation_service::SettlementOwner::Managed { .. } => "release_specialist",
+            };
+            assert_eq!(row[1], expected_kind);
+            assert_eq!(row[2], target.scene.view.workspace_id);
+            assert_eq!(row[3], target.scene.owner.scope_kind());
+            assert_eq!(row[4], target.scene.owner.scope_ref().to_string());
+            assert_eq!(row[5], target.scene.member_ref.to_string());
+            assert_eq!(row[6], target.scene.member_ref.to_string());
+            assert_eq!(
+                row[7],
+                format!(
+                    "controller:{}",
+                    target.scene.controller.identity.controller_id
+                )
+            );
+            assert_eq!(
+                row[8],
+                target.scene.controller.identity.generation.to_string()
+            );
+            assert_eq!(row[9], target.scene.revision.to_string());
+            // The acquired lease recorded this attempt's own witness digest.
+            let expected_owner = {
+                let probe = target.hold_lease();
+                probe.owner_ref().unwrap()
+            };
+            assert_eq!(row[10], expected_owner);
+            assert_eq!(row[10].len(), 64);
+            assert!(row[10].bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_eq!(row[11], "settling");
+            assert_eq!(row[12], "-");
+            assert_eq!(row[13], "none");
+            assert_eq!(row[14], "-");
+            assert_eq!(row[15], "-");
+            let expected_state = match target.scene.owner {
+                crate::delegation_service::SettlementOwner::External { .. } => "releasing",
+                crate::delegation_service::SettlementOwner::Managed { .. } => "retiring",
+            };
+            assert_eq!(target.member_state(), expected_state);
+            assert_eq!(target.event_count(), 1);
+        }
+    }
+
+    /// A settled operation answers with its retained projection, its
+    /// original operation reference and no mutation, whatever the revision says.
+    #[test]
+    fn a_terminal_release_answers_with_the_settled_operation_and_no_mutation() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        for target in [ReleaseTarget::external(), ReleaseTarget::managed()] {
+            let MemberReleaseOutcome::Operation(admitted) =
+                target.release(target.scene.revision).unwrap()
+            else {
+                panic!("a fresh admission returns the durable operation");
+            };
+            super::release_probe::settle_release_row(
+                &target.scene.state_root,
+                target.scene.member_ref,
+            );
+            let rows = super::release_probe::release_rows(&target.scene.state_root);
+            let state = target.member_state();
+            let events = target.event_count();
+            let MemberReleaseOutcome::Operation(settled) =
+                target.release(target.scene.revision + 7).unwrap()
+            else {
+                panic!("a settled operation answers with its projection");
+            };
+            assert_eq!(settled.progress, "terminal");
+            assert_eq!(settled.operation_ref, admitted.operation_ref);
+            assert_eq!(
+                settled.terminal_membership_revision,
+                Some(target.scene.revision + 1)
+            );
+            assert_eq!(
+                super::release_probe::release_rows(&target.scene.state_root),
+                rows
+            );
+            assert_eq!(target.member_state(), state);
+            assert_eq!(target.event_count(), events);
+        }
+    }
+
+    /// A fresh release fences the scoped membership counter, and a
+    /// mismatch leaves no row, no member state and no event.
+    #[test]
+    fn a_stale_revision_on_a_fresh_release_has_no_effect() {
+        for target in [ReleaseTarget::external(), ReleaseTarget::managed()] {
+            let state = target.member_state();
+            let events = target.event_count();
+            let refused = target.release(target.scene.revision + 1).unwrap_err();
+            let crate::delegation_service::MemberReleaseFailure::BeforeAdmission(error) = refused
+            else {
+                panic!("a revision fence refuses before any admission");
+            };
+            assert_eq!(error.code, "REVISION_CONFLICT");
+            assert_eq!(
+                super::release_probe::release_row_count(&target.scene.state_root),
+                0
+            );
+            assert_eq!(target.member_state(), state);
+            assert_eq!(target.event_count(), events);
+        }
+    }
+
+    /// A held lease whose verified witness is the row's owner is a
+    /// typed busy with no mutation.
+    #[test]
+    fn a_verified_live_owner_refuses_the_release_as_busy() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        for target in [ReleaseTarget::external(), ReleaseTarget::managed()] {
+            target.block_quiescence();
+            let MemberReleaseOutcome::Operation(admitted) =
+                target.release(target.scene.revision).unwrap()
+            else {
+                panic!("a fresh admission returns the durable operation");
+            };
+            // The same process's witness is the one the row recorded, so holding
+            // the lease is exactly a verified live owner of this operation.
+            let held = target.hold_lease();
+            let rows = super::release_probe::release_rows(&target.scene.state_root);
+            match target.release(target.scene.revision).unwrap() {
+                MemberReleaseOutcome::Busy { operation_ref } => {
+                    assert_eq!(operation_ref.to_string(), admitted.operation_ref);
+                }
+                other => panic!("a verified live owner answers busy: {other:?}"),
+            }
+            assert_eq!(
+                super::release_probe::release_rows(&target.scene.state_root),
+                rows
+            );
+            drop(held);
+        }
+    }
+
+    /// A held lease whose witness is not this operation's owner, or
+    /// cannot be proven at all, is recovery — never a takeover.
+    #[test]
+    fn an_unproven_lifecycle_owner_refuses_the_release_as_recovery() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        for target in [ReleaseTarget::external(), ReleaseTarget::managed()] {
+            target.block_quiescence();
+            target.release(target.scene.revision).unwrap();
+            // A foreign digest that no live witness can match.
+            super::release_probe::set_release_owner_ref(
+                &target.scene.state_root,
+                target.scene.member_ref,
+                &"e".repeat(64),
+            );
+            let held = target.hold_lease();
+            let rows = super::release_probe::release_rows(&target.scene.state_root);
+            match target.release(target.scene.revision).unwrap() {
+                MemberReleaseOutcome::Recovery { .. } => {}
+                other => panic!("an unproven owner answers recovery: {other:?}"),
+            }
+            assert_eq!(
+                super::release_probe::release_rows(&target.scene.state_root),
+                rows,
+                "never a takeover"
+            );
+            drop(held);
+            // A held lease whose witness names another Run is unprovable too.
+            let held = target.hold_lease();
+            let foreign = crate::worker::current_startup_owner(
+                &target.scene.view.workspace_id,
+                Uuid::now_v7(),
+                1,
+            )
+            .unwrap();
+            crate::worker::StartupLockFile::open(
+                &super::release_probe::lifecycle_lock_path(
+                    &target.scene.state_root,
+                    target.scene.member_ref,
+                ),
+                crate::darwin::DarwinSystem.current_uid(),
+            )
+            .unwrap()
+            .write_owner(&foreign)
+            .unwrap();
+            let rows = super::release_probe::release_rows(&target.scene.state_root);
+            match target.release(target.scene.revision).unwrap() {
+                MemberReleaseOutcome::Recovery { .. } => {}
+                other => panic!("an unprovable witness answers recovery: {other:?}"),
+            }
+            assert_eq!(
+                super::release_probe::release_rows(&target.scene.state_root),
+                rows,
+                "never a takeover"
+            );
+            drop(held);
+        }
+    }
+
+    /// One external release settles end to end while the lease is held.
+    #[test]
+    fn a_full_external_release_settles_the_member_and_releases_everything() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let isolated_root = scene.register_isolated_root();
+        let MemberReleaseOutcome::Operation(operation) = scene.release(scene.revision).unwrap()
+        else {
+            panic!("a full release returns the settled operation");
+        };
+        assert_eq!(operation.progress, "terminal");
+        assert_eq!(
+            operation.terminal_membership_revision,
+            Some(scene.revision + 1)
+        );
+        assert_eq!(operation.settled_workload_revision, Some(0));
+        let row = scene.row();
+        assert_eq!(row[11], "terminal");
+        assert_eq!(row[12], "-");
+        assert_eq!(row[13], "none");
+        assert_eq!(row[14], (scene.revision + 1).to_string());
+        assert_eq!(row[15], "0");
+        // The member itself, the scoped counter and the release events.
+        assert_eq!(scene.member_state(), "released");
+        assert_eq!(
+            super::release_probe::scope_membership_revision(
+                &scene.state_root,
+                &scene.view.workspace_id,
+                "external_engagement",
+                scene.owner.scope_ref(),
+            ),
+            scene.revision + 1
+        );
+        assert_eq!(scene.event_count(), 2);
+        // The owned cleanup the settlement proved.
+        assert!(
+            scene.membership_released(),
+            "the Profile membership retired"
+        );
+        assert!(!scene.writer_observation().holds);
+        // The lease dropped with the settlement, so a new attempt may hold it.
+        drop(scene.hold_lease());
+        assert!(!isolated_root.exists(), "the isolated root was cleaned");
+    }
+
+    /// One managed release settles end to end and ends `retired`.
+    #[test]
+    fn a_full_managed_release_settles_the_member_as_retired() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let MemberReleaseOutcome::Operation(operation) = scene.release(scene.revision).unwrap()
+        else {
+            panic!("a full release returns the settled operation");
+        };
+        assert_eq!(operation.progress, "terminal");
+        assert_eq!(
+            operation.terminal_membership_revision,
+            Some(scene.revision + 1)
+        );
+        let row = scene.row();
+        assert_eq!(row[11], "terminal");
+        assert_eq!(row[14], (scene.revision + 1).to_string());
+        // Only `retired` counts as released for the legacy close guards.
+        assert_eq!(scene.member_state(), "retired");
+        assert_eq!(scene.event_count(), 2);
+        assert!(
+            scene.membership_released(),
+            "the Profile membership retired"
+        );
+        drop(scene.hold_lease());
+    }
+
+    /// An already-Closed Run is still verified before the terminal.
+    #[test]
+    fn an_already_closed_member_run_is_still_verified_and_released() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        // The scene models a worker generation 1 that was verifiably cleaned
+        // through the real remover: no runtime locator, no slot record, and a
+        // verified-absence marker for exactly generation 1 — the legitimate
+        // retry the marker authorizes.
+        let record = crate::worker::runtime_record_path(
+            &crate::worker::runtime_root(&scene.state_root),
+            scene.member_ref,
+        )
+        .unwrap();
+        assert!(!record.exists(), "the scene carries no runtime locator");
+        let marker = scene
+            .verified_absence_marker()
+            .expect("the verified cleanup left its marker");
+        assert_eq!(marker.run_generation, 1);
+        let lock = crate::worker::StartupLockFile::open(
+            &crate::worker::startup_lock_path(
+                &crate::worker::runtime_root(&scene.state_root),
+                scene.member_ref,
+            ),
+            DarwinSystem.current_uid(),
+        )
+        .unwrap();
+        assert!(
+            lock.read_owner(1).unwrap().is_none(),
+            "a cleanly settled generation leaves no slot claim"
+        );
+        let MemberReleaseOutcome::Operation(operation) = scene.release(scene.revision).unwrap()
+        else {
+            panic!("an already-Closed member still releases");
+        };
+        assert_eq!(operation.progress, "terminal");
+        assert_eq!(scene.member_state(), "released");
+        assert!(scene.membership_released());
+    }
+
+    /// A missing or dangling locator with a live owned generation
+    /// records the recovery row and never settles; once the generation's range
+    /// frees, the retry converges, while a dangling locator stays fail-closed
+    /// until the recorded `recover_run` action removes it.
+    #[test]
+    fn a_missing_locator_with_a_live_generation_records_the_recovery_row() {
+        use crate::delegation_service::{MemberReleaseFailure, MemberReleaseOutcome};
+        use std::os::unix::fs::PermissionsExt as _;
+        // A second process claims the member's worker range, exactly as a live
+        // worker generation would.
+        if let Ok(handshake) = std::env::var("DOLGORAE_RELEASE_RANGE_CHILD") {
+            let handshake = PathBuf::from(handshake);
+            let state_root = PathBuf::from(
+                std::fs::read_to_string(handshake.join("state_root"))
+                    .unwrap()
+                    .trim(),
+            );
+            let workspace_id = std::fs::read_to_string(handshake.join("workspace_id"))
+                .unwrap()
+                .trim()
+                .to_owned();
+            let run_id = Uuid::parse_str(
+                std::fs::read_to_string(handshake.join("run_id"))
+                    .unwrap()
+                    .trim(),
+            )
+            .unwrap();
+            let lock = crate::worker::StartupLockFile::open(
+                &crate::worker::startup_lock_path(
+                    &crate::worker::runtime_root(&state_root),
+                    run_id,
+                ),
+                DarwinSystem.current_uid(),
+            )
+            .unwrap();
+            let mut owner = crate::worker::current_startup_owner(&workspace_id, run_id, 1).unwrap();
+            owner.slot = 1;
+            let guard = lock
+                .claim(&owner, std::time::Duration::from_secs(1))
+                .unwrap();
+            std::fs::write(handshake.join("ready"), b"ready").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !handshake.join("release").exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            drop(guard);
+            return;
+        }
+        for dangling in [false, true] {
+            let scene = super::release_fixture::ReleasableMember::external(
+                super::release_fixture::ReleaseScene::AlreadyClosed,
+            );
+            let record = crate::worker::runtime_record_path(
+                &crate::worker::runtime_root(&scene.state_root),
+                scene.member_ref,
+            )
+            .unwrap();
+            if dangling {
+                std::os::unix::fs::symlink(scene.state_root.join("nowhere"), &record).unwrap();
+            }
+            let handshake =
+                std::env::temp_dir().join(format!("dolgorae-release-range-{}", Uuid::now_v7()));
+            std::fs::create_dir(&handshake).unwrap();
+            std::fs::set_permissions(&handshake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(
+                handshake.join("state_root"),
+                scene.state_root.to_str().unwrap(),
+            )
+            .unwrap();
+            std::fs::write(handshake.join("workspace_id"), &scene.view.workspace_id).unwrap();
+            std::fs::write(handshake.join("run_id"), scene.member_ref.to_string()).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("semantic::tests::a_missing_locator_with_a_live_generation_records_the_recovery_row")
+                .arg("--test-threads=1")
+                .env("DOLGORAE_RELEASE_RANGE_CHILD", &handshake)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !handshake.join("ready").exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                handshake.join("ready").exists(),
+                "the range holder never claimed the worker range"
+            );
+            let MemberReleaseFailure::AfterAdmission { error, .. } =
+                scene.release(scene.revision).unwrap_err()
+            else {
+                panic!("an unprovable generation surfaces its settlement failure");
+            };
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            let row = scene.row();
+            assert_eq!(row[11], "recovery_needed");
+            assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+            assert_eq!(row[13], "recover_run");
+            assert_eq!(row[14], "-");
+            assert_eq!(scene.member_state(), "releasing");
+            // Once the generation's range frees, the retry converges. A
+            // dangling locator stays fail-closed until the recorded
+            // `recover_run` action removes it, exactly as an operator would.
+            std::fs::write(handshake.join("release"), b"release").unwrap();
+            let _ = child.wait();
+            if dangling {
+                let MemberReleaseFailure::AfterAdmission { .. } =
+                    scene.release(scene.revision + 3).unwrap_err()
+                else {
+                    panic!("a dangling locator stays fail-closed after the range frees")
+                };
+                let blocked = scene.row();
+                assert_eq!(blocked[11], "recovery_needed");
+                assert_eq!(blocked[14], "-");
+                std::fs::remove_file(&record).unwrap();
+            }
+            let MemberReleaseOutcome::Operation(settled) =
+                scene.release(scene.revision + 3).unwrap()
+            else {
+                panic!("the freed range lets the release settle");
+            };
+            assert_eq!(settled.progress, "terminal");
+            assert!(!record.exists());
+            let _ = std::fs::remove_dir_all(handshake);
+        }
+    }
+
+    /// An unreadable locator is an unprovable owned state, never a
+    /// silent skip.
+    #[test]
+    fn an_unreadable_locator_records_the_recovery_row() {
+        use crate::delegation_service::MemberReleaseFailure;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        let record = crate::worker::runtime_record_path(
+            &crate::worker::runtime_root(&scene.state_root),
+            scene.member_ref,
+        )
+        .unwrap();
+        std::fs::write(&record, b"not a runtime record").unwrap();
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("an unreadable locator surfaces its settlement failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        let row = scene.row();
+        assert_eq!(row[11], "recovery_needed");
+        assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+        assert_eq!(row[13], "recover_run");
+        assert_eq!(row[14], "-");
+        assert_eq!(scene.member_state(), "releasing");
+    }
+
+    /// A locator-missing Run with any remaining
+    /// registration — the owned server's, live or dead — is never proven
+    /// absent: the recovery row, never a terminal, even after the server dies.
+    #[test]
+    fn a_live_owned_server_surviving_the_worker_records_the_recovery_row() {
+        use crate::delegation_service::MemberReleaseFailure;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        // The Run's dedicated server, registered exactly as the worker
+        // registers it, surviving in its own session and group. `yes` is the
+        // long-lived carrier whose own argv carries the expected argument.
+        let socket = scene.state_root.join("server.sock");
+        let expected_argument = format!("unix://{}", socket.display());
+        let mut command = std::process::Command::new("/usr/bin/yes");
+        command
+            .arg(&expected_argument)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut server = DarwinSystem.spawn_detached(&mut command).unwrap();
+        let owner_root = scene.state_root.canonicalize().unwrap();
+        let mut registration = crate::process_inventory::Registration::prepare(
+            "dedicated_server",
+            &owner_root,
+            std::path::Path::new("/usr/bin/yes"),
+            expected_argument.clone(),
+            None,
+            Some("default"),
+            Some(scene.member_ref),
+        )
+        .unwrap();
+        registration.mark_spawned(server.id());
+        registration.activate(server.id()).unwrap();
+        // The worker range is free, yet a registration remains: the generation
+        // cannot be proven absent.
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("a surviving owned server surfaces its settlement failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        let refused = scene.row();
+        assert_eq!(refused[11], "recovery_needed");
+        assert_eq!(refused[12], "OWNED_CLEANUP_UNVERIFIED");
+        assert_eq!(refused[13], "recover_run");
+        assert_eq!(refused[14], "-");
+        assert_eq!(scene.member_state(), "releasing");
+        assert_eq!(
+            error.details["reason"], "registration_remains",
+            "the remaining registration is the named reason"
+        );
+        // The server dies; the registration still remains, so the retry stays
+        // at the recovery row — the locator-missing path never claims a
+        // census and never retires.
+        server.kill().unwrap();
+        server.wait().unwrap();
+        let MemberReleaseFailure::AfterAdmission { .. } =
+            scene.release(scene.revision + 2).unwrap_err()
+        else {
+            panic!("a remaining registration keeps the release non-terminal");
+        };
+        let blocked = scene.row();
+        assert_eq!(blocked[11], "recovery_needed");
+        assert_eq!(blocked[12], "OWNED_CLEANUP_UNVERIFIED");
+        assert_eq!(blocked[14], "-");
+        assert_eq!(scene.member_state(), "releasing");
+        assert_eq!(
+            crate::process_inventory::run_registration_count(scene.member_ref).unwrap(),
+            1,
+            "the locator-missing path never retires a registration"
+        );
+        drop(registration);
+    }
+
+    /// A prepared registration that recorded
+    /// no process yet still blocks the locator-missing proof — a crash between
+    /// prepare and activate lost the locator without the verified cleanup.
+    /// Once the stale registration is cleaned, the release settles.
+    #[test]
+    fn a_prepared_registration_without_a_process_blocks_the_locator_missing_proof() {
+        use crate::delegation_service::{MemberReleaseFailure, MemberReleaseOutcome};
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        let owner_root = scene.state_root.canonicalize().unwrap();
+        let registration = crate::process_inventory::Registration::prepare(
+            "worker",
+            &owner_root,
+            std::path::Path::new("/usr/bin/yes"),
+            "unix://prepared".to_owned(),
+            None,
+            Some("default"),
+            Some(scene.member_ref),
+        )
+        .unwrap();
+        // Prepared, never spawned or activated: no process was recorded, yet
+        // the locator-missing rule still refuses to claim absence.
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("a prepared registration surfaces its settlement failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(error.details["reason"], "registration_remains");
+        let refused = scene.row();
+        assert_eq!(refused[11], "recovery_needed");
+        assert_eq!(refused[12], "OWNED_CLEANUP_UNVERIFIED");
+        assert_eq!(refused[13], "recover_run");
+        assert_eq!(refused[14], "-");
+        assert_eq!(scene.member_state(), "releasing");
+        // The recorded `recover_run` action cleans the stale registration; the
+        // rule's terminal path then holds.
+        drop(registration);
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision + 1).unwrap()
+        else {
+            panic!("the cleaned registration lets the release settle");
+        };
+        assert_eq!(settled.progress, "terminal");
+        assert_eq!(scene.member_state(), "released");
+    }
+
+    /// The present-path verified cleanup leaves the marker,
+    /// so a first attempt that fails afterwards — Profile retirement — settles
+    /// on retry through the marker once the locator is gone.
+    #[test]
+    fn a_present_path_cleanup_failure_settles_through_the_marker_on_retry() {
+        use crate::delegation_service::{MemberReleaseFailure, MemberReleaseOutcome};
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::LostLocator,
+        );
+        // The member's dead generation-1 locator is present and no marker
+        // exists: the settlement must verify the cleanup through the present
+        // path before it reaches Profile retirement.
+        let (record, _) = scene.write_absent_worker_locator();
+        assert!(record.exists());
+        assert!(scene.verified_absence_marker().is_none());
+        // Attempt 1: the owned cleanup succeeds, Profile retirement fails on
+        // the unknown membership, and the failure row keeps the work.
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("the failed retirement surfaces its settlement failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        let row = scene.row();
+        assert_eq!(row[11], "cleanup_failed");
+        assert_eq!(row[12], "PROFILE_RETIREMENT_FAILED");
+        assert_eq!(row[13], "restore_state");
+        assert_eq!(row[14], "-");
+        assert!(!record.exists(), "the verified cleanup removed the locator");
+        let marker = scene
+            .verified_absence_marker()
+            .expect("the present-path cleanup left its marker");
+        assert_eq!(marker.run_generation, 1);
+        // The recorded `restore_state` action; the retry now proves the
+        // generation absent through the marker alone and reaches terminal.
+        scene.record_profile_membership();
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision + 1).unwrap()
+        else {
+            panic!("the retry settles through the marker");
+        };
+        assert_eq!(settled.progress, "terminal");
+        assert_eq!(scene.member_state(), "released");
+        assert!(scene.membership_released());
+    }
+
+    /// A locator lost without the verified cleanup is never
+    /// proven absent — zero registrations (the orphan cleanup deleted them)
+    /// with a live detached descendant stays the recovery row.
+    #[test]
+    fn a_lost_locator_without_a_marker_stays_recovery_with_no_registrations() {
+        use crate::delegation_service::MemberReleaseFailure;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::LostLocator,
+        );
+        // A live detached descendant in its own session and group, registered
+        // nowhere — the fact a zero registration count cannot supply.
+        let mut command = std::process::Command::new("/usr/bin/yes");
+        command
+            .arg("detached-descendant")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut descendant = DarwinSystem.spawn_detached(&mut command).unwrap();
+        assert_eq!(
+            crate::process_inventory::run_registration_count(scene.member_ref).unwrap(),
+            0,
+            "the scenario's registrations were deleted"
+        );
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("a lost locator without a marker surfaces its settlement failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(error.details["reason"], "no_verified_absence_marker");
+        let row = scene.row();
+        assert_eq!(row[11], "recovery_needed");
+        assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+        assert_eq!(row[13], "recover_run");
+        assert_eq!(row[14], "-");
+        assert_eq!(scene.member_state(), "releasing");
+        descendant.kill().unwrap();
+        descendant.wait().unwrap();
+    }
+
+    /// A Run with no evidence that any worker generation was
+    /// ever attempted — projection generation 0, no slot record, no marker —
+    /// is proven absent and settles.
+    #[test]
+    fn a_run_with_no_generation_evidence_is_proven_absent() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::LostLocator,
+        );
+        scene.rewrite_projection_generation(0);
+        scene.record_profile_membership();
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision).unwrap()
+        else {
+            panic!("a never-started Run still releases");
+        };
+        assert_eq!(settled.progress, "terminal");
+        assert_eq!(scene.member_state(), "released");
+        assert!(scene.membership_released());
+    }
+
+    /// A marker for an older generation than the durable
+    /// facts evidence never proves the current generation absent.
+    #[test]
+    fn a_marker_older_than_the_durable_generation_blocks_the_proof() {
+        use crate::delegation_service::MemberReleaseFailure;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        // The scene leaves a generation-1 marker; a newer generation reached
+        // the durable projection without a verified cleanup of its own.
+        scene.rewrite_projection_generation(2);
+        assert_eq!(scene.verified_absence_marker().unwrap().run_generation, 1);
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("an older marker surfaces its settlement failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(
+            error.details["reason"],
+            "absence_marker_generation_mismatch"
+        );
+        let row = scene.row();
+        assert_eq!(row[11], "recovery_needed");
+        assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+        assert_eq!(row[13], "recover_run");
+        assert_eq!(row[14], "-");
+        assert_eq!(scene.member_state(), "releasing");
+    }
+
+    /// A crashed newer generation leaves a stale slot-1 claim,
+    /// so the marker for the older generation never proves it absent; a claim
+    /// for exactly the marker's generation must be identity-bound to it.
+    #[test]
+    fn a_stale_newer_generation_claim_blocks_the_marker_proof() {
+        use crate::delegation_service::{MemberReleaseFailure, MemberReleaseOutcome};
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::LostLocator,
+        );
+        // The generation-1 verified cleanup leaves its marker and no locator.
+        let (record, marker_record) = scene.write_absent_worker_locator();
+        crate::worker::remove_verified_absent_runtime(&record, DarwinSystem.current_uid()).unwrap();
+        assert_eq!(scene.verified_absence_marker().unwrap().run_generation, 1);
+        // A crashed generation 2: its dead slot-1 claim survives the kernel's
+        // release of the byte range.
+        scene.write_stale_slot_claim(1, 2, None);
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("a crashed newer generation surfaces its settlement failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(
+            error.details["reason"],
+            "absence_marker_generation_mismatch"
+        );
+        assert_eq!(scene.row()[12], "OWNED_CLEANUP_UNVERIFIED");
+        // A claim for exactly the marker's generation with a different
+        // identity is not the generation the marker verified.
+        scene.write_stale_slot_claim(1, 1, None);
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision + 1).unwrap_err()
+        else {
+            panic!("a foreign identity surfaces its settlement failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(error.details["reason"], "absence_marker_identity_mismatch");
+        assert_eq!(scene.row()[12], "OWNED_CLEANUP_UNVERIFIED");
+        // The marker's own identity for exactly its generation is the binding
+        // the rule accepts, and the release settles.
+        scene.record_profile_membership();
+        scene.write_stale_slot_claim(1, 1, Some(marker_record.identity));
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision + 2).unwrap()
+        else {
+            panic!("the marker's own identity settles");
+        };
+        assert_eq!(settled.progress, "terminal");
+        assert_eq!(scene.member_state(), "released");
+        assert!(scene.membership_released());
+    }
+
+    /// An unreadable slot record is not "absent" — it blocks
+    /// the locator-missing proof as a recovery fact.
+    #[test]
+    fn an_unreadable_slot_record_blocks_the_locator_missing_proof() {
+        use crate::delegation_service::MemberReleaseFailure;
+        for slot in [0_u8, 1_u8] {
+            let scene = super::release_fixture::ReleasableMember::external(
+                super::release_fixture::ReleaseScene::LostLocator,
+            );
+            scene.corrupt_startup_slot(slot);
+            let MemberReleaseFailure::AfterAdmission { error, .. } =
+                scene.release(scene.revision).unwrap_err()
+            else {
+                panic!("an unreadable slot record surfaces its settlement failure");
+            };
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            assert_eq!(
+                error.details["reason"],
+                if slot == 0 {
+                    "slot0_record_unreadable"
+                } else {
+                    "slot1_record_unreadable"
+                }
+            );
+            let row = scene.row();
+            assert_eq!(row[11], "recovery_needed");
+            assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+            assert_eq!(row[13], "recover_run");
+            assert_eq!(row[14], "-");
+            assert_eq!(scene.member_state(), "releasing");
+        }
+    }
+
+    /// The locator-missing proof never clears or rewrites a
+    /// slot record. A slot-0 record for a newer generation blocks the first
+    /// attempt and must block every later attempt the same way, with the
+    /// slot bytes byte-identical before and after each call — releasing the
+    /// startup range must not erase the evidence the proof itself reads.
+    #[test]
+    fn a_newer_slot0_record_blocks_every_locator_missing_attempt() {
+        use crate::delegation_service::MemberReleaseFailure;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::LostLocator,
+        );
+        // The generation-1 verified cleanup leaves its marker.
+        let (record, _) = scene.write_absent_worker_locator();
+        crate::worker::remove_verified_absent_runtime(&record, DarwinSystem.current_uid()).unwrap();
+        // A crashed newer start left its slot-0 record for generation 2.
+        scene.write_stale_slot_claim(0, 2, None);
+        let evidence = scene.startup_lock_bytes();
+        for attempt in 0_u8..2 {
+            let MemberReleaseFailure::AfterAdmission { error, .. } = scene
+                .release(scene.revision + u64::from(attempt))
+                .unwrap_err()
+            else {
+                panic!("a newer slot-0 record keeps blocking every attempt");
+            };
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            assert_eq!(
+                error.details["reason"],
+                "absence_marker_generation_mismatch"
+            );
+            let row = scene.row();
+            assert_eq!(row[11], "recovery_needed");
+            assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+            assert_eq!(row[13], "recover_run");
+            assert_eq!(row[14], "-");
+            assert_eq!(scene.member_state(), "releasing");
+            assert_eq!(
+                scene.startup_lock_bytes(),
+                evidence,
+                "the proof leaves the slot bytes exactly as found (attempt {attempt})"
+            );
+        }
+    }
+
+    /// An unreadable slot-0 blocks every attempt identically
+    /// and is never erased or rewritten by the proof that reads it.
+    #[test]
+    fn an_unreadable_slot0_record_blocks_every_locator_missing_attempt() {
+        use crate::delegation_service::MemberReleaseFailure;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::LostLocator,
+        );
+        // The generation-1 verified cleanup leaves its marker.
+        let (record, _) = scene.write_absent_worker_locator();
+        crate::worker::remove_verified_absent_runtime(&record, DarwinSystem.current_uid()).unwrap();
+        scene.corrupt_startup_slot(0);
+        let evidence = scene.startup_lock_bytes();
+        for attempt in 0_u8..2 {
+            let MemberReleaseFailure::AfterAdmission { error, .. } = scene
+                .release(scene.revision + u64::from(attempt))
+                .unwrap_err()
+            else {
+                panic!("an unreadable slot-0 keeps blocking every attempt");
+            };
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            assert_eq!(error.details["reason"], "slot0_record_unreadable");
+            let row = scene.row();
+            assert_eq!(row[11], "recovery_needed");
+            assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+            assert_eq!(row[13], "recover_run");
+            assert_eq!(scene.member_state(), "releasing");
+            assert_eq!(
+                scene.startup_lock_bytes(),
+                evidence,
+                "the proof leaves the slot bytes exactly as found (attempt {attempt})"
+            );
+        }
+    }
+
+    /// The settled member's release proof is derived from the frozen
+    /// terminal row on every read — collect and the identity export answer
+    /// `released` with the original proof (RPC:396-423), the revision domains
+    /// separate (RPC:283-290), an unrelated aggregate revision advance leaves
+    /// the proof byte-identical, and the frozen released example names every
+    /// object level of the derived shape.
+    #[test]
+    fn a_released_external_member_collects_and_exports_with_the_original_proof() {
+        use crate::delegation_service::{
+            CollectExternalSpecialistTask, collect_external_specialist_task,
+            get_external_delegation_identity,
+        };
+        let (scene, task) = super::release_fixture::ReleasableMember::external_with_settled_task(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+            "released-collect",
+        );
+        let database = EngagementStore::workspace_database_path(&scene.state_root);
+        let before = std::fs::read(&database).unwrap();
+        let caller = crate::caller_scope::fixture(3);
+        let request = || CollectExternalSpecialistTask {
+            engagement_id: match scene.owner {
+                crate::delegation_service::SettlementOwner::External { engagement_id } => {
+                    engagement_id
+                }
+                _ => panic!("an external scene owns an engagement"),
+            },
+            member_ref: scene.member_ref,
+            task_ref: task,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        let port = scene.port();
+        let scope = scene.scope();
+        let collected = collect_external_specialist_task(&scope, &port, request()).unwrap();
+        assert_eq!(collected.disposition.state, "idle");
+        assert!(collected.disposition.release_receipt.is_none());
+        // The release settles everything, then collect observes `released`
+        // with the derived proof.
+        let crate::delegation_service::MemberReleaseOutcome::Operation(settled) =
+            scene.release(scene.revision).unwrap()
+        else {
+            panic!("the external release settles");
+        };
+        assert_eq!(settled.progress, "terminal");
+        let collected = collect_external_specialist_task(&scope, &port, request()).unwrap();
+        assert_eq!(collected.disposition.state, "released");
+        assert_eq!(
+            collected.complete_result.as_ref().unwrap()["terminal_outcome"],
+            "completed"
+        );
+        let proof = collected
+            .disposition
+            .release_receipt
+            .clone()
+            .expect("the released disposition carries its proof");
+        assert_eq!(proof.schema, "dolgorae.member-release-proof/v1");
+        assert_eq!(proof.operation_kind, "release_external_specialist");
+        // Revision separation (RPC:283-290): admitted < terminal <= the
+        // observed membership revision, settled <= the observed workload
+        // revision.
+        let row = scene.row();
+        let admitted: u64 = row[9].parse().unwrap();
+        let terminal: u64 = row[14].parse().unwrap();
+        let settled_workload: u64 = row[15].parse().unwrap();
+        assert!(admitted < terminal);
+        assert_eq!(proof.terminal_membership_revision, terminal);
+        assert_eq!(proof.settled_workload_revision, settled_workload);
+        assert!(proof.terminal_membership_revision <= collected.disposition.membership_revision);
+        assert!(proof.settled_workload_revision <= collected.disposition.workload_revision);
+        // The proof round-trips through its own closed type.
+        let receipt = serde_json::to_value(&proof).unwrap();
+        let parsed: crate::delegation_identity::MemberReleaseProof =
+            serde_json::from_value(receipt.clone()).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed, proof);
+        // The export answers released with the same proof, observed after the
+        // collected result digest (RPC:399-410).
+        let view = get_external_delegation_identity(&scope, &caller, &port, request()).unwrap();
+        assert_eq!(view.identity.worker_disposition, "released");
+        assert_eq!(view.identity.disposition_proof.state, "released");
+        assert_eq!(
+            view.identity.disposition_proof.release_receipt.as_ref(),
+            Some(&proof)
+        );
+        assert_eq!(
+            view.identity.disposition_proof.observed_after_result_digest,
+            view.identity.result_digest
+        );
+        // Full-object round-trip plus the frozen released example's object
+        // levels, including the receipt's.
+        let produced = serde_json::to_value(&view.identity).unwrap();
+        let round: crate::delegation_identity::DelegationIdentity =
+            serde_json::from_value(produced.clone()).unwrap();
+        round.validate().unwrap();
+        let example: serde_json::Value = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/v014-identity-release-external-released.valid.json"
+        ))
+        .unwrap();
+        for path in [
+            "",
+            "/complete_result",
+            "/complete_result/source",
+            "/caller_scope",
+            "/disposition_proof",
+            "/disposition_proof/release_receipt",
+        ] {
+            let produced_level = if path.is_empty() {
+                &produced
+            } else {
+                produced.pointer(path).unwrap()
+            };
+            let example_level = if path.is_empty() {
+                &example
+            } else {
+                example.pointer(path).unwrap()
+            };
+            let mut produced_keys: Vec<&str> = produced_level
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            produced_keys.sort_unstable();
+            let mut example_keys: Vec<&str> = example_level
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            example_keys.sort_unstable();
+            assert_eq!(
+                produced_keys, example_keys,
+                "object level {path:?} differs from the frozen released example"
+            );
+        }
+        // An unrelated aggregate revision advance cannot rewrite the settled
+        // proof; the observation's revision simply moves past it.
+        let scope_kind = match scene.owner {
+            crate::delegation_service::SettlementOwner::External { .. } => "external_engagement",
+            _ => "orchestrated_session",
+        };
+        let scope_ref = scene.owner.scope_ref().to_string();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE scope_membership_revisions SET revision=revision+1
+                  WHERE workspace_ref=?1 AND scope_kind=?2 AND scope_ref=?3",
+                rusqlite::params![scene.view.workspace_id, scope_kind, scope_ref],
+            )
+            .unwrap();
+        drop(connection);
+        let again = collect_external_specialist_task(&scope, &port, request()).unwrap();
+        assert_eq!(again.disposition.state, "released");
+        assert_eq!(
+            again.disposition.release_receipt.as_ref(),
+            Some(&proof),
+            "the settled proof is derived from the frozen row, not the counter"
+        );
+        assert!(again.disposition.membership_revision > collected.disposition.membership_revision);
+        // The R calls wrote nothing: the main database file is byte-identical.
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+    }
+
+    /// The managed owner's released export and collect carry the same
+    /// derived proof, and the frozen managed released example names the
+    /// derived shape.
+    #[test]
+    fn a_released_managed_member_collects_and_exports_with_the_original_proof() {
+        use crate::delegation_service::{
+            CollectSpecialistTask, collect_specialist_task, get_managed_delegation_identity,
+        };
+        let (scene, task) = super::release_fixture::ReleasableMember::managed_with_settled_task(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+            "released-managed-collect",
+        );
+        let caller = crate::caller_scope::fixture(3);
+        let request = || CollectSpecialistTask {
+            member_ref: scene.member_ref,
+            task_ref: task,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        let port = scene.port();
+        let scope = scene.scope();
+        let context = scene.managed_context("released-managed-collect");
+        let crate::delegation_service::MemberReleaseOutcome::Operation(settled) =
+            scene.release(scene.revision).unwrap()
+        else {
+            panic!("the managed release settles");
+        };
+        assert_eq!(settled.progress, "terminal");
+        assert_eq!(scene.member_state(), "retired");
+        let collected = collect_specialist_task(&scope, &context, &port, request()).unwrap();
+        assert_eq!(collected.disposition.state, "released");
+        let proof = collected
+            .disposition
+            .release_receipt
+            .clone()
+            .expect("the released disposition carries its proof");
+        assert_eq!(proof.operation_kind, "release_specialist");
+        assert_eq!(proof.scope_kind, "orchestrated_session");
+        let row = scene.row();
+        let admitted: u64 = row[9].parse().unwrap();
+        let terminal: u64 = row[14].parse().unwrap();
+        let settled_workload: u64 = row[15].parse().unwrap();
+        assert!(admitted < terminal);
+        assert_eq!(proof.terminal_membership_revision, terminal);
+        assert_eq!(proof.settled_workload_revision, settled_workload);
+        assert!(proof.terminal_membership_revision <= collected.disposition.membership_revision);
+        assert!(proof.settled_workload_revision <= collected.disposition.workload_revision);
+        let view =
+            get_managed_delegation_identity(&scope, &context, &caller, &port, request()).unwrap();
+        assert_eq!(view.identity.worker_disposition, "released");
+        assert_eq!(
+            view.identity.disposition_proof.release_receipt.as_ref(),
+            Some(&proof)
+        );
+        let produced = serde_json::to_value(&view.identity).unwrap();
+        let round: crate::delegation_identity::DelegationIdentity =
+            serde_json::from_value(produced.clone()).unwrap();
+        round.validate().unwrap();
+        let example: serde_json::Value = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/v014-identity-release-managed-released.valid.json"
+        ))
+        .unwrap();
+        for path in [
+            "",
+            "/disposition_proof",
+            "/disposition_proof/release_receipt",
+        ] {
+            let produced_level = if path.is_empty() {
+                &produced
+            } else {
+                produced.pointer(path).unwrap()
+            };
+            let example_level = if path.is_empty() {
+                &example
+            } else {
+                example.pointer(path).unwrap()
+            };
+            let mut produced_keys: Vec<&str> = produced_level
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            produced_keys.sort_unstable();
+            let mut example_keys: Vec<&str> = example_level
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            example_keys.sort_unstable();
+            assert_eq!(produced_keys, example_keys, "object level {path:?}");
+        }
+    }
+
+    /// The managed services carry-over: await, collect and the identity export are
+    /// read observations that keep answering after a close intent moves the
+    /// session out of `active` (RPC:396-423).
+    #[test]
+    fn managed_r_calls_answer_after_a_close_intent() {
+        use crate::delegation_service::{
+            AwaitPredicate, AwaitSpecialistTasks, CollectSpecialistTask, collect_specialist_task,
+            get_managed_delegation_identity,
+        };
+        let (scene, task) = super::release_fixture::ReleasableMember::managed_with_settled_task(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+            "close-intent-collect",
+        );
+        // A committed close intent moves the session out of `active`.
+        let database = EngagementStore::workspace_database_path(&scene.state_root);
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE orchestrated_sessions SET status='completing' WHERE session_id=?1",
+                [scene.owner.scope_ref().to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        let caller = crate::caller_scope::fixture(3);
+        let context = scene.managed_context("collect-after-close-intent");
+        let port = scene.port();
+        let scope = scene.scope();
+        let (observed, timed_out) = crate::delegation_service::await_specialist_tasks(
+            &scope,
+            &context,
+            AwaitSpecialistTasks {
+                member_ref: scene.member_ref,
+                tasks: &[task],
+                predicate: AwaitPredicate::All,
+                timeout_seconds: 60,
+            },
+        )
+        .unwrap();
+        assert!(!timed_out);
+        assert_eq!(observed[0].state, "completed");
+        let collected = collect_specialist_task(
+            &scope,
+            &context,
+            &port,
+            CollectSpecialistTask {
+                member_ref: scene.member_ref,
+                task_ref: task,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+        assert_eq!(collected.disposition.state, "idle");
+        assert!(collected.disposition.release_receipt.is_none());
+        let view = get_managed_delegation_identity(
+            &scope,
+            &context,
+            &caller,
+            &port,
+            CollectSpecialistTask {
+                member_ref: scene.member_ref,
+                task_ref: task,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+        assert_eq!(view.identity.worker_disposition, "idle");
+    }
+
+    /// A terminal release row is frozen — neither its progress nor its
+    /// completion revisions may be rewritten after the fact (RPC:296-301).
+    #[test]
+    fn a_settled_release_row_is_frozen_after_the_fact() {
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let crate::delegation_service::MemberReleaseOutcome::Operation(settled) =
+            scene.release(scene.revision).unwrap()
+        else {
+            panic!("the release settles");
+        };
+        assert_eq!(settled.progress, "terminal");
+        let database = EngagementStore::workspace_database_path(&scene.state_root);
+        let before = std::fs::read(&database).unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        for statement in [
+            "UPDATE member_release_operations SET progress='settling' WHERE member_ref=?1",
+            "UPDATE member_release_operations SET terminal_membership_revision=terminal_membership_revision+1 WHERE member_ref=?1",
+            "UPDATE member_release_operations SET settled_workload_revision=settled_workload_revision+1 WHERE member_ref=?1",
+        ] {
+            assert!(
+                connection
+                    .execute(statement, [scene.member_ref.to_string()])
+                    .is_err(),
+                "the frozen terminal row refuses {statement}"
+            );
+        }
+        drop(connection);
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+    }
+
+    /// A stopped owner's successor attempt acquires the free
+    /// lease, replaces `owner_ref` with its own witness digest and settles,
+    /// while the frozen admission fields (operation_ref, initiating controller
+    /// principal and generation, admitted membership revision) are preserved.
+    #[test]
+    fn a_stopped_owner_takeover_replaces_the_witness_and_preserves_the_operation() {
+        use crate::delegation_service::{MemberReleaseFailure, MemberReleaseOutcome};
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::WithoutProfileMembership,
+        );
+        // The first attempt owns the release — it records its witness — and
+        // stops at the unknown Profile membership.
+        let MemberReleaseFailure::AfterAdmission { .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("the stopped owner surfaces its settlement failure");
+        };
+        let after_stop = scene.row();
+        assert_eq!(after_stop[11], "cleanup_failed");
+        assert_eq!(after_stop[12], "PROFILE_RETIREMENT_FAILED");
+        let stopped_owner = after_stop[10].clone();
+        assert_ne!(stopped_owner, "-", "the stopped owner recorded its witness");
+        // The stopped owner's witness names a process this host no longer
+        // has — modelled by its recorded digest — while its lease died with
+        // it, so the successor attempt acquires freely.
+        let dead_owner = "d".repeat(64);
+        let connection =
+            rusqlite::Connection::open(EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        connection
+            .execute(
+                "UPDATE member_release_operations SET owner_ref=?2 WHERE member_ref=?1",
+                rusqlite::params![scene.member_ref.to_string(), dead_owner],
+            )
+            .unwrap();
+        drop(connection);
+        // The recorded `restore_state` action; the successor attempt takes the
+        // now-free lease and settles the same operation.
+        scene.record_profile_membership();
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision + 1).unwrap()
+        else {
+            panic!("the successor attempt settles");
+        };
+        assert_eq!(settled.progress, "terminal");
+        let taken_over = scene.row();
+        assert_eq!(taken_over[0], after_stop[0], "operation_ref preserved");
+        assert_eq!(
+            taken_over[7], after_stop[7],
+            "the initiating controller principal is preserved"
+        );
+        assert_eq!(
+            taken_over[8], after_stop[8],
+            "the initiating controller generation is preserved"
+        );
+        assert_eq!(
+            taken_over[9], after_stop[9],
+            "the admitted membership revision is preserved"
+        );
+        assert_ne!(
+            taken_over[10], dead_owner,
+            "the successor attempt replaced the witness digest"
+        );
+        assert_ne!(taken_over[10], "-");
+        assert_eq!(scene.member_state(), "released");
+    }
+
+    /// Two attempts racing the terminal commit converge on
+    /// exactly one settled operation: one row, one admission event, one
+    /// released event, whatever answer each attempt brought back.
+    #[test]
+    fn a_terminal_commit_race_settles_exactly_once() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let outcomes = std::thread::scope(|scope| {
+            let first = scope.spawn(|| scene.release(scene.revision));
+            let second = scope.spawn(|| scene.release(scene.revision));
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        let mut terminal_ref = None;
+        for outcome in [outcomes.0, outcomes.1] {
+            if let Ok(MemberReleaseOutcome::Operation(operation)) = &outcome
+                && operation.progress == "terminal"
+            {
+                assert!(
+                    terminal_ref
+                        .replace(operation.operation_ref.clone())
+                        .is_none_or(|prior| { prior == operation.operation_ref }),
+                    "both settled answers name one operation"
+                );
+            }
+        }
+        assert!(terminal_ref.is_some(), "at least one attempt settled");
+        assert_eq!(
+            super::release_probe::release_row_count(&scene.state_root),
+            1,
+            "exactly one release operation exists"
+        );
+        assert_eq!(
+            super::release_probe::engagement_event_count(
+                &scene.state_root,
+                "member_release_requested"
+            ),
+            1
+        );
+        assert_eq!(
+            super::release_probe::engagement_event_count(
+                &scene.state_root,
+                "external_member_released"
+            ),
+            1
+        );
+        assert_eq!(scene.member_state(), "released");
+    }
+
+    /// The hire crash and the recovery_required spawn — a member
+    /// whose Run never started — end in the typed close recovery row, never an
+    /// unrecorded escape, and stay recoverable.
+    #[test]
+    fn a_never_started_member_run_records_the_close_recovery_row() {
+        use crate::delegation_service::MemberReleaseFailure;
+        for external in [true, false] {
+            let scene = if external {
+                super::release_fixture::ReleasableMember::external(
+                    super::release_fixture::ReleaseScene::CloseSettlement,
+                )
+            } else {
+                super::release_fixture::ReleasableMember::managed(
+                    super::release_fixture::ReleaseScene::CloseSettlement,
+                )
+            };
+            // The Run's durable state is unreadable — the shape a hire
+            // crash or a recovery_required spawn leaves when no Run ever came
+            // up cleanly.
+            let state =
+                crate::run::run_root(&scene.state_root, scene.member_ref).join("state.json");
+            std::fs::write(&state, b"not a projection").unwrap();
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let MemberReleaseFailure::AfterAdmission { error, .. } =
+                scene.release(scene.revision).unwrap_err()
+            else {
+                panic!("an unreadable Run state surfaces its settlement failure");
+            };
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            let row = scene.row();
+            assert_eq!(row[11], "recovery_needed");
+            assert_eq!(row[12], "MEMBER_RUN_CLOSE_UNVERIFIED");
+            assert_eq!(row[13], "recover_run");
+            assert_eq!(row[14], "-");
+            assert_eq!(
+                scene.member_state(),
+                if external { "releasing" } else { "retiring" }
+            );
+        }
+    }
+
+    /// An uncertain dispatch that never produced a Turn keeps the
+    /// release non-terminal; once the durable Turn terminal settles the task —
+    /// resolving the conservative round, exactly as the shared settlement
+    /// does — the same operation converges to terminal.
+    #[test]
+    fn an_uncertain_dispatch_blocks_then_converges_when_the_turn_settles() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        let (scene, task) = super::release_fixture::ReleasableMember::external_with_uncertain_task(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+            "uncertain-recovery",
+        );
+        // The uncertain dispatch: the round stays counted unresolved and no
+        // Turn terminal exists yet.
+        let MemberReleaseOutcome::Operation(blocked) = scene.release(scene.revision).unwrap()
+        else {
+            panic!("the uncertain dispatch answers with the durable operation");
+        };
+        assert_eq!(blocked.progress, "settling");
+        assert_eq!(scene.member_state(), "releasing");
+        // The durable terminal Turn settles the task; the settlement resolves
+        // the conservative round to counted_accepted.
+        super::successor_fixture::publish_terminal_json_in(
+            &scene.state_root,
+            scene.member_ref,
+            "turn-recovery",
+            "completed",
+            &json!({"kind": "inline", "text": "recovered"}),
+            RunLifecycle::Idle,
+        );
+        use crate::delegation_service::RunSettlementPort as _;
+        let port = scene.port();
+        assert_eq!(
+            port.settle_member_task(crate::delegation_service::MemberTaskSettlement {
+                view: &scene.view,
+                state_root: &scene.state_root,
+                owner: scene.owner,
+                member_ref: scene.member_ref,
+                task_ref: task,
+                execution_intent: "read_only",
+            })
+            .unwrap(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        // The published Turn ran on generation 1; the verifiably cleaned
+        // generation leaves the marker the strict locator-missing proof needs.
+        let (record, _) = scene.write_absent_worker_locator();
+        crate::worker::remove_verified_absent_runtime(&record, DarwinSystem.current_uid()).unwrap();
+        // The retry converges on the same operation.
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision + 1).unwrap()
+        else {
+            panic!("the settled Turn lets the release converge");
+        };
+        assert_eq!(settled.operation_ref, blocked.operation_ref);
+        assert_eq!(settled.progress, "terminal");
+        assert_eq!(scene.member_state(), "released");
+    }
+
+    /// A durable turn terminal without its resolution record — the window
+    /// between the two — ends in the typed recovery row, never the endless
+    /// settling answer; the task, its round and its receipt stay
+    /// byte-identical between calls, and the release converges once the
+    /// worker writes the resolution.
+    #[test]
+    fn a_terminal_without_resolution_blocks_until_it_is_published() {
+        use crate::delegation_service::{
+            MemberReleaseFailure, MemberReleaseOutcome, MemberSettlement, RunSettlementPort as _,
+        };
+        let (scene, task) = super::release_fixture::ReleasableMember::external_with_running_task(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+            "z1-recovery",
+        );
+        // The crash window: the ledger terminal exists without its resolution.
+        super::successor_fixture::publish_terminal_without_resolution_in(
+            &scene.state_root,
+            scene.member_ref,
+            "turn-recovery",
+            "completed",
+        );
+        let port = scene.port();
+        let settlement = || {
+            port.settle_member_task(crate::delegation_service::MemberTaskSettlement {
+                view: &scene.view,
+                state_root: &scene.state_root,
+                owner: scene.owner,
+                member_ref: scene.member_ref,
+                task_ref: task,
+                execution_intent: "read_only",
+            })
+        };
+        assert_eq!(
+            settlement().unwrap(),
+            MemberSettlement::Running,
+            "a pre-resolution terminal settles nothing"
+        );
+        let owned_work = || -> String {
+            let connection = rusqlite::Connection::open(EngagementStore::workspace_database_path(
+                &scene.state_root,
+            ))
+            .unwrap();
+            let task_row: String = connection
+                .query_row(
+                    "SELECT state||'|'||COALESCE(turn_id,'-') FROM tasks
+                      WHERE specialist_run_id=?1",
+                    [scene.member_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let accounting: String = connection
+                .query_row(
+                    "SELECT accounting_state FROM caller_scope_assignments
+                      WHERE assignment_id=?1",
+                    [task.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let receipt: String = connection
+                .query_row(
+                    "SELECT state||'|'||receipt_json FROM delegation_operations
+                      WHERE operation_kind='assign_external_specialist_task'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            format!("{task_row}|{accounting}|{receipt}")
+        };
+        // The first call ends in the typed recovery row with the original work
+        // untouched and the member still fenced.
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("a terminal without its resolution record ends in the typed recovery state");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(error.details["reason"], "terminal_without_resolution");
+        let row = scene.row();
+        assert_eq!(row[11], "recovery_needed");
+        assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+        assert_eq!(row[13], "recover_run");
+        assert_eq!(row[14], "-");
+        assert_eq!(row[15], "-");
+        assert_eq!(scene.member_state(), "releasing");
+        let after_first = owned_work();
+        // The repeat answers identically, and the task row, the accounting row
+        // and the receipt are byte-identical between the calls.
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision + 1).unwrap_err()
+        else {
+            panic!("the repeat stays in the typed recovery state");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(error.details["reason"], "terminal_without_resolution");
+        assert_eq!(owned_work(), after_first);
+        // The worker's resolution publication completes the pair; the
+        // settlement then settles and the release resumes from the durable
+        // state.
+        super::successor_fixture::publish_terminal_json_in(
+            &scene.state_root,
+            scene.member_ref,
+            "turn-recovery",
+            "completed",
+            &json!({"kind": "inline", "text": "recovered"}),
+            RunLifecycle::Idle,
+        );
+        assert_eq!(settlement().unwrap(), MemberSettlement::Terminal);
+        // The published Turn ran on generation 1; the verifiably cleaned
+        // generation leaves the marker the strict locator-missing proof needs.
+        let (record, _) = scene.write_absent_worker_locator();
+        crate::worker::remove_verified_absent_runtime(&record, DarwinSystem.current_uid()).unwrap();
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision + 2).unwrap()
+        else {
+            panic!("the published resolution lets the release converge");
+        };
+        assert_eq!(settled.progress, "terminal");
+    }
+
+    /// A dispatching task whose Turn id was never recorded — the real
+    /// dispatch path's Uncertain outcome — ends in the typed recovery row; the
+    /// task row, the accounting row and the receipt stay byte-identical
+    /// between calls, and the release converges once the dispatch's response
+    /// path records the Turn and the Turn settles.
+    #[test]
+    fn a_turnless_dispatch_ends_in_the_recovery_row() {
+        use crate::delegation_service::{
+            MemberReleaseFailure, MemberReleaseOutcome, MemberSettlement, RunSettlementPort as _,
+        };
+        let (scene, task) =
+            super::release_fixture::ReleasableMember::external_with_turnless_dispatch(
+                super::release_fixture::ReleaseScene::CloseSettlement,
+                "turnless-recovery",
+            );
+        // The real Uncertain shape: dispatching with no Turn id recorded.
+        let connection =
+            rusqlite::Connection::open(EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        let (state, turn): (String, Option<String>) = connection
+            .query_row(
+                "SELECT state,turn_id FROM tasks WHERE specialist_run_id=?1",
+                [scene.member_ref.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(state, "dispatching");
+        assert_eq!(turn, None);
+        let owned_work = || -> String {
+            let connection = rusqlite::Connection::open(EngagementStore::workspace_database_path(
+                &scene.state_root,
+            ))
+            .unwrap();
+            let task_row: String = connection
+                .query_row(
+                    "SELECT state||'|'||COALESCE(turn_id,'-') FROM tasks
+                      WHERE specialist_run_id=?1",
+                    [scene.member_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let accounting: String = connection
+                .query_row(
+                    "SELECT accounting_state FROM caller_scope_assignments
+                      WHERE assignment_id=?1",
+                    [task.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let receipt: String = connection
+                .query_row(
+                    "SELECT state||'|'||receipt_json FROM delegation_operations
+                      WHERE operation_kind='assign_external_specialist_task'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            format!("{task_row}|{accounting}|{receipt}")
+        };
+        // Both calls answer the typed recovery row with the original work
+        // untouched and the member still fenced.
+        let before = owned_work();
+        for revision in [scene.revision, scene.revision + 1] {
+            let MemberReleaseFailure::AfterAdmission { error, .. } =
+                scene.release(revision).unwrap_err()
+            else {
+                panic!("a turnless dispatch ends in its typed recovery state");
+            };
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            assert_eq!(error.details["reason"], "dispatch_without_turn");
+            let row = scene.row();
+            assert_eq!(row[11], "recovery_needed");
+            assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+            assert_eq!(row[13], "recover_run");
+            assert_eq!(row[14], "-");
+            assert_eq!(row[15], "-");
+            assert_eq!(scene.member_state(), "releasing");
+        }
+        assert_eq!(
+            owned_work(),
+            before,
+            "the task row, the accounting row and the receipt are byte-identical between the calls"
+        );
+        // The dispatch's response path records the Turn id — the only owned
+        // fact that changes — and the durable terminal with its resolution
+        // then settles the task.
+        let connection =
+            rusqlite::Connection::open(EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        connection
+            .execute(
+                "UPDATE tasks SET turn_id='turn-recovery' WHERE specialist_run_id=?1",
+                [scene.member_ref.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(
+            owned_work(),
+            before.replace("dispatching|-", "dispatching|turn-recovery"),
+            "only the Turn id changed"
+        );
+        super::successor_fixture::publish_terminal_json_in(
+            &scene.state_root,
+            scene.member_ref,
+            "turn-recovery",
+            "completed",
+            &json!({"kind": "inline", "text": "recovered"}),
+            RunLifecycle::Idle,
+        );
+        let port = scene.port();
+        assert_eq!(
+            port.settle_member_task(crate::delegation_service::MemberTaskSettlement {
+                view: &scene.view,
+                state_root: &scene.state_root,
+                owner: scene.owner,
+                member_ref: scene.member_ref,
+                task_ref: task,
+                execution_intent: "read_only",
+            })
+            .unwrap(),
+            MemberSettlement::Terminal
+        );
+        // The verifiably cleaned generation leaves the marker the strict
+        // locator-missing proof needs.
+        let (record, _) = scene.write_absent_worker_locator();
+        crate::worker::remove_verified_absent_runtime(&record, DarwinSystem.current_uid()).unwrap();
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision + 2).unwrap()
+        else {
+            panic!("the recorded Turn lets the release converge");
+        };
+        assert_eq!(settled.progress, "terminal");
+    }
+
+    /// An observation failure inside the dead-work check — a corrupt
+    /// resolution record — is recorded exactly like every other owned-cleanup
+    /// failure, never an unrecorded escape, and the repeat answers the same.
+    #[test]
+    fn a_corrupt_resolution_record_answers_the_recorded_recovery_row() {
+        use crate::delegation_service::MemberReleaseFailure;
+        let (scene, _task) = super::release_fixture::ReleasableMember::external_with_running_task(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+            "corrupt-resolution",
+        );
+        // The bound Turn's durable terminal and its resolution exist; the
+        // resolution record is then corrupt.
+        super::successor_fixture::publish_terminal_json_in(
+            &scene.state_root,
+            scene.member_ref,
+            "turn-recovery",
+            "completed",
+            &json!({"kind": "inline", "text": "recovered"}),
+            RunLifecycle::Idle,
+        );
+        let resolution = crate::run::run_root(&scene.state_root, scene.member_ref)
+            .join("terminal-resolutions")
+            .join(resolution_record_name("turn-recovery"));
+        std::fs::write(&resolution, b"{corrupt").unwrap();
+        std::fs::set_permissions(&resolution, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for revision in [scene.revision, scene.revision + 1] {
+            let MemberReleaseFailure::AfterAdmission { error, .. } =
+                scene.release(revision).unwrap_err()
+            else {
+                panic!("a corrupt resolution record surfaces its settlement failure");
+            };
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            let row = scene.row();
+            assert_eq!(row[11], "recovery_needed");
+            assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+            assert_eq!(row[13], "recover_run");
+            assert_eq!(row[14], "-");
+        }
+        assert_eq!(scene.member_state(), "releasing");
+    }
+
+    /// The terminal check is per task Turn id — Turn A durably terminal
+    /// without its resolution record still ends in the typed recovery row
+    /// when a later Turn B ends afterwards, so the Run's last terminal is no
+    /// longer A's. Both calls answer the same row with the owned work
+    /// byte-identical between them.
+    #[test]
+    fn a_turn_terminal_earlier_than_the_last_still_recovers() {
+        use crate::delegation_service::MemberReleaseFailure;
+        let (scene, task) = super::release_fixture::ReleasableMember::external_with_running_task(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+            "z1-earlier-turn",
+        );
+        // Turn A — the task's bound Turn: durable terminal, no resolution.
+        super::successor_fixture::publish_terminal_without_resolution_in(
+            &scene.state_root,
+            scene.member_ref,
+            "turn-recovery",
+            "completed",
+        );
+        // A later Turn B ends afterwards with its resolution, so the ledger's
+        // last terminal is now B's, not the task's.
+        super::successor_fixture::publish_terminal_json_in(
+            &scene.state_root,
+            scene.member_ref,
+            "turn-later",
+            "completed",
+            &json!({"kind": "inline", "text": "later"}),
+            RunLifecycle::Idle,
+        );
+        let owned_work = || -> String {
+            let connection = rusqlite::Connection::open(EngagementStore::workspace_database_path(
+                &scene.state_root,
+            ))
+            .unwrap();
+            let task_row: String = connection
+                .query_row(
+                    "SELECT state||'|'||COALESCE(turn_id,'-') FROM tasks
+                      WHERE specialist_run_id=?1",
+                    [scene.member_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let accounting: String = connection
+                .query_row(
+                    "SELECT accounting_state FROM caller_scope_assignments
+                      WHERE assignment_id=?1",
+                    [task.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let receipt: String = connection
+                .query_row(
+                    "SELECT state||'|'||receipt_json FROM delegation_operations
+                      WHERE operation_kind='assign_external_specialist_task'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            format!("{task_row}|{accounting}|{receipt}")
+        };
+        let before = owned_work();
+        for revision in [scene.revision, scene.revision + 1] {
+            let MemberReleaseFailure::AfterAdmission { error, .. } =
+                scene.release(revision).unwrap_err()
+            else {
+                panic!("an earlier unresolved Turn ends in its typed recovery state");
+            };
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            assert_eq!(error.details["reason"], "terminal_without_resolution");
+            let row = scene.row();
+            assert_eq!(row[11], "recovery_needed");
+            assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+            assert_eq!(row[13], "recover_run");
+            assert_eq!(row[14], "-");
+            assert_eq!(row[15], "-");
+            assert_eq!(scene.member_state(), "releasing");
+        }
+        assert_eq!(
+            owned_work(),
+            before,
+            "the owned rows are byte-identical between the calls"
+        );
+    }
+
+    /// The retired member's Broker credential is the dead state the
+    /// terminal release removes, and a repeat release of the same terminal
+    /// row stays idempotent.
+    #[test]
+    fn a_terminal_release_retires_the_members_broker_credential() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let credential = scene
+            .state_root
+            .join("orchestration/broker-credentials")
+            .join(format!("{}.json", scene.member_ref));
+        assert!(credential.exists());
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision).unwrap()
+        else {
+            panic!("the managed release settles");
+        };
+        assert_eq!(settled.progress, "terminal");
+        assert!(
+            !credential.exists(),
+            "the terminal release retired the credential"
+        );
+        // The repeat release answers from the frozen terminal row and re-runs
+        // only the idempotent cleanup.
+        let MemberReleaseOutcome::Operation(repeat) = scene.release(scene.revision + 1).unwrap()
+        else {
+            panic!("the repeat answers from the settled row");
+        };
+        assert_eq!(repeat.operation_ref, settled.operation_ref);
+        assert_eq!(repeat.progress, "terminal");
+    }
+
+    /// An isolated-root cleanup failure after the terminal commit has
+    /// a retry path — the repeat release re-runs the idempotent cleanup from
+    /// the frozen terminal row, keeps reporting the typed recovery answer
+    /// while the state is broken, and converges once the recorded action
+    /// repairs it.
+    #[test]
+    fn a_failed_isolated_root_cleanup_has_a_retry_path() {
+        use crate::delegation_service::{MemberReleaseFailure, MemberReleaseOutcome};
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let isolated_root = scene.register_isolated_root();
+        // The registration is broken, so the post-terminal cleanup fails.
+        std::fs::remove_file(isolated_root.join(".git")).unwrap();
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("the broken registration surfaces its cleanup failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(
+            error.details["required_action"], "restore_isolated_worktree",
+            "the failure names its recorded action"
+        );
+        let row = scene.row();
+        assert_eq!(row[11], "terminal", "the settlement itself committed");
+        assert!(isolated_root.exists(), "the broken root is untouched");
+        // The repeat release answers from the frozen terminal row and retries
+        // exactly the cleanup: the same typed answer while it still fails.
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision + 1).unwrap_err()
+        else {
+            panic!("the repeat re-runs the failed cleanup");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(
+            scene.row()[11],
+            "terminal",
+            "the frozen row was not rewritten"
+        );
+        // The recorded action repairs the state; the next repeat converges.
+        std::fs::remove_dir_all(&isolated_root).unwrap();
+        let MemberReleaseOutcome::Operation(converged) = scene.release(scene.revision + 2).unwrap()
+        else {
+            panic!("the repaired state lets the repeat converge");
+        };
+        assert_eq!(converged.progress, "terminal");
+        assert!(!isolated_root.exists());
+    }
+
+    /// The external aggregate close refuses an unreleased
+    /// successor member with the typed guard and completes once every member
+    /// is released by its own release owner.
+    #[test]
+    fn an_external_close_waits_for_the_successor_release() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let crate::delegation_service::SettlementOwner::External { engagement_id } = scene.owner
+        else {
+            panic!("an external scene owns an engagement");
+        };
+        // The scene's member carries its accepted successor hire intent — the
+        // fact that separates the two release owners.
+        let subjects = crate::delegation_identity::AcceptedSubjects {
+            member_ref: Some(scene.member_ref.to_string()),
+            ..crate::delegation_identity::AcceptedSubjects::default()
+        };
+        let connection =
+            rusqlite::Connection::open(EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        connection
+            .execute(
+                "INSERT INTO delegation_operations(
+                   operation_ref,schema_version,state,workspace_ref,controller_principal,
+                   controller_generation,scope_kind,scope_ref,operation_kind,idempotency_key,
+                   mutation_envelope_json,mutation_envelope_digest,expected_revision,
+                   trusted_invocation_json,accepted_subjects_json,receipt_json,
+                   created_at_ms,updated_at_ms
+                 ) VALUES(?1,2,'accepted',?2,'controller:fixture',1,'external_engagement',?3,
+                          'hire_external_specialist',?4,'{}','fixture',NULL,NULL,?5,'{}',1,1)",
+                rusqlite::params![
+                    Uuid::now_v7().to_string(),
+                    scene.view.workspace_id,
+                    engagement_id.to_string(),
+                    format!("successor-hire-{engagement_id}"),
+                    serde_json::to_string(&subjects).unwrap(),
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        let mut store =
+            EngagementStore::open(&EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        // The unreleased successor member refuses the close with the typed
+        // guard and no keyed close receipt.
+        let refused = store
+            .close_external_engagement(engagement_id, "complete", "done", "close-key")
+            .unwrap_err();
+        assert_eq!(refused.code, "SUCCESSOR_MEMBER_UNRELEASED");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        let receipts: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM operations
+                  WHERE scope_id=?1 AND operation='close_external_engagement'",
+                [engagement_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipts, 0, "no close receipt was recorded");
+        // Every member released: the same close completes.
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision).unwrap()
+        else {
+            panic!("the release settles");
+        };
+        assert_eq!(settled.progress, "terminal");
+        assert_eq!(scene.member_state(), "released");
+        let result = store
+            .close_external_engagement(engagement_id, "complete", "done", "close-key")
+            .unwrap();
+        assert_eq!(result, "completed");
+        // The keyed receipt replays byte-identically.
+        let replay = store
+            .close_external_engagement(engagement_id, "complete", "done", "close-key")
+            .unwrap();
+        assert_eq!(replay, "completed");
+    }
+
+    /// The legacy managed release owner completes the Profile
+    /// retirement of a member whose Run projection is already Closed instead
+    /// of returning early.
+    #[test]
+    fn a_closed_member_release_still_retires_the_membership() {
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let crate::delegation_service::SettlementOwner::Managed { session_id } = scene.owner else {
+            panic!("a managed scene owns a session");
+        };
+        // The member Run is closed without retiring — the state a retry finds.
+        let credential = crate::orchestration::BrokerCredential::load(
+            &scene.state_root.join("orchestration/broker-credentials"),
+            DarwinSystem.current_uid(),
+            scene.member_ref,
+        )
+        .unwrap();
+        let broker = credential.controller_carrier().unwrap();
+        successor_close_run(
+            &scene.view,
+            &scene.state_root,
+            scene.member_ref,
+            &broker,
+            false,
+        )
+        .unwrap();
+        assert!(!scene.membership_released(), "the close never retires");
+        // The legacy release owner's adapter still completes the retirement.
+        // The member row is aligned with its manifest exactly as a facade-v4
+        // member reads, so the adapter's authority cross-check passes; the
+        // fixed branch itself is owner-independent.
+        let manifest = RunStore::new(SystemWorkspacePlatform, &scene.state_root)
+            .load_manifest(scene.member_ref)
+            .unwrap();
+        let binding = manifest.aggregate_binding.as_ref().unwrap();
+        let connection =
+            rusqlite::Connection::open(EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        connection
+            .execute(
+                "UPDATE brokered_members SET
+                   activation_policy='on_mail',
+                   parent_run_id=?2,
+                   role_ref=?3,
+                   role_snapshot_sha256=?4,
+                   agent_configuration_json=?5,
+                   agent_configuration_sha256=?6,
+                   controller_binding_json=?7,
+                   spawn_operation_id=?8,
+                   requested_access=?9
+                 WHERE run_id=?1",
+                rusqlite::params![
+                    scene.member_ref.to_string(),
+                    binding.aggregate_id.to_string(),
+                    binding.role_reference.clone().unwrap_or_default(),
+                    binding.role_snapshot_sha256.clone().unwrap_or_default(),
+                    serde_json::to_string(&manifest.agent_configuration).unwrap(),
+                    binding
+                        .agent_configuration_sha256
+                        .clone()
+                        .unwrap_or_default(),
+                    serde_json::to_string(&manifest.controller).unwrap(),
+                    binding.operation_id.to_string(),
+                    if manifest.initial_access == Access::Write {
+                        "isolated_write"
+                    } else {
+                        "read_only"
+                    },
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        let member = crate::orchestration::OrchestrationStore::open_observer(&scene.state_root)
+            .unwrap()
+            .members(session_id)
+            .unwrap()
+            .into_iter()
+            .find(|member| member.run_id == scene.member_ref)
+            .expect("the scene's member row exists");
+        let mut adapter = ProductionOrchestrationEffects::new(&scene.state_root);
+        use crate::orchestration::OrchestrationAdapter as _;
+        adapter.release_specialist(&member, &credential).unwrap();
+        assert!(scene.membership_released());
+    }
+
+    /// A repeat release after the session closed answers the settled
+    /// operation with a stale expected_revision, without mutation.
+    #[test]
+    fn a_managed_release_repeats_after_the_session_closed() {
+        use crate::delegation_service::{ReleaseSpecialist, release_specialist};
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let crate::delegation_service::SettlementOwner::Managed { session_id } = scene.owner else {
+            panic!("a managed scene owns a session");
+        };
+        scene.admit_successor_spawn_intent();
+        let view = release_specialist(
+            &scene.scope(),
+            &scene.managed_context("settle-before-close"),
+            &scene.port(),
+            ReleaseSpecialist {
+                member_ref: scene.member_ref,
+                expected_revision: scene.revision,
+                allow_interrupt: false,
+            },
+        )
+        .unwrap();
+        let settled = view.operation.clone();
+        assert_eq!(settled.progress, "terminal");
+        // The session closes: every successor member is retired, so the legacy
+        // close paths settle and finish.
+        let mut broker = crate::orchestration::OrchestrationStore::open(&scene.state_root).unwrap();
+        broker.begin_session_close(session_id, false, 1).unwrap();
+        let mut adapter = ProductionOrchestrationEffects::new(&scene.state_root);
+        broker
+            .settle_session_close(session_id, &mut adapter)
+            .unwrap();
+        assert_eq!(
+            broker.complete_session_close(session_id).unwrap().status,
+            "completed"
+        );
+        drop(broker);
+        let database = EngagementStore::workspace_database_path(&scene.state_root);
+        let before = std::fs::read(&database).unwrap();
+        // The repeat release answers through the public successor service even
+        // though the session is no longer active, with a stale revision.
+        let view = release_specialist(
+            &scene.scope(),
+            &scene.managed_context("repeat-after-close"),
+            &scene.port(),
+            ReleaseSpecialist {
+                member_ref: scene.member_ref,
+                expected_revision: scene.revision,
+                allow_interrupt: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(view.operation.operation_ref, settled.operation_ref);
+        assert_eq!(view.state, "released");
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+    }
+
+    /// A retained close intent with an unreleased successor member
+    /// no longer blocks the release — the release settles to terminal, and the
+    /// retained intent then settles and completes.
+    #[test]
+    fn a_release_reconciles_a_retained_close_intent() {
+        use crate::delegation_service::{ReleaseSpecialist, release_specialist};
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let crate::delegation_service::SettlementOwner::Managed { session_id } = scene.owner else {
+            panic!("a managed scene owns a session");
+        };
+        // The durable close intent while the successor member is unreleased —
+        // the state legacy_closes_refuse_a_live_successor_member models; built
+        // directly because begin_session_close refuses to create it while the
+        // member is unreleased.
+        let connection =
+            rusqlite::Connection::open(EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        connection
+            .execute(
+                "INSERT INTO orchestrated_session_closes(
+                   operation_id,session_id,interrupt,initiating_controller_generation,
+                   progress,safe_error_code,created_at_ms,updated_at_ms
+                 ) VALUES(?1,?2,false,1,'settling',NULL,1,1)",
+                rusqlite::params![Uuid::now_v7().to_string(), session_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE orchestrated_sessions SET status='completing' WHERE session_id=?1",
+                [session_id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        // The close path itself still refuses the unreleased member.
+        let mut broker = crate::orchestration::OrchestrationStore::open(&scene.state_root).unwrap();
+        let mut adapter = ProductionOrchestrationEffects::new(&scene.state_root);
+        let refused = broker
+            .settle_session_close(session_id, &mut adapter)
+            .unwrap_err();
+        assert_eq!(refused.code, "SUCCESSOR_MEMBER_UNRELEASED");
+        // The release is no longer refused for the session's non-active status
+        // and settles the member through the public successor service.
+        scene.admit_successor_spawn_intent();
+        let view = release_specialist(
+            &scene.scope(),
+            &scene.managed_context("release-through-close-intent"),
+            &scene.port(),
+            ReleaseSpecialist {
+                member_ref: scene.member_ref,
+                expected_revision: scene.revision,
+                allow_interrupt: false,
+            },
+        )
+        .unwrap();
+        let settled = view.operation.clone();
+        assert_eq!(settled.progress, "terminal");
+        assert_eq!(scene.member_state(), "retired");
+        // The retained intent now settles and completes.
+        broker
+            .settle_session_close(session_id, &mut adapter)
+            .unwrap();
+        assert_eq!(
+            broker.complete_session_close(session_id).unwrap().status,
+            "completed"
+        );
+    }
+
+    /// The external release keeps answering after the engagement
+    /// closed — a repeat returns the original operation without mutation.
+    #[test]
+    fn an_external_release_repeats_after_the_engagement_closed() {
+        use crate::delegation_service::{
+            MemberReleaseOutcome, ReleaseExternalSpecialist, release_external_specialist,
+        };
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let crate::delegation_service::SettlementOwner::External { engagement_id } = scene.owner
+        else {
+            panic!("an external scene owns an engagement");
+        };
+        // The accepted successor hire intent that names the member.
+        let subjects = crate::delegation_identity::AcceptedSubjects {
+            member_ref: Some(scene.member_ref.to_string()),
+            ..crate::delegation_identity::AcceptedSubjects::default()
+        };
+        let connection =
+            rusqlite::Connection::open(EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        connection
+            .execute(
+                "INSERT INTO delegation_operations(
+                   operation_ref,schema_version,state,workspace_ref,controller_principal,
+                   controller_generation,scope_kind,scope_ref,operation_kind,idempotency_key,
+                   mutation_envelope_json,mutation_envelope_digest,expected_revision,
+                   trusted_invocation_json,accepted_subjects_json,receipt_json,
+                   created_at_ms,updated_at_ms
+                 ) VALUES(?1,2,'accepted',?2,'controller:fixture',1,'external_engagement',?3,
+                          'hire_external_specialist',?4,'{}','fixture',NULL,NULL,?5,'{}',1,1)",
+                rusqlite::params![
+                    Uuid::now_v7().to_string(),
+                    scene.view.workspace_id,
+                    engagement_id.to_string(),
+                    format!("successor-hire-{engagement_id}"),
+                    serde_json::to_string(&subjects).unwrap(),
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision).unwrap()
+        else {
+            panic!("the release settles");
+        };
+        assert_eq!(settled.progress, "terminal");
+        let mut store =
+            EngagementStore::open(&EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        assert_eq!(
+            store
+                .close_external_engagement(engagement_id, "complete", "done", "close-key")
+                .unwrap(),
+            "completed"
+        );
+        drop(store);
+        let database = EngagementStore::workspace_database_path(&scene.state_root);
+        let before = std::fs::read(&database).unwrap();
+        let view = release_external_specialist(
+            &scene.scope(),
+            &scene.port(),
+            ReleaseExternalSpecialist {
+                engagement_id,
+                member_ref: scene.member_ref,
+                expected_revision: scene.revision,
+                allow_interrupt: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(view.operation.operation_ref, settled.operation_ref);
+        assert_eq!(view.state, "released");
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+    }
+
+    /// The busy branch's terminal answer runs the post-terminal cleanup
+    /// — a caller that contends with the settling owner never receives a
+    /// success answer while the isolated-root cleanup is still pending, the
+    /// frozen row stays unchanged, and a repeat converges after the repair.
+    #[test]
+    fn a_busy_terminal_answer_runs_the_post_terminal_cleanup() {
+        use crate::delegation_service::{MemberReleaseFailure, MemberReleaseOutcome};
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let isolated_root = scene.register_isolated_root();
+        scene.unresolved_task();
+        let MemberReleaseOutcome::Operation(blocked) = scene.release(scene.revision).unwrap()
+        else {
+            panic!("a blocked settlement answers with the durable operation");
+        };
+        assert_eq!(blocked.progress, "settling");
+        // Another owner holds the lease, and a concurrent attempt settles the
+        // work and commits the terminal row while this caller sits between its
+        // pre-lease read and its acquire.
+        let lease = scene.hold_lease();
+        let state_root = scene.state_root.clone();
+        let member = scene.member_ref;
+        let interleave = set_release_pre_lease_interleave(move || {
+            let connection =
+                rusqlite::Connection::open(EngagementStore::workspace_database_path(&state_root))
+                    .unwrap();
+            connection
+                .execute(
+                    "UPDATE tasks SET state='failed' WHERE specialist_run_id=?1",
+                    [member.to_string()],
+                )
+                .unwrap();
+            super::release_probe::settle_release_row(&state_root, member);
+        });
+        // The broken registration makes the pending cleanup fail.
+        std::fs::remove_file(isolated_root.join(".git")).unwrap();
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision + 1).unwrap_err()
+        else {
+            panic!("the busy caller surfaces the pending cleanup");
+        };
+        drop(interleave);
+        drop(lease);
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(
+            error.details["required_action"], "restore_isolated_worktree",
+            "the busy terminal answer names its recorded action"
+        );
+        // The concurrent attempt's terminal row stands exactly as it committed;
+        // the busy answer rewrote nothing.
+        let after_busy = super::release_probe::release_rows(&scene.state_root);
+        assert_eq!(scene.row()[11], "terminal");
+        // The repair lets a repeat converge.
+        std::fs::remove_dir_all(&isolated_root).unwrap();
+        let MemberReleaseOutcome::Operation(converged) = scene.release(scene.revision + 2).unwrap()
+        else {
+            panic!("the repaired state lets the repeat converge");
+        };
+        assert_eq!(converged.progress, "terminal");
+        assert_eq!(
+            super::release_probe::release_rows(&scene.state_root),
+            after_busy,
+            "no later call rewrote the frozen terminal row"
+        );
+    }
+
+    /// A concurrent admission joins the committed row before the
+    /// revision fence — one operation, one member transition, one event.
+    #[test]
+    fn a_concurrent_admission_joins_before_the_revision_fence() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        // The winner settles fully; the scoped counter advances with it.
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision).unwrap()
+        else {
+            panic!("the winner settles");
+        };
+        assert_eq!(settled.progress, "terminal");
+        // The late attempt read no row before the winner committed and now
+        // arrives with the winner's pre-admission revision: the admission
+        // transaction answers from the committed row before its fence.
+        let input = MemberReleaseInput {
+            view: &scene.view,
+            state_root: &scene.state_root,
+            owner: scene.owner,
+            workspace_ref: &scene.view.workspace_id,
+            member_ref: scene.member_ref,
+            controller: &scene.controller,
+            allow_interrupt: false,
+            expected_revision: scene.revision,
+        };
+        let scope_ref = scene.owner.scope_ref().to_string();
+        let joined =
+            EngagementStore::open(&EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap()
+                .transact(|transaction| {
+                    admit_release_transaction(
+                        transaction,
+                        &input,
+                        "external_engagement",
+                        &scope_ref,
+                        Uuid::now_v7(),
+                        "controller:late",
+                        unix_time_ms_semantic().unwrap(),
+                    )
+                })
+                .unwrap();
+        assert_eq!(joined.operation_ref, settled.operation_ref);
+        // Exactly one operation, one admission event, one released event — the
+        // late attempt added no member transition of its own.
+        assert_eq!(
+            super::release_probe::release_row_count(&scene.state_root),
+            1
+        );
+        assert_eq!(
+            super::release_probe::engagement_event_count(
+                &scene.state_root,
+                "member_release_requested"
+            ),
+            1
+        );
+        assert_eq!(
+            super::release_probe::engagement_event_count(
+                &scene.state_root,
+                "external_member_released"
+            ),
+            1
+        );
+        assert_eq!(scene.member_state(), "released");
+        // And a real repeat call answers from the terminal row too.
+        let MemberReleaseOutcome::Operation(repeat) = scene.release(scene.revision).unwrap() else {
+            panic!("a repeat answers from the settled row");
+        };
+        assert_eq!(repeat.operation_ref, settled.operation_ref);
+    }
+
+    /// Two admissions that read no row converge on one operation.
+    #[test]
+    fn concurrent_release_admissions_converge_on_one_operation() {
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        scene.unresolved_task();
+        let scope_ref = scene.owner.scope_ref().to_string();
+        let mut store =
+            EngagementStore::open(&EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        let winner = Uuid::now_v7();
+        let admission =
+            |operation_ref: Uuid, now_ms: i64| crate::engagement::MemberReleaseAdmission {
+                operation_ref,
+                workspace_ref: &scene.view.workspace_id,
+                scope_kind: "external_engagement",
+                scope_ref: &scope_ref,
+                member_ref: scene.member_ref,
+                run_ref: scene.member_ref,
+                controller_principal: "controller:fixture",
+                controller_generation: 1,
+                admitted_membership_revision: scene.revision,
+                now_ms,
+            };
+        // The concurrent winner commits first; the loser's own transaction then
+        // joins the winner's operation instead of colliding on uniqueness.
+        let joined = store
+            .transact(|transaction| {
+                crate::engagement::admit_member_release(transaction, admission(winner, 1))?;
+                crate::engagement::admit_or_join_member_release(
+                    transaction,
+                    admission(Uuid::now_v7(), 2),
+                )
+            })
+            .unwrap();
+        assert_eq!(joined.operation_ref, winner.to_string());
+        assert_eq!(
+            super::release_probe::release_row_count(&scene.state_root),
+            1
+        );
+    }
+
+    /// The busy branch decides by the row as it stands after the
+    /// failed acquire — a digest a concurrent attempt just recorded is a
+    /// verified active owner, so it answers busy, never recovery or a takeover.
+    #[test]
+    fn a_busy_acquire_decides_by_the_current_row_owner() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        use crate::worker::LifecycleOwnerVerdict;
+        let row = |owner_ref: Option<&str>| crate::delegation_identity::MemberReleaseOperation {
+            schema: crate::delegation_identity::MEMBER_RELEASE_OPERATION_SCHEMA.to_owned(),
+            operation_ref: Uuid::now_v7().to_string(),
+            operation_kind: "release_external_specialist".to_owned(),
+            workspace_ref: "workspace:fixture".to_owned(),
+            scope_kind: "external_engagement".to_owned(),
+            scope_ref: "engagement:fixture".to_owned(),
+            member_ref: "member:fixture".to_owned(),
+            run_ref: "run:fixture".to_owned(),
+            controller_principal: "controller:fixture".to_owned(),
+            controller_generation: 1,
+            admitted_membership_revision: 0,
+            owner_ref: owner_ref.map(str::to_owned),
+            progress: "settling".to_owned(),
+            safe_failure_code: None,
+            required_action: "none".to_owned(),
+            terminal_membership_revision: None,
+            settled_workload_revision: None,
+        };
+        let operation_ref = Uuid::now_v7();
+        let live = "a".repeat(64);
+        // The re-read row carries the live holder's digest: typed busy.
+        assert!(matches!(
+            busy_release_outcome(
+                operation_ref,
+                &row(Some(&live)),
+                LifecycleOwnerVerdict::HeldVerified(live.clone())
+            ),
+            MemberReleaseOutcome::Busy { operation_ref: matched } if matched == operation_ref
+        ));
+        // A stale or missing digest against the live holder: recovery, never a
+        // takeover.
+        assert!(matches!(
+            busy_release_outcome(
+                operation_ref,
+                &row(Some(&"e".repeat(64))),
+                LifecycleOwnerVerdict::HeldVerified(live.clone())
+            ),
+            MemberReleaseOutcome::Recovery { .. }
+        ));
+        assert!(matches!(
+            busy_release_outcome(
+                operation_ref,
+                &row(Some(&live)),
+                LifecycleOwnerVerdict::HeldUnverifiable
+            ),
+            MemberReleaseOutcome::Recovery { .. }
+        ));
+        // Still free after the one retry: no attempt proved itself, so this
+        // call never claims the lock.
+        assert!(matches!(
+            busy_release_outcome(operation_ref, &row(None), LifecycleOwnerVerdict::Free),
+            MemberReleaseOutcome::Busy { .. }
+        ));
+        // A row another attempt settled while this one contended answers from
+        // that terminal row, whatever the witness says.
+        let mut terminal = row(None);
+        terminal.progress = "terminal".to_owned();
+        terminal.terminal_membership_revision = Some(1);
+        terminal.settled_workload_revision = Some(0);
+        assert!(matches!(
+            busy_release_outcome(
+                operation_ref,
+                &terminal,
+                LifecycleOwnerVerdict::HeldUnverifiable
+            ),
+            MemberReleaseOutcome::Operation(returned)
+                if returned.operation_ref == terminal.operation_ref
+        ));
+    }
+
+    /// Unresolved work blocks the terminal and is not a failure.
+    #[test]
+    fn unresolved_work_blocks_the_release_terminal() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        for target in [ReleaseTarget::external(), ReleaseTarget::managed()] {
+            target.block_quiescence();
+            let MemberReleaseOutcome::Operation(operation) =
+                target.release(target.scene.revision).unwrap()
+            else {
+                panic!("a blocked settlement answers with the durable operation");
+            };
+            assert_eq!(operation.progress, "settling");
+            let row = target.row();
+            assert_eq!(row[11], "settling");
+            assert_eq!(row[14], "-");
+            assert_eq!(row[15], "-");
+            let expected_state = match target.scene.owner {
+                crate::delegation_service::SettlementOwner::External { .. } => "releasing",
+                crate::delegation_service::SettlementOwner::Managed { .. } => "retiring",
+            };
+            assert_eq!(target.member_state(), expected_state);
+            assert_eq!(target.event_count(), 1);
+        }
+    }
+
+    /// The quiescence gate's interaction arm: a member with a pending interaction and no other
+    /// work keeps the release non-terminal — the settling answer, no terminal
+    /// row, the member still fenced — and the same release converges once the
+    /// interaction is decided (RPC:346-348).
+    #[test]
+    fn a_pending_interaction_keeps_the_release_settling_until_it_resolves() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        let target = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let state_root = target.state_root.clone();
+        let member = target.member_ref;
+        let run_root = crate::run::run_root(&state_root, member);
+        // The live-worker fact the pending-interaction context needs: a runtime
+        // record whose app-server epoch the snapshot observes, on a Run whose
+        // durable generation names it. The worker the record names is dead, and
+        // the record is verified away between the two attempts through the real
+        // remover (the release's own blocked answer never reaches the close).
+        let (record_path, _) = target.write_absent_worker_locator();
+        target.rewrite_projection_generation(1);
+        // One pending interaction on the member's active turn, journaled in the
+        // real durable shape and matched to the snapshot the gate itself reads.
+        let snapshot = RunSources::load(
+            &state_root,
+            member,
+            observed_control_socket_epoch(&state_root, member),
+        )
+        .unwrap();
+        let epoch = snapshot
+            .app_server_epoch
+            .expect("the fixture run observes a server epoch");
+        let turn_id = "turn-interaction";
+        let interaction = json!({
+            "schema_version": 1,
+            "request_id": Uuid::now_v7(),
+            "run_id": member,
+            "controller_id": snapshot.controller.controller_id,
+            "control_mode": serde_json::to_value(snapshot.manifest.control_mode).unwrap(),
+            "thread_id": "thread-1",
+            "turn_id": turn_id,
+            "item_id": null,
+            "run_generation": snapshot.projection.run_generation,
+            "server_epoch": epoch,
+            "kind": "command_execution_approval",
+            "status": "pending",
+            "payload": {},
+            "available_decisions": [],
+            "response_schema": "dolgorae.interaction.command-execution/v1",
+            "opened_at": "2026-10-23T00:00:00.000000Z",
+            "resolved_at": null,
+            "resolution": null
+        });
+        let requested = json!({"upstream_request_id": 1_u64, "interaction": interaction});
+        let decided = json!({
+            "request_id": "1",
+            "idempotency_key": "release-fixture-decision",
+            "response_sha256": format!("sha256:{}", "d".repeat(64)),
+            "resolution_receipt_id": Uuid::now_v7(),
+            "resolved_at": "2026-10-23T00:00:01.000000Z",
+            "resolution": {"outcome": "approved"}
+        });
+        // Publish records and materialize the run-state projection the way the
+        // fixture's own terminal publisher does, preserving the scene's facts.
+        let publish = |records: Vec<(crate::audit::AuditKind, serde_json::Value)>,
+                       active: Option<&str>,
+                       lifecycle: Option<RunLifecycle>| {
+            let mut ledger = crate::ledger::Ledger::open(&run_root, member).unwrap();
+            for (kind, payload) in &records {
+                ledger.append_required_payload(*kind, payload, 1).unwrap();
+            }
+            let head = ledger.head().unwrap();
+            drop(ledger);
+            let mut projection: crate::projection::RunStateProjection = serde_json::from_str(
+                &std::fs::read_to_string(run_root.join("state.json")).unwrap(),
+            )
+            .unwrap();
+            projection.ledger_head = head;
+            projection.active_turn_id = active.map(str::to_owned);
+            if active.is_some() {
+                projection.latest_turn_id = active.map(str::to_owned);
+            }
+            if let Some(lifecycle) = lifecycle {
+                projection.lifecycle = lifecycle;
+            }
+            let text = serde_json::to_string(&projection).unwrap();
+            let canonical = canonicalize(&parse(&text).unwrap()).unwrap();
+            let path = run_root.join("state.json");
+            std::fs::write(&path, &canonical).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        publish(
+            vec![
+                (
+                    crate::audit::AuditKind::TurnStarted,
+                    json!({"turn_id": turn_id}),
+                ),
+                (crate::audit::AuditKind::ApprovalRequested, requested),
+            ],
+            Some(turn_id),
+            None,
+        );
+        assert!(member_interaction_pending(&state_root, member).unwrap());
+        // The settling answer: no terminal row, the member still fenced.
+        let MemberReleaseOutcome::Operation(operation) = target.release(target.revision).unwrap()
+        else {
+            panic!("a blocked interaction answers with the durable operation");
+        };
+        assert_eq!(operation.progress, "settling");
+        let row = target.row();
+        assert_eq!(row[11], "settling");
+        assert_eq!(row[14], "-");
+        assert_eq!(row[15], "-");
+        assert_eq!(target.member_state(), "releasing");
+        assert_eq!(target.event_count(), 1);
+        // Once the interaction is decided, the same release converges: the
+        // worker answers the decision and closes the member Run, and its dead
+        // generation is verifiably cleaned through the real remover — the
+        // verified-absence marker stays, the locator goes — so the release's
+        // verifier proves the generation absent and settles (the AlreadyClosed
+        // shape, reached from the blocked row).
+        crate::worker::remove_verified_absent_runtime(&record_path, DarwinSystem.current_uid())
+            .unwrap();
+        publish(
+            vec![(crate::audit::AuditKind::ApprovalDecided, decided)],
+            None,
+            Some(RunLifecycle::Closed),
+        );
+        assert!(!member_interaction_pending(&state_root, member).unwrap());
+        let MemberReleaseOutcome::Operation(settled) = target.release(target.revision).unwrap()
+        else {
+            panic!("a decided interaction releases the member");
+        };
+        assert_eq!(settled.progress, "terminal");
+        assert!(target.membership_released());
+    }
+
+    /// A member whose task settled as the immutable unavailable result
+    /// still releases to terminal with its derived proof — the release settles
+    /// on execution facts, not result availability — while collect and the
+    /// identity export of that task keep refusing the typed condition.
+    #[test]
+    fn a_member_with_an_unavailable_result_still_releases_with_its_proof() {
+        use crate::delegation_service::{
+            CollectExternalSpecialistTask, collect_external_specialist_task,
+            get_external_delegation_identity,
+        };
+        let (scene, task) =
+            super::release_fixture::ReleasableMember::external_with_unavailable_task(
+                super::release_fixture::ReleaseScene::CloseSettlement,
+                "d25-unavailable",
+            );
+        let caller = crate::caller_scope::fixture(3);
+        let request = || CollectExternalSpecialistTask {
+            engagement_id: match scene.owner {
+                crate::delegation_service::SettlementOwner::External { engagement_id } => {
+                    engagement_id
+                }
+                _ => panic!("an external scene owns an engagement"),
+            },
+            member_ref: scene.member_ref,
+            task_ref: task,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        let port = scene.port();
+        let scope = scene.scope();
+        // Collect and the identity export keep refusing that task's result.
+        assert_eq!(
+            collect_external_specialist_task(&scope, &port, request())
+                .unwrap_err()
+                .code,
+            "COMPLETE_RESULT_UNAVAILABLE"
+        );
+        assert_eq!(
+            get_external_delegation_identity(&scope, &caller, &port, request())
+                .unwrap_err()
+                .code,
+            "COMPLETE_RESULT_UNAVAILABLE"
+        );
+        // The release settles on execution facts and reaches terminal.
+        let crate::delegation_service::MemberReleaseOutcome::Operation(settled) =
+            scene.release(scene.revision).unwrap()
+        else {
+            panic!("an unavailable result does not block the release");
+        };
+        assert_eq!(settled.progress, "terminal");
+        assert!(scene.membership_released());
+        assert_eq!(scene.member_state(), "released");
+        // The typed condition outlives the release: no identity is fabricated.
+        assert_eq!(
+            collect_external_specialist_task(&scope, &port, request())
+                .unwrap_err()
+                .code,
+            "COMPLETE_RESULT_UNAVAILABLE"
+        );
+    }
+
+    /// RPD:302 concurrent assignment/release — the release-first serial order
+    /// for the external owner. A release admitted and still settling (blocked
+    /// at quiescence by an unresolved task row, so the member holds no task
+    /// in accepted/queued/claimed/dispatching/running and the one-active-task
+    /// wall cannot be the refusal) fences a new assignment inside its
+    /// acceptance transaction: the membership gate alone refuses the
+    /// releasing member at the admitted revision. A settling release does not
+    /// advance the scoped counter — only its terminal commit does — so a
+    /// different revision is refused by the counter fence exactly as before
+    /// admission; together the two answers show the counter has not moved.
+    /// Neither attempt creates a task row or consumes a round. Both
+    /// operations take the same owning boundary — the scoped membership
+    /// revision row of the aggregate, read and gated inside one
+    /// engagement-store write transaction (release: `admit_release_transaction`;
+    /// assignment: `accept_assign`).
+    #[test]
+    fn an_assignment_to_a_releasing_member_is_refused_while_the_release_settles() {
+        use crate::delegation_service::{
+            AssignExternalSpecialistTask, assign_external_specialist_task,
+        };
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        // The blocker that keeps the release settling while the member has no
+        // active task: one unresolved (`interrupted_unknown`) task row.
+        scene.unresolved_task();
+        let crate::delegation_service::MemberReleaseOutcome::Operation(operation) =
+            scene.release(scene.revision).unwrap()
+        else {
+            panic!("the release answers with its durable operation");
+        };
+        assert_eq!(operation.progress, "settling");
+        assert_eq!(scene.member_state(), "releasing");
+        let port = scene.port();
+        let scope = scene.scope();
+        let caller = crate::caller_scope::fixture(3);
+        let assignment = |key: &'static str, expected: Option<u64>| {
+            assign_external_specialist_task(
+                &scope,
+                &caller,
+                &port,
+                AssignExternalSpecialistTask {
+                    engagement_id: match scene.owner {
+                        crate::delegation_service::SettlementOwner::External { engagement_id } => {
+                            engagement_id
+                        }
+                        _ => panic!("an external scene owns an engagement"),
+                    },
+                    member_ref: scene.member_ref,
+                    task: crate::delegation_service::fixture_task(),
+                    execution_intent: "read_only",
+                    target: None,
+                    deadline_seconds: 600,
+                    idempotency_key: key,
+                    expected_revision: expected,
+                },
+            )
+        };
+        let counts = || -> (i64, i64) {
+            let connection = rusqlite::Connection::open(EngagementStore::workspace_database_path(
+                &scene.state_root,
+            ))
+            .unwrap();
+            let tasks: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE specialist_run_id=?1",
+                    [scene.member_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let rounds: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM caller_scope_assignments WHERE member_ref=?1",
+                    [scene.member_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (tasks, rounds)
+        };
+        let before = counts();
+        // The membership gate alone refuses the releasing member at the
+        // admitted revision; a different revision is refused by the counter
+        // fence — the settling release did not move the counter.
+        let gated = assignment("releasing-gate", Some(scene.revision)).unwrap_err();
+        assert_eq!(gated.code, "STATE_CONFLICT");
+        let fenced = assignment("releasing-fence", Some(scene.revision + 1)).unwrap_err();
+        assert_eq!(fenced.code, "REVISION_CONFLICT");
+        // Neither attempt created a task row or consumed a round, and the
+        // release row is exactly where the blocked settlement left it.
+        assert_eq!(counts(), before);
+        assert_eq!(scene.row()[11], "settling");
+    }
+
+    /// RPD:302 concurrent assignment/release — the release-first serial order
+    /// for the managed owner, through the real managed assign service. While
+    /// the release is admitted and settling, the in-transaction membership
+    /// gate refuses the retiring member at the admitted revision; a settling
+    /// release does not advance the scoped counter — only its terminal commit
+    /// does — so a different revision is refused by the counter fence exactly
+    /// as before admission, and together the two answers show the counter has
+    /// not moved. Neither attempt leaves a task or accounting row.
+    #[test]
+    fn a_managed_assignment_to_a_retiring_member_is_refused_while_the_release_settles() {
+        use crate::delegation_service::{AssignSpecialistTask, assign_specialist_task};
+        let (scene, _running) = super::release_fixture::ReleasableMember::managed_with_running_task(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+            "managed-assign-release-race",
+        );
+        let crate::delegation_service::MemberReleaseOutcome::Operation(operation) =
+            scene.release(scene.revision).unwrap()
+        else {
+            panic!("the release answers with its durable operation");
+        };
+        assert_eq!(operation.progress, "settling");
+        assert_eq!(scene.member_state(), "retiring");
+        // The public managed services need the successor spawn intent that
+        // names this member.
+        scene.admit_successor_spawn_intent();
+        let port = scene.port();
+        let scope = scene.scope();
+        let caller = crate::caller_scope::fixture(3);
+        let assignment = |key: &'static str, expected: Option<u64>| {
+            let context = scene.managed_context(key);
+            assign_specialist_task(
+                &scope,
+                &context,
+                &caller,
+                &port,
+                AssignSpecialistTask {
+                    member_ref: scene.member_ref,
+                    task: crate::delegation_service::fixture_task(),
+                    execution_intent: "read_only",
+                    target: None,
+                    deadline_seconds: 600,
+                    expected_revision: expected,
+                },
+            )
+        };
+        let counts = || -> (i64, i64) {
+            let connection = rusqlite::Connection::open(EngagementStore::workspace_database_path(
+                &scene.state_root,
+            ))
+            .unwrap();
+            let tasks: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM brokered_tasks WHERE target_run_id=?1",
+                    [scene.member_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let rounds: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM caller_scope_assignments WHERE member_ref=?1",
+                    [scene.member_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (tasks, rounds)
+        };
+        let before = counts();
+        // A settling release does not advance the scoped counter (only its
+        // terminal commit does): the membership gate refuses the retiring
+        // member at the current revision, and the counter fence refuses any
+        // other revision.
+        let gated = assignment("managed-gate", Some(scene.revision)).unwrap_err();
+        assert_eq!(gated.code, "SPECIALIST_NOT_MEMBER");
+        let fenced = assignment("managed-fence", Some(scene.revision + 1)).unwrap_err();
+        assert_eq!(fenced.code, "REVISION_CONFLICT");
+        assert_eq!(counts(), before);
+        assert_eq!(scene.row()[11], "settling");
+    }
+
+    /// RPD:302 concurrent assignment/release — the assignment-first serial
+    /// order, for both owners: a task accepted before the release admission
+    /// keeps the release settling until that task is terminal; the same
+    /// release then converges to terminal with its Profile membership
+    /// released.
+    #[test]
+    fn a_release_waits_for_a_task_accepted_before_its_admission_then_converges() {
+        for owner in ["external", "managed"] {
+            let (scene, _task, turn_id, releasing_state, terminal_state) = match owner {
+                "external" => {
+                    let (scene, task) =
+                        super::release_fixture::ReleasableMember::external_with_running_task(
+                            super::release_fixture::ReleaseScene::CloseSettlement,
+                            "release-waits-for-assignment",
+                        );
+                    (scene, task, "turn-recovery", "releasing", "released")
+                }
+                _ => {
+                    let (scene, task) =
+                        super::release_fixture::ReleasableMember::managed_with_running_task(
+                            super::release_fixture::ReleaseScene::CloseSettlement,
+                            "release-waits-for-assignment",
+                        );
+                    // The managed terminal member state is `retired`.
+                    (scene, task, "turn-managed-race", "retiring", "retired")
+                }
+            };
+            let crate::delegation_service::MemberReleaseOutcome::Operation(blocked) =
+                scene.release(scene.revision).unwrap()
+            else {
+                panic!("the release answers with its durable operation");
+            };
+            assert_eq!(blocked.progress, "settling");
+            assert_eq!(scene.member_state(), releasing_state);
+            // The accepted task reaches its terminal and settles; the same
+            // release converges without a new admission.
+            scene.settle_task_terminal(turn_id, "completed", "the racing answer");
+            let crate::delegation_service::MemberReleaseOutcome::Operation(settled) =
+                scene.release(scene.revision).unwrap()
+            else {
+                panic!("the settled task releases the member");
+            };
+            assert_eq!(settled.progress, "terminal");
+            assert!(scene.membership_released());
+            assert_eq!(scene.member_state(), terminal_state);
+        }
+    }
+
+    /// RPC §4 authorized Controller handoff (RPC:303-336, RPC:674): a release
+    /// initiated under Controller generation G that stopped without a live
+    /// owner is taken over by the validly handed-off successor Controller —
+    /// the durable `controller.json` binding and committed reset journal a
+    /// `run.controller.reset` leaves — reaching terminal with the initiating
+    /// `operation_ref`, controller principal, controller generation (= G) and
+    /// admitted revision preserved and a new owner witness. The old
+    /// Controller is refused afterwards, and the new Controller's collect and
+    /// identity export return the original proof carrying G. The external
+    /// owner has no valid handoff in v0.1.4: its engagement owner binding is
+    /// stored at open and never rewritten (`external_owner_binding` reads the
+    /// digest-bound row), so a reset Controller fails that owner's
+    /// authentication. The managed owner's authority is the live root Run
+    /// binding, which the reset advances.
+    #[test]
+    fn a_handed_off_controller_takes_over_a_stopped_release_and_preserves_the_initiator() {
+        use crate::delegation_service::{
+            CollectSpecialistTask, ReleaseSpecialist, collect_specialist_task,
+            get_managed_delegation_identity, release_specialist,
+        };
+        let (scene, task) = super::release_fixture::ReleasableMember::managed_with_settled_task(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+            "controller-handoff",
+        );
+        scene.admit_successor_spawn_intent();
+        // The initiating attempt under generation G: blocked at quiescence,
+        // the row settling, the lease dropped — a release that stopped
+        // without a live owner.
+        scene.unresolved_task();
+        let crate::delegation_service::MemberReleaseOutcome::Operation(initiating) =
+            scene.release(scene.revision).unwrap()
+        else {
+            panic!("the initiating release answers with its durable operation");
+        };
+        assert_eq!(initiating.progress, "settling");
+        let initiated = scene.row();
+        let initiated_ref = initiated[0].clone();
+        let initiated_principal = initiated[7].clone();
+        let initiated_generation = initiated[8].clone();
+        let initiated_admitted = initiated[9].clone();
+        assert_eq!(initiated_generation, "1");
+        assert_ne!(
+            initiated[10], "-",
+            "the initiating attempt recorded its witness"
+        );
+        // The stopped owner's witness names a process this host no longer
+        // has — modelled by its recorded digest, the takeover convention.
+        let dead_owner = "d".repeat(64);
+        let connection =
+            rusqlite::Connection::open(EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        connection
+            .execute(
+                "UPDATE member_release_operations SET owner_ref=?2 WHERE member_ref=?1",
+                rusqlite::params![scene.member_ref.to_string(), dead_owner],
+            )
+            .unwrap();
+        drop(connection);
+        // The valid handoff on the session's root Run: the durable binding
+        // override and committed journal record a controller reset leaves —
+        // a new Controller identity (and therefore a new release principal,
+        // `controller:<controller_id>`) at generation G + 1. That difference
+        // is what makes the preserved-principal assertions below meaningful.
+        let crate::delegation_service::SettlementOwner::Managed { session_id } = scene.owner else {
+            panic!("a managed scene owns a session");
+        };
+        let root_run_id =
+            crate::orchestration::OrchestrationStore::open_observer(&scene.state_root)
+                .unwrap()
+                .session(session_id)
+                .unwrap()
+                .root_run_id;
+        let replacement = scene.state_root.join("release-session-root-replacement");
+        crate::controller::create_controller_credential(
+            &replacement,
+            crate::domain::ControllerKind::HumanCli,
+            "session-root".to_owned(),
+            None,
+            None,
+        )
+        .unwrap();
+        let replacement_carrier = CredentialCarrier::open_path(&replacement).unwrap();
+        let new_controller =
+            crate::controller::binding_from_carrier(&replacement_carrier, 2).unwrap();
+        let run_root = crate::run::run_root(&scene.state_root, root_run_id);
+        let recovery = run_root.join("recovery");
+        std::fs::create_dir_all(&recovery).unwrap();
+        std::fs::set_permissions(&recovery, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let binding_text = serde_json::to_string(&new_controller).unwrap();
+        let binding_canonical = canonicalize(&parse(&binding_text).unwrap()).unwrap();
+        std::fs::write(run_root.join("controller.json"), &binding_canonical).unwrap();
+        std::fs::set_permissions(
+            run_root.join("controller.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let journal = json!({
+            "schema_version": 1,
+            "operation_id": Uuid::now_v7(),
+            "status": "committed",
+            "run_id": root_run_id,
+            "old_controller_id": scene.controller.identity.controller_id,
+            "new_controller_id": new_controller.identity.controller_id,
+            "new_generation": 2,
+            "writer_released": false
+        });
+        let journal_text = serde_json::to_string(&journal).unwrap();
+        let mut journal_line = canonicalize(&parse(&journal_text).unwrap()).unwrap();
+        journal_line.push(b'\n');
+        std::fs::write(recovery.join("controller-reset.jsonl"), &journal_line).unwrap();
+        std::fs::set_permissions(
+            recovery.join("controller-reset.jsonl"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        // The blocker the initiating attempt found is gone (fixture control).
+        let connection =
+            rusqlite::Connection::open(EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        connection
+            .execute(
+                "DELETE FROM brokered_tasks
+                  WHERE session_id=?1 AND target_run_id=?2 AND state='interrupted_unknown'",
+                rusqlite::params![session_id.to_string(), scene.member_ref.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        // The new Controller takes over and converges.
+        let port = scene.port();
+        let scope = crate::delegation_service::DelegationScope {
+            view: &scene.view,
+            state_root: &scene.state_root,
+            controller: &new_controller,
+        };
+        let context = scene.managed_context("controller-handoff-release");
+        let settled = release_specialist(
+            &scope,
+            &context,
+            &port,
+            ReleaseSpecialist {
+                member_ref: scene.member_ref,
+                expected_revision: scene.revision,
+                allow_interrupt: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(settled.state, "released");
+        assert_eq!(settled.operation.operation_ref, initiated_ref);
+        assert_eq!(settled.operation.controller_principal, initiated_principal);
+        assert_eq!(settled.operation.controller_generation, 1);
+        assert_eq!(
+            settled.operation.admitted_membership_revision.to_string(),
+            initiated_admitted
+        );
+        let row = scene.row();
+        assert_eq!(row[11], "terminal");
+        assert_ne!(row[10], dead_owner, "the takeover wrote a new witness");
+        assert!(scene.membership_released());
+        // The old Controller's repeat release is refused.
+        let crate::delegation_service::MemberReleaseFailure::BeforeAdmission(refused) =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("the superseded Controller is refused before any admission");
+        };
+        assert_eq!(
+            refused.code, "SESSION_OWNER_MISMATCH",
+            "the superseded Controller cannot answer for this release"
+        );
+        // The new Controller's collect and identity export return the original
+        // proof, still carrying the initiating generation G.
+        let request = || CollectSpecialistTask {
+            member_ref: scene.member_ref,
+            task_ref: task,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        let collected = collect_specialist_task(&scope, &context, &port, request()).unwrap();
+        assert_eq!(collected.disposition.state, "released");
+        let proof = collected
+            .disposition
+            .release_receipt
+            .clone()
+            .expect("the released disposition carries its proof");
+        assert_eq!(proof.controller_generation, 1);
+        assert_eq!(proof.controller_principal, initiated_principal);
+        let caller = crate::caller_scope::fixture(3);
+        let view =
+            get_managed_delegation_identity(&scope, &context, &caller, &port, request()).unwrap();
+        assert_eq!(view.identity.worker_disposition, "released");
+        assert_eq!(
+            view.identity
+                .disposition_proof
+                .release_receipt
+                .as_ref()
+                .expect("the export carries the same proof")
+                .controller_generation,
+            1
+        );
+    }
+
+    /// A held writer is settled by the release; a blocked-unknown guard
+    /// blocks the terminal with its failure row.
+    #[test]
+    fn writer_cleanup_is_settled_or_blocks_the_terminal() {
+        use crate::delegation_service::{MemberReleaseFailure, MemberReleaseOutcome};
+        // An Active hold is the pending owned cleanup a release settles.
+        let settling = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        settling.active_writer_hold();
+        assert!(settling.writer_observation().holds);
+        let MemberReleaseOutcome::Operation(operation) =
+            settling.release(settling.revision).unwrap()
+        else {
+            panic!("a settleable writer still releases");
+        };
+        assert_eq!(operation.progress, "terminal");
+        assert!(!settling.writer_observation().holds);
+        // A blocked-unknown guard is unresolved cleanup: failure row, no terminal.
+        let blocked = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        blocked.blocked_writer_guard();
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            blocked.release(blocked.revision).unwrap_err()
+        else {
+            panic!("a blocked writer surfaces its settlement failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        let row = blocked.row();
+        assert_eq!(row[11], "cleanup_failed");
+        assert_eq!(row[12], "WRITER_CLEANUP_UNSETTLED");
+        assert_eq!(row[13], "restore_state");
+        assert_eq!(row[14], "-");
+        assert_eq!(row[15], "-");
+        assert_eq!(blocked.member_state(), "releasing");
+    }
+
+    /// A runtime record that cannot be proven records the typed recovery
+    /// row and never settles.
+    #[test]
+    fn an_unprovable_runtime_record_records_the_recovery_row() {
+        use crate::delegation_service::MemberReleaseFailure;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        scene.write_mismatching_runtime_record();
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("an unprovable owned cleanup surfaces its failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        let row = scene.row();
+        assert_eq!(row[11], "recovery_needed");
+        assert_eq!(row[12], "OWNED_CLEANUP_UNVERIFIED");
+        assert_eq!(row[13], "recover_run");
+        assert_eq!(row[14], "-");
+        assert_eq!(scene.member_state(), "releasing");
+    }
+
+    /// An unknown Profile retirement records the cleanup failure row.
+    #[test]
+    fn an_unknown_profile_retirement_records_the_cleanup_row() {
+        use crate::delegation_service::MemberReleaseFailure;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::WithoutProfileMembership,
+        );
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("an unknown Profile membership surfaces its failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        let row = scene.row();
+        assert_eq!(row[11], "cleanup_failed");
+        assert_eq!(row[12], "PROFILE_RETIREMENT_FAILED");
+        assert_eq!(row[13], "restore_state");
+        assert_eq!(row[14], "-");
+        assert_eq!(scene.member_state(), "releasing");
+        assert!(!scene.membership_released());
+    }
+
+    /// A blocked release keeps the member's isolated root and its
+    /// work; only the terminal release removes the root.
+    #[test]
+    fn a_blocked_release_keeps_the_isolated_root_until_the_terminal() {
+        use crate::delegation_service::MemberReleaseOutcome;
+        let scene = super::release_fixture::ReleasableMember::external(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let isolated_root = scene.register_isolated_root();
+        scene.unresolved_task();
+        let MemberReleaseOutcome::Operation(blocked) = scene.release(scene.revision).unwrap()
+        else {
+            panic!("a blocked settlement answers with the durable operation");
+        };
+        assert_eq!(blocked.progress, "settling");
+        assert!(
+            isolated_root.exists(),
+            "a blocked release never destroys the isolated root"
+        );
+        let connection =
+            rusqlite::Connection::open(EngagementStore::workspace_database_path(&scene.state_root))
+                .unwrap();
+        let task_state: String = connection
+            .query_row(
+                "SELECT state FROM tasks WHERE specialist_run_id=?1",
+                [scene.member_ref.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(task_state, "interrupted_unknown");
+        // Once the work settles, the same operation reaches terminal and the
+        // root follows the terminal commit.
+        connection
+            .execute(
+                "UPDATE tasks SET state='failed' WHERE specialist_run_id=?1",
+                [scene.member_ref.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        let MemberReleaseOutcome::Operation(settled) = scene.release(scene.revision + 5).unwrap()
+        else {
+            panic!("the settled work lets the release reach terminal");
+        };
+        assert_eq!(settled.progress, "terminal");
+        assert!(
+            !isolated_root.exists(),
+            "the terminal release cleans the root"
+        );
+    }
+
+    /// A close-preparation failure records the close-stage failure row
+    /// with null revisions instead of escaping unrecorded.
+    #[test]
+    fn a_missing_broker_credential_records_the_close_failure_row() {
+        use crate::delegation_service::MemberReleaseFailure;
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        std::fs::remove_file(
+            scene
+                .state_root
+                .join("orchestration/broker-credentials")
+                .join(format!("{}.json", scene.member_ref)),
+        )
+        .unwrap();
+        let MemberReleaseFailure::AfterAdmission { error, .. } =
+            scene.release(scene.revision).unwrap_err()
+        else {
+            panic!("a missing member credential surfaces its close failure");
+        };
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        let row = scene.row();
+        assert_eq!(row[11], "recovery_needed");
+        assert_eq!(row[12], "MEMBER_RUN_CLOSE_UNVERIFIED");
+        assert_eq!(row[13], "recover_run");
+        assert_eq!(row[14], "-");
+        assert_eq!(row[15], "-");
+        assert_eq!(scene.member_state(), "retiring");
+    }
+
+    /// Only a proved non-dispatch becomes Case B, and a failed writer
+    /// release is surfaced instead of reported as a release.
+    #[test]
+    fn a_dispatch_refusal_is_case_b_only_when_non_dispatch_is_proved() {
+        use crate::delegation_service::MemberDispatchOutcome;
+        for code in [
+            "WRITER_BUSY",
+            "RUN_BUSY",
+            "ENGAGEMENT_STATE_CONFLICT",
+            "CONTROLLER_MISMATCH",
+            "INVALID_ARGUMENT",
+            "CAPABILITY_UNSUPPORTED",
+        ] {
+            assert!(proved_non_dispatch(code), "{code}");
+        }
+        for code in [
+            "OUTCOME_UNKNOWN",
+            "INTERNAL_ERROR",
+            "APP_SERVER_REJECTED",
+            "CONTROL_CALL_TIMEOUT",
+        ] {
+            assert!(!proved_non_dispatch(code), "{code}");
+        }
+        assert!(matches!(
+            refused_after_release(Ok(()), "RUN_BUSY".to_owned(), "busy".to_owned()),
+            Ok(MemberDispatchOutcome::Refused { code, .. }) if code == "RUN_BUSY"
+        ));
+        // A failed cleanup is not a released writer: it stays uncertain.
+        assert!(matches!(
+            refused_after_release(
+                Err(MachineError::new(
+                    "WRITER_BUSY",
+                    "release refused",
+                    true,
+                    json!({})
+                )),
+                "RUN_BUSY".to_owned(),
+                "busy".to_owned()
+            ),
+            Ok(MemberDispatchOutcome::Uncertain { .. })
+        ));
+        assert!(matches!(
+            refused_after_release(
+                Err(MachineError::new("WRITER_BUSY", "release refused", true, json!({}))),
+                "REVISION_CONFLICT".to_owned(),
+                "refused".to_owned()
+            ),
+            Ok(MemberDispatchOutcome::Uncertain { code, .. }) if code == "WRITER_BUSY"
+        ));
+    }
 
     #[test]
     fn build_handoff_control_requires_terminal_absence_and_retained_state_before_replacement() {
@@ -13931,7 +22972,7 @@ fn begin_prepared_mutation(
             },
         )?
     })();
-    lock.release();
+    lock.release_preserving_records();
     result
 }
 
@@ -14355,5 +23396,11623 @@ mod mutation_admission_tests {
         );
         drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod delegated_member_start_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// A delegated member start is published as a valid generation-4 Run
+    /// from the retained capture, and its reservation replays by generation.
+    #[test]
+    fn a_delegated_member_start_publishes_a_valid_generation_four_run() {
+        use crate::instructions::SelectedInstructionSource;
+        let root = std::env::temp_dir().join(format!("dolgorae-delegated-{}", Uuid::now_v7()));
+        for directory in [&root, &root.join("runs"), &root.join("runtime/locks")] {
+            std::fs::create_dir_all(directory).unwrap();
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        let home = crate::paths::DolgoraeHome::from_canonical_home(root.clone()).unwrap();
+        std::fs::create_dir(home.root()).unwrap();
+        std::fs::set_permissions(home.root(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store_sources = crate::instructions::InstructionSourceStore::new(&home);
+        store_sources.initialize_templates().unwrap();
+        let codex_home = root.join("codex-home");
+        std::fs::create_dir(&codex_home).unwrap();
+        std::fs::set_permissions(&codex_home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut binding = {
+            let reservation: crate::run::CallerStartReservation =
+                serde_json::from_str(include_str!(
+                    "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+                ))
+                .unwrap();
+            reservation.accepted_intent.global_profile_binding
+        };
+        binding.launch_snapshot.canonical_codex_home = codex_home.to_str().unwrap().to_owned();
+        let encoded = serde_json::to_string(&binding.launch_snapshot).unwrap();
+        binding.launch_snapshot_sha256 =
+            sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
+        binding.validate_for_recovery().unwrap();
+        let state_root = root.join("state");
+        std::fs::create_dir(&state_root).unwrap();
+        std::fs::set_permissions(&state_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sources = crate::provisioning::ProvisioningSources {
+            instruct: &store_sources,
+            role_name: "reviewer",
+            role: SelectedInstructionSource::File(vec!["roles".to_owned(), "reviewer".to_owned()]),
+            dependencies: vec![crate::instructions::SelectedNamedSource {
+                name: "contract".to_owned(),
+                source: SelectedInstructionSource::Inline("Accepted contract.\n".to_owned()),
+            }],
+            selected_guidance: Vec::new(),
+            profile_binding: binding.clone(),
+            admission: crate::provisioning::ProvisioningAdmission {
+                model: "gpt-5.6".to_owned(),
+                effort: "high".to_owned(),
+                purpose_kind: "review".to_owned(),
+                purpose_label: None,
+                required_capabilities: Vec::new(),
+                execution_lane: "dedicated".to_owned(),
+                requested_access: "read_only".to_owned(),
+                required_assurance: "best_effort_personal_alpha".to_owned(),
+                native_subagent_policy: "disabled".to_owned(),
+            },
+        };
+        let (_, snapshot) =
+            crate::provisioning::install_provisioning(&sources, &state_root).unwrap();
+        // The retained capture is the only instruction source from here on.
+        std::fs::remove_dir_all(home.root().join("roles")).unwrap();
+        let (instructions, configuration) = snapshot.admitted_configuration().unwrap();
+
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let workspace_id = crate::workspace::workspace_id(&workspace);
+        let view = WorkspaceView {
+            workspace_id: workspace_id.clone(),
+            canonical_path: crate::workspace::LosslessPath::from_path(&workspace),
+            mode: crate::workspace::WorkspaceMode::NonGit,
+            created: true,
+        };
+        let credential = root.join("controller");
+        crate::controller::create_controller_credential(
+            &credential,
+            crate::domain::ControllerKind::Automation,
+            "delegated-member-test".to_owned(),
+            None,
+            None,
+        )
+        .unwrap();
+        let carrier = CredentialCarrier::open_path(&credential).unwrap();
+        let controller = presented_controller_from_carrier(&carrier, 1)
+            .unwrap()
+            .binding;
+        let engagement_id = Uuid::now_v7();
+        let aggregate = crate::run::AggregateBinding {
+            aggregate_kind: crate::domain::AggregateKind::ExternalSpecialistEngagement,
+            aggregate_id: engagement_id,
+            operation_id: Uuid::now_v7(),
+            member_kind: crate::run::AggregateMemberKind::Specialist,
+            policy_sha256: None,
+            role_reference: Some("reviewer".to_owned()),
+            role_snapshot_sha256: Some(
+                instructions
+                    .role_snapshot_digest
+                    .trim_start_matches("sha256:")
+                    .to_owned(),
+            ),
+            agent_configuration_sha256: Some(
+                crate::run::agent_configuration_digest(&configuration).unwrap(),
+            ),
+        };
+        let request = CallerRunStartRequest {
+            schema: "dolgorae-run-start-request/v2".to_owned(),
+            workspace: Some(workspace.to_str().unwrap().to_owned()),
+            expected_workspace_id: Some(workspace_id.clone()),
+            specialist_policy: None,
+            profile: binding.selected_name.clone(),
+            control_mode: ControlMode::ManagedAgent,
+            access: crate::domain::CallerWorkspaceAccess::ReadOnly,
+            role: "reviewer".to_owned(),
+            model: None,
+            effort: None,
+            purpose: configuration.purpose.clone(),
+            parent_ref: Some(ParentReference {
+                namespace: "dolgorae.external-specialist-engagement.v1".to_owned(),
+                kind: "specialist".to_owned(),
+                id: engagement_id.to_string(),
+            }),
+            required_capabilities: configuration.required_capabilities.clone(),
+            idempotency_key: "delegated-member-start".to_owned(),
+        }
+        .resolve_member(&aggregate)
+        .unwrap();
+        let state = ServerState {
+            schema_version: 2,
+            server_key: binding.server_key.clone(),
+            lifecycle: "ready".to_owned(),
+            server_epoch: 1,
+            epoch_id: Uuid::now_v7(),
+            boot_session_uuid: Uuid::now_v7(),
+            pid: 10,
+            pgid: 10,
+            uid: DarwinSystem.current_uid(),
+            process_fingerprint: "fixture-server".to_owned(),
+            drainer_pid: 11,
+            drainer_pgid: 11,
+            drainer_uid: DarwinSystem.current_uid(),
+            drainer_fingerprint: "fixture-drainer".to_owned(),
+            socket_path: "/fixture/profile.sock".to_owned(),
+            socket_device: 1,
+            socket_inode: 1,
+            membership_revision: 0,
+            default_model: configuration.model.clone(),
+            models: vec![configuration.model.clone()],
+            capabilities: std::collections::BTreeMap::new(),
+            snapshot: binding.launch_snapshot.clone(),
+        };
+        let intent = crate::run::CallerStartIntent {
+            run_id: Uuid::now_v7(),
+            created_at: SystemLedgerClock::default().timestamp(),
+            workspace_id,
+            canonical_workspace: view.canonical_path.clone(),
+            workspace_mode: view.mode,
+            start_baseline: crate::workspace::GitBaseline::empty(),
+            request,
+            controller,
+            global_profile_binding: binding,
+            instructions,
+            admitted_configuration: Some(configuration.clone()),
+            orchestration: None,
+            readiness: crate::run::CallerProfileReadiness {
+                model: configuration.model.clone(),
+                default_effort: configuration.default_effort.clone(),
+                profile_capability_snapshot: run_capability_snapshot(
+                    &run_profile_snapshot(&state.snapshot).unwrap(),
+                    &state,
+                ),
+            },
+        };
+        // The reservation carries the generation-3 reservation shape and only
+        // the delegation reader accepts it.
+        let reservation = crate::run::CallerStartReservation::new(intent).unwrap();
+        let reservations = StartReservationStore::new(SystemWorkspacePlatform, &root);
+        let stored = reservations
+            .reserve_caller_generation(&reservation)
+            .unwrap();
+        assert_eq!(stored.schema_version, 3);
+        let loaded = reservations
+            .load_caller_generation::<crate::delegation_identity::InstructionSnapshot>(
+                &stored.idempotency_key,
+                &stored.request_sha256,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.normalized_identity_sha256,
+            stored.normalized_identity_sha256
+        );
+        assert_eq!(
+            reservations
+                .load_caller_generation::<crate::instructions::InstructionSnapshot>(
+                    &stored.idempotency_key,
+                    &stored.request_sha256,
+                )
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        // The manifest is a validated generation-4 Run bound to its aggregate.
+        let mut manifest = build_delegated_manifest(
+            &loaded.accepted_intent,
+            &view,
+            &state,
+            &configuration.model,
+            &configuration.default_effort,
+        )
+        .unwrap();
+        manifest.aggregate_binding = Some(aggregate);
+        assert_eq!(manifest.schema_version, 4);
+        assert_eq!(manifest.start_operation_receipt, Some(None));
+        assert!(manifest.instructions.delegation().is_some());
+        assert_eq!(
+            manifest.admitted_configuration_digest,
+            Some(
+                configuration
+                    .admitted_configuration
+                    .as_ref()
+                    .unwrap()
+                    .digest()
+                    .unwrap()
+            )
+        );
+        let store = RunStore::new(SystemWorkspacePlatform, &root);
+        store.publish(&manifest).unwrap();
+        let reloaded = store.load_manifest(manifest.run_id).unwrap();
+        assert_eq!(reloaded, manifest);
+        let mut changed = loaded.accepted_intent.clone();
+        changed.request.role = "other".to_owned();
+        assert!(
+            validate_caller_manifest_intent::<crate::delegation_identity::InstructionSnapshot>(
+                &reloaded, &changed,
+            )
+            .is_err()
+        );
+        drop(carrier);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// One admitted delegated member fixture: an installed provisioning
+    /// snapshot, its admitted configuration, a matching aggregate binding and
+    /// a Controller carrier — the pieces a delegated member start is built
+    /// from. `unqualified` installs the snapshot under an admitted runtime
+    /// whose executable identity is not the qualified discovery-control pin.
+    fn delegated_member_fixture(
+        unqualified: bool,
+    ) -> (
+        std::path::PathBuf,
+        WorkspaceView,
+        std::path::PathBuf,
+        AgentConfigurationSnapshot,
+        crate::run::AggregateBinding,
+        crate::global_runtime::GlobalProfileBinding,
+        CredentialCarrier,
+    ) {
+        use crate::instructions::SelectedInstructionSource;
+        let root = std::env::temp_dir().join(format!("dolgorae-cd10-{}", Uuid::now_v7()));
+        for directory in [&root, &root.join("runs"), &root.join("runtime/locks")] {
+            std::fs::create_dir_all(directory).unwrap();
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        let home = crate::paths::DolgoraeHome::from_canonical_home(root.clone()).unwrap();
+        std::fs::create_dir(home.root()).unwrap();
+        std::fs::set_permissions(home.root(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store_sources = crate::instructions::InstructionSourceStore::new(&home);
+        store_sources.initialize_templates().unwrap();
+        let codex_home = root.join("codex-home");
+        std::fs::create_dir(&codex_home).unwrap();
+        std::fs::set_permissions(&codex_home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut binding = {
+            let reservation: crate::run::CallerStartReservation =
+                serde_json::from_str(include_str!(
+                    "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+                ))
+                .unwrap();
+            reservation.accepted_intent.global_profile_binding
+        };
+        binding.launch_snapshot.canonical_codex_home = codex_home.to_str().unwrap().to_owned();
+        let resealed = |binding: &mut crate::global_runtime::GlobalProfileBinding| {
+            let encoded = serde_json::to_string(&binding.launch_snapshot).unwrap();
+            binding.launch_snapshot_sha256 =
+                sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
+        };
+        resealed(&mut binding);
+        binding.launch_snapshot.executable_identity.sha256 = if unqualified {
+            "0".repeat(64)
+        } else {
+            "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878".to_owned()
+        };
+        resealed(&mut binding);
+        binding.validate_for_recovery().unwrap();
+        let state_root = root.join("state");
+        std::fs::create_dir(&state_root).unwrap();
+        std::fs::set_permissions(&state_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sources = crate::provisioning::ProvisioningSources {
+            instruct: &store_sources,
+            role_name: "reviewer",
+            role: SelectedInstructionSource::File(vec!["roles".to_owned(), "reviewer".to_owned()]),
+            dependencies: vec![crate::instructions::SelectedNamedSource {
+                name: "contract".to_owned(),
+                source: SelectedInstructionSource::Inline("Accepted contract.\n".to_owned()),
+            }],
+            selected_guidance: Vec::new(),
+            profile_binding: binding.clone(),
+            admission: crate::provisioning::ProvisioningAdmission {
+                model: "gpt-5.6".to_owned(),
+                effort: "high".to_owned(),
+                purpose_kind: "review".to_owned(),
+                purpose_label: None,
+                required_capabilities: Vec::new(),
+                execution_lane: "dedicated".to_owned(),
+                requested_access: "read_only".to_owned(),
+                required_assurance: "best_effort_personal_alpha".to_owned(),
+                native_subagent_policy: "disabled".to_owned(),
+            },
+        };
+        let (_, snapshot) =
+            crate::provisioning::install_provisioning(&sources, &state_root).unwrap();
+        let (instructions, configuration) = snapshot.admitted_configuration().unwrap();
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let view = WorkspaceView {
+            workspace_id: crate::workspace::workspace_id(&workspace),
+            canonical_path: crate::workspace::LosslessPath::from_path(&workspace),
+            mode: crate::workspace::WorkspaceMode::NonGit,
+            created: true,
+        };
+        let aggregate = crate::run::AggregateBinding {
+            aggregate_kind: crate::domain::AggregateKind::ExternalSpecialistEngagement,
+            aggregate_id: Uuid::now_v7(),
+            operation_id: Uuid::now_v7(),
+            member_kind: crate::run::AggregateMemberKind::Specialist,
+            policy_sha256: None,
+            role_reference: configuration.role_reference.clone(),
+            role_snapshot_sha256: Some(
+                instructions
+                    .role_snapshot_digest
+                    .trim_start_matches("sha256:")
+                    .to_owned(),
+            ),
+            agent_configuration_sha256: Some(
+                crate::run::agent_configuration_digest(&configuration).unwrap(),
+            ),
+        };
+        let credential = root.join("controller");
+        crate::controller::create_controller_credential(
+            &credential,
+            crate::domain::ControllerKind::Automation,
+            "cd10-member-test".to_owned(),
+            None,
+            None,
+        )
+        .unwrap();
+        let carrier = CredentialCarrier::open_path(&credential).unwrap();
+        (
+            root,
+            view,
+            state_root,
+            configuration,
+            aggregate,
+            binding,
+            carrier,
+        )
+    }
+
+    /// CD-10: the caller member start's validation applies the project and
+    /// ancestor discovery control to the admitted snapshot's binding. The
+    /// delegated member start runs `validate_caller_member_start` on exactly
+    /// these admitted facts, in this order, before any reservation or
+    /// allocation; the workspace discovery that precedes the block needs real
+    /// home state, so the test drives the validation function itself. A
+    /// qualified admitted runtime passes the whole block, and an admitted
+    /// runtime whose executable identity is not the qualified pin still
+    /// passes every identity check and the recovery validation — the
+    /// discovery control is the only refusal. (Remove
+    /// `require_discovery_control` from the block and this test fails: the
+    /// unqualified member would validate cleanly.)
+    #[test]
+    fn a_delegated_member_start_refuses_a_runtime_without_discovery_control() {
+        let (root, view, state_root, configuration, aggregate, binding, carrier) =
+            delegated_member_fixture(false);
+        let qualified = CallerMemberStart {
+            view: &view,
+            state_root: &state_root,
+            configuration: &configuration,
+            global_profile_binding: &binding,
+            run_id: Uuid::now_v7(),
+            aggregate: &aggregate,
+            carrier: &carrier,
+            access: crate::domain::CallerWorkspaceAccess::ReadOnly,
+            idempotency_key: "cd10-member-start".to_owned(),
+            reviewer_plan: None,
+        };
+        super::validate_caller_member_start::<crate::delegation_identity::InstructionSnapshot>(
+            &qualified,
+            &view,
+            &state_root,
+        )
+        .unwrap();
+        drop(qualified);
+        drop(carrier);
+        std::fs::remove_dir_all(root).unwrap();
+
+        let (root, view, state_root, configuration, aggregate, binding, carrier) =
+            delegated_member_fixture(true);
+        let unqualified = CallerMemberStart {
+            view: &view,
+            state_root: &state_root,
+            configuration: &configuration,
+            global_profile_binding: &binding,
+            run_id: Uuid::now_v7(),
+            aggregate: &aggregate,
+            carrier: &carrier,
+            access: crate::domain::CallerWorkspaceAccess::ReadOnly,
+            idempotency_key: "cd10-member-start".to_owned(),
+            reviewer_plan: None,
+        };
+        let error = super::validate_caller_member_start::<
+            crate::delegation_identity::InstructionSnapshot,
+        >(&unqualified, &view, &state_root)
+        .unwrap_err();
+        assert_eq!(error.code, "INSTRUCTION_DISCOVERY_UNSUPPORTED");
+        assert!(!error.retryable);
+        assert_eq!(error.details["required_action"], "select_supported_runtime");
+        assert_eq!(error.details["phase"], "admission");
+        assert_eq!(error.details["outcome"], "not_dispatched");
+        assert!(error.details["run_id"].is_null());
+        drop(unqualified);
+        drop(carrier);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The successor services reach Run start only through their declared port;
+    /// this value is the Run service's whole implementation of it.
+    #[test]
+    fn the_settlement_port_is_the_run_services_start_edge() {
+        let root = std::env::temp_dir().join(format!("dolgorae-port-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let credential = root.join("controller");
+        crate::controller::create_controller_credential(
+            &credential,
+            crate::domain::ControllerKind::Automation,
+            "settlement-port-test".to_owned(),
+            None,
+            None,
+        )
+        .unwrap();
+        let carrier = CredentialCarrier::open_path(&credential).unwrap();
+        let port = SemanticRunSettlementPort { carrier: &carrier };
+        // The port is the only start edge the successor services can name.
+        fn accepts_settlement_port(_: &dyn crate::delegation_service::RunSettlementPort) {}
+        accepts_settlement_port(&port);
+        drop(carrier);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// A published generation-4 successor member for the caller-policy gate tests.
+///
+/// A real delegated member start cannot run inside a library test (workers are
+/// spawned from `std::env::current_exe()` and TASK-076 adds no CLI), so the
+/// fixtures build the durable member state directly.
+///
+/// One closed external member Run under a managed Profile home.
+///
+/// The retirement split is only observable where a Run's state root is the
+/// managed workspace layout (`<home>/workspaces/<id>`), because that layout is
+/// what the Profile membership store binds, and where the close is already
+/// durable, so the close path needs no worker.
+#[cfg(test)]
+pub(crate) mod release_fixture {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    pub(crate) struct ClosedMemberRun {
+        /// Keeps the workspace and every temporary directory alive.
+        _base: super::successor_fixture::SuccessorMember,
+        pub view: WorkspaceView,
+        pub state_root: PathBuf,
+        pub manifest: RunManifest,
+        pub owner: CredentialCarrier,
+        pub run_id: Uuid,
+        pub workspace_id: String,
+        pub engagement_id: Uuid,
+        home_root: PathBuf,
+        profile: String,
+        server_key: String,
+    }
+
+    impl ClosedMemberRun {
+        pub(crate) fn new() -> Self {
+            let base = super::successor_fixture::SuccessorMember::new();
+            let workspace_id = base.manifest.workspace_id.clone();
+            let home_root = base.root.join("home");
+            let state_root = home_root.join("workspaces").join(&workspace_id);
+            for directory in [
+                home_root.clone(),
+                home_root.join("workspaces"),
+                state_root.clone(),
+                state_root.join("runs"),
+                state_root.join("runtime"),
+                state_root.join("runtime/locks"),
+            ] {
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            let run_id = Uuid::now_v7();
+            let mut manifest = base.manifest.clone();
+            manifest.run_id = run_id;
+            RunStore::new(SystemWorkspacePlatform, &state_root)
+                .publish(&manifest)
+                .unwrap();
+            let view = WorkspaceView {
+                workspace_id: workspace_id.clone(),
+                canonical_path: manifest.canonical_workspace.clone(),
+                mode: manifest.workspace_mode,
+                created: true,
+            };
+            // An empty ledger and a closed projection: a repeated close is
+            // durable without a worker, which is the state a release retry
+            // finds.
+            let run_root = crate::run::run_root(&state_root, run_id);
+            let audit = run_root.join("audit.jsonl");
+            std::fs::write(&audit, b"").unwrap();
+            std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let mut projection = crate::projection::RunStateProjection::starting(run_id);
+            projection.lifecycle = RunLifecycle::Closed;
+            projection.run_generation = 1;
+            let text = serde_json::to_string(&projection).unwrap();
+            let canonical = crate::jcs::canonicalize(&crate::jcs::parse(&text).unwrap()).unwrap();
+            let path = run_root.join("state.json");
+            std::fs::write(&path, &canonical).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            // The writer authority record the owned-cleanup verification reads.
+            crate::writer::WriterStore::initialize_layout(
+                &state_root,
+                &workspace_id,
+                DarwinSystem.current_uid(),
+            )
+            .unwrap();
+            // The original Profile membership the retirement step resolves.
+            let binding = manifest.global_profile_binding.clone().unwrap();
+            crate::global_runtime::GlobalMembershipStore::from_root(
+                &home_root,
+                &binding.selected_name,
+                &binding.server_key,
+            )
+            .unwrap()
+            .record(
+                &workspace_id,
+                run_id,
+                crate::global_runtime::MembershipDisposition::Active,
+            )
+            .unwrap();
+            let owner = CredentialCarrier::open_path(&base.root.join("owner")).unwrap();
+            Self {
+                engagement_id: base.engagement_id,
+                _base: base,
+                view,
+                state_root,
+                manifest,
+                owner,
+                run_id,
+                workspace_id,
+                home_root,
+                profile: binding.selected_name,
+                server_key: binding.server_key,
+            }
+        }
+
+        /// Whether the Run's original Profile membership now reads `released`.
+        pub(crate) fn membership_released(&self) -> bool {
+            let store = crate::global_runtime::GlobalMembershipStore::from_root(
+                &self.home_root,
+                &self.profile,
+                &self.server_key,
+            )
+            .unwrap();
+            let index = store.load_existing().unwrap();
+            index
+                .members
+                .get(&format!("{}:{}", self.workspace_id, self.run_id))
+                .is_some_and(|member| {
+                    member.disposition == crate::global_runtime::MembershipDisposition::Released
+                })
+        }
+    }
+
+    /// Which durable shape one releasable member scene starts from.
+    pub(crate) enum ReleaseScene {
+        /// An Idle member Run the settlement itself closes (the offline close).
+        CloseSettlement,
+        /// An already-Closed Run whose worker generation was verifiably
+        /// cleaned through the real remover (marker left, locator gone).
+        AlreadyClosed,
+        /// An Idle Run whose original Profile membership was never recorded.
+        WithoutProfileMembership,
+        /// An already-Closed Run at generation 1 whose runtime locator was
+        /// lost without the verified cleanup: no marker, no slot record.
+        LostLocator,
+    }
+
+    /// Which aggregate fixture built one releasable member scene.
+    enum ReleaseBase {
+        External(super::successor_fixture::SuccessorMember),
+        Managed(super::successor_fixture::ManagedMember),
+    }
+
+    /// A real, already-dead worker-generation identity: a process-group
+    /// leader that was alive when its kernel identity was captured and is
+    /// reaped before the identity is returned.
+    fn dead_worker_identity(
+        workspace_id: &str,
+        run_id: Uuid,
+        generation: u64,
+    ) -> crate::worker::WorkerIdentity {
+        use std::os::unix::fs::MetadataExt as _;
+        let boot_uuid = Uuid::parse_str(&DarwinSystem.boot_session_uuid().unwrap()).unwrap();
+        // The generation leader runs detached — its own session and group —
+        // exactly as a real worker does, so the whole-generation absence proof
+        // the remover performs sees an empty scope once it is reaped.
+        let mut command = std::process::Command::new("/usr/bin/yes");
+        command
+            .arg("absent-generation")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = DarwinSystem.spawn_detached(&mut command).unwrap();
+        let process = match DarwinSystem.bsd_process_identity(child.id()) {
+            Ok(process) => process,
+            Err(error) => {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("cannot observe test worker identity: {error}");
+            }
+        };
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let executable = std::path::Path::new("/usr/bin/yes");
+        let metadata = std::fs::symlink_metadata(executable).unwrap();
+        let image = std::fs::read(executable).unwrap();
+        crate::worker::WorkerIdentity {
+            workspace_id: workspace_id.to_owned(),
+            run_id,
+            run_generation: generation,
+            boot_uuid,
+            pid: process.pid,
+            process_group_id: process.process_group_id,
+            session_id: process.session_id,
+            uid: DarwinSystem.current_uid(),
+            start_tvsec: process.start_tvsec,
+            start_tvusec: process.start_tvusec,
+            executable_path: executable.to_path_buf(),
+            executable_device: metadata.dev(),
+            executable_inode: metadata.ino(),
+            executable_sha256: sha256_hex(&image),
+        }
+    }
+
+    /// Write the Run's runtime locator naming an already-dead worker
+    /// generation 1.
+    ///
+    /// The identity is real — a process-group leader that was alive when its
+    /// kernel identity was captured and is reaped before the record is
+    /// written — so the record classifies `Absent` and the production remover
+    /// accepts it.
+    pub(crate) fn write_absent_worker_locator(
+        state_root: &Path,
+        workspace_id: &str,
+        run_id: Uuid,
+    ) -> (PathBuf, crate::worker::WorkerRuntimeRecord) {
+        let identity = dead_worker_identity(workspace_id, run_id, 1);
+        let record = crate::worker::WorkerRuntimeRecord {
+            schema_version: 1,
+            identity,
+            socket_path: crate::worker::worker_socket_path(
+                DarwinSystem.current_uid(),
+                workspace_id,
+                run_id,
+            )
+            .unwrap(),
+            socket_identity: crate::worker::SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            control_socket_epoch: 1,
+            app_server_epoch: Some(1),
+            control_recovery_required: false,
+            startup_scope: None,
+            dedicated_server_identity: None,
+            dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+            mutation_protocol_version: crate::worker::WORKER_PROTOCOL_VERSION,
+            binary_sha256: crate::worker::current_dolgorae_build()
+                .unwrap()
+                .binary_sha256,
+        };
+        let path =
+            crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+                .unwrap();
+        crate::worker::write_runtime_record(&path, &record).unwrap();
+        (path, record)
+    }
+
+    /// Settle one read-only external task on the base fixture through the real
+    /// assign service, the durable terminal Turn and the real settlement port,
+    /// before the scene's rows are retained.
+    fn settle_external_read_only_task(
+        base: &super::successor_fixture::SuccessorMember,
+        key: &str,
+    ) -> Uuid {
+        use crate::delegation_service::RunSettlementPort as _;
+        let accepted = base.accept_and_dispatch_task(key, "read_only", 600);
+        base.mark_task_running(accepted.task_ref, "turn-release-collect");
+        base.publish_terminal_turn(
+            "turn-release-collect",
+            "completed",
+            "the released member's answer",
+            RunLifecycle::Idle,
+        );
+        let port = SemanticRunSettlementPort {
+            carrier: &base.owner,
+        };
+        assert_eq!(
+            port.settle_member_task(crate::delegation_service::MemberTaskSettlement {
+                view: &base.view,
+                state_root: &base.state_root,
+                owner: base.owner(),
+                member_ref: base.member_ref,
+                task_ref: accepted.task_ref,
+                execution_intent: "read_only",
+            })
+            .unwrap(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        accepted.task_ref
+    }
+
+    /// Settle one write task as the immutable typed-unavailable result:
+    /// the Run's retained-content aggregate is already exhausted, so the
+    /// producer's retention fails and the settlement publishes the unavailable
+    /// marker instead of a complete result.
+    fn settle_external_unavailable_task(
+        base: &super::successor_fixture::SuccessorMember,
+        key: &str,
+    ) -> Uuid {
+        let accepted = base.accept_and_dispatch_task(key, "canonical_workspace_write", 600);
+        base.mark_task_running(accepted.task_ref, "turn-unavailable");
+        base.record_dispatch_index_for(accepted.task_ref);
+        let workspace = base.view.canonical_path.to_path_buf().unwrap();
+        std::fs::write(workspace.join("README.md"), b"edited\n").unwrap();
+        // Another task of this Run already retains the whole aggregate.
+        base.store()
+            .connection()
+            .execute(
+                "INSERT INTO dispatch_indexes(
+                   task_id,workspace_ref,run_ref,head_commit,index_sha256,index_byte_length,
+                   file_count,baseline_bytes,created_at_ms
+                 ) VALUES(?1,?2,?3,NULL,?4,1,0,?5,1)",
+                rusqlite::params![
+                    Uuid::now_v7().to_string(),
+                    base.view.workspace_id,
+                    base.member_ref.to_string(),
+                    "a".repeat(64),
+                    crate::engagement::MAX_RUN_BASELINE_BYTES,
+                ],
+            )
+            .unwrap();
+        base.publish_terminal_turn(
+            "turn-unavailable",
+            "completed",
+            "no complete result",
+            RunLifecycle::Idle,
+        );
+        super::settle_bound_successor_task(
+            &base.state_root,
+            base.member_ref,
+            base.owner(),
+            &base.terminal("turn-unavailable"),
+        )
+        .unwrap();
+        // The premise: the terminal row carries the unavailable marker.
+        let task = base
+            .store()
+            .external_task(base.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(task.state, "completed_not_delivered");
+        let (_, bytes) = base
+            .store()
+            .task_complete_result(base.engagement_id, accepted.task_ref)
+            .unwrap()
+            .unwrap();
+        let marker: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(marker["schema"], "dolgorae.complete-result-unavailable/v1");
+        accepted.task_ref
+    }
+
+    /// Settle one read-only managed task on the base fixture through the real
+    /// admission and the store's own settlement transaction.
+    fn settle_managed_read_only_task(
+        base: &super::successor_fixture::ManagedMember,
+        key: &str,
+    ) -> Uuid {
+        let accepted = base.accept_and_dispatch_task(key, 600);
+        let task_ref = accepted.task_ref;
+        let mut store = base.store();
+        let facts =
+            crate::orchestration::successor_task(store.connection(), base.session_id, task_ref)
+                .unwrap()
+                .unwrap();
+        let accepted_identity: crate::delegation_identity::AcceptedTask =
+            serde_json::from_str(&facts.accepted_request_json).unwrap();
+        let result = crate::delegation_identity::CompleteResult {
+            schema: crate::delegation_identity::COMPLETE_RESULT_SCHEMA.to_owned(),
+            source: crate::delegation_identity::ResultSource {
+                scope_kind: "orchestrated_session".to_owned(),
+                scope_ref: base.session_id.to_string(),
+                worker_ref: base.member_ref.to_string(),
+                task_ref: task_ref.to_string(),
+                role_snapshot_digest: accepted_identity.role_snapshot_digest.clone(),
+                agent_configuration_digest: accepted_identity.agent_configuration_digest.clone(),
+                accepted_task_digest: accepted_identity.digest().unwrap(),
+            },
+            terminal_outcome: "completed".to_owned(),
+            final_response: Some(crate::delegation_identity::BytesRef {
+                byte_length: u64::try_from("the released member's answer".len()).unwrap(),
+                sha256: format!(
+                    "sha256:{}",
+                    sha256_hex("the released member's answer".as_bytes())
+                ),
+            }),
+            structured_output_schema: None,
+            structured_output: None,
+            changes: Vec::new(),
+            attachments: Vec::new(),
+            safe_failure_code: None,
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        let canonical =
+            String::from_utf8(canonicalize(&parse(&value.to_string()).unwrap()).unwrap()).unwrap();
+        let now = unix_time_ms_semantic().unwrap();
+        store
+            .transact(|transaction| {
+                crate::orchestration::retain_successor_task_result(
+                    transaction,
+                    task_ref,
+                    canonical.as_bytes(),
+                )?;
+                if !crate::orchestration::settle_successor_task_result(
+                    transaction,
+                    base.session_id,
+                    task_ref,
+                    "completed_not_delivered",
+                    None,
+                    Some(&sha256_hex(canonical.as_bytes())),
+                    now,
+                )? {
+                    return Err(MachineError::new(
+                        "STATE_CONFLICT",
+                        "the fixture task is not settleable",
+                        false,
+                        json!({}),
+                    ));
+                }
+                crate::engagement::advance_member_workload_revision(
+                    transaction,
+                    &base.view.workspace_id,
+                    "orchestrated_session",
+                    &base.session_id.to_string(),
+                    &base.member_ref.to_string(),
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        task_ref
+    }
+
+    /// One complete, releasable member scene under a managed Profile home.
+    ///
+    /// The member's aggregate rows, its manifest-4 Run, its writer layout and
+    /// its original global Profile membership all live in one home-rooted state
+    /// root — the layout the shared settlement's Profile retirement and
+    /// owned-cleanup verification resolve.
+    pub(crate) struct ReleasableMember {
+        _base: ReleaseBase,
+        pub view: WorkspaceView,
+        pub state_root: PathBuf,
+        home_root: PathBuf,
+        profile: String,
+        server_key: String,
+        pub owner: crate::delegation_service::SettlementOwner,
+        pub member_ref: Uuid,
+        pub controller: crate::run::ControllerBinding,
+        pub carrier: CredentialCarrier,
+        pub manifest: RunManifest,
+        pub revision: u64,
+    }
+
+    impl ReleasableMember {
+        /// One external successor member a release can settle end to end.
+        pub(crate) fn external(scene: ReleaseScene) -> Self {
+            let fixture = super::successor_fixture::SuccessorMember::new();
+            let owner = crate::delegation_service::SettlementOwner::External {
+                engagement_id: fixture.engagement_id,
+            };
+            let member_ref = fixture.member_ref;
+            let manifest = fixture.manifest.clone();
+            let controller = fixture.owner_binding.clone();
+            let carrier = CredentialCarrier::open_path(&fixture.root.join("owner")).unwrap();
+            Self::assemble(
+                scene,
+                ReleaseBase::External(fixture),
+                owner,
+                member_ref,
+                Some((manifest, controller, carrier)),
+            )
+        }
+
+        /// One managed successor member a release can settle end to end.
+        pub(crate) fn managed(scene: ReleaseScene) -> Self {
+            let fixture = super::successor_fixture::ManagedMember::new();
+            let owner = fixture.owner();
+            let member_ref = fixture.member_ref;
+            Self::assemble(
+                scene,
+                ReleaseBase::Managed(fixture),
+                owner,
+                member_ref,
+                None,
+            )
+        }
+
+        /// One external successor member whose base fixture also settled one
+        /// read-only task with its complete result, so the released
+        /// disposition and its proof are observable after the release.
+        pub(crate) fn external_with_settled_task(scene: ReleaseScene, key: &str) -> (Self, Uuid) {
+            let fixture = super::successor_fixture::SuccessorMember::new();
+            let task_ref = settle_external_read_only_task(&fixture, key);
+            let owner = crate::delegation_service::SettlementOwner::External {
+                engagement_id: fixture.engagement_id,
+            };
+            let member_ref = fixture.member_ref;
+            let manifest = fixture.manifest.clone();
+            let controller = fixture.owner_binding.clone();
+            let carrier = CredentialCarrier::open_path(&fixture.root.join("owner")).unwrap();
+            (
+                Self::assemble(
+                    scene,
+                    ReleaseBase::External(fixture),
+                    owner,
+                    member_ref,
+                    Some((manifest, controller, carrier)),
+                ),
+                task_ref,
+            )
+        }
+
+        /// One external successor member whose base fixture settled one write
+        /// task as the immutable typed-unavailable result, so the
+        /// release-side consequence is observable: no complete result exists,
+        /// only the unavailable marker.
+        pub(crate) fn external_with_unavailable_task(
+            scene: ReleaseScene,
+            key: &str,
+        ) -> (Self, Uuid) {
+            let fixture = super::successor_fixture::SuccessorMember::new();
+            let task_ref = settle_external_unavailable_task(&fixture, key);
+            let owner = crate::delegation_service::SettlementOwner::External {
+                engagement_id: fixture.engagement_id,
+            };
+            let member_ref = fixture.member_ref;
+            let manifest = fixture.manifest.clone();
+            let controller = fixture.owner_binding.clone();
+            let carrier = CredentialCarrier::open_path(&fixture.root.join("owner")).unwrap();
+            (
+                Self::assemble(
+                    scene,
+                    ReleaseBase::External(fixture),
+                    owner,
+                    member_ref,
+                    Some((manifest, controller, carrier)),
+                ),
+                task_ref,
+            )
+        }
+
+        /// One managed successor member whose base fixture also settled one
+        /// read-only task with its complete result.
+        pub(crate) fn managed_with_settled_task(scene: ReleaseScene, key: &str) -> (Self, Uuid) {
+            let fixture = super::successor_fixture::ManagedMember::new();
+            let task_ref = settle_managed_read_only_task(&fixture, key);
+            let owner = fixture.owner();
+            let member_ref = fixture.member_ref;
+            (
+                Self::assemble(
+                    scene,
+                    ReleaseBase::Managed(fixture),
+                    owner,
+                    member_ref,
+                    None,
+                ),
+                task_ref,
+            )
+        }
+
+        /// One external successor member whose base fixture left one accepted
+        /// task running — the shape an uncertain dispatch or the window
+        /// between a durable terminal and its resolution settles from.
+        pub(crate) fn external_with_running_task(scene: ReleaseScene, key: &str) -> (Self, Uuid) {
+            let fixture = super::successor_fixture::SuccessorMember::new();
+            let accepted = fixture.accept_and_dispatch_task(key, "read_only", 600);
+            fixture.mark_task_running(accepted.task_ref, "turn-recovery");
+            let owner = crate::delegation_service::SettlementOwner::External {
+                engagement_id: fixture.engagement_id,
+            };
+            let member_ref = fixture.member_ref;
+            let manifest = fixture.manifest.clone();
+            let controller = fixture.owner_binding.clone();
+            let carrier = CredentialCarrier::open_path(&fixture.root.join("owner")).unwrap();
+            (
+                Self::assemble(
+                    scene,
+                    ReleaseBase::External(fixture),
+                    owner,
+                    member_ref,
+                    Some((manifest, controller, carrier)),
+                ),
+                accepted.task_ref,
+            )
+        }
+
+        /// One managed successor member whose base fixture left one accepted
+        /// task running — the release-first half of the assignment/release
+        /// race for the managed owner (RPD:302).
+        pub(crate) fn managed_with_running_task(scene: ReleaseScene, key: &str) -> (Self, Uuid) {
+            let fixture = super::successor_fixture::ManagedMember::new();
+            let accepted = fixture.accept_and_dispatch_task(key, 600);
+            fixture.mark_task_running(accepted.task_ref, "turn-managed-race");
+            let owner = fixture.owner();
+            let member_ref = fixture.member_ref;
+            (
+                Self::assemble(
+                    scene,
+                    ReleaseBase::Managed(fixture),
+                    owner,
+                    member_ref,
+                    None,
+                ),
+                accepted.task_ref,
+            )
+        }
+
+        /// Publish one terminal Turn on the scene's member Run and settle the
+        /// task bound to that Turn through the real settlement entry — the
+        /// convergence step of the assignment/release race tests. The scene's
+        /// own projection facts (its bootstrapped generation state) are
+        /// preserved: only the head, the terminal Turn and the lifecycle move.
+        pub(crate) fn settle_task_terminal(&self, turn_id: &str, status: &str, text: &str) {
+            let run_root = crate::run::run_root(&self.state_root, self.member_ref);
+            std::fs::create_dir_all(run_root.join("recovery")).unwrap();
+            for directory in [run_root.clone(), run_root.join("recovery")] {
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            let audit = run_root.join("audit.jsonl");
+            if !audit.exists() {
+                std::fs::write(&audit, b"").unwrap();
+                std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let final_response = json!({"kind": "inline", "text": text});
+            let mut ledger = crate::ledger::Ledger::open(&run_root, self.member_ref).unwrap();
+            // The scene's member Run never started a worker generation, so its
+            // records stay at generation 0 — a generation-1 record would make
+            // the release's generation-absence proof require a marker.
+            ledger
+                .append_required_payload(
+                    crate::audit::AuditKind::TurnStarted,
+                    &json!({"turn_id": turn_id}),
+                    0,
+                )
+                .unwrap();
+            ledger
+                .append_required_payload(
+                    crate::audit::AuditKind::TurnTerminal,
+                    &json!({
+                        "thread_id": "thread-1",
+                        "turn_id": turn_id,
+                        "status": status,
+                        "effort": "high",
+                        "final_response": final_response,
+                        "usage": {"inputTokens": 1, "outputTokens": 1}
+                    }),
+                    0,
+                )
+                .unwrap();
+            let head = ledger.head().unwrap();
+            drop(ledger);
+            let resolved = crate::turn::TerminalTurn {
+                thread_id: "thread-1".to_owned(),
+                turn_id: turn_id.to_owned(),
+                status: status.to_owned(),
+                effort: "high".to_owned(),
+                final_response: Some(serde_json::from_value(final_response.clone()).unwrap()),
+                usage: Some(json!({"inputTokens": 1, "outputTokens": 1})),
+            };
+            super::record_resolved_terminal(&self.state_root, self.member_ref, &resolved).unwrap();
+            let path = run_root.join("state.json");
+            let mut projection: crate::projection::RunStateProjection =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            projection.lifecycle = RunLifecycle::Idle;
+            projection.latest_turn_id = Some(turn_id.to_owned());
+            projection.active_turn_id = None;
+            projection.ledger_head = head;
+            let text = serde_json::to_string(&projection).unwrap();
+            let canonical = crate::jcs::canonicalize(&crate::jcs::parse(&text).unwrap()).unwrap();
+            std::fs::write(&path, &canonical).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            super::settle_bound_successor_task(
+                &self.state_root,
+                self.member_ref,
+                self.owner,
+                &resolved,
+            )
+            .unwrap();
+        }
+
+        /// One external successor member whose base fixture left one accepted
+        /// task in an uncertain dispatch — `dispatching` with the round still
+        /// counted unresolved.
+        pub(crate) fn external_with_uncertain_task(scene: ReleaseScene, key: &str) -> (Self, Uuid) {
+            let fixture = super::successor_fixture::SuccessorMember::new();
+            let accepted = fixture.accept_uncertain_dispatch_task(key, "read_only", 600);
+            // The Turn was submitted but its outcome never settled: the task
+            // shows running under its turn while the round stays unresolved.
+            fixture.mark_task_running(accepted.task_ref, "turn-recovery");
+            let owner = crate::delegation_service::SettlementOwner::External {
+                engagement_id: fixture.engagement_id,
+            };
+            let member_ref = fixture.member_ref;
+            let manifest = fixture.manifest.clone();
+            let controller = fixture.owner_binding.clone();
+            let carrier = CredentialCarrier::open_path(&fixture.root.join("owner")).unwrap();
+            (
+                Self::assemble(
+                    scene,
+                    ReleaseBase::External(fixture),
+                    owner,
+                    member_ref,
+                    Some((manifest, controller, carrier)),
+                ),
+                accepted.task_ref,
+            )
+        }
+
+        /// One external successor member whose real uncertain dispatch never
+        /// recorded a Turn id — `dispatching` with the round counted
+        /// unresolved and `turn_id` NULL, exactly as the dispatch path's
+        /// Uncertain outcome leaves it.
+        pub(crate) fn external_with_turnless_dispatch(
+            scene: ReleaseScene,
+            key: &str,
+        ) -> (Self, Uuid) {
+            let fixture = super::successor_fixture::SuccessorMember::new();
+            let accepted = fixture.accept_uncertain_dispatch_task(key, "read_only", 600);
+            let owner = crate::delegation_service::SettlementOwner::External {
+                engagement_id: fixture.engagement_id,
+            };
+            let member_ref = fixture.member_ref;
+            let manifest = fixture.manifest.clone();
+            let controller = fixture.owner_binding.clone();
+            let carrier = CredentialCarrier::open_path(&fixture.root.join("owner")).unwrap();
+            (
+                Self::assemble(
+                    scene,
+                    ReleaseBase::External(fixture),
+                    owner,
+                    member_ref,
+                    Some((manifest, controller, carrier)),
+                ),
+                accepted.task_ref,
+            )
+        }
+
+        /// The successor service scope of this scene.
+        pub(crate) fn scope(&self) -> crate::delegation_service::DelegationScope<'_> {
+            crate::delegation_service::DelegationScope {
+                view: &self.view,
+                state_root: &self.state_root,
+                controller: &self.controller,
+            }
+        }
+
+        /// The real settlement port over this scene's owner carrier.
+        pub(crate) fn port(&self) -> SemanticRunSettlementPort<'_> {
+            SemanticRunSettlementPort {
+                carrier: &self.carrier,
+            }
+        }
+
+        /// One managed call context rooted at the session's root Run.
+        pub(crate) fn managed_context<'a>(
+            &'a self,
+            key: &'a str,
+        ) -> crate::delegation_service::ManagedCallContext<'a> {
+            let crate::delegation_service::SettlementOwner::Managed { session_id } = self.owner
+            else {
+                panic!("a managed context needs a managed scene");
+            };
+            let root_run_id =
+                crate::orchestration::OrchestrationStore::open_observer(&self.state_root)
+                    .unwrap()
+                    .session(session_id)
+                    .unwrap()
+                    .root_run_id;
+            crate::delegation_service::ManagedCallContext {
+                session_id,
+                source_run_id: root_run_id,
+                source_turn_id: "turn-root",
+                source_tool_call_id: "tool-call-root",
+                idempotency_key: key,
+            }
+        }
+
+        /// The accepted successor spawn intent that names the member — the
+        /// marker the public managed services read.
+        pub(crate) fn admit_successor_spawn_intent(&self) {
+            let crate::delegation_service::SettlementOwner::Managed { session_id } = self.owner
+            else {
+                panic!("a managed scene owns a session");
+            };
+            let connection = rusqlite::Connection::open(EngagementStore::workspace_database_path(
+                &self.state_root,
+            ))
+            .unwrap();
+            let spawn_operation_id: String = connection
+                .query_row(
+                    "SELECT spawn_operation_id FROM brokered_members WHERE run_id=?1",
+                    [self.member_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let subjects = crate::delegation_identity::AcceptedSubjects {
+                run_ref: Some(self.member_ref.to_string()),
+                member_ref: Some(self.member_ref.to_string()),
+                ..crate::delegation_identity::AcceptedSubjects::default()
+            };
+            connection
+                .execute(
+                    "INSERT INTO delegation_operations(
+                       operation_ref,schema_version,state,workspace_ref,controller_principal,
+                       controller_generation,scope_kind,scope_ref,operation_kind,idempotency_key,
+                       mutation_envelope_json,mutation_envelope_digest,expected_revision,
+                       trusted_invocation_json,accepted_subjects_json,receipt_json,
+                       created_at_ms,updated_at_ms
+                     ) VALUES(?1,2,'accepted',?2,'controller:fixture',1,'orchestrated_session',?3,
+                              'spawn_specialist',?4,'{}','fixture',NULL,NULL,?5,'{}',1,1)",
+                    rusqlite::params![
+                        spawn_operation_id,
+                        self.view.workspace_id,
+                        session_id.to_string(),
+                        format!("successor-spawn-{spawn_operation_id}"),
+                        serde_json::to_string(&subjects).unwrap(),
+                    ],
+                )
+                .unwrap();
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn assemble(
+            scene: ReleaseScene,
+            base: ReleaseBase,
+            owner: crate::delegation_service::SettlementOwner,
+            member_ref: Uuid,
+            external_facts: Option<(
+                RunManifest,
+                crate::run::ControllerBinding,
+                CredentialCarrier,
+            )>,
+        ) -> Self {
+            let base_root = match &base {
+                ReleaseBase::External(fixture) => fixture.root.clone(),
+                ReleaseBase::Managed(fixture) => fixture.root.clone(),
+            };
+            let base_state_root = match &base {
+                ReleaseBase::External(fixture) => fixture.state_root.clone(),
+                ReleaseBase::Managed(fixture) => fixture.state_root.clone(),
+            };
+            let view = match &base {
+                ReleaseBase::External(fixture) => fixture.view.clone(),
+                ReleaseBase::Managed(fixture) => fixture.view.clone(),
+            };
+            let workspace_id = view.workspace_id.clone();
+            let home_root = base_root.join("release-home");
+            let state_root = home_root.join("workspaces").join(&workspace_id);
+            for directory in [
+                home_root.clone(),
+                home_root.join("workspaces"),
+                state_root.clone(),
+                state_root.join("runs"),
+                state_root.join("runtime"),
+                state_root.join("runtime/locks"),
+                state_root.join("runtime/locks/startup"),
+                state_root.join("runtime/runs"),
+                state_root.join("orchestration"),
+            ] {
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            // Every aggregate row the base fixture admitted, retained
+            // byte-for-byte in the scene's own namespace.
+            let source = EngagementStore::workspace_database_path(&base_state_root);
+            {
+                let connection = rusqlite::Connection::open(&source).unwrap();
+                connection
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .unwrap();
+            }
+            std::fs::copy(
+                &source,
+                EngagementStore::workspace_database_path(&state_root),
+            )
+            .unwrap();
+            let birth = source
+                .parent()
+                .unwrap()
+                .join(crate::engagement::NAMESPACE_BIRTH_FILE);
+            if birth.exists() {
+                std::fs::copy(
+                    &birth,
+                    state_root
+                        .join("orchestration")
+                        .join(crate::engagement::NAMESPACE_BIRTH_FILE),
+                )
+                .unwrap();
+            }
+            // The owner's own authority. Managed runs answer to their Broker
+            // credential, minted into this state root, and the session's root
+            // Primary Run is published here for the scope authentication.
+            let (manifest, controller, carrier) = match external_facts {
+                Some(facts) => facts,
+                None => {
+                    let ReleaseBase::Managed(fixture) = &base else {
+                        unreachable!("a managed scene builds its own authority")
+                    };
+                    let orchestration =
+                        crate::orchestration::OrchestrationStore::open(&state_root).unwrap();
+                    let credential = orchestration.create_member_credential(member_ref).unwrap();
+                    drop(orchestration);
+                    let (root_controller, root_path) = fixture.publish_session_root_at(&state_root);
+                    let mut manifest = fixture.manifest.clone();
+                    manifest.controller = credential.binding.clone();
+                    (
+                        manifest,
+                        root_controller,
+                        CredentialCarrier::open_path(&root_path).unwrap(),
+                    )
+                }
+            };
+            RunStore::new(SystemWorkspacePlatform, &state_root)
+                .publish(&manifest)
+                .unwrap();
+            // The scene's lifecycle: an already-Closed Run is exactly the state
+            // a release retry verifies, while a settlement-closable Run carries
+            // the bootstrapped threadless ledger the durable offline close seals.
+            let run_root = crate::run::run_root(&state_root, member_ref);
+            let audit = run_root.join("audit.jsonl");
+            std::fs::write(&audit, b"").unwrap();
+            std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let projection = match scene {
+                ReleaseScene::AlreadyClosed => {
+                    let mut projection =
+                        crate::projection::RunStateProjection::starting(member_ref);
+                    projection.lifecycle = RunLifecycle::Closed;
+                    projection.run_generation = 1;
+                    // The Run's worker generation 1 ran and was verifiably
+                    // cleaned through the real remover: the marker for exactly
+                    // generation 1 is left behind and the locator is gone, so
+                    // this scene is the legitimate retry the marker authorizes.
+                    let (record_path, _) =
+                        write_absent_worker_locator(&state_root, &workspace_id, member_ref);
+                    crate::worker::remove_verified_absent_runtime(
+                        &record_path,
+                        DarwinSystem.current_uid(),
+                    )
+                    .unwrap();
+                    projection
+                }
+                ReleaseScene::LostLocator => {
+                    // A generation-1 Run whose locator vanished without the
+                    // verified cleanup: no marker, no slot record (the
+                    // unprovable-case tests build on this scene).
+                    let mut projection =
+                        crate::projection::RunStateProjection::starting(member_ref);
+                    projection.lifecycle = RunLifecycle::Closed;
+                    projection.run_generation = 1;
+                    projection
+                }
+                ReleaseScene::CloseSettlement | ReleaseScene::WithoutProfileMembership => {
+                    let mut ledger =
+                        ConformantLedger::open_for_bootstrap(&run_root, member_ref).unwrap();
+                    ledger
+                        .bootstrap(&BootstrapRequest {
+                            timestamp: "2026-10-22T00:00:00.000000Z".to_owned(),
+                            workspace_id: workspace_id.clone(),
+                            intent: IdempotencyIntent {
+                                schema_version: 1,
+                                operation: IdempotencyOperation::StartRun,
+                                idempotency_key: format!("release-scene-{member_ref}"),
+                                normalized_identity_sha256: "2".repeat(64),
+                                run_id: member_ref,
+                            },
+                            record_kind: BootstrapRecordKind::RunCreated,
+                            initial_access: "unknown".to_owned(),
+                            default_effort: Some("low".to_owned()),
+                        })
+                        .unwrap();
+                    ledger
+                        .mark_threadless_ready("2026-10-22T00:00:01.000000Z")
+                        .unwrap();
+                    ledger.inner().projection().unwrap()
+                }
+            };
+            let text = serde_json::to_string(&projection).unwrap();
+            let canonical = crate::jcs::canonicalize(&crate::jcs::parse(&text).unwrap()).unwrap();
+            let path = run_root.join("state.json");
+            std::fs::write(&path, &canonical).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            crate::writer::WriterStore::initialize_layout(
+                &state_root,
+                &workspace_id,
+                DarwinSystem.current_uid(),
+            )
+            .unwrap();
+            let binding = manifest.global_profile_binding.clone().unwrap();
+            let profile = binding.selected_name.clone();
+            let server_key = binding.server_key.clone();
+            if !matches!(
+                scene,
+                ReleaseScene::WithoutProfileMembership | ReleaseScene::LostLocator
+            ) {
+                crate::global_runtime::GlobalMembershipStore::from_root(
+                    &home_root,
+                    &profile,
+                    &server_key,
+                )
+                .unwrap()
+                .record(
+                    &workspace_id,
+                    member_ref,
+                    crate::global_runtime::MembershipDisposition::Active,
+                )
+                .unwrap();
+            }
+            let revision = super::release_probe::scope_membership_revision(
+                &state_root,
+                &workspace_id,
+                owner.scope_kind(),
+                owner.scope_ref(),
+            );
+            Self {
+                _base: base,
+                view,
+                state_root,
+                home_root,
+                profile,
+                server_key,
+                owner,
+                member_ref,
+                controller,
+                carrier,
+                manifest,
+                revision,
+            }
+        }
+
+        /// One release call through the real settlement, as the port would.
+        pub(crate) fn release(
+            &self,
+            expected_revision: u64,
+        ) -> Result<
+            crate::delegation_service::MemberReleaseOutcome,
+            crate::delegation_service::MemberReleaseFailure,
+        > {
+            super::settle_member_release(
+                crate::delegation_service::MemberReleaseRequest {
+                    view: &self.view,
+                    state_root: &self.state_root,
+                    owner: self.owner,
+                    workspace_ref: &self.view.workspace_id,
+                    member_ref: self.member_ref,
+                    controller: &self.controller,
+                    allow_interrupt: false,
+                    expected_revision,
+                },
+                &self.carrier,
+            )
+        }
+
+        /// Write the member Run's runtime locator naming a dead generation 1.
+        pub(crate) fn write_absent_worker_locator(
+            &self,
+        ) -> (PathBuf, crate::worker::WorkerRuntimeRecord) {
+            write_absent_worker_locator(&self.state_root, &self.view.workspace_id, self.member_ref)
+        }
+
+        /// Record the member's original Profile membership (the recorded
+        /// `restore_state` action of a failed retirement).
+        pub(crate) fn record_profile_membership(&self) {
+            crate::global_runtime::GlobalMembershipStore::from_root(
+                &self.home_root,
+                &self.profile,
+                &self.server_key,
+            )
+            .unwrap()
+            .record(
+                &self.view.workspace_id,
+                self.member_ref,
+                crate::global_runtime::MembershipDisposition::Active,
+            )
+            .unwrap();
+        }
+
+        /// Rewrite the durable projection's run generation (keeping the rest).
+        pub(crate) fn rewrite_projection_generation(&self, generation: u64) {
+            let path = crate::run::run_root(&self.state_root, self.member_ref).join("state.json");
+            let mut projection = RunStore::new(SystemWorkspacePlatform, &self.state_root)
+                .load_state_projection(self.member_ref)
+                .unwrap();
+            projection.run_generation = generation;
+            let text = serde_json::to_string(&projection).unwrap();
+            let canonical = crate::jcs::canonicalize(&crate::jcs::parse(&text).unwrap()).unwrap();
+            std::fs::write(&path, &canonical).unwrap();
+        }
+
+        /// Write one startup slot's owner record for a dead generation — the
+        /// residue a crashed start (slot 0) or worker (slot 1) leaves when
+        /// the kernel frees its byte range but the record survives.
+        ///
+        /// No byte range is claimed: the crash already released it. Without an
+        /// explicit identity a fresh dead process is captured.
+        pub(crate) fn write_stale_slot_claim(
+            &self,
+            slot: u8,
+            generation: u64,
+            identity: Option<crate::worker::WorkerIdentity>,
+        ) -> crate::worker::WorkerIdentity {
+            let mut identity = identity.unwrap_or_else(|| {
+                dead_worker_identity(&self.view.workspace_id, self.member_ref, generation)
+            });
+            identity.run_generation = generation;
+            let lock = crate::worker::StartupLockFile::open(
+                &crate::worker::startup_lock_path(
+                    &crate::worker::runtime_root(&self.state_root),
+                    self.member_ref,
+                ),
+                DarwinSystem.current_uid(),
+            )
+            .unwrap();
+            lock.write_owner(&crate::worker::StartupOwnerRecord {
+                schema_version: 1,
+                slot,
+                executable_path_sha256: identity.executable_sha256.clone(),
+                identity: identity.clone(),
+            })
+            .unwrap();
+            identity
+        }
+
+        /// The startup lock file's raw bytes — the slot evidence, exactly as
+        /// stored.
+        pub(crate) fn startup_lock_bytes(&self) -> Vec<u8> {
+            std::fs::read(crate::worker::startup_lock_path(
+                &crate::worker::runtime_root(&self.state_root),
+                self.member_ref,
+            ))
+            .unwrap()
+        }
+
+        /// Corrupt one startup slot's record bytes — not all-zero and
+        /// checksum-invalid — so reading the slot record fails instead of
+        /// reporting it absent.
+        pub(crate) fn corrupt_startup_slot(&self, slot: u8) {
+            use std::os::unix::fs::FileExt as _;
+            let path = crate::worker::startup_lock_path(
+                &crate::worker::runtime_root(&self.state_root),
+                self.member_ref,
+            );
+            drop(crate::worker::StartupLockFile::open(&path, DarwinSystem.current_uid()).unwrap());
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.write_all_at(
+                &[0xFF; crate::worker::STARTUP_SLOT_BYTES],
+                crate::worker::slot_offset(slot).unwrap(),
+            )
+            .unwrap();
+        }
+
+        /// The Run's verified-absence marker, if one exists.
+        pub(crate) fn verified_absence_marker(
+            &self,
+        ) -> Option<crate::worker::VerifiedAbsenceMarker> {
+            crate::worker::verified_absence_marker(
+                &crate::worker::runtime_root(&self.state_root),
+                self.member_ref,
+            )
+            .unwrap()
+        }
+
+        /// Whether the member's original Profile membership reads `released`.
+        pub(crate) fn membership_released(&self) -> bool {
+            let Ok(store) = crate::global_runtime::GlobalMembershipStore::from_root(
+                &self.home_root,
+                &self.profile,
+                &self.server_key,
+            ) else {
+                return false;
+            };
+            let Ok(index) = store.load_existing() else {
+                return false;
+            };
+            index
+                .members
+                .get(&format!("{}:{}", self.view.workspace_id, self.member_ref))
+                .is_some_and(|member| {
+                    member.disposition == crate::global_runtime::MembershipDisposition::Released
+                })
+        }
+
+        /// The member's terminal aggregate state (`released` / `retired`).
+        pub(crate) fn member_state(&self) -> String {
+            match self.owner {
+                crate::delegation_service::SettlementOwner::External { engagement_id } => {
+                    super::release_probe::external_member_state(
+                        &self.state_root,
+                        engagement_id,
+                        self.member_ref,
+                    )
+                }
+                crate::delegation_service::SettlementOwner::Managed { .. } => {
+                    super::release_probe::successor_member_state(&self.state_root, self.member_ref)
+                }
+            }
+        }
+
+        /// How many release events the aggregate recorded for this member.
+        pub(crate) fn event_count(&self) -> i64 {
+            match self.owner {
+                crate::delegation_service::SettlementOwner::External { .. } => {
+                    super::release_probe::engagement_event_count(
+                        &self.state_root,
+                        "member_release_requested",
+                    ) + super::release_probe::engagement_event_count(
+                        &self.state_root,
+                        "external_member_released",
+                    )
+                }
+                crate::delegation_service::SettlementOwner::Managed { session_id } => {
+                    super::release_probe::session_event_count(
+                        &self.state_root,
+                        session_id,
+                        "specialist_release_requested",
+                    ) + super::release_probe::session_event_count(
+                        &self.state_root,
+                        session_id,
+                        "specialist_released",
+                    )
+                }
+            }
+        }
+
+        pub(crate) fn row(&self) -> Vec<String> {
+            super::release_probe::release_row(&self.state_root, self.member_ref)
+        }
+
+        pub(crate) fn hold_lease(&self) -> crate::worker::RunLifecycleLease {
+            crate::worker::RunLifecycleLease::acquire(
+                &self.state_root,
+                &self.view.workspace_id,
+                self.member_ref,
+                1,
+            )
+            .unwrap()
+        }
+
+        /// Leave one unresolved task on this member, which blocks the terminal.
+        pub(crate) fn unresolved_task(&self) {
+            let connection = rusqlite::Connection::open(EngagementStore::workspace_database_path(
+                &self.state_root,
+            ))
+            .unwrap();
+            match self.owner {
+                crate::delegation_service::SettlementOwner::External { engagement_id } => {
+                    connection
+                        .execute(
+                            "INSERT INTO tasks(
+                               task_id,engagement_id,specialist_run_id,objective_sha256,state,
+                               external_request_ref_json,request_json,execution_intent,
+                               deadline_seconds,created_at_ms,updated_at_ms
+                             ) VALUES(?1,?2,?3,?4,'interrupted_unknown','{}','{}',
+                                     'read_only',60,1,1)",
+                            rusqlite::params![
+                                Uuid::now_v7().to_string(),
+                                engagement_id.to_string(),
+                                self.member_ref.to_string(),
+                                format!("sha256:{}", "e".repeat(64)),
+                            ],
+                        )
+                        .unwrap();
+                }
+                crate::delegation_service::SettlementOwner::Managed { session_id } => {
+                    connection
+                        .execute(
+                            "INSERT INTO brokered_tasks(
+                               task_id,session_id,idempotency_key,request_sha256,
+                               source_run_id,source_turn_id,source_tool_call_id,target_run_id,
+                               request_json,target_turn_id,result_json,result_sha256,
+                               result_artifact_id,state,safe_error_code,
+                               created_at_ms,updated_at_ms
+                             ) VALUES(?1,?2,'fixture-unresolved',?3,?2,'t','tc',?4,'{}',
+                                     NULL,NULL,NULL,NULL,'interrupted_unknown',NULL,1,1)",
+                            rusqlite::params![
+                                Uuid::now_v7().to_string(),
+                                session_id.to_string(),
+                                format!("sha256:{}", "e".repeat(64)),
+                                self.member_ref.to_string(),
+                            ],
+                        )
+                        .unwrap();
+                }
+            }
+        }
+
+        /// Leave this member holding an Active writer guard (pending cleanup).
+        pub(crate) fn active_writer_hold(&self) {
+            self.writer_guard(|record, transaction_id| {
+                let (_, generation) = record
+                    .prepare_acquire(self.member_ref, self.writer_holder(), transaction_id)
+                    .unwrap();
+                record.commit_acquire(transaction_id, generation).unwrap();
+            });
+        }
+
+        /// Leave this member holding a blocked-unknown writer guard.
+        pub(crate) fn blocked_writer_guard(&self) {
+            self.writer_guard(|record, transaction_id| {
+                record
+                    .prepare_acquire(self.member_ref, self.writer_holder(), transaction_id)
+                    .unwrap();
+                record.block_unknown(transaction_id);
+            });
+        }
+
+        fn writer_holder(&self) -> crate::writer::WriterHolder {
+            crate::writer::WriterStore::holder(
+                self.member_ref,
+                self.manifest.profile.profile_name.clone(),
+                &self.manifest.controller,
+                1,
+                self.manifest.profile_capability_snapshot.server_key.clone(),
+                self.manifest.profile_capability_snapshot.server_epoch,
+                None,
+                RunLifecycle::Idle,
+            )
+        }
+
+        fn writer_guard(&self, craft: impl FnOnce(&mut crate::writer::WriterRecord, Uuid)) {
+            let store = crate::writer::WriterStore::new(
+                &self.state_root,
+                &self.view.workspace_id,
+                DarwinSystem.current_uid(),
+            );
+            let transaction_id = Uuid::now_v7();
+            store
+                .transact(|record| {
+                    craft(record, transaction_id);
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        /// The real writer observation the settlement's verification reads.
+        pub(crate) fn writer_observation(
+            &self,
+        ) -> crate::delegation_service::MemberWriterObservation {
+            super::member_writer_observation(crate::delegation_service::MemberCleanupObservation {
+                view: &self.view,
+                state_root: &self.state_root,
+                owner: self.owner,
+                member_ref: self.member_ref,
+            })
+            .unwrap()
+        }
+
+        /// Register a real isolated worktree at this member's isolated root.
+        pub(crate) fn register_isolated_root(&self) -> PathBuf {
+            let crate::delegation_service::SettlementOwner::External { engagement_id } = self.owner
+            else {
+                panic!("only an external member owns an isolated root")
+            };
+            let root = crate::workspace::isolated_specialist_root(
+                &self.state_root,
+                engagement_id,
+                self.member_ref,
+            );
+            std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+            let status = std::process::Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(self.view.canonical_path.to_path_buf().unwrap())
+                .args(["worktree", "add", "--detach"])
+                .arg(&root)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            // The production launcher creates the isolated root 0700; `git
+            // worktree add` does not, so the fixture restores the real mode.
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            root
+        }
+
+        /// Write one runtime record whose live process identity mismatches, so
+        /// the owned-cleanup verifier classifies it for recovery.
+        pub(crate) fn write_mismatching_runtime_record(&self) {
+            use std::os::unix::fs::MetadataExt as _;
+            let child = std::process::Command::new("/bin/sleep")
+                .arg("60")
+                .spawn()
+                .unwrap();
+            let process = DarwinSystem.bsd_process_identity(child.id()).unwrap();
+            let boot = Uuid::parse_str(&DarwinSystem.boot_session_uuid().unwrap()).unwrap();
+            let executable = std::path::Path::new("/bin/sleep");
+            let metadata = std::fs::symlink_metadata(executable).unwrap();
+            let identity = crate::worker::WorkerIdentity {
+                workspace_id: self.view.workspace_id.clone(),
+                run_id: self.member_ref,
+                run_generation: 1,
+                boot_uuid: boot,
+                pid: child.id(),
+                process_group_id: process.process_group_id,
+                session_id: process.session_id,
+                uid: DarwinSystem.current_uid(),
+                start_tvsec: process.start_tvsec,
+                start_tvusec: process.start_tvusec,
+                executable_path: executable.to_path_buf(),
+                executable_device: metadata.dev(),
+                executable_inode: metadata.ino(),
+                // A digest no live executable matches, so the record can never
+                // classify as this worker.
+                executable_sha256: "f".repeat(64),
+            };
+            let record = crate::worker::WorkerRuntimeRecord {
+                schema_version: 1,
+                identity,
+                socket_path: crate::worker::worker_socket_path(
+                    DarwinSystem.current_uid(),
+                    &self.view.workspace_id,
+                    self.member_ref,
+                )
+                .unwrap(),
+                socket_identity: crate::worker::SocketIdentity {
+                    device: 1,
+                    inode: 1,
+                },
+                control_socket_epoch: 1,
+                app_server_epoch: Some(1),
+                control_recovery_required: false,
+                startup_scope: None,
+                dedicated_server_identity: None,
+                dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+                mutation_protocol_version: crate::worker::WORKER_PROTOCOL_VERSION,
+                binary_sha256: crate::worker::current_dolgorae_build()
+                    .unwrap()
+                    .binary_sha256,
+            };
+            let path = crate::worker::runtime_record_path(
+                &crate::worker::runtime_root(&self.state_root),
+                self.member_ref,
+            )
+            .unwrap();
+            crate::worker::write_runtime_record(&path, &record).unwrap();
+            // The crafted process must outlive the release attempt.
+            std::mem::forget(child);
+        }
+    }
+}
+
+/// The durable release facts one release test asserts, read straight from the store.
+#[cfg(test)]
+pub(crate) mod release_probe {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn database(state_root: &Path) -> PathBuf {
+        crate::engagement::EngagementStore::workspace_database_path(state_root)
+    }
+
+    /// Every release row, as one comparable text snapshot.
+    pub(crate) fn release_rows(state_root: &Path) -> String {
+        let connection = Connection::open(database(state_root)).unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT operation_ref,operation_kind,workspace_ref,scope_kind,scope_ref,
+                        member_ref,run_ref,controller_principal,
+                        CAST(controller_generation AS TEXT),
+                        CAST(admitted_membership_revision AS TEXT),
+                        COALESCE(owner_ref,'-'),progress,COALESCE(safe_failure_code,'-'),
+                        required_action,
+                        COALESCE(CAST(terminal_membership_revision AS TEXT),'-'),
+                        COALESCE(CAST(settled_workload_revision AS TEXT),'-')
+                   FROM member_release_operations ORDER BY operation_ref",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| {
+                Ok((0..16)
+                    .map(|index| row.get::<_, String>(index).unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("|"))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows.join("\n")
+    }
+
+    /// One member's row as its columns.
+    pub(crate) fn release_row(state_root: &Path, member: Uuid) -> Vec<String> {
+        release_rows(state_root)
+            .lines()
+            .find(|line| line.split('|').nth(5) == Some(member.to_string().as_str()))
+            .map(|line| line.split('|').map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn release_row_count(state_root: &Path) -> i64 {
+        let connection = Connection::open(database(state_root)).unwrap();
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM member_release_operations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    pub(crate) fn settle_release_row(state_root: &Path, member: Uuid) {
+        let connection = Connection::open(database(state_root)).unwrap();
+        connection
+            .execute(
+                "UPDATE member_release_operations
+                    SET progress='terminal',
+                        terminal_membership_revision=admitted_membership_revision+1,
+                        settled_workload_revision=0
+                  WHERE member_ref=?1",
+                [member.to_string()],
+            )
+            .unwrap();
+    }
+
+    pub(crate) fn set_release_owner_ref(state_root: &Path, member: Uuid, owner_ref: &str) {
+        let connection = Connection::open(database(state_root)).unwrap();
+        connection
+            .execute(
+                "UPDATE member_release_operations SET owner_ref=?2 WHERE member_ref=?1",
+                rusqlite::params![member.to_string(), owner_ref],
+            )
+            .unwrap();
+    }
+
+    pub(crate) fn external_member_state(
+        state_root: &Path,
+        engagement_id: Uuid,
+        member: Uuid,
+    ) -> String {
+        let connection = Connection::open(database(state_root)).unwrap();
+        connection
+            .query_row(
+                "SELECT state FROM members WHERE engagement_id=?1 AND specialist_run_id=?2",
+                rusqlite::params![engagement_id.to_string(), member.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    pub(crate) fn successor_member_state(state_root: &Path, member: Uuid) -> String {
+        let connection = Connection::open(database(state_root)).unwrap();
+        connection
+            .query_row(
+                "SELECT membership_state FROM brokered_members WHERE run_id=?1",
+                [member.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    pub(crate) fn engagement_event_count(state_root: &Path, kind: &str) -> i64 {
+        let connection = Connection::open(database(state_root)).unwrap();
+        connection
+            .query_row("SELECT COUNT(*) FROM events WHERE kind=?1", [kind], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    pub(crate) fn session_event_count(state_root: &Path, session: Uuid, kind: &str) -> i64 {
+        let connection = Connection::open(database(state_root)).unwrap();
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM orchestration_events WHERE session_id=?1 AND kind=?2",
+                rusqlite::params![session.to_string(), kind],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    pub(crate) fn scope_membership_revision(
+        state_root: &Path,
+        workspace_ref: &str,
+        scope_kind: &str,
+        scope_ref: Uuid,
+    ) -> u64 {
+        let connection = Connection::open(database(state_root)).unwrap();
+        crate::engagement::scope_membership_revision(
+            &connection,
+            workspace_ref,
+            scope_kind,
+            &scope_ref.to_string(),
+        )
+        .unwrap()
+    }
+
+    pub(crate) fn lifecycle_lock_path(state_root: &Path, run_id: Uuid) -> PathBuf {
+        crate::worker::runtime_root(state_root)
+            .join("locks/lifecycle")
+            .join(format!("{run_id}.lock"))
+    }
+}
+
+/// worker and semantic gates are driven against exactly the records the
+/// successor services write: a manifest-4 Run bound to its aggregate, the
+/// engagement whose owner binding is that Run's Controller, and an active member
+/// whose accepted configuration is the one the Run carries.
+#[cfg(test)]
+pub(crate) mod successor_fixture {
+    use super::*;
+    use crate::instructions::SelectedInstructionSource;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// One successor task the assign service accepted and marked dispatching.
+    pub(crate) struct AcceptedSuccessorTask {
+        pub task_ref: Uuid,
+        /// The exact prompt the acceptance preserved, rendered by the same
+        /// complete renderer the dispatch sends.
+        pub prompt: String,
+    }
+
+    /// A settlement port that accepts every dispatch, so the acceptance under
+    /// test is the one the real assign service writes.
+    pub(crate) struct AcceptingPort;
+
+    impl crate::delegation_service::RunSettlementPort for AcceptingPort {
+        fn member_writer_observation(
+            &self,
+            _request: crate::delegation_service::MemberCleanupObservation<'_>,
+        ) -> Result<crate::delegation_service::MemberWriterObservation, MachineError> {
+            Ok(crate::delegation_service::MemberWriterObservation {
+                holds: false,
+                blocked_unknown: false,
+                fingerprint: "fixture:absent".to_owned(),
+            })
+        }
+
+        fn settle_member_task(
+            &self,
+            _request: crate::delegation_service::MemberTaskSettlement<'_>,
+        ) -> Result<crate::delegation_service::MemberSettlement, MachineError> {
+            Ok(crate::delegation_service::MemberSettlement::Terminal)
+        }
+
+        fn start_member_run(
+            &self,
+            request: crate::delegation_service::AdmittedMemberStart<'_>,
+        ) -> Result<crate::delegation_service::MemberRunStart, MachineError> {
+            Ok(crate::delegation_service::MemberRunStart {
+                run_id: request.run_id,
+            })
+        }
+
+        fn settle_member_release(
+            &self,
+            _request: crate::delegation_service::MemberReleaseRequest<'_>,
+        ) -> Result<
+            crate::delegation_service::MemberReleaseOutcome,
+            crate::delegation_service::MemberReleaseFailure,
+        > {
+            Err(
+                crate::delegation_service::MemberReleaseFailure::BeforeAdmission(
+                    MachineError::new(
+                        "INTERNAL_ERROR",
+                        "the accepting fixture port does not settle releases",
+                        false,
+                        json!({"invariant":"fixture_release_not_admitted"}),
+                    ),
+                ),
+            )
+        }
+
+        fn dispatch_member_task(
+            &self,
+            request: crate::delegation_service::MemberTaskDispatch<'_>,
+        ) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
+            Ok(crate::delegation_service::MemberDispatchOutcome::Accepted {
+                turn_ref: format!("turn-{}", request.task_ref),
+            })
+        }
+
+        fn dispatch_managed_task(
+            &self,
+            request: crate::delegation_service::ManagedTaskDispatch<'_>,
+        ) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
+            Ok(crate::delegation_service::MemberDispatchOutcome::Accepted {
+                turn_ref: format!("turn-{}", request.task_ref),
+            })
+        }
+    }
+
+    /// One legacy (generation-3) member and its published Run.
+    pub(crate) struct LegacyMember {
+        pub run_id: Uuid,
+        pub manifest: RunManifest,
+        pub idempotency_key: String,
+    }
+
+    pub(crate) struct SuccessorMember {
+        pub root: PathBuf,
+        pub state_root: PathBuf,
+        pub view: WorkspaceView,
+        pub manifest: RunManifest,
+        pub engagement_id: Uuid,
+        pub member_ref: Uuid,
+        pub owner_binding: crate::run::ControllerBinding,
+        pub owner: CredentialCarrier,
+        pub stranger: CredentialCarrier,
+        pub profile_binding: GlobalProfileBinding,
+    }
+
+    impl SuccessorMember {
+        pub(crate) fn new() -> Self {
+            Self::with_access("canonical_workspace_write")
+        }
+
+        pub(crate) fn reviewer() -> Self {
+            Self::with_access("read_only")
+        }
+
+        pub(crate) fn unqualified_review(case: usize) -> Self {
+            match case {
+                0 => Self::with_options("read_only", "interactive", true),
+                1 => Self::with_options("canonical_workspace_write", "review", true),
+                _ => Self::with_options("read_only", "review", false),
+            }
+        }
+
+        fn with_access(access: &str) -> Self {
+            Self::with_options(access, "review", true)
+        }
+
+        fn with_options(access: &str, purpose: &str, qualified: bool) -> Self {
+            let root = std::env::temp_dir().join(format!("dolgorae-successor-{}", Uuid::now_v7()));
+            for directory in [
+                root.clone(),
+                root.join("state"),
+                root.join("state/runs"),
+                root.join("state/runtime"),
+                root.join("state/runtime/locks"),
+            ] {
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            let root = root.canonicalize().unwrap();
+            let home = crate::paths::DolgoraeHome::from_canonical_home(root.clone()).unwrap();
+            std::fs::create_dir(home.root()).unwrap();
+            std::fs::set_permissions(home.root(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let store_sources = crate::instructions::InstructionSourceStore::new(&home);
+            store_sources.initialize_templates().unwrap();
+            let codex_home = root.join("codex-home");
+            std::fs::create_dir(&codex_home).unwrap();
+            std::fs::set_permissions(&codex_home, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut profile_binding = {
+                let reservation: crate::run::CallerStartReservation =
+                    serde_json::from_str(include_str!(
+                        "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+                    ))
+                    .unwrap();
+                reservation.accepted_intent.global_profile_binding
+            };
+            profile_binding.launch_snapshot.canonical_codex_home =
+                codex_home.to_str().unwrap().to_owned();
+            // The qualified caller-workspace runtime: the record must be one the
+            // lane actually admits, or the gate would refuse the fixture itself.
+            profile_binding.launch_snapshot.executable_identity.sha256 =
+                "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878".to_owned();
+            if !qualified {
+                profile_binding
+                    .launch_snapshot
+                    .enabled_features
+                    .push("unqualified-feature".to_owned());
+            }
+            let encoded = serde_json::to_string(&profile_binding.launch_snapshot).unwrap();
+            profile_binding.launch_snapshot_sha256 =
+                sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
+            profile_binding.validate_for_recovery().unwrap();
+            let state_root = root.join("state");
+            let sources = crate::provisioning::ProvisioningSources {
+                instruct: &store_sources,
+                role_name: "reviewer",
+                role: SelectedInstructionSource::File(vec![
+                    "roles".to_owned(),
+                    "reviewer".to_owned(),
+                ]),
+                dependencies: vec![crate::instructions::SelectedNamedSource {
+                    name: "contract".to_owned(),
+                    source: SelectedInstructionSource::Inline("Accepted contract.\n".to_owned()),
+                }],
+                selected_guidance: Vec::new(),
+                profile_binding: profile_binding.clone(),
+                admission: crate::provisioning::ProvisioningAdmission {
+                    model: "gpt-5.6".to_owned(),
+                    effort: "high".to_owned(),
+                    purpose_kind: purpose.to_owned(),
+                    purpose_label: None,
+                    required_capabilities: Vec::new(),
+                    execution_lane: "dedicated".to_owned(),
+                    // Writable admission: the capture gate refuses a
+                    // canonical-workspace-write task whose admitted access is
+                    // read-only.
+                    requested_access: access.to_owned(),
+                    required_assurance: "best_effort_personal_alpha".to_owned(),
+                    native_subagent_policy: "disabled".to_owned(),
+                },
+            };
+            let (_, snapshot) =
+                crate::provisioning::install_provisioning(&sources, &state_root).unwrap();
+            // The retained capture is the only instruction source from here on.
+            std::fs::remove_dir_all(home.root().join("roles")).unwrap();
+            let (instructions, configuration) = snapshot.admitted_configuration().unwrap();
+
+            let workspace = root.join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let git = |arguments: &[&str]| {
+                assert!(
+                    std::process::Command::new("/usr/bin/git")
+                        .arg("-C")
+                        .arg(&workspace)
+                        .args(["-c", "user.email=test@example.invalid"])
+                        .args(["-c", "user.name=Dolgorae Test"])
+                        .args(arguments)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            };
+            std::fs::write(workspace.join("README.md"), b"baseline\n").unwrap();
+            // The ignored-path rule every MD1 and dispatch-index case is read
+            // against is part of the fixture's committed baseline.
+            std::fs::write(workspace.join(".gitignore"), b"*.log\n").unwrap();
+            git(&["init", "-q"]);
+            git(&["add", "README.md", ".gitignore"]);
+            git(&["commit", "-q", "-m", "baseline"]);
+            let view = WorkspaceView {
+                workspace_id: crate::workspace::workspace_id(&workspace),
+                canonical_path: crate::workspace::LosslessPath::from_path(&workspace),
+                // A writable delegated task is admitted only in a Git workspace.
+                mode: crate::workspace::WorkspaceMode::Git,
+                created: true,
+            };
+            let owner =
+                CredentialCarrier::open_path(&Self::mint(&root.join("owner"), "successor-owner"))
+                    .unwrap();
+            let owner_binding = presented_controller_from_carrier(&owner, 1)
+                .unwrap()
+                .binding;
+            let stranger =
+                CredentialCarrier::open_path(&Self::mint(&root.join("stranger"), "another-owner"))
+                    .unwrap();
+            let mut store =
+                EngagementStore::open(&EngagementStore::workspace_database_path(&state_root))
+                    .unwrap();
+            let opened = store
+                .open_external_engagement(
+                    &view.workspace_id,
+                    &owner_binding,
+                    &json!({"namespace": "test", "kind": "host", "id": "successor"}),
+                    None,
+                    "fixture-open",
+                )
+                .unwrap();
+            let reservation = store
+                .reserve_external_hire(
+                    opened.engagement_id,
+                    "reviewer",
+                    &configuration,
+                    "inspect the accepted candidate",
+                    // Writable access also admits a read-only task, so one member
+                    // covers both dispatch intents.
+                    "canonical_workspace_write",
+                    "fixture-hire",
+                )
+                .unwrap();
+            store
+                .finish_external_hire(
+                    &reservation,
+                    crate::engagement::RuntimeOutcome::Accepted,
+                    "fixture-hire",
+                )
+                .unwrap();
+            let aggregate = crate::run::AggregateBinding {
+                aggregate_kind: crate::domain::AggregateKind::ExternalSpecialistEngagement,
+                aggregate_id: opened.engagement_id,
+                operation_id: reservation.hire_operation_id,
+                member_kind: crate::run::AggregateMemberKind::Specialist,
+                policy_sha256: None,
+                role_reference: configuration.role_reference.clone(),
+                role_snapshot_sha256: Some(
+                    instructions
+                        .role_snapshot_digest
+                        .trim_start_matches("sha256:")
+                        .to_owned(),
+                ),
+                agent_configuration_sha256: Some(
+                    crate::run::agent_configuration_digest(&configuration).unwrap(),
+                ),
+            };
+            let request = CallerRunStartRequest {
+                schema: "dolgorae-run-start-request/v2".to_owned(),
+                workspace: Some(workspace.to_str().unwrap().to_owned()),
+                expected_workspace_id: Some(view.workspace_id.clone()),
+                specialist_policy: None,
+                profile: profile_binding.selected_name.clone(),
+                control_mode: ControlMode::ManagedAgent,
+                // The admitted configuration is writable, and a successor Run's
+                // creation access must agree with it.
+                access: if access == "read_only" {
+                    crate::domain::CallerWorkspaceAccess::ReadOnly
+                } else {
+                    crate::domain::CallerWorkspaceAccess::Writable
+                },
+                role: "reviewer".to_owned(),
+                model: None,
+                effort: None,
+                purpose: configuration.purpose.clone(),
+                parent_ref: Some(ParentReference {
+                    namespace: "dolgorae.external-specialist-engagement.v1".to_owned(),
+                    kind: "specialist".to_owned(),
+                    id: opened.engagement_id.to_string(),
+                }),
+                required_capabilities: configuration.required_capabilities.clone(),
+                idempotency_key: "successor-member-start".to_owned(),
+            }
+            .resolve_member(&aggregate)
+            .unwrap();
+            let state = ServerState {
+                schema_version: 2,
+                server_key: profile_binding.server_key.clone(),
+                lifecycle: "ready".to_owned(),
+                server_epoch: 1,
+                epoch_id: Uuid::now_v7(),
+                boot_session_uuid: Uuid::now_v7(),
+                pid: 10,
+                pgid: 10,
+                uid: crate::darwin::DarwinSystem.current_uid(),
+                process_fingerprint: "fixture-server".to_owned(),
+                drainer_pid: 11,
+                drainer_pgid: 11,
+                drainer_uid: crate::darwin::DarwinSystem.current_uid(),
+                drainer_fingerprint: "fixture-drainer".to_owned(),
+                socket_path: "/fixture/profile.sock".to_owned(),
+                socket_device: 1,
+                socket_inode: 1,
+                membership_revision: 0,
+                default_model: configuration.model.clone(),
+                models: vec![configuration.model.clone()],
+                capabilities: std::collections::BTreeMap::new(),
+                snapshot: profile_binding.launch_snapshot.clone(),
+            };
+            let profile_binding_for_member = profile_binding.clone();
+            let intent = crate::run::CallerStartIntent {
+                run_id: reservation.specialist_run_id,
+                created_at: SystemLedgerClock::default().timestamp(),
+                workspace_id: view.workspace_id.clone(),
+                canonical_workspace: view.canonical_path.clone(),
+                workspace_mode: view.mode,
+                start_baseline: crate::workspace::GitBaseline::empty(),
+                request,
+                controller: owner_binding.clone(),
+                global_profile_binding: profile_binding,
+                instructions: instructions.clone(),
+                admitted_configuration: Some(configuration.clone()),
+                orchestration: None,
+                readiness: crate::run::CallerProfileReadiness {
+                    model: configuration.model.clone(),
+                    default_effort: configuration.default_effort.clone(),
+                    profile_capability_snapshot: run_capability_snapshot(
+                        &run_profile_snapshot(&state.snapshot).unwrap(),
+                        &state,
+                    ),
+                },
+            };
+            let mut manifest = build_delegated_manifest(
+                &intent,
+                &view,
+                &state,
+                &configuration.model,
+                &configuration.default_effort,
+            )
+            .unwrap();
+            manifest.aggregate_binding = Some(aggregate);
+            RunStore::new(crate::workspace::SystemWorkspacePlatform, &state_root)
+                .publish(&manifest)
+                .unwrap();
+            Self {
+                root,
+                state_root,
+                view,
+                manifest,
+                engagement_id: opened.engagement_id,
+                member_ref: reservation.specialist_run_id,
+                owner_binding,
+                owner,
+                stranger,
+                profile_binding: profile_binding_for_member,
+            }
+        }
+
+        /// One legacy (generation-3) member of this engagement.
+        ///
+        /// It carries a published manifest-3 Run and a legacy `operations`
+        /// receipt, so the generation decision is taken on real records.
+        pub(crate) fn legacy_member(&self, key: &str) -> LegacyMember {
+            let binding = self.profile_binding.clone();
+            let common_body = "Common instructions.\n".to_owned();
+            let role_body = "Inspect the accepted candidate.\n".to_owned();
+            let capture = crate::instructions::InstructionSnapshot::compose(
+                crate::instructions::SourceCapture {
+                    byte_length: common_body.len() as u64,
+                    sha256: sha256_hex(common_body.as_bytes()),
+                    body: common_body,
+                },
+                crate::instructions::RoleCapture {
+                    name: "researcher".to_owned(),
+                    byte_length: role_body.len() as u64,
+                    sha256: sha256_hex(role_body.as_bytes()),
+                    body: role_body,
+                },
+            )
+            .unwrap();
+            let configuration: AgentConfigurationSnapshot =
+                crate::run::CallerAgentConfigurationSnapshot {
+                    schema_version: 3,
+                    selected_profile: binding.selected_name.clone(),
+                    global_profile_binding_sha256: binding.digest().unwrap(),
+                    model: "gpt-5.6".to_owned(),
+                    default_effort: "high".to_owned(),
+                    purpose: Purpose {
+                        kind: PurposeKind::Review,
+                        external_label: None,
+                    },
+                    required_capabilities: Vec::new(),
+                    role_reference: Some("researcher".to_owned()),
+                    instructions: capture.clone(),
+                    execution_lane: ExecutionLane::Dedicated,
+                    required_assurance: Assurance::BestEffortPersonalAlpha,
+                    native_subagent_policy: "enabled".to_owned(),
+                }
+                .try_into()
+                .unwrap();
+            let hire_key = format!("{key}-hire");
+            let mut store = self.store();
+            let reservation = store
+                .reserve_external_hire(
+                    self.engagement_id,
+                    "researcher",
+                    &configuration,
+                    "inspect the accepted candidate",
+                    "read_only",
+                    &hire_key,
+                )
+                .unwrap();
+            store
+                .finish_external_hire(
+                    &reservation,
+                    crate::engagement::RuntimeOutcome::Accepted,
+                    &hire_key,
+                )
+                .unwrap();
+            // The generation-3 facade receipt lives only in `operations`.
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO operations(
+                       scope_id,operation,idempotency_key,request_sha256,response_json
+                     ) VALUES(?1,'assign_external_specialist_task',?2,?3,'{}')",
+                    rusqlite::params![
+                        self.engagement_id.to_string(),
+                        key,
+                        format!("sha256:{}", "e".repeat(64))
+                    ],
+                )
+                .unwrap();
+            let mut manifest = self.manifest.clone();
+            manifest.run_id = reservation.specialist_run_id;
+            manifest.schema_version = 3;
+            manifest.initial_access = Access::Read;
+            manifest.requested_access = Some(crate::domain::CallerWorkspaceAccess::ReadOnly);
+            manifest.selected_role = Some("researcher".to_owned());
+            manifest.creation_mode = None;
+            manifest.admitted_configuration_digest = None;
+            manifest.start_operation_receipt = None;
+            manifest.model = configuration.model.clone();
+            manifest.initial_reasoning_effort = configuration.default_effort.clone();
+            manifest.default_reasoning_effort = configuration.default_effort.clone();
+            manifest.purpose = configuration.purpose.clone();
+            manifest.required_capabilities = configuration.required_capabilities.clone();
+            manifest.instructions = capture.clone().into();
+            manifest.agent_configuration = configuration.clone();
+            manifest.aggregate_binding = Some(crate::run::AggregateBinding {
+                aggregate_kind: crate::domain::AggregateKind::ExternalSpecialistEngagement,
+                aggregate_id: self.engagement_id,
+                operation_id: reservation.hire_operation_id,
+                member_kind: crate::run::AggregateMemberKind::Specialist,
+                policy_sha256: None,
+                role_reference: Some("researcher".to_owned()),
+                role_snapshot_sha256: Some(
+                    capture.role.sha256.trim_start_matches("sha256:").to_owned(),
+                ),
+                agent_configuration_sha256: Some(
+                    crate::run::agent_configuration_digest(&configuration).unwrap(),
+                ),
+            });
+            RunStore::new(crate::workspace::SystemWorkspacePlatform, &self.state_root)
+                .publish(&manifest)
+                .unwrap();
+            LegacyMember {
+                run_id: manifest.run_id,
+                manifest,
+                idempotency_key: key.to_owned(),
+            }
+        }
+
+        fn mint(path: &Path, instance: &str) -> PathBuf {
+            crate::controller::create_controller_credential(
+                path,
+                crate::domain::ControllerKind::WorkflowOrchestrator,
+                instance.to_owned(),
+                None,
+                None,
+            )
+            .unwrap();
+            path.to_path_buf()
+        }
+
+        pub(crate) fn database(&self) -> PathBuf {
+            EngagementStore::workspace_database_path(&self.state_root)
+        }
+
+        /// The settlement owner this member's tasks belong to.
+        pub(crate) fn owner(&self) -> crate::delegation_service::SettlementOwner {
+            crate::delegation_service::SettlementOwner::External {
+                engagement_id: self.engagement_id,
+            }
+        }
+
+        pub(crate) fn store(&self) -> EngagementStore {
+            EngagementStore::open(&self.database()).unwrap()
+        }
+
+        /// Accept one read-only successor task through the real assign service
+        /// and leave it at the dispatch boundary its Turn is presented at.
+        pub(crate) fn accept_and_dispatch_task(
+            &self,
+            key: &str,
+            execution_intent: &str,
+            deadline_seconds: u64,
+        ) -> AcceptedSuccessorTask {
+            self.accept_and_dispatch(
+                key,
+                execution_intent,
+                deadline_seconds,
+                Self::plain_task(),
+                None,
+            )
+        }
+
+        /// Accept one checked-output (structured_review_v3) task.
+        pub(crate) fn accept_and_dispatch_review_task(
+            &self,
+            key: &str,
+            execution_intent: &str,
+            deadline_seconds: u64,
+        ) -> AcceptedSuccessorTask {
+            self.accept_and_dispatch(
+                key,
+                execution_intent,
+                deadline_seconds,
+                Self::review_task(key),
+                None,
+            )
+        }
+
+        pub(crate) fn accept_target_task(&self, key: &str) -> AcceptedSuccessorTask {
+            self.accept_and_dispatch(
+                key,
+                "read_only",
+                600,
+                Self::plain_task(),
+                Some(json!({"kind":"workspace", "revision":null})),
+            )
+        }
+
+        pub(crate) fn accept_checked_task(
+            &self,
+            key: &str,
+            task: crate::task_request::SpecialistTaskRequest,
+            kind: &str,
+            revision: Option<&str>,
+        ) -> AcceptedSuccessorTask {
+            self.accept_and_dispatch(
+                key,
+                "read_only",
+                600,
+                task,
+                Some(json!({"kind":kind,"revision":revision})),
+            )
+        }
+
+        fn accept_and_dispatch(
+            &self,
+            key: &str,
+            execution_intent: &str,
+            deadline_seconds: u64,
+            task: crate::task_request::SpecialistTaskRequest,
+            target: Option<serde_json::Value>,
+        ) -> AcceptedSuccessorTask {
+            let caller = crate::caller_scope::fixture(3);
+            let scope = self.scope();
+            let (observation, _) = crate::delegation_service::assign_external_specialist_task(
+                &scope,
+                &caller,
+                &AcceptingPort,
+                crate::delegation_service::AssignExternalSpecialistTask {
+                    engagement_id: self.engagement_id,
+                    member_ref: self.member_ref,
+                    task,
+                    execution_intent,
+                    target: target.map(serde_json::from_value).transpose().unwrap(),
+                    deadline_seconds,
+                    idempotency_key: key,
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+            let task_ref = Uuid::parse_str(&observation.task_ref).unwrap();
+            let now = unix_time_ms_semantic().unwrap();
+            let mut store = self.store();
+            // The fake port reports executor acceptance, so the accounting
+            // transition the real port performs applies here too.
+            store
+                .transact(|transaction| crate::caller_scope::accepted(transaction, task_ref))
+                .unwrap();
+            store
+                .transact(|transaction| {
+                    crate::engagement::mark_external_task_dispatching_in(
+                        transaction,
+                        self.engagement_id,
+                        task_ref,
+                        now,
+                    )
+                })
+                .unwrap();
+            let store = self.store();
+            let accepted = store
+                .external_task_identity(self.engagement_id, task_ref)
+                .unwrap()
+                .unwrap();
+            let (task_body, contexts, target) =
+                crate::engagement::accepted_task_content(store.connection(), task_ref)
+                    .unwrap()
+                    .unwrap();
+            let prompt = crate::successor_capture::AcceptedTaskContents {
+                task_body,
+                contexts,
+                target,
+            }
+            .prompt(&accepted, execution_intent, deadline_seconds)
+            .unwrap();
+            AcceptedSuccessorTask { task_ref, prompt }
+        }
+
+        /// The retained task body re-encoded with a different brief.
+        pub(crate) fn altered_task_body(&self, task_id: Uuid) -> Vec<u8> {
+            let store = self.store();
+            let (task_body, _, _) =
+                crate::engagement::accepted_task_content(store.connection(), task_id)
+                    .unwrap()
+                    .unwrap();
+            let mut task: serde_json::Value = serde_json::from_slice(&task_body).unwrap();
+            task["brief"] = json!("Assess a different candidate.\n");
+            let text = serde_json::to_string(&task).unwrap();
+            canonicalize(&parse(&text).unwrap()).unwrap()
+        }
+
+        /// Render the Turn the current retention would send for one task.
+        pub(crate) fn render_retained(
+            &self,
+            task_id: Uuid,
+            execution_intent: &str,
+            deadline_seconds: u64,
+        ) -> String {
+            let store = self.store();
+            let accepted = store
+                .external_task_identity(self.engagement_id, task_id)
+                .unwrap()
+                .unwrap();
+            let (task_body, contexts, target) =
+                crate::engagement::accepted_task_content(store.connection(), task_id)
+                    .unwrap()
+                    .unwrap();
+            crate::successor_capture::AcceptedTaskContents {
+                task_body,
+                contexts,
+                target,
+            }
+            .prompt(&accepted, execution_intent, deadline_seconds)
+            .unwrap()
+        }
+
+        /// Leave one external task where an uncertain dispatch stops: the task is
+        /// reserved (`dispatching`) and its round is counted unresolved.
+        pub(crate) fn accept_uncertain_dispatch_task(
+            &self,
+            key: &str,
+            execution_intent: &str,
+            deadline_seconds: u64,
+        ) -> AcceptedSuccessorTask {
+            let caller = crate::caller_scope::fixture(3);
+            let scope = self.scope();
+            let (observation, _) = crate::delegation_service::assign_external_specialist_task(
+                &scope,
+                &caller,
+                &AcceptingPort,
+                crate::delegation_service::AssignExternalSpecialistTask {
+                    engagement_id: self.engagement_id,
+                    member_ref: self.member_ref,
+                    task: Self::plain_task(),
+                    execution_intent,
+                    target: None,
+                    deadline_seconds,
+                    idempotency_key: key,
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+            let task_ref = Uuid::parse_str(&observation.task_ref).unwrap();
+            // The dispatch never proved acceptance: the round stays conservative.
+            let mut store = self.store();
+            let now = unix_time_ms_semantic().unwrap();
+            store
+                .transact(|transaction| {
+                    crate::engagement::mark_external_task_dispatching_in(
+                        transaction,
+                        self.engagement_id,
+                        task_ref,
+                        now,
+                    )
+                })
+                .unwrap();
+            let store = self.store();
+            let accepted = store
+                .external_task_identity(self.engagement_id, task_ref)
+                .unwrap()
+                .unwrap();
+            let (task_body, contexts, target) =
+                crate::engagement::accepted_task_content(store.connection(), task_ref)
+                    .unwrap()
+                    .unwrap();
+            let prompt = crate::successor_capture::AcceptedTaskContents {
+                task_body,
+                contexts,
+                target,
+            }
+            .prompt(&accepted, execution_intent, deadline_seconds)
+            .unwrap();
+            AcceptedSuccessorTask { task_ref, prompt }
+        }
+
+        /// Leave one dispatched task at the running boundary with its Turn.
+        pub(crate) fn mark_task_running(&self, task_ref: Uuid, turn_id: &str) {
+            let mut store = self.store();
+            let now = unix_time_ms_semantic().unwrap();
+            store
+                .transact(|transaction| {
+                    crate::engagement::mark_external_task_running_in(
+                        transaction,
+                        self.engagement_id,
+                        task_ref,
+                        turn_id,
+                        now,
+                    )
+                    .map(|_| ())
+                })
+                .unwrap();
+        }
+
+        /// Publish the member Run's durable terminal Turn and idle projection.
+        pub(crate) fn publish_terminal_turn(
+            &self,
+            turn_id: &str,
+            status: &str,
+            text: &str,
+            lifecycle: RunLifecycle,
+        ) {
+            self.publish_terminal_json(
+                turn_id,
+                status,
+                &json!({"kind": "inline", "text": text}),
+                lifecycle,
+            );
+        }
+
+        pub(crate) fn workload_revision(&self) -> u64 {
+            crate::engagement::member_workload_revision(
+                self.store().connection(),
+                &self.view.workspace_id,
+                "external_engagement",
+                &self.engagement_id.to_string(),
+                &self.member_ref.to_string(),
+            )
+            .unwrap()
+        }
+
+        /// The durable accounting state of one external task's round.
+        pub(crate) fn round_state(&self, task_ref: Uuid) -> String {
+            self.store()
+                .connection()
+                .query_row(
+                    "SELECT accounting_state FROM caller_scope_assignments
+                      WHERE assignment_id=?1",
+                    [task_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        /// The caller scope's counted rounds.
+        pub(crate) fn rounds_used(&self) -> u64 {
+            crate::caller_scope::rounds_used(
+                self.store().connection(),
+                &crate::caller_scope::fixture(3),
+            )
+            .unwrap()
+        }
+
+        /// Hold the workspace writer authority for this member Run.
+        pub(crate) fn reserve_member_writer(&self) {
+            self.initialize_writer_authority();
+            let writer = crate::writer::WriterStore::new(
+                &self.state_root,
+                &self.view.workspace_id,
+                crate::darwin::DarwinSystem.current_uid(),
+            );
+            let holder = crate::writer::WriterStore::holder(
+                self.manifest.run_id,
+                self.manifest.profile.profile_name.clone(),
+                &self.manifest.controller,
+                1,
+                self.manifest.profile_capability_snapshot.server_key.clone(),
+                self.manifest.profile_capability_snapshot.server_epoch,
+                Some("thread-1".to_owned()),
+                RunLifecycle::Idle,
+            );
+            let transaction_id = Uuid::now_v7();
+            writer
+                .transact(|record| {
+                    let (_, generation) =
+                        record.prepare_acquire(self.manifest.run_id, holder, transaction_id)?;
+                    record.commit_acquire(transaction_id, generation)?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        /// Write one artifact-backed final response file into the Run's store.
+        pub(crate) fn store_final_response_artifact(&self, bytes: &[u8]) -> Uuid {
+            let artifact_id = Uuid::now_v7();
+            let directory =
+                crate::run::run_root(&self.state_root, self.manifest.run_id).join("artifacts");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path = directory.join(format!("{artifact_id}.bin"));
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            artifact_id
+        }
+
+        /// Publish a terminal Turn whose final response is that artifact.
+        pub(crate) fn publish_terminal_artifact(
+            &self,
+            turn_id: &str,
+            artifact_id: Uuid,
+            byte_length: u64,
+        ) {
+            let digest = self
+                .final_response_artifact_digest(artifact_id)
+                .unwrap_or_default();
+            self.publish_terminal_artifact_with_digest(turn_id, artifact_id, byte_length, &digest);
+        }
+
+        fn final_response_artifact_digest(&self, artifact_id: Uuid) -> Option<String> {
+            let path = crate::run::run_root(&self.state_root, self.manifest.run_id)
+                .join("artifacts")
+                .join(format!("{artifact_id}.bin"));
+            std::fs::read(path)
+                .ok()
+                .map(|bytes| crate::jcs::sha256_hex(&bytes))
+        }
+
+        pub(crate) fn publish_terminal_artifact_with_digest(
+            &self,
+            turn_id: &str,
+            artifact_id: Uuid,
+            byte_length: u64,
+            digest: &str,
+        ) {
+            self.publish_terminal_json(
+                turn_id,
+                "completed",
+                &json!({
+                    "kind": "artifact",
+                    "artifact_id": artifact_id.to_string(),
+                    "byte_length": byte_length,
+                    "sha256": digest.trim_start_matches("sha256:"),
+                    "created_at": "2026-10-22T00:00:00.000000Z",
+                }),
+                RunLifecycle::Idle,
+            );
+        }
+
+        /// Publish only the pre-resolution ledger terminal.
+        pub(crate) fn publish_terminal_turn_without_resolution(&self, turn_id: &str, status: &str) {
+            publish_terminal_without_resolution_in(
+                &self.state_root,
+                self.manifest.run_id,
+                turn_id,
+                status,
+            );
+        }
+
+        /// Publish a ledger terminal that carries no final response.
+        pub(crate) fn publish_terminal_without_response(&self, turn_id: &str, status: &str) {
+            self.publish_terminal_json(
+                turn_id,
+                status,
+                &serde_json::Value::Null,
+                RunLifecycle::Idle,
+            );
+        }
+
+        /// Publish a terminal Turn with no final response at all.
+        #[allow(dead_code)]
+        pub(crate) fn clear_final_response(&self, turn_id: &str) {
+            self.publish_terminal_json(
+                turn_id,
+                "failed",
+                &serde_json::Value::Null,
+                RunLifecycle::Idle,
+            );
+        }
+
+        fn publish_terminal_json(
+            &self,
+            turn_id: &str,
+            status: &str,
+            final_response: &serde_json::Value,
+            lifecycle: RunLifecycle,
+        ) {
+            publish_terminal_json_in(
+                &self.state_root,
+                self.manifest.run_id,
+                turn_id,
+                status,
+                final_response,
+                lifecycle,
+            );
+        }
+
+        /// One accepted task with an unchecked output contract (plain results).
+        fn plain_task() -> crate::task_request::SpecialistTaskRequest {
+            let mut task = crate::delegation_service::fixture_task();
+            task.expected_output = "complete_result".to_owned();
+            task
+        }
+
+        /// One accepted task whose output is the checked review contract.
+        pub(crate) fn review_task(key: &str) -> crate::task_request::SpecialistTaskRequest {
+            let _ = key;
+            crate::delegation_service::fixture_task()
+        }
+
+        /// Retain the dispatch index the write dispatch would record (Part A).
+        pub(crate) fn record_dispatch_index_for(&self, task_ref: Uuid) {
+            let workspace = self.view.canonical_path.to_path_buf().unwrap();
+            let capture =
+                crate::successor_capture::capture_dispatch_index(&workspace, task_ref).unwrap();
+            let mut store = self.store();
+            let now = unix_time_ms_semantic().unwrap();
+            store
+                .transact(|transaction| {
+                    crate::engagement::record_dispatch_index_with_content(
+                        transaction,
+                        crate::engagement::DispatchIndexRecord {
+                            task_id: task_ref,
+                            workspace_ref: &self.view.workspace_id,
+                            run_ref: self.member_ref,
+                            head_commit: capture.head.as_deref(),
+                            index_sha256: &capture.sha256,
+                            index_byte_length: u64::try_from(capture.canonical.len()).unwrap(),
+                            file_count: capture.file_count,
+                            baseline_bytes: capture.baseline_bytes,
+                        },
+                        &capture.canonical,
+                        &capture.baseline,
+                        now,
+                    )
+                })
+                .unwrap();
+        }
+
+        /// The resolved terminal of one Turn, as the coordinator produced it.
+        pub(crate) fn terminal(&self, turn_id: &str) -> crate::turn::TerminalTurn {
+            super::resolved_terminal(&self.state_root, self.manifest.run_id, turn_id)
+                .unwrap()
+                .unwrap()
+        }
+
+        /// Record one executor `fileChange` item the way a successor-bound Turn
+        /// does (MD1): the normalized payload is published write-once under its
+        /// digest and that digest is journaled for this Turn.
+        pub(crate) fn record_file_change_item(
+            &self,
+            turn_id: &str,
+            item_id: &str,
+            changes: &[crate::interaction_payload::FileChangePayload],
+        ) -> String {
+            let (digest, canonical) = Self::file_change_payload_bytes(changes);
+            let directory =
+                crate::run::run_root(&self.state_root, self.manifest.run_id).join("file-changes");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path = directory.join(format!("{digest}.json"));
+            std::fs::write(&path, &canonical).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            self.journal_file_change_snapshot(turn_id, item_id, 0, &digest);
+            digest
+        }
+
+        /// The same record with its payload gone: a digest the Turn names whose
+        /// bytes are not there.
+        pub(crate) fn record_file_change_item_without_payload(
+            &self,
+            turn_id: &str,
+            item_id: &str,
+            changes: &[crate::interaction_payload::FileChangePayload],
+        ) -> String {
+            let (digest, _) = Self::file_change_payload_bytes(changes);
+            self.journal_file_change_snapshot(turn_id, item_id, 0, &digest);
+            digest
+        }
+
+        /// Publish one normalized payload under its digest without journaling it.
+        pub(crate) fn publish_file_change_payload(&self, canonical: &[u8]) -> String {
+            let digest = sha256_hex(canonical);
+            let directory =
+                crate::run::run_root(&self.state_root, self.manifest.run_id).join("file-changes");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path = directory.join(format!("{digest}.json"));
+            std::fs::write(&path, canonical).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            digest
+        }
+
+        pub(crate) fn file_change_payload_bytes(
+            changes: &[crate::interaction_payload::FileChangePayload],
+        ) -> (String, Vec<u8>) {
+            let text = serde_json::to_string(&serde_json::to_value(changes).unwrap()).unwrap();
+            let canonical = canonicalize(&parse(&text).unwrap()).unwrap();
+            (sha256_hex(&canonical), canonical)
+        }
+
+        pub(crate) fn journal_file_change_snapshot(
+            &self,
+            turn_id: &str,
+            item_id: &str,
+            revision: u64,
+            digest: &str,
+        ) {
+            let run_root = crate::run::run_root(&self.state_root, self.manifest.run_id);
+            std::fs::create_dir_all(run_root.join("recovery")).unwrap();
+            for directory in [
+                self.state_root.clone(),
+                self.state_root.join("runs"),
+                run_root.clone(),
+                run_root.join("recovery"),
+            ] {
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            let audit = run_root.join("audit.jsonl");
+            if !audit.exists() {
+                std::fs::write(&audit, b"").unwrap();
+                std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let mut ledger = crate::ledger::Ledger::open(&run_root, self.manifest.run_id).unwrap();
+            use crate::turn::DurableTurnJournal as _;
+            crate::turn::LedgerTurnJournal::new(&mut ledger, 1)
+                .append_and_sync(crate::turn::JournalEntry::FileChangeSnapshot {
+                    thread_id: "thread-1".to_owned(),
+                    turn_id: turn_id.to_owned(),
+                    item_id: item_id.to_owned(),
+                    revision,
+                    snapshot_sha256: digest.to_owned(),
+                })
+                .unwrap();
+        }
+
+        /// Rewrite the retained complete result's source to another task.
+        pub(crate) fn substitute_result_task(&self, task_ref: Uuid, other: Uuid) {
+            let store = self.store();
+            let connection = store.connection();
+            let (artifact, bytes) = {
+                let (_, bytes) = store
+                    .task_complete_result(self.engagement_id, task_ref)
+                    .unwrap()
+                    .unwrap();
+                let artifact: String = connection
+                    .query_row(
+                        "SELECT artifact_id FROM tasks WHERE task_id=?1",
+                        [task_ref.to_string()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                (artifact, bytes)
+            };
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value["source"]["task_ref"] = json!(other.to_string());
+            let text = serde_json::to_string(&value).unwrap();
+            let canonical = canonicalize(&parse(&text).unwrap()).unwrap();
+            let digest = sha256_hex(&canonical);
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO result_content(sha256,bytes) VALUES(?1,?2)",
+                    rusqlite::params![digest, canonical],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE result_content_refs SET sha256=?1,byte_length=?2
+                      WHERE owner_kind='external_artifact' AND owner_id=?3
+                        AND representation='json'",
+                    rusqlite::params![digest, canonical.len() as u64, artifact],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE tasks SET result_sha256=?1 WHERE task_id=?2",
+                    rusqlite::params![digest, task_ref.to_string()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE artifacts SET result_sha256=?1 WHERE artifact_id=?2",
+                    rusqlite::params![digest, artifact],
+                )
+                .unwrap();
+        }
+
+        /// Leave a writer record that exists but cannot be read.
+        pub(crate) fn corrupt_writer_record(&self) {
+            self.initialize_writer_authority();
+            let path = self.state_root.join("runtime").join("writer.json");
+            std::fs::write(&path, b"{}").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        /// Leave the member Run's writer guard blocked-unknown.
+        pub(crate) fn block_member_writer(&self) {
+            let writer = crate::writer::WriterStore::new(
+                &self.state_root,
+                &self.view.workspace_id,
+                crate::darwin::DarwinSystem.current_uid(),
+            );
+            let transaction_id = Uuid::now_v7();
+            writer
+                .transact(|record| {
+                    record.prepare_release(self.manifest.run_id, transaction_id)?;
+                    record.block_unknown(transaction_id);
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        /// Move the member row to one membership state.
+        pub(crate) fn set_member_state(&self, state: &str) {
+            self.store()
+                .connection()
+                .execute(
+                    "UPDATE members SET state=?1 WHERE engagement_id=?2 AND specialist_run_id=?3",
+                    rusqlite::params![
+                        state,
+                        self.engagement_id.to_string(),
+                        self.member_ref.to_string()
+                    ],
+                )
+                .unwrap();
+        }
+
+        pub(crate) fn writer_record(&self) -> crate::writer::WriterRecord {
+            crate::writer::WriterStore::new(
+                &self.state_root,
+                &self.view.workspace_id,
+                crate::darwin::DarwinSystem.current_uid(),
+            )
+            .load()
+            .unwrap()
+        }
+
+        pub(crate) fn artifact_rows(&self) -> i64 {
+            self.store()
+                .connection()
+                .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+                .unwrap()
+        }
+
+        /// Initialize the workspace writer authority so a dispatch can acquire it.
+        pub(crate) fn initialize_writer_authority(&self) {
+            let uid = crate::darwin::DarwinSystem.current_uid();
+            crate::writer::WriterStore::initialize_layout(
+                &self.state_root,
+                &self.view.workspace_id,
+                uid,
+            )
+            .unwrap();
+        }
+
+        /// Publish the idle Run projection this member's dispatch requires.
+        pub(crate) fn write_idle_projection(&self) {
+            let mut projection =
+                crate::projection::RunStateProjection::starting(self.manifest.run_id);
+            projection.lifecycle = RunLifecycle::Idle;
+            let text = serde_json::to_string(&projection).unwrap();
+            let canonical = canonicalize(&parse(&text).unwrap()).unwrap();
+            let path =
+                crate::run::run_root(&self.state_root, self.manifest.run_id).join("state.json");
+            std::fs::write(&path, &canonical).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        /// Leave an unreadable runtime record, so the writer acquire fails after
+        /// it reserved this Run's transition.
+        pub(crate) fn write_unreadable_runtime_record(&self) {
+            let path = crate::worker::runtime_record_path(
+                &crate::worker::runtime_root(&self.state_root),
+                self.manifest.run_id,
+            )
+            .unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"{}").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        /// Rewrite one retained successor task and the digests its row records.
+        ///
+        /// `acceptance_digests` also moves `objective_sha256` and the retained
+        /// `accepted_task_digest`, so only the frozen intent envelope can still
+        /// tell the rewrite from the original acceptance.
+        pub(crate) fn rewrite_retained_task(
+            &self,
+            task_id: Uuid,
+            task_body: &[u8],
+            acceptance_digests: bool,
+        ) {
+            let store = self.store();
+            let connection = store.connection();
+            let digest = sha256_hex(task_body);
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO result_content(sha256,bytes) VALUES(?1,?2)",
+                    rusqlite::params![digest, task_body],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE result_content_refs SET sha256=?1,byte_length=?2
+                      WHERE owner_kind='accepted_task' AND owner_id=?3
+                        AND representation='task_body'",
+                    rusqlite::params![digest, task_body.len() as u64, task_id.to_string()],
+                )
+                .unwrap();
+            let request: String = connection
+                .query_row(
+                    "SELECT request_json FROM tasks WHERE task_id=?1",
+                    [task_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut identity: serde_json::Value = serde_json::from_str(&request).unwrap();
+            identity["task_body"]["sha256"] = json!(format!("sha256:{digest}"));
+            identity["task_body"]["byte_length"] = json!(task_body.len() as u64);
+            let text = serde_json::to_string(&identity).unwrap();
+            let rewritten =
+                String::from_utf8(canonicalize(&parse(&text).unwrap()).unwrap()).unwrap();
+            connection
+                .execute(
+                    "UPDATE tasks SET request_json=?1 WHERE task_id=?2",
+                    rusqlite::params![rewritten, task_id.to_string()],
+                )
+                .unwrap();
+            if acceptance_digests {
+                let accepted: crate::delegation_identity::AcceptedTask =
+                    serde_json::from_str(&rewritten).unwrap();
+                let digest = accepted.digest().unwrap();
+                let external = serde_json::to_string(&json!({
+                    "provisioning_ref": null,
+                    "accepted_task_digest": digest,
+                    "deadline_seconds": 600,
+                }))
+                .unwrap();
+                connection
+                    .execute(
+                        "UPDATE tasks SET objective_sha256=?1,external_request_ref_json=?2
+                          WHERE task_id=?3",
+                        rusqlite::params![digest, external, task_id.to_string()],
+                    )
+                    .unwrap();
+            }
+        }
+
+        pub(crate) fn scope(&self) -> crate::delegation_service::DelegationScope<'_> {
+            crate::delegation_service::DelegationScope {
+                view: &self.view,
+                state_root: &self.state_root,
+                controller: &self.owner_binding,
+            }
+        }
+    }
+
+    /// Publish only a member Run's pre-resolution ledger terminal and projection.
+    ///
+    /// The worker funnel must publish the resolved terminal itself, so this writes the
+    /// ledger record without the resolution file.
+    pub(crate) fn publish_terminal_without_resolution_in(
+        state_root: &Path,
+        run_id: Uuid,
+        turn_id: &str,
+        status: &str,
+    ) {
+        let run_root = crate::run::run_root(state_root, run_id);
+        std::fs::create_dir_all(run_root.join("recovery")).unwrap();
+        for directory in [
+            state_root.to_path_buf(),
+            state_root.join("runs"),
+            run_root.clone(),
+            run_root.join("recovery"),
+        ] {
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let audit = run_root.join("audit.jsonl");
+        if !audit.exists() {
+            std::fs::write(&audit, b"").unwrap();
+            std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut ledger = crate::ledger::Ledger::open(&run_root, run_id).unwrap();
+        ledger
+            .append_required_payload(
+                crate::audit::AuditKind::TurnStarted,
+                &json!({"turn_id": turn_id}),
+                1,
+            )
+            .unwrap();
+        ledger
+            .append_required_payload(
+                crate::audit::AuditKind::TurnTerminal,
+                &json!({
+                    "thread_id": "thread-1",
+                    "turn_id": turn_id,
+                    "status": status,
+                    "effort": "high",
+                    "final_response": {"kind": "inline", "text": "pre-resolution text"},
+                    "usage": {"inputTokens": 1, "outputTokens": 1}
+                }),
+                1,
+            )
+            .unwrap();
+        let head = ledger.head().unwrap();
+        drop(ledger);
+        let mut projection = crate::projection::RunStateProjection::starting(run_id);
+        projection.lifecycle = RunLifecycle::Idle;
+        projection.latest_turn_id = Some(turn_id.to_owned());
+        projection.ledger_head = head;
+        let text = serde_json::to_string(&projection).unwrap();
+        let canonical = canonicalize(&parse(&text).unwrap()).unwrap();
+        let path = run_root.join("state.json");
+        std::fs::write(&path, &canonical).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    impl Drop for SuccessorMember {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Publish one member Run's terminal Turn, its resolution and its projection.
+    ///
+    /// Shared by both owners: the settlement observes exactly this pair whatever
+    /// aggregate the member belongs to.
+    pub(crate) fn publish_terminal_json_in(
+        state_root: &Path,
+        run_id: Uuid,
+        turn_id: &str,
+        status: &str,
+        final_response: &serde_json::Value,
+        lifecycle: RunLifecycle,
+    ) {
+        let run_root = crate::run::run_root(state_root, run_id);
+        std::fs::create_dir_all(run_root.join("recovery")).unwrap();
+        for directory in [
+            state_root.to_owned(),
+            state_root.join("runs"),
+            run_root.clone(),
+            run_root.join("recovery"),
+        ] {
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let audit = run_root.join("audit.jsonl");
+        if !audit.exists() {
+            std::fs::write(&audit, b"").unwrap();
+            std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut ledger = crate::ledger::Ledger::open(&run_root, run_id).unwrap();
+        ledger
+            .append_required_payload(
+                crate::audit::AuditKind::TurnStarted,
+                &json!({"turn_id": turn_id}),
+                1,
+            )
+            .unwrap();
+        let mut payload = json!({
+            "thread_id": "thread-1",
+            "turn_id": turn_id,
+            "status": status,
+            "effort": "high",
+            "usage": {"inputTokens": 1, "outputTokens": 1}
+        });
+        if !final_response.is_null() {
+            payload["final_response"] = final_response.clone();
+        }
+        ledger
+            .append_required_payload(crate::audit::AuditKind::TurnTerminal, &payload, 1)
+            .unwrap();
+        let head = ledger.head().unwrap();
+        drop(ledger);
+        // The worker records the resolved terminal before it settles, so a
+        // published terminal Turn also publishes its resolution record.
+        let resolved = crate::turn::TerminalTurn {
+            thread_id: "thread-1".to_owned(),
+            turn_id: turn_id.to_owned(),
+            status: status.to_owned(),
+            effort: "high".to_owned(),
+            final_response: if final_response.is_null() {
+                None
+            } else {
+                serde_json::from_value(final_response.clone()).unwrap()
+            },
+            usage: Some(json!({"inputTokens": 1, "outputTokens": 1})),
+        };
+        super::record_resolved_terminal(state_root, run_id, &resolved).unwrap();
+        let mut projection = crate::projection::RunStateProjection::starting(run_id);
+        projection.lifecycle = lifecycle;
+        projection.latest_turn_id = Some(turn_id.to_owned());
+        projection.ledger_head = head;
+        let text = serde_json::to_string(&projection).unwrap();
+        let canonical = canonicalize(&parse(&text).unwrap()).unwrap();
+        let path = run_root.join("state.json");
+        std::fs::write(&path, &canonical).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    /// One successor managed member of an Orchestrated Session.
+    ///
+    /// The member owns Broker task rows instead of Engagement task rows, so the
+    /// settlement, hook and sweep must reach the same facts through the owner the
+    /// member Run's manifest names.
+    pub(crate) struct ManagedMember {
+        pub root: PathBuf,
+        pub state_root: PathBuf,
+        pub view: WorkspaceView,
+        pub manifest: RunManifest,
+        pub session_id: Uuid,
+        pub member_ref: Uuid,
+        configuration: AgentConfigurationSnapshot,
+    }
+
+    impl ManagedMember {
+        pub(crate) fn new() -> Self {
+            Self::with_access("read_only")
+        }
+
+        pub(crate) fn writable() -> Self {
+            Self::with_access("canonical_workspace_write")
+        }
+
+        pub(crate) fn unqualified_review(case: usize) -> Self {
+            match case {
+                0 => Self::with_options("read_only", "interactive", true),
+                1 => Self::with_options("canonical_workspace_write", "review", true),
+                _ => Self::with_options("read_only", "review", false),
+            }
+        }
+
+        fn with_access(access: &str) -> Self {
+            Self::with_options(access, "review", true)
+        }
+
+        fn with_options(access: &str, purpose: &str, qualified: bool) -> Self {
+            use crate::specialist_policy::{
+                InstalledSpecialistPolicy, InstalledSpecialistRole, RoleSource,
+                RoleSourceReference, RoleSourceScope,
+            };
+
+            let root = std::env::temp_dir().join(format!("dolgorae-managed-{}", Uuid::now_v7()));
+            for directory in [
+                root.clone(),
+                root.join("state"),
+                root.join("state/runs"),
+                root.join("state/runtime"),
+                root.join("state/runtime/locks"),
+            ] {
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            let root = root.canonicalize().unwrap();
+            let home = crate::paths::DolgoraeHome::from_canonical_home(root.clone()).unwrap();
+            std::fs::create_dir(home.root()).unwrap();
+            std::fs::set_permissions(home.root(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let store_sources = crate::instructions::InstructionSourceStore::new(&home);
+            store_sources.initialize_templates().unwrap();
+            let codex_home = root.join("codex-home");
+            std::fs::create_dir(&codex_home).unwrap();
+            std::fs::set_permissions(&codex_home, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut profile_binding = {
+                let reservation: crate::run::CallerStartReservation =
+                    serde_json::from_str(include_str!(
+                        "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+                    ))
+                    .unwrap();
+                reservation.accepted_intent.global_profile_binding
+            };
+            profile_binding.launch_snapshot.canonical_codex_home =
+                codex_home.to_str().unwrap().to_owned();
+            profile_binding.launch_snapshot.executable_identity.sha256 =
+                "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878".to_owned();
+            if !qualified {
+                profile_binding
+                    .launch_snapshot
+                    .enabled_features
+                    .push("unqualified-feature".to_owned());
+            }
+            let encoded = serde_json::to_string(&profile_binding.launch_snapshot).unwrap();
+            profile_binding.launch_snapshot_sha256 =
+                sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
+            profile_binding.validate_for_recovery().unwrap();
+            let state_root = root.join("state");
+            let sources = crate::provisioning::ProvisioningSources {
+                instruct: &store_sources,
+                role_name: "reviewer",
+                role: SelectedInstructionSource::File(vec![
+                    "roles".to_owned(),
+                    "reviewer".to_owned(),
+                ]),
+                dependencies: vec![crate::instructions::SelectedNamedSource {
+                    name: "contract".to_owned(),
+                    source: SelectedInstructionSource::Inline("Accepted contract.\n".to_owned()),
+                }],
+                selected_guidance: Vec::new(),
+                profile_binding: profile_binding.clone(),
+                admission: crate::provisioning::ProvisioningAdmission {
+                    model: "gpt-5.6".to_owned(),
+                    effort: "high".to_owned(),
+                    purpose_kind: purpose.to_owned(),
+                    purpose_label: None,
+                    required_capabilities: Vec::new(),
+                    execution_lane: "dedicated".to_owned(),
+                    requested_access: access.to_owned(),
+                    required_assurance: "best_effort_personal_alpha".to_owned(),
+                    native_subagent_policy: "disabled".to_owned(),
+                },
+            };
+            let (_, snapshot) =
+                crate::provisioning::install_provisioning(&sources, &state_root).unwrap();
+            std::fs::remove_dir_all(home.root().join("roles")).unwrap();
+            let (instructions, configuration) = snapshot.admitted_configuration().unwrap();
+
+            let workspace = root.join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let git = |arguments: &[&str]| {
+                assert!(
+                    std::process::Command::new("/usr/bin/git")
+                        .arg("-C")
+                        .arg(&workspace)
+                        .args(["-c", "user.email=test@example.invalid"])
+                        .args(["-c", "user.name=Dolgorae Test"])
+                        .args(arguments)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            };
+            std::fs::write(workspace.join("README.md"), b"baseline\n").unwrap();
+            git(&["init", "-q"]);
+            git(&["add", "README.md"]);
+            git(&["commit", "-q", "-m", "baseline"]);
+            let view = WorkspaceView {
+                workspace_id: crate::workspace::workspace_id(&workspace),
+                canonical_path: crate::workspace::LosslessPath::from_path(&workspace),
+                mode: crate::workspace::WorkspaceMode::Git,
+                created: true,
+            };
+            // The member Run's controller is its own Broker credential.
+            let member_ref = Uuid::now_v7();
+            let credentials = crate::orchestration::OrchestrationStore::open(&state_root).unwrap();
+            let credential = credentials.create_member_credential(member_ref).unwrap();
+            let broker = credential.controller_carrier().unwrap();
+            let broker_binding = presented_controller_from_carrier(&broker, 1)
+                .unwrap()
+                .binding;
+
+            // One active Session: its root Run is the session itself, exactly as
+            // the legacy and caller session openers create it.
+            let session_id = Uuid::now_v7();
+            let run_root = crate::run::run_root(&state_root, session_id);
+            for directory in [run_root.clone(), run_root.join("artifacts")] {
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            let role_source = RoleSource {
+                schema_version: 1,
+                name: "reviewer".to_owned(),
+                display_name: "Reviewer".to_owned(),
+                description: "Reviews the requested change.".to_owned(),
+                instructions: "Inspect the evidence and return a bounded result.".to_owned(),
+            };
+            let role_source_sha256 = sha256_hex(
+                &canonicalize(&parse(&serde_json::to_string(&role_source).unwrap()).unwrap())
+                    .unwrap(),
+            );
+            let policy = InstalledSpecialistPolicy {
+                schema_version: 2,
+                policy_name: "managed-fixture-policy".to_owned(),
+                revision: 1,
+                approval_policy: "fully_delegated".to_owned(),
+                max_active_specialists: 4,
+                roles: vec![InstalledSpecialistRole {
+                    role_ref: "reviewer".to_owned(),
+                    role_source: RoleSourceReference {
+                        scope: RoleSourceScope::Project,
+                        name: "reviewer".to_owned(),
+                    },
+                    role_source_sha256,
+                    role: role_source,
+                    agent_configuration: {
+                        let text = "Inspect the evidence and return a bounded result.".to_owned();
+                        AgentConfigurationSnapshot {
+                            schema_version: 2,
+                            runtime_profile: "test".to_owned(),
+                            runtime_profile_snapshot_sha256: "a".repeat(64),
+                            model: "test-model".to_owned(),
+                            default_effort: "medium".to_owned(),
+                            purpose: crate::domain::Purpose {
+                                kind: crate::domain::PurposeKind::Review,
+                                external_label: None,
+                            },
+                            required_capabilities: Vec::new(),
+                            role_reference: Some("reviewer".to_owned()),
+                            normalized_instructions: text.clone(),
+                            admitted_configuration: None,
+                            instructions: crate::run::InstructionSnapshot {
+                                schema: "dolgorae.instructions/v1".to_owned(),
+                                common_prefix_version: 1,
+                                mode_prefix_version: 1,
+                                purpose_prefix_version: 1,
+                                normalized_byte_length: text.len() as u64,
+                                normalized_sha256: sha256_hex(text.as_bytes()),
+                            }
+                            .into(),
+                            execution_lane: crate::domain::ExecutionLane::Dedicated,
+                            required_assurance: crate::domain::Assurance::BestEffortPersonalAlpha,
+                            native_subagent_policy: "enabled".to_owned(),
+                        }
+                    },
+                    max_active_instances: 2,
+                    reuse_policy: "never".to_owned(),
+                    allowed_access: vec!["read_only".to_owned()],
+                    activation_policy: "keep_resident".to_owned(),
+                    primary_may_request: true,
+                    collaboration_source: false,
+                    collaboration_target: false,
+                    auto_approve_when_fully_delegated: true,
+                }],
+            };
+            let mut store = crate::orchestration::OrchestrationStore::open(&state_root).unwrap();
+            store
+                .prepare_session(
+                    &view.workspace_id,
+                    session_id,
+                    "managed-session-bootstrap",
+                    &"b".repeat(64),
+                    &policy,
+                )
+                .unwrap();
+            store.mark_primary_intent(session_id).unwrap();
+            store
+                .finish_primary_publication(session_id, Ok(()))
+                .unwrap();
+
+            // One accepted successor spawn and its Broker member row.
+            let spawn_ref = Uuid::now_v7();
+            let role_snapshot_sha256 = instructions
+                .role_snapshot_digest
+                .trim_start_matches("sha256:")
+                .to_owned();
+            let configuration_json = serde_json::to_string(&configuration).unwrap();
+            let configuration_json =
+                String::from_utf8(canonicalize(&parse(&configuration_json).unwrap()).unwrap())
+                    .unwrap();
+            let configuration_sha256 =
+                crate::run::agent_configuration_digest(&configuration).unwrap();
+            let controller_json = serde_json::to_string(&broker_binding).unwrap();
+            let controller_json =
+                String::from_utf8(canonicalize(&parse(&controller_json).unwrap()).unwrap())
+                    .unwrap();
+            let now = unix_time_ms_semantic().unwrap();
+            let mut engagement =
+                EngagementStore::open(&EngagementStore::workspace_database_path(&state_root))
+                    .unwrap();
+            engagement
+                .transact(|transaction| {
+                    crate::orchestration::admit_successor_spawn(
+                        transaction,
+                        crate::orchestration::SuccessorSpawn {
+                            operation_ref: spawn_ref,
+                            session_id,
+                            member_run_id: member_ref,
+                            parent_run_id: session_id,
+                            internal_key: &format!("successor:{spawn_ref}"),
+                            request_sha256: &sha256_hex(b"fixture spawn body"),
+                            request_json: &serde_json::json!({
+                                "schema": crate::orchestration::SUCCESSOR_SPAWN_MARKER_SCHEMA,
+                                "operation_ref": spawn_ref.to_string(),
+                                "provisioning_ref": snapshot.provisioning_ref().unwrap(),
+                                "role_ref": "reviewer",
+                                "agent_configuration_digest": snapshot.candidate(true).unwrap().agent_configuration_digest,
+                                "requested_access": access,
+                            })
+                            .to_string(),
+                            role_ref: "reviewer",
+                            role_snapshot_sha256: &role_snapshot_sha256,
+                            agent_configuration_json: &configuration_json,
+                            agent_configuration_sha256: &configuration_sha256,
+                            controller_binding_json: &controller_json,
+                            requested_access: access,
+                            source_turn_id: "turn-root",
+                            source_tool_call_id: "tool-call-root",
+                            now_ms: now,
+                        },
+                    )?;
+                    crate::orchestration::settle_successor_spawn(
+                        transaction,
+                        session_id,
+                        spawn_ref,
+                        member_ref,
+                        true,
+                        None,
+                        now,
+                    )
+                })
+                .unwrap();
+
+            // The member Run is manifest 4, bound to the session aggregate.
+            let aggregate = crate::run::AggregateBinding {
+                aggregate_kind: crate::domain::AggregateKind::OrchestratedSession,
+                aggregate_id: session_id,
+                operation_id: spawn_ref,
+                member_kind: crate::run::AggregateMemberKind::Specialist,
+                policy_sha256: None,
+                role_reference: Some("reviewer".to_owned()),
+                role_snapshot_sha256: Some(role_snapshot_sha256.clone()),
+                agent_configuration_sha256: Some(configuration_sha256.clone()),
+            };
+            let request = CallerRunStartRequest {
+                schema: "dolgorae-run-start-request/v2".to_owned(),
+                workspace: Some(workspace.to_str().unwrap().to_owned()),
+                expected_workspace_id: Some(view.workspace_id.clone()),
+                specialist_policy: None,
+                profile: profile_binding.selected_name.clone(),
+                control_mode: ControlMode::ManagedAgent,
+                access: if access == "canonical_workspace_write" {
+                    crate::domain::CallerWorkspaceAccess::Writable
+                } else {
+                    crate::domain::CallerWorkspaceAccess::ReadOnly
+                },
+                role: "reviewer".to_owned(),
+                model: None,
+                effort: None,
+                purpose: configuration.purpose.clone(),
+                parent_ref: Some(ParentReference {
+                    namespace: "dolgorae.orchestrated-session.v1".to_owned(),
+                    kind: "specialist".to_owned(),
+                    id: session_id.to_string(),
+                }),
+                required_capabilities: configuration.required_capabilities.clone(),
+                idempotency_key: "managed-member-start".to_owned(),
+            }
+            .resolve_member(&aggregate)
+            .unwrap();
+            let server = ServerState {
+                schema_version: 2,
+                server_key: profile_binding.server_key.clone(),
+                lifecycle: "ready".to_owned(),
+                server_epoch: 1,
+                epoch_id: Uuid::now_v7(),
+                boot_session_uuid: Uuid::now_v7(),
+                pid: 10,
+                pgid: 10,
+                uid: DarwinSystem.current_uid(),
+                process_fingerprint: "fixture-server".to_owned(),
+                drainer_pid: 11,
+                drainer_pgid: 11,
+                drainer_uid: DarwinSystem.current_uid(),
+                drainer_fingerprint: "fixture-drainer".to_owned(),
+                socket_path: "/fixture/profile.sock".to_owned(),
+                socket_device: 1,
+                socket_inode: 1,
+                membership_revision: 0,
+                default_model: configuration.model.clone(),
+                models: vec![configuration.model.clone()],
+                capabilities: std::collections::BTreeMap::new(),
+                snapshot: profile_binding.launch_snapshot.clone(),
+            };
+            let readiness = crate::run::CallerProfileReadiness {
+                model: configuration.model.clone(),
+                default_effort: configuration.default_effort.clone(),
+                profile_capability_snapshot: run_capability_snapshot(
+                    &run_profile_snapshot(&server.snapshot).unwrap(),
+                    &server,
+                ),
+            };
+            let intent = crate::run::CallerStartIntent {
+                run_id: member_ref,
+                created_at: SystemLedgerClock::default().timestamp(),
+                workspace_id: view.workspace_id.clone(),
+                canonical_workspace: view.canonical_path.clone(),
+                workspace_mode: view.mode,
+                start_baseline: crate::workspace::GitBaseline::empty(),
+                request,
+                controller: broker_binding,
+                global_profile_binding: profile_binding,
+                instructions: instructions.clone(),
+                admitted_configuration: Some(configuration.clone()),
+                orchestration: None,
+                readiness,
+            };
+            let mut manifest = build_delegated_manifest(
+                &intent,
+                &view,
+                &server,
+                &configuration.model,
+                &configuration.default_effort,
+            )
+            .unwrap();
+            manifest.aggregate_binding = Some(aggregate);
+            RunStore::new(crate::workspace::SystemWorkspacePlatform, &state_root)
+                .publish(&manifest)
+                .unwrap();
+            Self {
+                root,
+                state_root,
+                view,
+                manifest,
+                session_id,
+                member_ref,
+                configuration,
+            }
+        }
+
+        /// The settlement owner this member's tasks belong to.
+        pub(crate) fn owner(&self) -> SettlementOwner {
+            SettlementOwner::Managed {
+                session_id: self.session_id,
+            }
+        }
+
+        pub(crate) fn store(&self) -> EngagementStore {
+            EngagementStore::open(&EngagementStore::workspace_database_path(&self.state_root))
+                .unwrap()
+        }
+
+        /// Accept one read-only managed task and leave it at the dispatch boundary.
+        ///
+        /// The rows are the ones the managed assign writes: the Broker task, its
+        /// acceptance, the retained accepted bytes and one counted round.
+        pub(crate) fn accept_and_dispatch_task(
+            &self,
+            key: &str,
+            deadline_seconds: u64,
+        ) -> AcceptedSuccessorTask {
+            self.accept_task(key, deadline_seconds, "read_only", None)
+        }
+
+        pub(crate) fn accept_write_task(&self, key: &str) -> AcceptedSuccessorTask {
+            self.accept_task(key, 600, "canonical_workspace_write", None)
+        }
+
+        pub(crate) fn accept_checked_task(
+            &self,
+            key: &str,
+            task: crate::task_request::SpecialistTaskRequest,
+            kind: &str,
+            revision: Option<&str>,
+        ) -> AcceptedSuccessorTask {
+            crate::engagement::ensure_delegation_namespace(&self.state_root).unwrap();
+            let controller = RunStore::new(SystemWorkspacePlatform, &self.state_root)
+                .load_controller_binding(self.session_id)
+                .unwrap();
+            let scope = crate::delegation_service::DelegationScope {
+                view: &self.view,
+                state_root: &self.state_root,
+                controller: &controller,
+            };
+            let context = crate::delegation_service::ManagedCallContext {
+                session_id: self.session_id,
+                source_run_id: self.session_id,
+                source_turn_id: "primary-turn",
+                source_tool_call_id: "primary-tool",
+                idempotency_key: key,
+            };
+            let (observation, _) = crate::delegation_service::assign_specialist_task(
+                &scope,
+                &context,
+                &crate::caller_scope::fixture(3),
+                &AcceptingPort,
+                crate::delegation_service::AssignSpecialistTask {
+                    member_ref: self.member_ref,
+                    task,
+                    execution_intent: "read_only",
+                    target: Some(
+                        serde_json::from_value(json!({"kind":kind,"revision":revision})).unwrap(),
+                    ),
+                    deadline_seconds: 600,
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+            let task_ref = Uuid::parse_str(&observation.task_ref).unwrap();
+            let mut store = self.store();
+            store
+                .transact(|tx| {
+                    crate::orchestration::mark_successor_task_dispatching(
+                        tx,
+                        self.session_id,
+                        task_ref,
+                        unix_time_ms_semantic().unwrap(),
+                    )
+                })
+                .unwrap();
+            let facts =
+                crate::orchestration::successor_task(store.connection(), self.session_id, task_ref)
+                    .unwrap()
+                    .unwrap();
+            let accepted =
+                crate::successor_capture::retained_accepted_task(&facts.accepted_request_json)
+                    .unwrap();
+            let (task_body, contexts, target) =
+                crate::engagement::accepted_task_content(store.connection(), task_ref)
+                    .unwrap()
+                    .unwrap();
+            let prompt = crate::successor_capture::AcceptedTaskContents {
+                task_body,
+                contexts,
+                target,
+            }
+            .prompt(&accepted, "read_only", 600)
+            .unwrap();
+            AcceptedSuccessorTask { task_ref, prompt }
+        }
+
+        pub(crate) fn accept_target_task(&self, key: &str) -> AcceptedSuccessorTask {
+            let target = crate::direct_review_target::DirectTarget::admit(
+                &self.view.canonical_path.to_path_buf().unwrap(),
+                self.view.mode,
+                "workspace",
+                None,
+                Uuid::now_v7(),
+            )
+            .unwrap();
+            let bytes = target.metadata_bytes().unwrap();
+            self.accept_task(key, 600, "read_only", Some((&target.target_sha256, &bytes)))
+        }
+
+        fn accept_task(
+            &self,
+            key: &str,
+            deadline_seconds: u64,
+            intent: &str,
+            target: Option<(&str, &[u8])>,
+        ) -> AcceptedSuccessorTask {
+            let task = Self::plain_task();
+            let (accepted, contents) = crate::successor_capture::capture_facade_task(
+                &self.configuration,
+                &task,
+                intent,
+                target,
+            )
+            .unwrap();
+            let task_ref = Uuid::now_v7();
+            let body = crate::successor_capture::assignment_body(
+                self.member_ref,
+                &task,
+                &accepted,
+                deadline_seconds,
+            )
+            .unwrap();
+            let request_sha256 = sha256_hex(&crate::operation::canonical(&body).unwrap());
+            let accepted_json = String::from_utf8(
+                canonicalize(&parse(&serde_json::to_string(&accepted).unwrap()).unwrap()).unwrap(),
+            )
+            .unwrap();
+            let accepted_sha256 = sha256_hex(accepted_json.as_bytes());
+            let now = unix_time_ms_semantic().unwrap();
+            let mut store = self.store();
+            let caller = crate::caller_scope::fixture(3);
+            store
+                .transact(|transaction| {
+                    crate::orchestration::admit_successor_task(
+                        transaction,
+                        crate::orchestration::SuccessorTask {
+                            session_id: self.session_id,
+                            task_id: task_ref,
+                            member_run_id: self.member_ref,
+                            internal_key: &format!("successor:fixture-{key}"),
+                            request_sha256: &request_sha256,
+                            request_json: &serde_json::json!({
+                                "schema": crate::orchestration::SUCCESSOR_TASK_MARKER_SCHEMA,
+                                "operation_ref": Uuid::now_v7().to_string(),
+                                "member_ref": self.member_ref.to_string(),
+                                "accepted_task_digest": accepted.digest().unwrap(),
+                                "execution_intent": intent,
+                                "deadline_seconds": deadline_seconds,
+                            })
+                            .to_string(),
+                            accepted_request_json: &accepted_json,
+                            accepted_request_sha256: &accepted_sha256,
+                            source_run_id: self.session_id,
+                            source_turn_id: "turn-root",
+                            source_tool_call_id: "tool-call-root",
+                            deadline_origin_ms: now,
+                            now_ms: now,
+                        },
+                    )?;
+                    crate::engagement::retain_accepted_task_content(
+                        transaction,
+                        task_ref,
+                        &contents.task_body,
+                        &contents.contexts,
+                        contents.target.as_deref(),
+                        now,
+                    )?;
+                    crate::caller_scope::admit(
+                        transaction,
+                        &crate::caller_scope::CallerAssignment {
+                            assignment_id: task_ref,
+                            workspace_ref: &self.view.workspace_id,
+                            aggregate_scope_kind: "orchestrated_session",
+                            aggregate_scope_ref: &self.session_id.to_string(),
+                            member_ref: self.member_ref,
+                        },
+                        &caller,
+                        now,
+                    )?;
+                    crate::caller_scope::accepted(transaction, task_ref)
+                })
+                .unwrap();
+            store
+                .transact(|transaction| {
+                    crate::orchestration::mark_successor_task_dispatching(
+                        transaction,
+                        self.session_id,
+                        task_ref,
+                        now,
+                    )
+                })
+                .unwrap();
+            let prompt = contents
+                .prompt(&accepted, intent, deadline_seconds)
+                .unwrap();
+            AcceptedSuccessorTask { task_ref, prompt }
+        }
+
+        /// Leave one managed task where an uncertain dispatch stops: the task is
+        /// reserved (`dispatching`) and its round is counted unresolved.
+        pub(crate) fn accept_uncertain_dispatch_task(
+            &self,
+            key: &str,
+            deadline_seconds: u64,
+        ) -> AcceptedSuccessorTask {
+            let task = Self::plain_task();
+            let (accepted, contents) = crate::successor_capture::capture_facade_task(
+                &self.configuration,
+                &task,
+                "read_only",
+                None,
+            )
+            .unwrap();
+            let task_ref = Uuid::now_v7();
+            let body = crate::successor_capture::assignment_body(
+                self.member_ref,
+                &task,
+                &accepted,
+                deadline_seconds,
+            )
+            .unwrap();
+            let request_sha256 = sha256_hex(&crate::operation::canonical(&body).unwrap());
+            let accepted_json = String::from_utf8(
+                canonicalize(&parse(&serde_json::to_string(&accepted).unwrap()).unwrap()).unwrap(),
+            )
+            .unwrap();
+            let accepted_sha256 = sha256_hex(accepted_json.as_bytes());
+            let now = unix_time_ms_semantic().unwrap();
+            let mut store = self.store();
+            let caller = crate::caller_scope::fixture(3);
+            store
+                .transact(|transaction| {
+                    crate::orchestration::admit_successor_task(
+                        transaction,
+                        crate::orchestration::SuccessorTask {
+                            session_id: self.session_id,
+                            task_id: task_ref,
+                            member_run_id: self.member_ref,
+                            internal_key: &format!("successor:fixture-{key}"),
+                            request_sha256: &request_sha256,
+                            request_json: &serde_json::json!({
+                                "schema": crate::orchestration::SUCCESSOR_TASK_MARKER_SCHEMA,
+                                "operation_ref": Uuid::now_v7().to_string(),
+                                "member_ref": self.member_ref.to_string(),
+                                "accepted_task_digest": accepted.digest().unwrap(),
+                                "execution_intent": "read_only",
+                                "deadline_seconds": deadline_seconds,
+                            })
+                            .to_string(),
+                            accepted_request_json: &accepted_json,
+                            accepted_request_sha256: &accepted_sha256,
+                            source_run_id: self.session_id,
+                            source_turn_id: "turn-root",
+                            source_tool_call_id: "tool-call-root",
+                            deadline_origin_ms: now,
+                            now_ms: now,
+                        },
+                    )?;
+                    crate::engagement::retain_accepted_task_content(
+                        transaction,
+                        task_ref,
+                        &contents.task_body,
+                        &contents.contexts,
+                        contents.target.as_deref(),
+                        now,
+                    )?;
+                    crate::caller_scope::admit(
+                        transaction,
+                        &crate::caller_scope::CallerAssignment {
+                            assignment_id: task_ref,
+                            workspace_ref: &self.view.workspace_id,
+                            aggregate_scope_kind: "orchestrated_session",
+                            aggregate_scope_ref: &self.session_id.to_string(),
+                            member_ref: self.member_ref,
+                        },
+                        &caller,
+                        now,
+                    )
+                })
+                .unwrap();
+            store
+                .transact(|transaction| {
+                    crate::orchestration::mark_successor_task_dispatching(
+                        transaction,
+                        self.session_id,
+                        task_ref,
+                        now,
+                    )
+                })
+                .unwrap();
+            let prompt = contents
+                .prompt(&accepted, "read_only", deadline_seconds)
+                .unwrap();
+            AcceptedSuccessorTask { task_ref, prompt }
+        }
+
+        /// Leave one dispatched managed task at the running boundary with its Turn.
+        pub(crate) fn mark_task_running(&self, task_ref: Uuid, turn_id: &str) {
+            let mut store = self.store();
+            let now = unix_time_ms_semantic().unwrap();
+            store
+                .transact(|transaction| {
+                    crate::orchestration::mark_successor_task_running(
+                        transaction,
+                        self.session_id,
+                        task_ref,
+                        turn_id,
+                        now,
+                    )
+                })
+                .unwrap();
+        }
+
+        pub(crate) fn publish_terminal_turn(
+            &self,
+            turn_id: &str,
+            status: &str,
+            text: &str,
+            lifecycle: RunLifecycle,
+        ) {
+            publish_terminal_json_in(
+                &self.state_root,
+                self.manifest.run_id,
+                turn_id,
+                status,
+                &json!({"kind": "inline", "text": text}),
+                lifecycle,
+            );
+        }
+
+        pub(crate) fn publish_terminal_without_response(&self, turn_id: &str, status: &str) {
+            publish_terminal_json_in(
+                &self.state_root,
+                self.manifest.run_id,
+                turn_id,
+                status,
+                &serde_json::Value::Null,
+                RunLifecycle::Idle,
+            );
+        }
+
+        pub(crate) fn terminal(&self, turn_id: &str) -> crate::turn::TerminalTurn {
+            super::resolved_terminal(&self.state_root, self.manifest.run_id, turn_id)
+                .unwrap()
+                .unwrap()
+        }
+
+        /// Publish only the pre-resolution ledger terminal.
+        pub(crate) fn publish_terminal_turn_without_resolution(&self, turn_id: &str, status: &str) {
+            publish_terminal_without_resolution_in(
+                &self.state_root,
+                self.manifest.run_id,
+                turn_id,
+                status,
+            );
+        }
+
+        pub(crate) fn task_state(&self, task_ref: Uuid) -> String {
+            let connection = rusqlite::Connection::open(EngagementStore::workspace_database_path(
+                &self.state_root,
+            ))
+            .unwrap();
+            connection
+                .query_row(
+                    "SELECT state FROM brokered_tasks WHERE task_id=?1",
+                    [task_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        pub(crate) fn task_safe_error_code(&self, task_ref: Uuid) -> Option<String> {
+            let connection = rusqlite::Connection::open(EngagementStore::workspace_database_path(
+                &self.state_root,
+            ))
+            .unwrap();
+            connection
+                .query_row(
+                    "SELECT safe_error_code FROM brokered_tasks WHERE task_id=?1",
+                    [task_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        /// The published complete-result bytes this task links, if any.
+        pub(crate) fn complete_result_bytes(&self, task_ref: Uuid) -> Option<Vec<u8>> {
+            let connection = rusqlite::Connection::open(EngagementStore::workspace_database_path(
+                &self.state_root,
+            ))
+            .unwrap();
+            crate::orchestration::successor_task_result(&connection, task_ref).unwrap()
+        }
+
+        pub(crate) fn complete_result_ref_rows(&self) -> i64 {
+            let connection = rusqlite::Connection::open(EngagementStore::workspace_database_path(
+                &self.state_root,
+            ))
+            .unwrap();
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM result_content_refs
+                      WHERE owner_kind='successor_task_result'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        pub(crate) fn workload_revision(&self) -> u64 {
+            crate::engagement::member_workload_revision(
+                self.store().connection(),
+                &self.view.workspace_id,
+                "orchestrated_session",
+                &self.session_id.to_string(),
+                &self.member_ref.to_string(),
+            )
+            .unwrap()
+        }
+
+        /// One published legacy (generation-3) Run in this Session's aggregate.
+        ///
+        /// It is never started: it exists so the worker's owner detection is read
+        /// against a real generation-3 manifest the manifest validator accepts,
+        /// which is the only thing that separates it from the successor member.
+        pub(crate) fn legacy_session_run(
+            &self,
+            member_kind: crate::run::AggregateMemberKind,
+        ) -> RunManifest {
+            let run_id = Uuid::now_v7();
+            // The generation's own Controller kind: a human for the session
+            // Primary, the Broker automation for a legacy member.
+            let kind = if member_kind == crate::run::AggregateMemberKind::Primary {
+                crate::domain::ControllerKind::HumanCli
+            } else {
+                crate::domain::ControllerKind::Automation
+            };
+            let credential = self.root.join(format!("legacy-{run_id}-credential"));
+            crate::controller::create_controller_credential(
+                &credential,
+                kind,
+                format!("legacy-{run_id}"),
+                None,
+                None,
+            )
+            .unwrap();
+            let carrier = CredentialCarrier::open_path(&credential).unwrap();
+            let controller = crate::controller::binding_from_carrier(&carrier, 1).unwrap();
+            self.publish_legacy_session_manifest(run_id, member_kind, controller)
+        }
+
+        /// Publish the Session's root Primary Run into an explicit state root,
+        /// returning the root Controller binding and the credential
+        /// carrier path a release attempt authenticates with.
+        pub(crate) fn publish_session_root_at(
+            &self,
+            state_root: &Path,
+        ) -> (crate::run::ControllerBinding, PathBuf) {
+            let credential = self.root.join("release-session-root-credential");
+            crate::controller::create_controller_credential(
+                &credential,
+                crate::domain::ControllerKind::HumanCli,
+                "session-root".to_owned(),
+                None,
+                None,
+            )
+            .unwrap();
+            let carrier = CredentialCarrier::open_path(&credential).unwrap();
+            let controller = crate::controller::binding_from_carrier(&carrier, 1).unwrap();
+            self.publish_legacy_session_manifest_at(
+                state_root,
+                self.session_id,
+                crate::run::AggregateMemberKind::Primary,
+                controller.clone(),
+            );
+            (controller, credential)
+        }
+
+        /// Build and publish one legacy (generation-3) manifest of this Session.
+        fn publish_legacy_session_manifest(
+            &self,
+            run_id: Uuid,
+            member_kind: crate::run::AggregateMemberKind,
+            controller: crate::run::ControllerBinding,
+        ) -> RunManifest {
+            self.publish_legacy_session_manifest_at(
+                &self.state_root,
+                run_id,
+                member_kind,
+                controller,
+            )
+        }
+
+        fn publish_legacy_session_manifest_at(
+            &self,
+            state_root: &Path,
+            run_id: Uuid,
+            member_kind: crate::run::AggregateMemberKind,
+            controller: crate::run::ControllerBinding,
+        ) -> RunManifest {
+            let primary = member_kind == crate::run::AggregateMemberKind::Primary;
+            let common = "Common instructions.\n".to_owned();
+            let role = "Inspect the evidence and return a bounded result.\n".to_owned();
+            let capture = crate::instructions::InstructionSnapshot::compose(
+                crate::instructions::SourceCapture {
+                    byte_length: common.len() as u64,
+                    sha256: sha256_hex(common.as_bytes()),
+                    body: common,
+                },
+                crate::instructions::RoleCapture {
+                    name: "reviewer".to_owned(),
+                    byte_length: role.len() as u64,
+                    sha256: sha256_hex(role.as_bytes()),
+                    body: role,
+                },
+            )
+            .unwrap();
+            let binding = self.manifest.global_profile_binding.clone().unwrap();
+            let configuration: AgentConfigurationSnapshot =
+                crate::run::CallerAgentConfigurationSnapshot {
+                    schema_version: 3,
+                    selected_profile: binding.selected_name.clone(),
+                    global_profile_binding_sha256: binding.digest().unwrap(),
+                    model: "gpt-5.6".to_owned(),
+                    default_effort: "high".to_owned(),
+                    purpose: crate::domain::Purpose {
+                        kind: crate::domain::PurposeKind::Review,
+                        external_label: None,
+                    },
+                    required_capabilities: Vec::new(),
+                    role_reference: (!primary).then(|| "reviewer".to_owned()),
+                    instructions: capture.clone(),
+                    execution_lane: crate::domain::ExecutionLane::Dedicated,
+                    required_assurance: crate::domain::Assurance::BestEffortPersonalAlpha,
+                    native_subagent_policy: "enabled".to_owned(),
+                }
+                .try_into()
+                .unwrap();
+            let mut manifest = self.manifest.clone();
+            manifest.run_id = run_id;
+            manifest.schema_version = 3;
+            manifest.controller = controller;
+            manifest.initial_access = crate::domain::Access::Read;
+            manifest.requested_access = Some(crate::domain::CallerWorkspaceAccess::ReadOnly);
+            manifest.selected_role = Some("reviewer".to_owned());
+            manifest.creation_mode = None;
+            manifest.admitted_configuration_digest = None;
+            manifest.start_operation_receipt = None;
+            manifest.instructions = capture.clone().into();
+            manifest.purpose = configuration.purpose.clone();
+            manifest.agent_configuration = configuration.clone();
+            if primary {
+                manifest.control_mode = ControlMode::DirectInteractive;
+                manifest.parent_ref = None;
+            } else {
+                manifest.parent_ref = Some(ParentReference {
+                    namespace: "dolgorae.orchestrated-session.v1".to_owned(),
+                    kind: "specialist".to_owned(),
+                    id: self.session_id.to_string(),
+                });
+            }
+            manifest.aggregate_binding = Some(crate::run::AggregateBinding {
+                aggregate_kind: crate::domain::AggregateKind::OrchestratedSession,
+                aggregate_id: if primary { run_id } else { self.session_id },
+                operation_id: Uuid::now_v7(),
+                member_kind,
+                policy_sha256: primary.then(|| "c".repeat(64)),
+                role_reference: (!primary).then(|| "reviewer".to_owned()),
+                role_snapshot_sha256: (!primary)
+                    .then(|| capture.role.sha256.trim_start_matches("sha256:").to_owned()),
+                agent_configuration_sha256: (!primary)
+                    .then(|| crate::run::agent_configuration_digest(&configuration).unwrap()),
+            });
+            RunStore::new(crate::workspace::SystemWorkspacePlatform, state_root)
+                .publish(&manifest)
+                .unwrap();
+            manifest
+        }
+
+        /// The durable accounting state of one managed task's round.
+        pub(crate) fn round_state(&self, task_ref: Uuid) -> String {
+            self.store()
+                .connection()
+                .query_row(
+                    "SELECT accounting_state FROM caller_scope_assignments
+                      WHERE assignment_id=?1",
+                    [task_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        /// The caller scope's counted rounds.
+        pub(crate) fn rounds_used(&self) -> u64 {
+            crate::caller_scope::rounds_used(
+                self.store().connection(),
+                &crate::caller_scope::fixture(3),
+            )
+            .unwrap()
+        }
+
+        /// Whether the managed member holds no work and no pending cleanup.
+        pub(crate) fn idle(&self) -> bool {
+            crate::orchestration::successor_member_quiescence(
+                self.store().connection(),
+                &self.view.workspace_id,
+                self.session_id,
+                self.member_ref,
+            )
+            .unwrap()
+            .idle()
+        }
+
+        fn plain_task() -> crate::task_request::SpecialistTaskRequest {
+            let mut task = crate::delegation_service::fixture_task();
+            task.expected_output = "complete_result".to_owned();
+            task
+        }
+    }
+
+    impl Drop for ManagedMember {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod successor_review_tests {
+    use super::successor_fixture::{
+        AcceptedSuccessorTask, AcceptingPort, ManagedMember, SuccessorMember,
+    };
+    use super::*;
+    use crate::delegation_service::{self as service, RunSettlementPort as _};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    enum Member {
+        External(Box<SuccessorMember>),
+        Managed(
+            Box<(
+                ManagedMember,
+                crate::run::ControllerBinding,
+                CredentialCarrier,
+            )>,
+        ),
+    }
+    pub(crate) struct Scene {
+        member: Member,
+    }
+    impl Scene {
+        pub(crate) fn new(managed: bool) -> Self {
+            Self::with_case(managed, None)
+        }
+        pub(crate) fn writable(managed: bool) -> Self {
+            Self::with_access(managed, None, true)
+        }
+        pub(crate) fn in_home(managed: bool) -> Self {
+            let mut scene = Self::new(managed);
+            let (root, state, workspace) = match &mut scene.member {
+                Member::External(m) => (&m.root, &mut m.state_root, &m.view.workspace_id),
+                Member::Managed(m) => (&m.0.root, &mut m.0.state_root, &m.0.view.workspace_id),
+            };
+            let home = root.join("history-home");
+            let workspaces = home.join("workspaces");
+            for directory in [&home, &workspaces] {
+                std::fs::create_dir(directory).unwrap();
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            let relocated = workspaces.join(workspace);
+            std::fs::rename(&*state, &relocated).unwrap();
+            *state = relocated;
+            scene
+        }
+        fn with_case(managed: bool, case: Option<usize>) -> Self {
+            Self::with_access(managed, case, false)
+        }
+        fn with_access(managed: bool, case: Option<usize>, writable: bool) -> Self {
+            let member = if managed {
+                let member = if writable {
+                    ManagedMember::writable()
+                } else {
+                    case.map_or_else(ManagedMember::new, ManagedMember::unqualified_review)
+                };
+                let root_run = run_root(&member.state_root, member.session_id);
+                std::fs::remove_dir(root_run.join("artifacts")).unwrap();
+                std::fs::remove_dir(root_run).unwrap();
+                let (controller, credential) = member.publish_session_root_at(&member.state_root);
+                let carrier = CredentialCarrier::open_path(&credential).unwrap();
+                let store = member.store();
+                let spawn: String = store
+                    .connection()
+                    .query_row(
+                        "SELECT spawn_operation_id FROM brokered_members WHERE run_id=?1",
+                        [member.member_ref.to_string()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let subjects = crate::delegation_identity::AcceptedSubjects {
+                    run_ref: Some(member.member_ref.to_string()),
+                    member_ref: Some(member.member_ref.to_string()),
+                    ..Default::default()
+                };
+                store.connection().execute("INSERT INTO delegation_operations(operation_ref,schema_version,state,workspace_ref,controller_principal,controller_generation,scope_kind,scope_ref,operation_kind,idempotency_key,mutation_envelope_json,mutation_envelope_digest,expected_revision,trusted_invocation_json,accepted_subjects_json,receipt_json,created_at_ms,updated_at_ms) VALUES(?1,2,'accepted',?2,'controller:fixture',1,'orchestrated_session',?3,'spawn_specialist','fixture-spawn','{}','fixture',NULL,NULL,?4,'{}',1,1)", rusqlite::params![spawn,member.view.workspace_id,member.session_id.to_string(),serde_json::to_string(&subjects).unwrap()]).unwrap();
+
+                Member::Managed(Box::new((member, controller, carrier)))
+            } else {
+                Member::External(Box::new(if writable {
+                    SuccessorMember::new()
+                } else {
+                    case.map_or_else(
+                        SuccessorMember::reviewer,
+                        SuccessorMember::unqualified_review,
+                    )
+                }))
+            };
+            Self { member }
+        }
+        pub(crate) fn state_root(&self) -> &Path {
+            match &self.member {
+                Member::External(m) => &m.state_root,
+                Member::Managed(m) => &m.0.state_root,
+            }
+        }
+        pub(crate) fn manifest(&self) -> &RunManifest {
+            match &self.member {
+                Member::External(m) => &m.manifest,
+                Member::Managed(m) => &m.0.manifest,
+            }
+        }
+        pub(crate) fn accept_generic_task(&self, key: &str) -> AcceptedSuccessorTask {
+            match &self.member {
+                Member::External(m) => m.accept_and_dispatch_task(key, "read_only", 600),
+                Member::Managed(m) => m.0.accept_and_dispatch_task(key, 600),
+            }
+        }
+        pub(crate) fn accept_write_task(&self, key: &str) -> AcceptedSuccessorTask {
+            let accepted = match &self.member {
+                Member::External(member) => {
+                    member.accept_and_dispatch_task(key, "canonical_workspace_write", 600)
+                }
+                Member::Managed(member) => member.0.accept_write_task(key),
+            };
+            let capture = crate::successor_capture::capture_dispatch_index(
+                &self.workspace(),
+                accepted.task_ref,
+            )
+            .unwrap();
+            self.store()
+                .transact(|transaction| {
+                    crate::engagement::record_dispatch_index_with_content(
+                        transaction,
+                        crate::engagement::DispatchIndexRecord {
+                            task_id: accepted.task_ref,
+                            workspace_ref: &self.view().workspace_id,
+                            run_ref: self.manifest().run_id,
+                            head_commit: capture.head.as_deref(),
+                            index_sha256: &capture.sha256,
+                            index_byte_length: capture.canonical.len() as u64,
+                            file_count: capture.file_count,
+                            baseline_bytes: capture.baseline_bytes,
+                        },
+                        &capture.canonical,
+                        &capture.baseline,
+                        unix_time_ms_semantic().unwrap(),
+                    )
+                })
+                .unwrap();
+            accepted
+        }
+        pub(crate) fn prepare_worker_ledger(&self) {
+            crate::writer::WriterStore::initialize_layout(
+                self.state_root(),
+                &self.manifest().workspace_id,
+                DarwinSystem.current_uid(),
+            )
+            .unwrap();
+            let root = run_root(self.state_root(), self.manifest().run_id);
+            let empty = crate::ledger::Ledger::open(&root, self.manifest().run_id)
+                .unwrap()
+                .durable_records()
+                .unwrap()
+                .is_empty();
+            assert!(empty);
+            let mut ledger =
+                ConformantLedger::open_for_bootstrap(&root, self.manifest().run_id).unwrap();
+            ledger
+                .bootstrap(&BootstrapRequest {
+                    timestamp: SystemLedgerClock::default().timestamp(),
+                    workspace_id: self.manifest().workspace_id.clone(),
+                    intent: IdempotencyIntent {
+                        schema_version: 1,
+                        operation: IdempotencyOperation::StartRun,
+                        idempotency_key: "recovery-fixture-start".to_owned(),
+                        normalized_identity_sha256: "a".repeat(64),
+                        run_id: self.manifest().run_id,
+                    },
+                    record_kind: BootstrapRecordKind::RunCreated,
+                    initial_access: "read".to_owned(),
+                    default_effort: Some(self.manifest().default_reasoning_effort.clone()),
+                })
+                .unwrap();
+            ledger
+                .mark_threadless_ready(&SystemLedgerClock::default().timestamp())
+                .unwrap();
+        }
+        /// A prior accepted execution, seeded without executing a native Turn.
+        pub(crate) fn record_running_execution(
+            &self,
+            task: &AcceptedSuccessorTask,
+            key: &str,
+            write: bool,
+        ) {
+            use crate::turn::{
+                DurableTurnJournal as _, JournalEntry, LedgerTurnJournal, OperationIntent,
+            };
+            let operation = Uuid::now_v7();
+            let manifest = self.manifest();
+            let mut ledger = crate::ledger::Ledger::open(
+                run_root(self.state_root(), manifest.run_id),
+                manifest.run_id,
+            )
+            .unwrap();
+            let mut journal = LedgerTurnJournal::new(&mut ledger, 1);
+            let policy = crate::domain::EffectivePolicy {
+                access: if write {
+                    crate::domain::Access::Write
+                } else {
+                    crate::domain::Access::Read
+                },
+                verification: crate::domain::PolicyVerification::Verified,
+                policy_epoch: crate::domain::PolicyEpoch(1),
+                thread_generation: Some(1),
+                server_epoch: Some(1),
+                writer_generation: write.then_some(1),
+            };
+            let request = crate::turn::TurnRequest {
+                write,
+                idempotency_key: key.to_owned(),
+                message: task.prompt.clone(),
+                images: Vec::new(),
+                model: manifest.model.clone(),
+                effort: None,
+                delivery: crate::turn::DeliveryMode::Submit,
+            };
+            journal
+                .append_and_sync(JournalEntry::Intent(OperationIntent {
+                    operation_id: operation,
+                    idempotency_key: key.to_owned(),
+                    request_sha256: crate::turn::normalized_request_digest(
+                        &request,
+                        &manifest.default_reasoning_effort,
+                    )
+                    .unwrap(),
+                    run_generation: 1,
+                    server_key: manifest.profile_capability_snapshot.server_key.clone(),
+                    server_epoch: 1,
+                    provisional_thread: true,
+                    accepted_input: None,
+                }))
+                .unwrap();
+            journal
+                .append_and_sync(JournalEntry::ThreadBound {
+                    operation_id: operation,
+                    thread_id: "thread-1".to_owned(),
+                    thread_generation: 1,
+                    effective_policy: policy.clone(),
+                })
+                .unwrap();
+            journal
+                .append_and_sync(JournalEntry::TurnAccepted {
+                    operation_id: operation,
+                    thread_id: "thread-1".to_owned(),
+                    turn_id: "turn-1".to_owned(),
+                    effort: manifest.default_reasoning_effort.clone(),
+                    effective_policy: policy,
+                    controller: Some(manifest.controller.identity.clone()),
+                })
+                .unwrap();
+            crate::conformance::verify_ledger_records(
+                manifest.run_id,
+                ledger.durable_records().unwrap(),
+            )
+            .unwrap();
+            self.mark_running(task.task_ref, "turn-1");
+        }
+        pub(crate) fn service_reconcile(
+            &self,
+            task: Uuid,
+        ) -> Result<service::MemberSettlement, MachineError> {
+            self.service_reconcile_with(task, self.carrier())
+        }
+        pub(crate) fn service_reconcile_with(
+            &self,
+            task: Uuid,
+            carrier: &CredentialCarrier,
+        ) -> Result<service::MemberSettlement, MachineError> {
+            let port = SemanticRunSettlementPort { carrier };
+            match self.owner() {
+                service::SettlementOwner::External { engagement_id } => {
+                    service::reconcile_external_member_task(
+                        &self.scope(),
+                        &port,
+                        engagement_id,
+                        self.manifest().run_id,
+                        task,
+                    )
+                }
+                service::SettlementOwner::Managed { .. } => service::reconcile_managed_member_task(
+                    &self.scope(),
+                    &self.context("recover"),
+                    &port,
+                    self.manifest().run_id,
+                    task,
+                ),
+            }
+        }
+        pub(crate) fn recover_under_lease(
+            &self,
+            lease: &crate::worker::RunLifecycleLease,
+        ) -> Result<Value, MachineError> {
+            history_reconciliation_with_lifecycle(
+                self.view(),
+                self.state_root(),
+                self.manifest().run_id,
+                &self.dispatch_credential(),
+                "run.reconcile",
+                None,
+                Some(lease),
+            )
+        }
+        pub(crate) fn release_for_recovery(
+            &self,
+        ) -> Result<service::MemberReleaseOutcome, service::MemberReleaseFailure> {
+            let scope = self.scope();
+            let revision = super::release_probe::scope_membership_revision(
+                self.state_root(),
+                &self.view().workspace_id,
+                self.owner().scope_kind(),
+                self.owner().scope_ref(),
+            );
+            super::settle_member_release(
+                service::MemberReleaseRequest {
+                    view: self.view(),
+                    state_root: self.state_root(),
+                    owner: self.owner(),
+                    workspace_ref: &self.view().workspace_id,
+                    member_ref: self.manifest().run_id,
+                    controller: scope.controller,
+                    allow_interrupt: false,
+                    expected_revision: revision,
+                },
+                self.carrier(),
+            )
+        }
+        pub(crate) fn dispatch_credential(&self) -> CredentialCarrier {
+            match &self.member {
+                Member::External(m) => CredentialCarrier::duplicate_fd(m.owner.raw_fd()).unwrap(),
+                Member::Managed(m) => {
+                    crate::orchestration::OrchestrationStore::open(&m.0.state_root)
+                        .unwrap()
+                        .member_credential(m.0.member_ref)
+                        .unwrap()
+                        .controller_carrier()
+                        .unwrap()
+                }
+            }
+        }
+        pub(crate) fn external_owner(&self) -> Option<Uuid> {
+            match self.owner() {
+                service::SettlementOwner::External { engagement_id } => Some(engagement_id),
+                service::SettlementOwner::Managed { .. } => None,
+            }
+        }
+        pub(crate) fn recorded_terminal(&self, turn: &str) -> crate::turn::TerminalTurn {
+            resolved_terminal(self.state_root(), self.manifest().run_id, turn)
+                .unwrap()
+                .unwrap()
+        }
+        pub(crate) fn observed_terminal(&self, turn: &str) -> crate::turn::TerminalTurn {
+            let (_, ledger) =
+                observe_run_ledger(self.state_root(), self.manifest().run_id, true).unwrap();
+            let value = ledger
+                .records()
+                .iter()
+                .filter(|r| r.kind() == AuditKind::TurnTerminal)
+                .map(|r| audit_value(r).unwrap())
+                .find(|v| v["turn_id"] == turn)
+                .unwrap();
+            serde_json::from_value(value).unwrap()
+        }
+        pub(crate) fn worker_bootstrap(
+            &self,
+            schema_version: u32,
+            active_writer: bool,
+            restart: bool,
+        ) -> WorkerSessionBootstrap {
+            let mut manifest = self.manifest().clone();
+            manifest.schema_version = schema_version;
+            let binding = manifest.global_profile_binding.as_ref().unwrap();
+            let state = ServerState {
+                schema_version: 2,
+                server_key: binding.server_key.clone(),
+                lifecycle: "ready".to_owned(),
+                server_epoch: 1,
+                epoch_id: Uuid::now_v7(),
+                boot_session_uuid: Uuid::now_v7(),
+                pid: 10,
+                pgid: 10,
+                uid: DarwinSystem.current_uid(),
+                process_fingerprint: "fixture-server".to_owned(),
+                drainer_pid: 11,
+                drainer_pgid: 11,
+                drainer_uid: DarwinSystem.current_uid(),
+                drainer_fingerprint: "fixture-drainer".to_owned(),
+                socket_path: "/fixture/profile.sock".to_owned(),
+                socket_device: 1,
+                socket_inode: 1,
+                membership_revision: 0,
+                default_model: manifest.model.clone(),
+                models: vec![manifest.model.clone()],
+                capabilities: BTreeMap::new(),
+                snapshot: binding.launch_snapshot.clone(),
+            };
+            let mut writer = crate::writer::WriterRecord::empty(&manifest.workspace_id);
+            let transaction = Uuid::now_v7();
+            let (_, generation) = writer
+                .prepare_acquire(
+                    manifest.run_id,
+                    crate::writer::WriterStore::holder(
+                        manifest.run_id,
+                        manifest.profile.profile_name.clone(),
+                        &manifest.controller,
+                        1,
+                        binding.server_key.clone(),
+                        1,
+                        None,
+                        RunLifecycle::Idle,
+                    ),
+                    transaction,
+                )
+                .unwrap();
+            if active_writer {
+                writer.commit_acquire(transaction, generation).unwrap();
+            }
+            let mut projection = crate::projection::RunStateProjection::starting(manifest.run_id);
+            if restart {
+                projection.run_generation = 1;
+            }
+            run_worker_session_bootstrap(
+                &manifest,
+                &projection,
+                &state,
+                &writer,
+                vec![manifest.default_reasoning_effort.clone()],
+                self.workspace(),
+                false,
+                None,
+                self.state_root(),
+            )
+            .unwrap()
+        }
+        pub(crate) fn view(&self) -> &WorkspaceView {
+            match &self.member {
+                Member::External(m) => &m.view,
+                Member::Managed(m) => &m.0.view,
+            }
+        }
+        pub(crate) fn owner(&self) -> service::SettlementOwner {
+            match &self.member {
+                Member::External(m) => m.owner(),
+                Member::Managed(m) => m.0.owner(),
+            }
+        }
+        fn scope(&self) -> service::DelegationScope<'_> {
+            match &self.member {
+                Member::External(m) => m.scope(),
+                Member::Managed(m) => service::DelegationScope {
+                    view: &m.0.view,
+                    state_root: &m.0.state_root,
+                    controller: &m.1,
+                },
+            }
+        }
+        fn carrier(&self) -> &CredentialCarrier {
+            match &self.member {
+                Member::External(m) => &m.owner,
+                Member::Managed(m) => &m.2,
+            }
+        }
+        fn context<'a>(&self, key: &'a str) -> service::ManagedCallContext<'a> {
+            service::ManagedCallContext {
+                session_id: self.owner().scope_ref(),
+                source_run_id: self.owner().scope_ref(),
+                source_turn_id: "primary-turn",
+                source_tool_call_id: "primary-tool",
+                idempotency_key: key,
+            }
+        }
+        pub(crate) fn store(&self) -> EngagementStore {
+            EngagementStore::open(&EngagementStore::workspace_database_path(self.state_root()))
+                .unwrap()
+        }
+        fn workspace(&self) -> PathBuf {
+            self.view().canonical_path.to_path_buf().unwrap()
+        }
+        fn git(&self, args: &[&str]) -> String {
+            let out = std::process::Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(self.workspace())
+                .args([
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "user.name=Dolgorae Test",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        }
+        fn try_assign(
+            &self,
+            key: &str,
+            target: Option<Value>,
+        ) -> Result<
+            (
+                service::DelegationTaskObservation,
+                crate::delegation_identity::OperationReceipt,
+            ),
+            MachineError,
+        > {
+            crate::engagement::ensure_delegation_namespace(self.state_root()).unwrap();
+            let target = target.map(serde_json::from_value).transpose().unwrap();
+            match &self.member {
+                Member::External(m) => service::assign_external_specialist_task(
+                    &self.scope(),
+                    &crate::caller_scope::fixture(3),
+                    &AcceptingPort,
+                    service::AssignExternalSpecialistTask {
+                        engagement_id: m.engagement_id,
+                        member_ref: m.member_ref,
+                        task: task(),
+                        execution_intent: "read_only",
+                        target,
+                        deadline_seconds: 600,
+                        idempotency_key: key,
+                        expected_revision: None,
+                    },
+                ),
+                Member::Managed(m) => service::assign_specialist_task(
+                    &self.scope(),
+                    &self.context(key),
+                    &crate::caller_scope::fixture(3),
+                    &AcceptingPort,
+                    service::AssignSpecialistTask {
+                        member_ref: m.0.member_ref,
+                        task: task(),
+                        execution_intent: "read_only",
+                        target,
+                        deadline_seconds: 600,
+                        expected_revision: None,
+                    },
+                ),
+            }
+        }
+        pub(crate) fn assign(
+            &self,
+            key: &str,
+            kind: &str,
+            revision: Option<&str>,
+        ) -> (
+            AcceptedSuccessorTask,
+            crate::direct_review_target::DirectTargetReader,
+        ) {
+            let accepted = match &self.member {
+                Member::External(m) => m.accept_checked_task(key, task(), kind, revision),
+                Member::Managed(m) => m.0.accept_checked_task(key, task(), kind, revision),
+            };
+            let reader = crate::worker::fixture_bind_checked_task(
+                self.state_root(),
+                self.manifest(),
+                accepted.task_ref,
+                key,
+                &accepted.prompt,
+            )
+            .unwrap();
+            assert_eq!(reader.review_id(), accepted.task_ref);
+            (accepted, reader)
+        }
+        pub(crate) fn mark_running(&self, task: Uuid, turn: &str) {
+            match &self.member {
+                Member::External(m) => m.mark_task_running(task, turn),
+                Member::Managed(m) => m.0.mark_task_running(task, turn),
+            }
+        }
+        fn publish(&self, turn: &str, text: &str) {
+            match &self.member {
+                Member::External(m) => {
+                    m.publish_terminal_turn(turn, "completed", text, RunLifecycle::Idle)
+                }
+                Member::Managed(m) => {
+                    m.0.publish_terminal_turn(turn, "completed", text, RunLifecycle::Idle)
+                }
+            }
+        }
+        pub(crate) fn settle(&self, task: Uuid) -> Result<service::MemberSettlement, MachineError> {
+            SemanticRunSettlementPort {
+                carrier: self.carrier(),
+            }
+            .settle_member_task(service::MemberTaskSettlement {
+                view: self.view(),
+                state_root: self.state_root(),
+                owner: self.owner(),
+                member_ref: self.manifest().run_id,
+                task_ref: task,
+                execution_intent: "read_only",
+            })
+        }
+        pub(crate) fn state(&self, task: Uuid) -> String {
+            match &self.member {
+                Member::External(m) => {
+                    m.store()
+                        .external_task(m.engagement_id, task)
+                        .unwrap()
+                        .state
+                }
+                Member::Managed(m) => m.0.task_state(task),
+            }
+        }
+        pub(crate) fn result(&self, task: Uuid) -> Value {
+            let store = self.store();
+            let bytes = match self.owner() {
+                service::SettlementOwner::External { engagement_id } => {
+                    store
+                        .task_complete_result(engagement_id, task)
+                        .unwrap()
+                        .unwrap()
+                        .1
+                }
+                service::SettlementOwner::Managed { .. } => {
+                    crate::orchestration::successor_task_result(store.connection(), task)
+                        .unwrap()
+                        .unwrap()
+                }
+            };
+            serde_json::from_slice(&bytes).unwrap()
+        }
+        pub(crate) fn observe(&self, task: Uuid, identity: bool) -> Result<(), MachineError> {
+            let port = SemanticRunSettlementPort {
+                carrier: self.carrier(),
+            };
+            match &self.member {
+                Member::External(m) => {
+                    let req = service::CollectExternalSpecialistTask {
+                        engagement_id: m.engagement_id,
+                        member_ref: m.member_ref,
+                        task_ref: task,
+                        adapter_id: "fixture-adapter",
+                        adapter_version: "fixture",
+                    };
+                    if identity {
+                        service::get_external_delegation_identity(
+                            &self.scope(),
+                            &crate::caller_scope::fixture(3),
+                            &port,
+                            req,
+                        )
+                        .map(|_| ())
+                    } else {
+                        service::collect_external_specialist_task(&self.scope(), &port, req)
+                            .map(|_| ())
+                    }
+                }
+                Member::Managed(m) => {
+                    let req = service::CollectSpecialistTask {
+                        member_ref: m.0.member_ref,
+                        task_ref: task,
+                        adapter_id: "fixture-adapter",
+                        adapter_version: "fixture",
+                    };
+                    if identity {
+                        service::get_managed_delegation_identity(
+                            &self.scope(),
+                            &self.context("observe"),
+                            &crate::caller_scope::fixture(3),
+                            &port,
+                            req,
+                        )
+                        .map(|_| ())
+                    } else {
+                        service::collect_specialist_task(
+                            &self.scope(),
+                            &self.context("observe"),
+                            &port,
+                            req,
+                        )
+                        .map(|_| ())
+                    }
+                }
+            }
+        }
+        pub(crate) fn evidence(
+            &self,
+            reader: &crate::direct_review_target::DirectTargetReader,
+            turn: &str,
+        ) -> Value {
+            reader
+                .read(
+                    "thread-1",
+                    turn,
+                    "read",
+                    &crate::direct_review_target::CandidateReadRequest {
+                        side: reader
+                            .target()
+                            .entries
+                            .iter()
+                            .find(|entry| entry.path == "README.md" && entry.side != "before")
+                            .unwrap()
+                            .side
+                            .clone(),
+                        path: "README.md".to_owned(),
+                        byte_offset: 0,
+                        byte_length: 9,
+                    },
+                )
+                .unwrap()["receipt"]
+                .clone()
+        }
+        fn finish(
+            &self,
+            task: Uuid,
+            reader: &crate::direct_review_target::DirectTargetReader,
+            turn: &str,
+            verdict: &Value,
+            items: &[Value],
+        ) {
+            let text = verdict.to_string();
+            self.mark_running(task, turn);
+            reader.begin_history("thread-1", turn).unwrap();
+            reader
+                .finish_history_response(
+                    "thread-1",
+                    turn,
+                    items,
+                    Some(crate::turn::FinalResponse::Inline { text: text.clone() }),
+                )
+                .unwrap();
+            self.publish(turn, &text);
+        }
+        pub(crate) fn stability_facts(&self) -> (u64, u64, usize) {
+            let store = self.store();
+            let revision = crate::engagement::member_workload_revision(
+                store.connection(),
+                &self.view().workspace_id,
+                self.owner().scope_kind(),
+                &self.owner().scope_ref().to_string(),
+                &self.manifest().run_id.to_string(),
+            )
+            .unwrap();
+            let rounds = crate::caller_scope::rounds_used(
+                store.connection(),
+                &crate::caller_scope::fixture(3),
+            )
+            .unwrap();
+            let audit = std::fs::read(
+                run_root(self.state_root(), self.manifest().run_id).join("audit.jsonl"),
+            )
+            .unwrap()
+            .len();
+            (revision, rounds, audit)
+        }
+        fn assert_failed(&self, task: Uuid, code: &str) {
+            let settled = self.settle(task);
+            if code.starts_with("REVIEW_") {
+                let error = settled.unwrap_err();
+                assert_eq!(error.code, code);
+                assert_eq!(error.details["phase"], "acceptance");
+                assert_eq!(
+                    error.details["outcome"],
+                    if code == "REVIEW_TARGET_UNAVAILABLE" {
+                        "failed"
+                    } else {
+                        "inconclusive"
+                    }
+                );
+            } else {
+                settled.unwrap();
+            }
+            assert_eq!(self.state(task), "failed");
+            let stored_code = match self.owner() {
+                service::SettlementOwner::External { engagement_id } => {
+                    self.store()
+                        .external_task(engagement_id, task)
+                        .unwrap()
+                        .safe_error_code
+                }
+                service::SettlementOwner::Managed { .. } => self
+                    .store()
+                    .connection()
+                    .query_row(
+                        "SELECT safe_error_code FROM brokered_tasks WHERE task_id=?1",
+                        [task.to_string()],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .unwrap(),
+            };
+            assert_eq!(stored_code.as_deref(), Some(code));
+
+            let result = self.result(task);
+            assert_eq!(result["terminal_outcome"], "failed");
+            assert_eq!(result["safe_failure_code"], code);
+            assert!(result["structured_output"].is_null());
+            assert!(result["structured_output_schema"].is_null());
+            let turn = match self.owner() {
+                service::SettlementOwner::External { engagement_id } => self
+                    .store()
+                    .external_task(engagement_id, task)
+                    .unwrap()
+                    .turn_id
+                    .unwrap(),
+                service::SettlementOwner::Managed { session_id } => {
+                    crate::orchestration::successor_task(
+                        self.store().connection(),
+                        session_id,
+                        task,
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .target_turn_id
+                    .unwrap()
+                }
+            };
+            assert_eq!(
+                resolved_terminal(self.state_root(), self.manifest().run_id, &turn)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "completed"
+            );
+            if code.starts_with("REVIEW_") {
+                for identity in [false, true] {
+                    let error = self.observe(task, identity).unwrap_err();
+                    assert_eq!(error.code, code);
+                    assert_eq!(error.details["schema"], "dolgorae.successor-error/v1");
+                    assert!(error.details.get("outcome").is_none());
+                }
+            }
+            let stable = self.stability_facts();
+            let before = self.result(task);
+            service::successor_restart_reader(self.state_root(), self.manifest()).unwrap();
+            resettle_member_tasks(self.state_root(), self.manifest().run_id, self.owner()).unwrap();
+            assert_eq!(self.result(task), before);
+            assert_eq!(self.stability_facts(), stable);
+        }
+    }
+    fn task() -> crate::task_request::SpecialistTaskRequest {
+        serde_json::from_value(json!({"purpose":"completion","brief":"Review the admitted candidate.","contexts":[{"id":"ctx-a","content":"first evidence","provenance":"caller"},{"id":"ctx-b","content":"second evidence","provenance":"caller"}],"criteria":[{"id":"a","statement":"first requirement","source_context_ids":["ctx-a"]},{"id":"b","statement":"second requirement","source_context_ids":["ctx-b"]}],"expected_output":"structured_review_v4"})).unwrap()
+    }
+    pub(crate) fn verdict(receipt: &Value) -> Value {
+        json!({"summary":"Both requirements are met.","findings":[],"criterion_assessments":(["a","b"].map(|id| json!({"criterion_id":id,"status":"met","explanation":"Verified candidate evidence.","evidence":[{"basis":"candidate","description":"Read the admitted file.","path":"README.md","line_start":1,"line_end":1,"context_id":null,"read_receipt_id":receipt["receipt_id"]}],"remaining_gap":null}))),"evidence_limits":[],"overall_assessment":"requirements_met"})
+    }
+
+    #[test]
+    fn caller_member_bootstrap_keeps_reader_policy_with_reserved_or_active_writer() {
+        for managed in [false, true] {
+            let scene = Scene::new(managed);
+            for active in [false, true] {
+                for restart in [false, true] {
+                    for generation in [2, 3, 4] {
+                        let bootstrap = scene.worker_bootstrap(generation, active, restart);
+                        let caller = generation == 3 || generation == 4;
+                        assert_eq!(
+                            bootstrap.sandbox,
+                            if caller {
+                                "read-only"
+                            } else {
+                                "workspace-write"
+                            }
+                        );
+                        assert_eq!(
+                            bootstrap.approval_policy,
+                            if caller { "never" } else { "on-request" }
+                        );
+                        assert!(matches!(bootstrap.attach, SessionAttach::Start));
+                        let expected = if managed {
+                            Some(
+                                scene
+                                    .manifest()
+                                    .aggregate_binding
+                                    .as_ref()
+                                    .unwrap()
+                                    .operation_id,
+                            )
+                        } else if caller {
+                            Some(scene.manifest().run_id)
+                        } else {
+                            None
+                        };
+                        assert_eq!(bootstrap.eager_thread_operation_id, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn successor_v4_review_publishes_checked_output_for_both_owners() {
+        for managed in [false, true] {
+            let scene = Scene::new(managed);
+            assert!(service::qualified_successor_review(scene.manifest()));
+            let (task, reader) = scene.assign("checked", "head", None);
+            let turn = format!("turn-{}", task.task_ref);
+            let receipt = scene.evidence(&reader, &turn);
+            let verdict = verdict(&receipt);
+            scene.finish(task.task_ref, &reader, &turn, &verdict, &[]);
+            scene.settle(task.task_ref).unwrap();
+            let result = scene.result(task.task_ref);
+            assert_eq!(result["structured_output_schema"], "structured_review_v4");
+            assert_eq!(result["terminal_outcome"], "completed");
+            assert!(result["safe_failure_code"].is_null());
+            let bytes: Vec<u8> = scene.store().connection().query_row("SELECT c.bytes FROM result_content c JOIN result_content_refs r USING(sha256) WHERE r.owner_kind='accepted_task' AND r.owner_id=?1 AND r.representation='structured_output'", [task.task_ref.to_string()], |row| row.get(0)).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), verdict);
+            assert_eq!(result["structured_output"]["byte_length"], bytes.len());
+            assert_eq!(
+                result["structured_output"]["sha256"],
+                format!("sha256:{}", sha256_hex(&bytes))
+            );
+            scene.observe(task.task_ref, false).unwrap();
+            scene.observe(task.task_ref, true).unwrap();
+            let old = scene.result(task.task_ref);
+            scene.settle(task.task_ref).unwrap();
+            assert_eq!(scene.result(task.task_ref), old);
+            let stable = scene.stability_facts();
+            let replay = scene
+                .try_assign("checked", Some(json!({"kind":"head","revision":null})))
+                .unwrap();
+            assert_eq!(replay.0.task_ref, task.task_ref.to_string());
+            assert_eq!(scene.stability_facts(), stable);
+        }
+    }
+    #[test]
+    fn unqualified_v4_members_are_refused_before_acceptance_for_both_owners() {
+        for managed in [false, true] {
+            for case in 0..4 {
+                let scene = Scene::with_case(managed, (case < 3).then_some(case));
+                let error = scene
+                    .try_assign(
+                        "refused",
+                        (case < 3).then(|| json!({"kind":"workspace","revision":null})),
+                    )
+                    .unwrap_err();
+                assert_eq!(
+                    error.code,
+                    if case == 3 {
+                        "INVALID_ARGUMENT"
+                    } else {
+                        "REVIEW_READING_BOUNDARY_UNSUPPORTED"
+                    }
+                );
+                let store = scene.store();
+                for table in [
+                    if managed { "brokered_tasks" } else { "tasks" },
+                    "caller_scope_assignments",
+                ] {
+                    assert_eq!(
+                        store
+                            .connection()
+                            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                                .get::<_, u64>(0))
+                            .unwrap(),
+                        0
+                    );
+                }
+                assert_eq!(store.connection().query_row("SELECT COUNT(*) FROM delegation_operations WHERE operation_kind IN ('assign_specialist_task','assign_external_specialist_task')",[],|r|r.get::<_,u64>(0)).unwrap(),0);
+                assert!(!scene.state_root().join("direct-reviews").exists());
+            }
+        }
+    }
+    #[test]
+    fn successor_v4_invalid_structure_and_task_semantics_have_no_payload() {
+        for managed in [false, true] {
+            for case in 0..10 {
+                let scene = Scene::new(managed);
+                let (task, reader) = scene.assign("invalid", "head", None);
+                let turn = format!("turn-{}", task.task_ref);
+                let mut value = verdict(&scene.evidence(&reader, &turn));
+                match case {
+                    0 => {
+                        value.as_object_mut().unwrap().remove("summary");
+                    }
+                    1 => value["extra"] = json!(true),
+                    2 => value["summary"] = json!(42),
+                    3 => value["criterion_assessments"]
+                        .as_array_mut()
+                        .unwrap()
+                        .swap(0, 1),
+                    4 => {
+                        value["criterion_assessments"][1] =
+                            value["criterion_assessments"][0].clone()
+                    }
+                    5 => {
+                        value["criterion_assessments"].as_array_mut().unwrap().pop();
+                    }
+                    6 => {
+                        let e = &mut value["criterion_assessments"][0]["evidence"][0];
+                        e["basis"] = json!("context");
+                        e["context_id"] = json!("ctx-b");
+                        e["path"] = Value::Null;
+                        e["line_start"] = Value::Null;
+                        e["line_end"] = Value::Null;
+                        e["read_receipt_id"] = Value::Null;
+                    }
+                    7 => value["criterion_assessments"][0]["evidence"][0]["line_start"] = json!(2),
+                    8 => value["criterion_assessments"][0]["evidence"][0]["line_end"] = Value::Null,
+                    _ => value["overall_assessment"] = json!("requirements_not_met"),
+                }
+                scene.finish(task.task_ref, &reader, &turn, &value, &[]);
+                scene.assert_failed(task.task_ref, "FINDINGS_OUTPUT_INVALID");
+            }
+        }
+    }
+    #[test]
+    fn successor_v4_receipts_are_host_issued_and_task_scoped() {
+        for managed in [false, true] {
+            for missing in [false, true] {
+                let scene = Scene::new(managed);
+                let (task, reader) = scene.assign("forged", "head", None);
+                let turn = format!("turn-{}", task.task_ref);
+                let mut value = verdict(&scene.evidence(&reader, &turn));
+                if missing {
+                    value["criterion_assessments"][0]["evidence"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("read_receipt_id");
+                } else {
+                    value["criterion_assessments"][0]["evidence"][0]["read_receipt_id"] =
+                        json!(Uuid::now_v7());
+                }
+                scene.finish(task.task_ref, &reader, &turn, &value, &[]);
+                scene.assert_failed(
+                    task.task_ref,
+                    if missing {
+                        "FINDINGS_OUTPUT_INVALID"
+                    } else {
+                        "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                    },
+                );
+            }
+        }
+        for managed in [false, true] {
+            let foreign = Scene::new(managed);
+            let (foreign_task, foreign_reader) = foreign.assign("foreign", "head", None);
+            let receipt =
+                foreign.evidence(&foreign_reader, &format!("turn-{}", foreign_task.task_ref));
+            let scene = Scene::new(managed);
+            let (task, reader) = scene.assign("local", "head", None);
+            let turn = format!("turn-{}", task.task_ref);
+            scene.evidence(&reader, &turn);
+            scene.finish(task.task_ref, &reader, &turn, &verdict(&receipt), &[]);
+            scene.assert_failed(task.task_ref, "REVIEW_CANDIDATE_PROVENANCE_INVALID");
+        }
+        for managed in [false, true] {
+            let scene = Scene::new(managed);
+            let (first, reader) = scene.assign("first", "head", None);
+            let turn = format!("turn-{}", first.task_ref);
+            let old_receipt = scene.evidence(&reader, &turn);
+            scene.finish(first.task_ref, &reader, &turn, &verdict(&old_receipt), &[]);
+            scene.settle(first.task_ref).unwrap();
+            let (second, next) = scene.assign("second", "head", None);
+            assert_ne!(reader.review_id(), next.review_id());
+            assert_eq!(reader.target().target_sha256, next.target().target_sha256);
+            let turn = format!("turn-{}", second.task_ref);
+            scene.evidence(&next, &turn);
+            scene.finish(second.task_ref, &next, &turn, &verdict(&old_receipt), &[]);
+            let restored = service::successor_restart_reader(scene.state_root(), scene.manifest())
+                .unwrap()
+                .unwrap();
+            assert_eq!(restored.review_id(), second.task_ref);
+            assert_eq!(
+                crate::direct_review_target::DirectTargetReader::open(
+                    scene.state_root(),
+                    first.task_ref,
+                    scene.manifest().run_id
+                )
+                .unwrap()
+                .target(),
+                reader.target()
+            );
+            scene.assert_failed(second.task_ref, "REVIEW_CANDIDATE_PROVENANCE_INVALID");
+        }
+    }
+    #[test]
+    fn successor_v4_finding_receipts_must_be_host_issued_for_the_task() {
+        for managed in [false, true] {
+            for forged in [false, true] {
+                let scene = Scene::new(managed);
+                let (task, reader) = scene.assign("finding", "head", None);
+                let turn = format!("turn-{}", task.task_ref);
+                let receipt = scene.evidence(&reader, &turn);
+                let mut value = verdict(&receipt);
+                value["criterion_assessments"][0]["status"] = json!("unmet");
+                value["overall_assessment"] = json!("requirements_not_met");
+                value["findings"] = json!([{"severity":"P2","title":"Satisfy the first requirement","description":"The admitted candidate does not meet the first requirement.","path":"README.md","line_start":1,"line_end":1,"recommendation":"Correct the candidate.","confidence":"high","read_receipt_id":if forged { json!(Uuid::now_v7()) } else { receipt["receipt_id"].clone() }}]);
+                scene.finish(task.task_ref, &reader, &turn, &value, &[]);
+                if forged {
+                    scene.assert_failed(task.task_ref, "REVIEW_CANDIDATE_PROVENANCE_INVALID");
+                } else {
+                    scene.settle(task.task_ref).unwrap();
+                    let bytes:Vec<u8> = scene.store().connection().query_row("SELECT c.bytes FROM result_content c JOIN result_content_refs r USING(sha256) WHERE r.owner_kind='accepted_task' AND r.owner_id=?1 AND r.representation='structured_output'", [task.task_ref.to_string()], |row| row.get(0)).unwrap();
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&bytes).unwrap()["findings"][0]["read_receipt_id"],
+                        receipt["receipt_id"]
+                    );
+                    assert_eq!(scene.result(task.task_ref)["terminal_outcome"], "completed");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn successor_v4_uses_the_original_completed_history_response() {
+        for managed in [false, true] {
+            let scene = Scene::new(managed);
+            let (task, reader) = scene.assign("history-response", "head", None);
+            let turn = format!("turn-{}", task.task_ref);
+            let value = verdict(&scene.evidence(&reader, &turn));
+            let text = value.to_string();
+            scene.mark_running(task.task_ref, &turn);
+            reader.begin_history("thread-1", &turn).unwrap();
+            reader
+                .finish_history_response(
+                    "thread-1",
+                    &turn,
+                    &[],
+                    Some(crate::turn::FinalResponse::Inline { text: text.clone() }),
+                )
+                .unwrap();
+            scene.publish(&turn, "notification differs from checked history");
+            scene.settle(task.task_ref).unwrap();
+            let result = scene.result(task.task_ref);
+            assert_eq!(result["terminal_outcome"], "completed");
+            assert_eq!(
+                result["final_response"]["sha256"],
+                format!("sha256:{}", sha256_hex(text.as_bytes()))
+            );
+        }
+    }
+
+    #[test]
+    fn successor_v4_unmediated_history_rejects_well_formed_verdicts() {
+        for managed in [false, true] {
+            for kind in ["commandExecution", "mcpToolCall"] {
+                let scene = Scene::new(managed);
+                let (task, reader) = scene.assign("history", "head", None);
+                let turn = format!("turn-{}", task.task_ref);
+                let value = verdict(&scene.evidence(&reader, &turn));
+                scene.finish(
+                    task.task_ref,
+                    &reader,
+                    &turn,
+                    &value,
+                    &[json!({"id":"foreign-tool","type":kind,"status":"completed"})],
+                );
+                scene.assert_failed(task.task_ref, "REVIEW_CANDIDATE_PROVENANCE_INVALID");
+            }
+        }
+    }
+    #[test]
+    fn successor_v4_mutable_drift_and_staged_sources_remain_distinct() {
+        for managed in [false, true] {
+            for kind in ["workspace", "dirty", "staged"] {
+                for mode_only in [false, true] {
+                    let scene = Scene::new(managed);
+                    let (task, reader) = scene.assign("drift", kind, None);
+                    let turn = format!("turn-{}", task.task_ref);
+                    let value = verdict(&scene.evidence(&reader, &turn));
+                    scene.finish(task.task_ref, &reader, &turn, &value, &[]);
+                    let path = scene.workspace().join("README.md");
+                    if mode_only {
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                            .unwrap();
+                    } else {
+                        std::fs::write(&path, b"modified\n").unwrap();
+                    }
+                    if kind == "staged" {
+                        scene.settle(task.task_ref).unwrap();
+                        assert_eq!(scene.result(task.task_ref)["terminal_outcome"], "completed");
+                    } else {
+                        scene.assert_failed(task.task_ref, "REVIEW_TARGET_DRIFTED");
+                    }
+                }
+            }
+            for base_only in [false, true] {
+                let scene = Scene::new(managed);
+                let (task, reader) = scene.assign("index", "staged", None);
+                let turn = format!("turn-{}", task.task_ref);
+                scene.finish(
+                    task.task_ref,
+                    &reader,
+                    &turn,
+                    &verdict(&scene.evidence(&reader, &turn)),
+                    &[],
+                );
+                if base_only {
+                    scene.git(&["commit", "--allow-empty", "-q", "-m", "new base"]);
+                } else {
+                    std::fs::write(scene.workspace().join("README.md"), b"changed index\n")
+                        .unwrap();
+                    scene.git(&["add", "README.md"]);
+                }
+                scene.assert_failed(task.task_ref, "REVIEW_TARGET_DRIFTED");
+            }
+        }
+    }
+    #[test]
+    fn successor_v4_sampled_scope_disclosure_respects_the_output_bound() {
+        for managed in [false, true] {
+            for (count, present, succeeds) in [
+                (0, false, true),
+                (63, false, true),
+                (64, false, false),
+                (64, true, true),
+            ] {
+                let scene = Scene::new(managed);
+                let (task, reader) = scene.assign("sampled-disclosure", "workspace", None);
+                let turn = format!("turn-{}", task.task_ref);
+                let mut value = verdict(&scene.evidence(&reader, &turn));
+                value["evidence_limits"] = json!(vec!["A caller-provided evidence limit."; count]);
+                if present {
+                    value["evidence_limits"][0] =
+                        json!(crate::direct_review_target::SAMPLED_SCOPE_LIMIT);
+                }
+                scene.finish(task.task_ref, &reader, &turn, &value, &[]);
+                if succeeds {
+                    scene.settle(task.task_ref).unwrap();
+                    let bytes:Vec<u8> = scene.store().connection().query_row("SELECT c.bytes FROM result_content c JOIN result_content_refs r USING(sha256) WHERE r.owner_kind='accepted_task' AND r.owner_id=?1 AND r.representation='structured_output'", [task.task_ref.to_string()], |row| row.get(0)).unwrap();
+                    let output: Value = serde_json::from_slice(&bytes).unwrap();
+                    let limits = output["evidence_limits"].as_array().unwrap();
+                    assert!(
+                        limits.contains(&json!(crate::direct_review_target::SAMPLED_SCOPE_LIMIT))
+                    );
+                    assert_eq!(limits.len(), count + usize::from(!present));
+                    assert_eq!(
+                        scene.result(task.task_ref)["structured_output"]["sha256"],
+                        format!("sha256:{}", sha256_hex(&bytes))
+                    );
+                } else {
+                    scene.assert_failed(task.task_ref, "FINDINGS_OUTPUT_INVALID");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn successor_v4_pinned_object_loss_never_uses_worktree_bytes() {
+        for managed in [false, true] {
+            let scene = Scene::new(managed);
+            let (task, reader) = scene.assign("object", "head", None);
+            let turn = format!("turn-{}", task.task_ref);
+            scene.finish(
+                task.task_ref,
+                &reader,
+                &turn,
+                &verdict(&scene.evidence(&reader, &turn)),
+                &[],
+            );
+            let oid = reader
+                .target()
+                .entries
+                .iter()
+                .find(|e| e.path == "README.md" && e.side != "before")
+                .unwrap()
+                .blob_oid
+                .as_ref()
+                .unwrap();
+            std::fs::remove_file(
+                scene
+                    .workspace()
+                    .join(".git/objects")
+                    .join(&oid[..2])
+                    .join(&oid[2..]),
+            )
+            .unwrap();
+            assert!(scene.workspace().join("README.md").is_file());
+            scene.assert_failed(task.task_ref, "REVIEW_TARGET_UNAVAILABLE");
+        }
+    }
+    #[test]
+    fn successor_dispatch_rejects_a_foreign_reader_binding_for_both_owners() {
+        for managed in [false, true] {
+            for case in 0..3 {
+                let scene = Scene::new(managed);
+                let (task, _) = scene.assign("binding", "workspace", None);
+                let path = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(task.task_ref.to_string())
+                    .join("binding.json");
+                let mut binding: Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                match case {
+                    0 => binding["review_id"] = json!(Uuid::now_v7()),
+                    1 => binding["run_id"] = json!(Uuid::now_v7()),
+                    _ => {
+                        binding["target"] = serde_json::to_value(
+                            crate::direct_review_target::DirectTarget::admit(
+                                &scene.workspace(),
+                                scene.view().mode,
+                                "head",
+                                None,
+                                task.task_ref,
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap()
+                    }
+                }
+                let bytes = serde_json::to_vec(&binding).unwrap();
+                std::fs::write(&path, &bytes).unwrap();
+                let error = crate::worker::fixture_bind_checked_task(
+                    scene.state_root(),
+                    scene.manifest(),
+                    task.task_ref,
+                    "binding",
+                    &task.prompt,
+                )
+                .err()
+                .unwrap();
+                assert_eq!(error.code, "REVIEW_CANDIDATE_PROVENANCE_INVALID");
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(scene.state(task.task_ref), "dispatching");
+            }
+        }
+    }
+
+    #[test]
+    fn successor_restart_missing_or_mismatched_reader_is_not_recreated() {
+        for managed in [false, true] {
+            for mismatch in [false, true] {
+                let scene = Scene::new(managed);
+                let (task, reader) = scene.assign("restart", "workspace", None);
+                let turn = format!("turn-{}", task.task_ref);
+                scene.mark_running(task.task_ref, &turn);
+                let root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(task.task_ref.to_string());
+                if mismatch {
+                    let binding = root.join("binding.json");
+                    let mut value: Value =
+                        serde_json::from_slice(&std::fs::read(&binding).unwrap()).unwrap();
+                    let target = crate::direct_review_target::DirectTarget::admit(
+                        &scene.workspace(),
+                        scene.view().mode,
+                        "head",
+                        None,
+                        task.task_ref,
+                    )
+                    .unwrap();
+                    value["target"] = serde_json::to_value(target).unwrap();
+                    std::fs::write(binding, serde_json::to_vec(&value).unwrap()).unwrap();
+                } else {
+                    std::fs::rename(&root, root.with_extension("saved")).unwrap();
+                }
+                let error = service::successor_restart_reader(scene.state_root(), scene.manifest())
+                    .err()
+                    .unwrap();
+                assert_eq!(
+                    error.code,
+                    if mismatch {
+                        "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                    } else {
+                        "RUNTIME_STATE_INVALID"
+                    }
+                );
+                if !mismatch {
+                    assert!(!root.exists());
+                }
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert_eq!(reader.review_id(), task.task_ref);
+            }
+        }
+    }
+    #[test]
+    fn successor_v4_reader_and_history_storage_failure_retries_original_terminal() {
+        for managed in [false, true] {
+            for history in [false, true] {
+                let scene = Scene::new(managed);
+                let (task, reader) = scene.assign("storage", "head", None);
+                let turn = format!("turn-{}", task.task_ref);
+                scene.finish(
+                    task.task_ref,
+                    &reader,
+                    &turn,
+                    &verdict(&scene.evidence(&reader, &turn)),
+                    &[],
+                );
+                let root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(task.task_ref.to_string());
+                let path = if history {
+                    std::fs::read_dir(root.join("history"))
+                        .unwrap()
+                        .map(|e| e.unwrap().path())
+                        .find(|p| p.to_string_lossy().ends_with(".response.json"))
+                        .unwrap()
+                } else {
+                    root.join("binding.json")
+                };
+                let bytes = std::fs::read(&path).unwrap();
+                let stable = scene.stability_facts();
+                std::fs::write(&path, b"broken storage").unwrap();
+                let revision = scene
+                    .store()
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM delegation_operations", [], |r| {
+                        r.get::<_, u64>(0)
+                    })
+                    .unwrap();
+                assert_eq!(
+                    scene.settle(task.task_ref).unwrap_err().code,
+                    "RUNTIME_STATE_INVALID"
+                );
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert_eq!(scene.stability_facts(), stable);
+                assert_eq!(scene.store().connection().query_row("SELECT COUNT(*) FROM result_content_refs WHERE representation='structured_output'",[],|r|r.get::<_,u64>(0)).unwrap(),0);
+                std::fs::write(path, bytes).unwrap();
+                resettle_member_tasks(scene.state_root(), scene.manifest().run_id, scene.owner())
+                    .unwrap();
+                assert_eq!(scene.result(task.task_ref)["terminal_outcome"], "completed");
+                assert_eq!(
+                    scene
+                        .store()
+                        .connection()
+                        .query_row("SELECT COUNT(*) FROM delegation_operations", [], |r| r
+                            .get::<_, u64>(0))
+                        .unwrap(),
+                    revision
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod managed_write_tests {
+    use super::successor_fixture::ManagedMember;
+    use super::*;
+    use crate::delegation_service::{ManagedCallContext, RunSettlementPort as _};
+    use crate::run::ControllerBinding;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// Scripted Submit acknowledgements and Reader refusals with a real worker identity.
+    /// The semantic service still performs its real census, credential, revision,
+    /// durable-policy and socket-identity checks.
+    struct ScriptedWorker {
+        children: Arc<Mutex<Vec<std::process::Child>>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+        sockets: Vec<PathBuf>,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn spawn_identity(
+        view: &WorkspaceView,
+        member_ref: Uuid,
+    ) -> (std::process::Child, crate::worker::WorkerIdentity) {
+        use std::os::unix::fs::MetadataExt as _;
+        let boot_uuid = Uuid::parse_str(&DarwinSystem.boot_session_uuid().unwrap()).unwrap();
+        let mut command = std::process::Command::new("/bin/sleep");
+        command
+            .arg("300")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = DarwinSystem.spawn_detached(&mut command).unwrap();
+        let process = match DarwinSystem.bsd_process_identity(child.id()) {
+            Ok(process) => process,
+            Err(error) => {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("cannot observe scripted worker identity: {error}");
+            }
+        };
+        let path = DarwinSystem.live_process_path(child.id()).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let identity = crate::worker::WorkerIdentity {
+            workspace_id: view.workspace_id.clone(),
+            run_id: member_ref,
+            run_generation: 1,
+            boot_uuid,
+            pid: process.pid,
+            process_group_id: process.process_group_id,
+            session_id: process.session_id,
+            uid: process.uid,
+            start_tvsec: process.start_tvsec,
+            start_tvusec: process.start_tvusec,
+            executable_sha256: sha256_hex(&std::fs::read(&path).unwrap()),
+            executable_path: path,
+            executable_device: metadata.dev(),
+            executable_inode: metadata.ino(),
+        };
+        (child, identity)
+    }
+
+    fn append_policy(
+        state_root: &Path,
+        run_id: Uuid,
+        kind: AuditKind,
+        operation_id: Uuid,
+        write: bool,
+        generation: u64,
+    ) -> crate::domain::EffectivePolicy {
+        let mut ledger = crate::ledger::Ledger::open(run_root(state_root, run_id), run_id).unwrap();
+        let policy = crate::domain::EffectivePolicy {
+            access: if write { Access::Write } else { Access::Read },
+            verification: crate::domain::PolicyVerification::Verified,
+            policy_epoch: crate::domain::PolicyEpoch(ledger.head().unwrap().sequence + 1),
+            thread_generation: Some(1),
+            server_epoch: Some(1),
+            writer_generation: write.then_some(generation),
+        };
+        ledger.append_required_payload(kind, &json!({"thread_id":"thread-1","thread_generation":1,
+            "writer_generation":generation,"transaction_id":operation_id,"effective_policy":policy}),1).unwrap();
+        policy
+    }
+
+    impl ScriptedWorker {
+        // 1 refuses the transition; 2 returns an unqualified caller-policy proof.
+        fn start(scene: &Assignment, failure: u8) -> Self {
+            Self::start_member(
+                &scene.member.view,
+                &scene.member.state_root,
+                &scene.member.manifest,
+                failure,
+            )
+        }
+
+        fn start_member(
+            view: &WorkspaceView,
+            state_root: &Path,
+            manifest: &RunManifest,
+            failure: u8,
+        ) -> Self {
+            use std::os::unix::fs::MetadataExt as _;
+            use std::os::unix::net::UnixListener;
+            let (worker, identity) = spawn_identity(view, manifest.run_id);
+            let mut fixture = Self {
+                children: Arc::new(Mutex::new(vec![worker])),
+                stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                thread: None,
+                sockets: Vec::new(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            };
+            let server_identity = identity.clone();
+            let dedicated: crate::worker::DedicatedServerIdentity = serde_json::from_value({
+                let mut value = serde_json::to_value(server_identity).unwrap();
+                for field in ["workspace_id", "run_id", "run_generation", "boot_uuid"] {
+                    value.as_object_mut().unwrap().remove(field);
+                }
+                value
+            })
+            .unwrap();
+            let socket = crate::worker::worker_socket_path(
+                identity.uid,
+                &identity.workspace_id,
+                identity.run_id,
+            )
+            .unwrap();
+            let app_socket =
+                crate::worker::dedicated_server_socket_path(identity.uid, identity.run_id, 1)
+                    .unwrap();
+            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            std::fs::set_permissions(
+                socket.parent().unwrap(),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            let listener = UnixListener::bind(&socket).unwrap();
+            fixture.sockets.push(socket.clone());
+            let app_listener = UnixListener::bind(&app_socket).unwrap();
+            fixture.sockets.push(app_socket.clone());
+            for path in [&socket, &app_socket] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let socket_id = |path: &Path| {
+                let metadata = std::fs::metadata(path).unwrap();
+                crate::worker::SocketIdentity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                }
+            };
+            let build = crate::worker::current_dolgorae_build().unwrap();
+            let runtime = crate::worker::WorkerRuntimeRecord {
+                schema_version: 1,
+                identity: identity.clone(),
+                socket_path: socket.clone(),
+                socket_identity: socket_id(&socket),
+                control_socket_epoch: 1,
+                app_server_epoch: Some(1),
+                control_recovery_required: false,
+                startup_scope: None,
+                dedicated_server_identity: None,
+                dolgorae_version: build.version,
+                mutation_protocol_version: build.mutation_protocol_version,
+                binary_sha256: build.binary_sha256,
+            };
+            let runtime_path = crate::worker::runtime_record_path(
+                &crate::worker::runtime_root(state_root),
+                manifest.run_id,
+            )
+            .unwrap();
+            std::fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+            std::fs::set_permissions(
+                runtime_path.parent().unwrap(),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            crate::worker::write_runtime_record(&runtime_path, &runtime).unwrap();
+            assert_eq!(
+                crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid())
+                    .unwrap(),
+                runtime
+            );
+            let run = run_root(state_root, manifest.run_id);
+            let empty = crate::ledger::Ledger::open(&run, manifest.run_id)
+                .unwrap()
+                .durable_records()
+                .unwrap()
+                .is_empty();
+            if empty {
+                let mut ledger =
+                    ConformantLedger::open_for_bootstrap(&run, manifest.run_id).unwrap();
+                ledger
+                    .with_event_context(
+                        bootstrap_event_context(
+                            manifest,
+                            &crate::writer::WriterStore::new(
+                                state_root,
+                                &view.workspace_id,
+                                DarwinSystem.current_uid(),
+                            )
+                            .load()
+                            .unwrap(),
+                        ),
+                        |ledger| {
+                            ledger
+                                .bootstrap(&BootstrapRequest {
+                                    timestamp: SystemLedgerClock::default().timestamp(),
+                                    workspace_id: view.workspace_id.clone(),
+                                    intent: IdempotencyIntent {
+                                        schema_version: 1,
+                                        operation: IdempotencyOperation::StartRun,
+                                        idempotency_key: "scripted-start".to_owned(),
+                                        normalized_identity_sha256: "a".repeat(64),
+                                        run_id: manifest.run_id,
+                                    },
+                                    record_kind: BootstrapRecordKind::RunCreated,
+                                    initial_access: "read".to_owned(),
+                                    default_effort: Some("high".to_owned()),
+                                })
+                                .unwrap();
+                            ledger
+                                .mark_threadless_ready(&SystemLedgerClock::default().timestamp())
+                                .unwrap();
+                            Ok::<(), MachineError>(())
+                        },
+                    )
+                    .unwrap();
+            }
+            append_policy(
+                state_root,
+                manifest.run_id,
+                AuditKind::ThreadBound,
+                Uuid::now_v7(),
+                false,
+                0,
+            );
+            let children = Arc::clone(&fixture.children);
+            let stop = Arc::clone(&fixture.stop);
+            let calls = Arc::clone(&fixture.calls);
+            listener.set_nonblocking(true).unwrap();
+            let state_root = state_root.to_path_buf();
+            let manifest = manifest.clone();
+            let proof_socket = socket_id(&app_socket);
+            let thread = std::thread::spawn({
+                let children = Arc::clone(&children);
+                let stop = Arc::clone(&stop);
+                let calls = Arc::clone(&calls);
+                move || {
+                    let _app_listener = app_listener;
+                    while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                        let (mut stream, _) = match listener.accept() {
+                            Ok(connection) => connection,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(5));
+                                continue;
+                            }
+                            Err(error) => panic!("scripted control: {error}"),
+                        };
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(5)))
+                            .unwrap();
+                        let mut request: ControlRequestV1 = crate::worker::read_frame(
+                            &mut std::io::BufReader::new(stream.try_clone().unwrap()),
+                        )
+                        .unwrap();
+                        loop {
+                            request = match request {
+                                ControlRequestV1::ControllerChecked { request, .. }
+                                | ControlRequestV1::CheckedMutation { request, .. }
+                                | ControlRequestV1::AdmittedMutation { request, .. } => *request,
+                                _ => break,
+                            };
+                        }
+                        calls
+                            .lock()
+                            .unwrap()
+                            .push(request.operation_name().to_owned());
+                        let response = match request {
+                            ControlRequestV1::SetWriterAccess {
+                                write,
+                                writer_generation,
+                                transaction_id,
+                                ..
+                            }
+                            | ControlRequestV1::ExternalSetWriterAccess {
+                                write,
+                                writer_generation,
+                                transaction_id,
+                                ..
+                            } => {
+                                if !write && failure == 1 {
+                                    ControlResponseV1::Failed {
+                                        code: "INTERNAL_ERROR".to_owned(),
+                                        message: "scripted Reader refusal".to_owned(),
+                                        retryable: true,
+                                        details: json!({}),
+                                    }
+                                } else {
+                                    let policy = append_policy(
+                                        &state_root,
+                                        manifest.run_id,
+                                        if write {
+                                            AuditKind::WriterAcquired
+                                        } else {
+                                            AuditKind::WriterReleased
+                                        },
+                                        transaction_id,
+                                        write,
+                                        writer_generation,
+                                    );
+                                    let binding = manifest.global_profile_binding.as_ref().unwrap();
+                                    let mut proof = crate::worker::CallerPolicyProof {
+                                        schema: "dolgorae.caller-policy-proof/v1".to_owned(),
+                                        operation_id: transaction_id,
+                                        identity: identity.clone(),
+                                        control_socket_epoch: 1,
+                                        dedicated_server_identity: dedicated.clone(),
+                                        app_server_socket_identity: proof_socket.clone(),
+                                        server_key: binding.server_key.clone(),
+                                        server_epoch: 1,
+                                        global_profile_binding_sha256: binding.digest().unwrap(),
+                                        thread_id: "thread-1".to_owned(),
+                                        effective_policy: policy,
+                                    };
+                                    if !write {
+                                        match failure {
+                                            2 => proof.operation_id = Uuid::now_v7(),
+                                            3 => proof.identity.run_generation += 1,
+                                            4 => proof.thread_id = "foreign-thread".to_owned(),
+                                            5 => proof.effective_policy.policy_epoch.0 += 1,
+                                            _ => {}
+                                        }
+                                    }
+                                    ControlResponseV1::CallerPolicyVerified {
+                                        proof: Box::new(proof),
+                                    }
+                                }
+                            }
+                            ControlRequestV1::BeginPreparedMutation { .. } => {
+                                ControlResponseV1::MutationAdmitted {
+                                    admission_id: Uuid::now_v7(),
+                                }
+                            }
+                            ControlRequestV1::Submit { request, .. } => {
+                                assert!(!request.write);
+                                let task_ref = Uuid::parse_str(
+                                    request
+                                        .idempotency_key
+                                        .strip_prefix("successor-task:")
+                                        .unwrap(),
+                                )
+                                .unwrap();
+                                let store = EngagementStore::open(
+                                    &EngagementStore::workspace_database_path(&state_root),
+                                )
+                                .unwrap();
+                                let binding = manifest.aggregate_binding.as_ref().unwrap();
+                                let task = crate::orchestration::successor_task(
+                                    store.connection(),
+                                    binding.aggregate_id,
+                                    task_ref,
+                                )
+                                .unwrap()
+                                .unwrap();
+                                assert_eq!(task.state, "dispatching");
+                                assert!(store.dispatch_index_object(task_ref).unwrap().is_some());
+                                let writer = crate::writer::WriterStore::new(
+                                    &state_root,
+                                    &manifest.workspace_id,
+                                    DarwinSystem.current_uid(),
+                                )
+                                .load()
+                                .unwrap();
+                                assert_eq!(
+                                    writer.state,
+                                    crate::writer::WriterAuthorityState::Active
+                                );
+                                assert_eq!(writer.holder.unwrap().run_id, manifest.run_id);
+                                ControlResponseV1::Accepted {
+                                    accepted: crate::turn::AcceptedTurn {
+                                        thread_id: "thread-1".to_owned(),
+                                        turn_id: "write-turn".to_owned(),
+                                        effort: "high".to_owned(),
+                                        replayed: false,
+                                    },
+                                }
+                            }
+                            ControlRequestV1::Close { .. }
+                            | ControlRequestV1::ExternalClose { .. } => {
+                                ConformantLedger::open(
+                                    run_root(&state_root, manifest.run_id),
+                                    manifest.run_id,
+                                )
+                                .unwrap()
+                                .seal_closed(
+                                    &SystemLedgerClock::default().timestamp(),
+                                    "scripted cleanup",
+                                )
+                                .unwrap();
+                                ControlResponseV1::Closed {
+                                    identity: identity.clone(),
+                                    thread_id: Some("thread-1".to_owned()),
+                                }
+                            }
+                            ControlRequestV1::Shutdown { .. } => {
+                                for child in children.lock().unwrap().iter_mut() {
+                                    child.kill().unwrap();
+                                    child.wait().unwrap();
+                                }
+                                stop.store(true, std::sync::atomic::Ordering::Release);
+                                ControlResponseV1::Shutdown {
+                                    identity: identity.clone(),
+                                    terminal_confirmed: true,
+                                }
+                            }
+                            other => panic!("unexpected scripted request: {other:?}"),
+                        };
+                        crate::worker::write_frame(&mut stream, &response).unwrap();
+                    }
+                }
+            });
+            fixture.thread = Some(thread);
+            fixture
+        }
+    }
+
+    impl Drop for ScriptedWorker {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            for child in self.children.lock().unwrap().iter_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+            for socket in &self.sockets {
+                let _ = std::fs::remove_file(socket);
+            }
+        }
+    }
+
+    struct Assignment {
+        member: ManagedMember,
+        controller: ControllerBinding,
+        carrier: CredentialCarrier,
+    }
+
+    impl Assignment {
+        fn new() -> Self {
+            let member = ManagedMember::writable();
+            let root_run = run_root(&member.state_root, member.session_id);
+            std::fs::remove_dir(root_run.join("artifacts")).unwrap();
+            std::fs::remove_dir(root_run).unwrap();
+            let (controller, path) = member.publish_session_root_at(&member.state_root);
+            let carrier = CredentialCarrier::open_path(&path).unwrap();
+            let store = member.store();
+            let spawn: String = store
+                .connection()
+                .query_row(
+                    "SELECT spawn_operation_id FROM brokered_members WHERE run_id=?1",
+                    [member.member_ref.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let subjects = crate::delegation_identity::AcceptedSubjects {
+                run_ref: Some(member.member_ref.to_string()),
+                member_ref: Some(member.member_ref.to_string()),
+                ..Default::default()
+            };
+            store.connection().execute("INSERT INTO delegation_operations(
+                operation_ref,schema_version,state,workspace_ref,controller_principal,
+                controller_generation,scope_kind,scope_ref,operation_kind,idempotency_key,
+                mutation_envelope_json,mutation_envelope_digest,expected_revision,
+                trusted_invocation_json,accepted_subjects_json,receipt_json,created_at_ms,updated_at_ms)
+                VALUES(?1,2,'accepted',?2,'controller:fixture',1,'orchestrated_session',?3,
+                'spawn_specialist','fixture-spawn','{}','fixture',NULL,NULL,?4,'{}',1,1)",
+                rusqlite::params![spawn,member.view.workspace_id,member.session_id.to_string(),serde_json::to_string(&subjects).unwrap()]).unwrap();
+            crate::writer::WriterStore::initialize_layout(
+                &member.state_root,
+                &member.view.workspace_id,
+                DarwinSystem.current_uid(),
+            )
+            .unwrap();
+            let mut projection = crate::projection::RunStateProjection::starting(member.member_ref);
+            projection.lifecycle = RunLifecycle::Idle;
+            std::fs::write(
+                run_root(&member.state_root, member.member_ref).join("state.json"),
+                serde_json::to_vec(&projection).unwrap(),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                run_root(&member.state_root, member.member_ref).join("state.json"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            Self {
+                member,
+                controller,
+                carrier,
+            }
+        }
+
+        fn releasable() -> Self {
+            let mut scene = Self::new();
+            let home = scene.member.root.join("release-home");
+            let workspaces = home.join("workspaces");
+            for directory in [&home, &workspaces] {
+                std::fs::create_dir(directory).unwrap();
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            let state_root = workspaces.join(&scene.member.view.workspace_id);
+            std::fs::rename(&scene.member.state_root, &state_root).unwrap();
+            scene.member.state_root = state_root;
+            let binding = scene
+                .member
+                .manifest
+                .global_profile_binding
+                .as_ref()
+                .unwrap();
+            GlobalMembershipStore::from_root(&home, &binding.selected_name, &binding.server_key)
+                .unwrap()
+                .record(
+                    &scene.member.view.workspace_id,
+                    scene.member.member_ref,
+                    MembershipDisposition::Active,
+                )
+                .unwrap();
+            scene
+        }
+
+        fn scope(&self) -> crate::delegation_service::DelegationScope<'_> {
+            crate::delegation_service::DelegationScope {
+                view: &self.member.view,
+                state_root: &self.member.state_root,
+                controller: &self.controller,
+            }
+        }
+
+        fn context(&self) -> ManagedCallContext<'_> {
+            ManagedCallContext {
+                session_id: self.member.session_id,
+                source_run_id: self.member.session_id,
+                source_turn_id: "primary-turn",
+                source_tool_call_id: "primary-tool",
+                idempotency_key: "managed-write",
+            }
+        }
+
+        fn port(&self) -> SemanticRunSettlementPort<'_> {
+            SemanticRunSettlementPort {
+                carrier: &self.carrier,
+            }
+        }
+
+        fn assign(
+            &self,
+        ) -> Result<
+            (
+                crate::delegation_service::DelegationTaskObservation,
+                crate::delegation_identity::OperationReceipt,
+            ),
+            MachineError,
+        > {
+            self.assign_using(&self.port())
+        }
+
+        fn assign_using(
+            &self,
+            port: &dyn crate::delegation_service::RunSettlementPort,
+        ) -> Result<
+            (
+                crate::delegation_service::DelegationTaskObservation,
+                crate::delegation_identity::OperationReceipt,
+            ),
+            MachineError,
+        > {
+            let mut task = crate::delegation_service::fixture_task();
+            task.expected_output = "complete_result".to_owned();
+            crate::delegation_service::assign_specialist_task(
+                &self.scope(),
+                &self.context(),
+                &crate::caller_scope::fixture(3),
+                port,
+                crate::delegation_service::AssignSpecialistTask {
+                    member_ref: self.member.member_ref,
+                    task,
+                    execution_intent: "canonical_workspace_write",
+                    target: None,
+                    deadline_seconds: 600,
+                    expected_revision: None,
+                },
+            )
+        }
+
+        fn receipt(&self) -> String {
+            self.member.store().connection().query_row("SELECT receipt_json FROM delegation_operations WHERE operation_kind='assign_specialist_task'", [], |row| row.get(0)).unwrap()
+        }
+
+        fn collect(
+            &self,
+            task_ref: Uuid,
+        ) -> Result<crate::delegation_service::CollectedTask, MachineError> {
+            crate::delegation_service::collect_specialist_task(
+                &self.scope(),
+                &self.context(),
+                &self.port(),
+                crate::delegation_service::CollectSpecialistTask {
+                    member_ref: self.member.member_ref,
+                    task_ref,
+                    adapter_id: "fixture",
+                    adapter_version: "test",
+                },
+            )
+        }
+
+        fn identity(
+            &self,
+            task_ref: Uuid,
+        ) -> Result<crate::delegation_service::DelegationIdentityView, MachineError> {
+            crate::delegation_service::get_managed_delegation_identity(
+                &self.scope(),
+                &self.context(),
+                &crate::caller_scope::fixture(3),
+                &self.port(),
+                crate::delegation_service::CollectSpecialistTask {
+                    member_ref: self.member.member_ref,
+                    task_ref,
+                    adapter_id: "fixture",
+                    adapter_version: "test",
+                },
+            )
+        }
+    }
+
+    fn writers(member: &ManagedMember) -> crate::writer::WriterStore {
+        crate::writer::WriterStore::new(
+            &member.state_root,
+            &member.view.workspace_id,
+            DarwinSystem.current_uid(),
+        )
+    }
+
+    fn hold(member: &ManagedMember, run_id: Uuid, binding: &ControllerBinding) {
+        let thread_id = RunStore::new(SystemWorkspacePlatform, &member.state_root)
+            .load_state_projection(member.member_ref)
+            .unwrap()
+            .thread_id;
+        let holder = crate::writer::WriterStore::holder(
+            run_id,
+            member.manifest.profile.profile_name.clone(),
+            binding,
+            1,
+            member.manifest.profile.initial_server_key.clone(),
+            member.manifest.profile_capability_snapshot.server_epoch,
+            thread_id,
+            RunLifecycle::Idle,
+        );
+        writers(member)
+            .transact(|writer| {
+                let transaction = Uuid::now_v7();
+                let (_, generation) = writer.prepare_acquire(run_id, holder, transaction)?;
+                writer.commit_acquire(transaction, generation)
+            })
+            .unwrap();
+    }
+
+    fn index(member: &ManagedMember, task_ref: Uuid) {
+        let writer = writers(member).load().unwrap();
+        assert_eq!(writer.state, crate::writer::WriterAuthorityState::Active);
+        assert_eq!(writer.holder.unwrap().run_id, member.member_ref);
+        let capture = crate::successor_capture::capture_dispatch_index(
+            &member.view.canonical_path.to_path_buf().unwrap(),
+            task_ref,
+        )
+        .unwrap();
+        member
+            .store()
+            .transact(|transaction| {
+                crate::engagement::record_dispatch_index_with_content(
+                    transaction,
+                    crate::engagement::DispatchIndexRecord {
+                        task_id: task_ref,
+                        workspace_ref: &member.view.workspace_id,
+                        run_ref: member.member_ref,
+                        head_commit: capture.head.as_deref(),
+                        index_sha256: &capture.sha256,
+                        index_byte_length: capture.canonical.len() as u64,
+                        file_count: capture.file_count,
+                        baseline_bytes: capture.baseline_bytes,
+                    },
+                    &capture.canonical,
+                    &capture.baseline,
+                    unix_time_ms_semantic().unwrap(),
+                )?;
+                crate::orchestration::mark_successor_task_dispatching(
+                    transaction,
+                    member.session_id,
+                    task_ref,
+                    unix_time_ms_semantic().unwrap(),
+                )
+            })
+            .unwrap();
+    }
+
+    fn running(scene: &Assignment) -> Uuid {
+        let member = &scene.member;
+        hold(member, member.member_ref, &member.manifest.controller);
+        let task = member.accept_write_task("write");
+        index(member, task.task_ref);
+        member.mark_task_running(task.task_ref, "write-turn");
+        task.task_ref
+    }
+
+    fn publish_terminal(scene: &Assignment) -> Result<(), MachineError> {
+        publish_terminal_lifecycle(scene, RunLifecycle::Idle)
+    }
+
+    fn publish_terminal_lifecycle(
+        scene: &Assignment,
+        lifecycle: RunLifecycle,
+    ) -> Result<(), MachineError> {
+        let member = &scene.member;
+        let prior = RunStore::new(SystemWorkspacePlatform, &member.state_root)
+            .load_state_projection(member.member_ref)?;
+        member.publish_terminal_turn("write-turn", "completed", "complete answer", lifecycle);
+        if prior.thread_id.is_some() {
+            let path = run_root(&member.state_root, member.member_ref).join("state.json");
+            let mut projection = RunStore::new(SystemWorkspacePlatform, &member.state_root)
+                .load_state_projection(member.member_ref)?;
+            projection.thread_id = prior.thread_id;
+            projection.run_generation = prior.run_generation;
+            std::fs::write(path, serde_json::to_vec(&projection).unwrap()).unwrap();
+        }
+        Ok(())
+    }
+
+    fn complete(scene: &Assignment) -> Result<(), MachineError> {
+        publish_terminal(scene)?;
+        let member = &scene.member;
+        settle_bound_successor_task(
+            &member.state_root,
+            member.member_ref,
+            member.owner(),
+            &member.terminal("write-turn"),
+        )
+    }
+
+    fn result(
+        member: &ManagedMember,
+        task_ref: Uuid,
+    ) -> crate::delegation_identity::CompleteResult {
+        serde_json::from_slice(&member.complete_result_bytes(task_ref).unwrap()).unwrap()
+    }
+
+    /// Match the external write fixture: establish the native policy effect in
+    /// WriterStore, then use the real index, Submit transport and task stores.
+    /// This does not manufacture a qualified caller-policy proof.
+    struct FixtureWriteDispatch<'a>(&'a Assignment);
+
+    impl crate::delegation_service::RunSettlementPort for FixtureWriteDispatch<'_> {
+        fn start_member_run(
+            &self,
+            _request: crate::delegation_service::AdmittedMemberStart<'_>,
+        ) -> Result<crate::delegation_service::MemberRunStart, MachineError> {
+            panic!("the write fixture starts no new member")
+        }
+
+        fn dispatch_member_task(
+            &self,
+            _request: crate::delegation_service::MemberTaskDispatch<'_>,
+        ) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
+            panic!("the write fixture dispatches only its managed member")
+        }
+
+        fn settle_member_task(
+            &self,
+            request: crate::delegation_service::MemberTaskSettlement<'_>,
+        ) -> Result<crate::delegation_service::MemberSettlement, MachineError> {
+            self.0.port().settle_member_task(request)
+        }
+
+        fn settle_member_release(
+            &self,
+            request: crate::delegation_service::MemberReleaseRequest<'_>,
+        ) -> Result<
+            crate::delegation_service::MemberReleaseOutcome,
+            crate::delegation_service::MemberReleaseFailure,
+        > {
+            self.0.port().settle_member_release(request)
+        }
+
+        fn member_writer_observation(
+            &self,
+            request: crate::delegation_service::MemberCleanupObservation<'_>,
+        ) -> Result<crate::delegation_service::MemberWriterObservation, MachineError> {
+            self.0.port().member_writer_observation(request)
+        }
+
+        fn dispatch_managed_task(
+            &self,
+            request: crate::delegation_service::ManagedTaskDispatch<'_>,
+        ) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
+            let member = &self.0.member;
+            assert_eq!(request.member_ref, member.member_ref);
+            assert_eq!(request.execution_intent, "canonical_workspace_write");
+            assert!(
+                !self.0.receipt().is_empty(),
+                "acceptance commits before writer acquisition"
+            );
+            let carrier = broker(member);
+            authorize_controller(
+                member.member_ref,
+                "run.acquire_write",
+                &member.manifest.controller,
+                &carrier,
+            )?;
+            assert_eq!(
+                writers(member).load()?.state,
+                crate::writer::WriterAuthorityState::None
+            );
+            hold(member, member.member_ref, &member.manifest.controller);
+            let generation = writers(member).load()?.writer_generation;
+            append_policy(
+                &member.state_root,
+                member.member_ref,
+                AuditKind::WriterAcquired,
+                Uuid::now_v7(),
+                true,
+                generation,
+            );
+            index(member, request.task_ref);
+            let response = crate::worker::call_run_worker(
+                &member.state_root,
+                member.member_ref,
+                DarwinSystem.current_uid(),
+                Some(carrier.raw_fd()),
+                |expected| ControlRequestV1::Submit {
+                    expected,
+                    caller: None,
+                    request: TurnControlRequest {
+                        normalized_request_sha256: None,
+                        write: false,
+                        message: request
+                            .contents
+                            .prompt(
+                                request.accepted,
+                                request.execution_intent,
+                                request.deadline_seconds,
+                            )
+                            .unwrap(),
+                        idempotency_key: format!("successor-task:{}", request.task_ref),
+                        effort: None,
+                        images: vec![],
+                    },
+                },
+            )
+            .map_err(|error| error.machine_error(member.member_ref, &member.state_root))?;
+            let ControlResponseV1::Accepted { accepted } = response else {
+                panic!("the scripted worker must acknowledge Submit")
+            };
+            member.store().transact(|transaction| {
+                crate::orchestration::mark_successor_task_running(
+                    transaction,
+                    member.session_id,
+                    request.task_ref,
+                    &accepted.turn_id,
+                    unix_time_ms_semantic()?,
+                )?;
+                crate::caller_scope::accepted(transaction, request.task_ref)
+            })?;
+            Ok(crate::delegation_service::MemberDispatchOutcome::Accepted {
+                turn_ref: accepted.turn_id,
+            })
+        }
+    }
+
+    fn exercise_managed_write_release(retry_after_commit: bool) {
+        let scene = Assignment::releasable();
+        let workspace = scene.member.view.canonical_path.to_path_buf().unwrap();
+        std::fs::write(workspace.join("README.md"), b"dirty before\r\n").unwrap();
+        let worker = ScriptedWorker::start(&scene, 0);
+        let (assigned, receipt) = scene.assign_using(&FixtureWriteDispatch(&scene)).unwrap();
+        let task = Uuid::parse_str(&assigned.task_ref).unwrap();
+        assert_eq!(assigned.state, "running");
+        let receipt_bytes = scene.receipt();
+        let held = writers(&scene.member).load().unwrap();
+        assert_eq!(held.state, crate::writer::WriterAuthorityState::Active);
+        assert_eq!(
+            held.holder.as_ref().unwrap().run_id,
+            scene.member.member_ref
+        );
+        assert!(
+            scene
+                .member
+                .store()
+                .dispatch_index_object(task)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(&*worker.calls.lock().unwrap(), &["run.submit"]);
+        std::fs::write(workspace.join("README.md"), b"retained after\r\n").unwrap();
+        std::fs::write(workspace.join("new.txt"), b"added\n").unwrap();
+        std::fs::set_permissions(
+            workspace.join("new.txt"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        // As in the external settlement fixture, Closed is an established Run
+        // fact. The real managed release must still prove the exact generation.
+        publish_terminal_lifecycle(&scene, RunLifecycle::Closed).unwrap();
+        let workload = scene.member.workload_revision();
+        let request = || crate::delegation_service::MemberTaskSettlement {
+            view: &scene.member.view,
+            state_root: &scene.member.state_root,
+            owner: scene.member.owner(),
+            member_ref: scene.member.member_ref,
+            task_ref: task,
+            execution_intent: "canonical_workspace_write",
+        };
+        if retry_after_commit {
+            assert_eq!(
+                scene.port().settle_member_task(request()).unwrap_err().code,
+                "RUN_STATE_CONFLICT"
+            );
+        } else {
+            settle_bound_successor_task(
+                &scene.member.state_root,
+                scene.member.member_ref,
+                scene.member.owner(),
+                &scene.member.terminal("write-turn"),
+            )
+            .unwrap();
+        }
+        let bytes = scene.member.complete_result_bytes(task).unwrap();
+        let complete = result(&scene.member, task);
+        let digest = complete.digest().unwrap();
+        assert_eq!(
+            complete
+                .changes
+                .iter()
+                .map(|change| change.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["README.md", "new.txt"]
+        );
+        assert_eq!(complete.changes[0].before_mode, Some(0o644));
+        assert_eq!(complete.changes[0].after_mode, Some(0o644));
+        assert_eq!(complete.changes[1].before_mode, None);
+        assert_eq!(complete.changes[1].after_mode, Some(0o600));
+        assert_eq!(scene.member.workload_revision(), workload + 1);
+        assert_eq!(scene.member.round_state(task), "counted_accepted");
+        assert_eq!(scene.receipt(), receipt_bytes);
+        assert_eq!(
+            writers(&scene.member).load().unwrap(),
+            held,
+            "terminal result commits before the writer is released"
+        );
+        let collected = scene.collect(task).unwrap();
+        assert!(collected.disposition.cleanup_pending);
+        assert_eq!(
+            scene.identity(task).unwrap_err().code,
+            "DISPOSITION_NOT_IDLE"
+        );
+        for (side, expected) in [
+            ("before", b"dirty before\r\n".as_slice()),
+            ("after", b"retained after\r\n".as_slice()),
+        ] {
+            assert_eq!(
+                crate::engagement::retained_change_side(
+                    scene.member.store().connection(),
+                    task,
+                    "README.md",
+                    side
+                )
+                .unwrap()
+                .unwrap(),
+                expected
+            );
+        }
+        std::fs::remove_file(workspace.join("README.md")).unwrap();
+        std::fs::remove_file(workspace.join("new.txt")).unwrap();
+        if retry_after_commit {
+            assert_eq!(
+                scene.port().settle_member_task(request()).unwrap(),
+                crate::delegation_service::MemberSettlement::Terminal
+            );
+            assert_eq!(scene.assign().unwrap().1, receipt);
+            resettle_member_tasks(
+                &scene.member.state_root,
+                scene.member.member_ref,
+                scene.member.owner(),
+            )
+            .unwrap();
+            assert_eq!(scene.member.complete_result_bytes(task).unwrap(), bytes);
+            assert_eq!(scene.member.workload_revision(), workload + 1);
+            assert_eq!(scene.receipt(), receipt_bytes);
+            assert_eq!(writers(&scene.member).load().unwrap(), held);
+            assert_eq!(&*worker.calls.lock().unwrap(), &["run.submit"]);
+        }
+        let runtime_path = crate::worker::runtime_record_path(
+            &crate::worker::runtime_root(&scene.member.state_root),
+            scene.member.member_ref,
+        )
+        .unwrap();
+        drop(worker);
+        crate::worker::remove_verified_absent_runtime(&runtime_path, DarwinSystem.current_uid())
+            .unwrap();
+        assert_eq!(writers(&scene.member).load().unwrap(), held);
+        let release = || {
+            crate::delegation_service::release_specialist(
+                &scene.scope(),
+                &scene.context(),
+                &scene.port(),
+                crate::delegation_service::ReleaseSpecialist {
+                    member_ref: scene.member.member_ref,
+                    expected_revision: collected.disposition.membership_revision,
+                    allow_interrupt: false,
+                },
+            )
+        };
+        let released = release().unwrap();
+        assert_eq!(released.state, "released");
+        assert_eq!(released.operation.progress, "terminal");
+        let writer = writers(&scene.member).load().unwrap();
+        assert_eq!(writer.state, crate::writer::WriterAuthorityState::None);
+        assert_eq!(writer.writer_generation, held.writer_generation);
+        let binding = scene
+            .member
+            .manifest
+            .global_profile_binding
+            .as_ref()
+            .unwrap();
+        let membership = GlobalMembershipStore::from_root(
+            &scene.member.root.join("release-home"),
+            &binding.selected_name,
+            &binding.server_key,
+        )
+        .unwrap()
+        .load()
+        .unwrap();
+        assert_eq!(
+            membership.members[&format!(
+                "{}:{}",
+                scene.member.view.workspace_id, scene.member.member_ref
+            )]
+                .disposition,
+            MembershipDisposition::Released
+        );
+        assert_eq!(scene.member.complete_result_bytes(task).unwrap(), bytes);
+        assert_eq!(scene.member.workload_revision(), workload + 1);
+        assert_eq!(scene.member.rounds_used(), 1);
+        assert_eq!(scene.receipt(), receipt_bytes);
+        assert_eq!(scene.assign().unwrap().1, receipt);
+        assert_eq!(release().unwrap().operation, released.operation);
+        assert_eq!(writers(&scene.member).load().unwrap(), writer);
+        resettle_member_tasks(
+            &scene.member.state_root,
+            scene.member.member_ref,
+            scene.member.owner(),
+        )
+        .unwrap();
+        let exported = scene.identity(task).unwrap();
+        assert_eq!(exported.identity.worker_disposition, "released");
+        assert_eq!(exported.identity.result_digest, digest);
+        assert_eq!(exported.identity.complete_result, complete);
+        assert!(!scene.collect(task).unwrap().disposition.cleanup_pending);
+        let store = scene.member.store();
+        for table in [
+            "brokered_tasks",
+            "dispatch_indexes",
+            "caller_scope_assignments",
+        ] {
+            assert_eq!(
+                store
+                    .connection()
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, u64>(0))
+                    .unwrap(),
+                1,
+                "{table}"
+            );
+        }
+        let (_, ledger) =
+            observe_caller_ledger(&scene.member.state_root, scene.member.member_ref).unwrap();
+        assert_eq!(
+            ledger
+                .payloads_of_kind(AuditKind::TurnStarted)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            ledger
+                .payloads_of_kind(AuditKind::TurnTerminal)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            super::release_probe::release_row_count(&scene.member.state_root),
+            1
+        );
+    }
+
+    #[test]
+    fn managed_write_fixture_dispatch_publishes_changes_and_releases_after_terminal() {
+        exercise_managed_write_release(false);
+    }
+
+    #[test]
+    fn managed_post_commit_cleanup_retry_preserves_receipt_result_and_dispatch() {
+        exercise_managed_write_release(true);
+    }
+
+    #[test]
+    fn managed_primary_writer_busy_preserves_receipt_and_releases_only_the_round() {
+        let scene = Assignment::new();
+        hold(&scene.member, scene.member.session_id, &scene.controller);
+        let primary = writers(&scene.member).load().unwrap();
+        let error = scene.assign().unwrap_err();
+        assert_eq!(error.code, "WRITER_BUSY");
+        assert_eq!(error.details["effect"], "accepted");
+        assert_eq!(scene.member.rounds_used(), 0);
+        assert_eq!(writers(&scene.member).load().unwrap(), primary);
+        let receipt = scene.receipt();
+        let replay = scene.assign().unwrap().1;
+        assert_eq!(
+            serde_json::from_str::<Value>(&receipt).unwrap(),
+            serde_json::to_value(replay).unwrap()
+        );
+        assert_eq!(scene.receipt(), receipt);
+        let store = scene.member.store();
+        let task_ref: String = store
+            .connection()
+            .query_row("SELECT task_id FROM brokered_tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            scene
+                .member
+                .round_state(Uuid::parse_str(&task_ref).unwrap()),
+            "proved_nondispatch"
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM dispatch_indexes", [], |row| row
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.connection().query_row("SELECT COUNT(*) FROM brokered_tasks WHERE state IN ('queued','dispatching','running')", [], |row| row.get::<_, u64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn managed_acquire_uncertainty_keeps_the_receipt_task_and_round() {
+        for unreadable_writer in [false, true] {
+            let scene = Assignment::new();
+            if unreadable_writer {
+                std::fs::write(
+                    scene.member.state_root.join("runtime/writer.json"),
+                    b"invalid writer record",
+                )
+                .unwrap();
+            } else {
+                let path = crate::worker::runtime_record_path(
+                    &crate::worker::runtime_root(&scene.member.state_root),
+                    scene.member.member_ref,
+                )
+                .unwrap();
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"invalid runtime record").unwrap();
+            }
+            let error = scene.assign().unwrap_err();
+            assert_eq!(error.details["effect"], "accepted");
+            assert_eq!(error.details["classification"], "RecoveryNeeded");
+            assert_eq!(scene.member.rounds_used(), 1);
+            let task_ref: String = scene
+                .member
+                .store()
+                .connection()
+                .query_row("SELECT task_id FROM brokered_tasks", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                scene
+                    .member
+                    .round_state(Uuid::parse_str(&task_ref).unwrap()),
+                "counted_unresolved"
+            );
+            assert!(!scene.receipt().is_empty());
+        }
+    }
+
+    #[test]
+    fn managed_changes_retain_bytes_modes_and_ignore_shell_only_files() {
+        let scene = Assignment::new();
+        let workspace = scene.member.view.canonical_path.to_path_buf().unwrap();
+        std::fs::write(workspace.join(".gitignore"), b"*.log\n").unwrap();
+        std::fs::write(workspace.join("README.md"), b"dirty baseline\r\n").unwrap();
+        let task = running(&scene);
+        std::fs::write(workspace.join("README.md"), b"retained after\r\n").unwrap();
+        std::fs::write(workspace.join("shell.log"), b"ignored shell output\n").unwrap();
+        std::fs::write(workspace.join("mode.txt"), b"mode\n").unwrap();
+        complete(&scene).unwrap();
+        let complete = result(&scene.member, task);
+        assert_eq!(complete.changes.len(), 2);
+        assert!(
+            complete
+                .changes
+                .iter()
+                .all(|change| change.path != "shell.log")
+        );
+        std::fs::remove_file(workspace.join("README.md")).unwrap();
+        let store = scene.member.store();
+        for (side, expected) in [
+            ("before", b"dirty baseline\r\n".as_slice()),
+            ("after", b"retained after\r\n".as_slice()),
+        ] {
+            let bytes = crate::engagement::retained_change_side(
+                store.connection(),
+                task,
+                "README.md",
+                side,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(bytes, expected);
+            let change = complete
+                .changes
+                .iter()
+                .find(|change| change.path == "README.md")
+                .unwrap();
+            let reference = if side == "before" {
+                change.before.as_ref()
+            } else {
+                change.after.as_ref()
+            }
+            .unwrap();
+            assert_eq!(reference.sha256, format!("sha256:{}", sha256_hex(&bytes)));
+        }
+    }
+
+    #[test]
+    fn managed_mode_only_changes_preserve_all_permission_bits() {
+        for mode in [0o755, 0o600] {
+            let scene = Assignment::new();
+            let path = scene
+                .member
+                .view
+                .canonical_path
+                .to_path_buf()
+                .unwrap()
+                .join("README.md");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let task = running(&scene);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            complete(&scene).unwrap();
+            let complete = result(&scene.member, task);
+            assert_eq!(complete.changes.len(), 1);
+            let change = &complete.changes[0];
+            assert_eq!(change.before, change.after);
+            assert_eq!(change.before_mode, Some(0o644));
+            assert_eq!(change.after_mode, Some(u64::from(mode)));
+        }
+    }
+
+    #[test]
+    fn managed_change_quota_rolls_back_to_unavailable() {
+        let scene = Assignment::new();
+        let task = running(&scene);
+        scene.member.store().connection().execute("INSERT INTO dispatch_indexes(task_id,workspace_ref,run_ref,head_commit,index_sha256,index_byte_length,file_count,baseline_bytes,created_at_ms)
+            VALUES(?1,?2,?3,NULL,?4,1,0,?5,1)",
+            rusqlite::params![Uuid::now_v7().to_string(),scene.member.view.workspace_id,scene.member.member_ref.to_string(),"a".repeat(64),crate::engagement::MAX_RUN_BASELINE_BYTES]).unwrap();
+        std::fs::write(
+            scene
+                .member
+                .view
+                .canonical_path
+                .to_path_buf()
+                .unwrap()
+                .join("README.md"),
+            b"edited\n",
+        )
+        .unwrap();
+        complete(&scene).unwrap();
+        let bytes = scene.member.complete_result_bytes(task).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["schema"],
+            "dolgorae.complete-result-unavailable/v1"
+        );
+        assert_eq!(
+            scene
+                .member
+                .store()
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM result_content_refs WHERE owner_kind='successor_change'",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            scene.collect(task).unwrap_err().code,
+            "COMPLETE_RESULT_UNAVAILABLE"
+        );
+        assert_eq!(
+            scene.identity(task).unwrap_err().code,
+            "COMPLETE_RESULT_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn managed_retention_mid_insert_error_rolls_back_and_retries() {
+        let scene = Assignment::new();
+        let task = running(&scene);
+        let contents: u64 = scene
+            .member
+            .store()
+            .connection()
+            .query_row("SELECT COUNT(*) FROM result_content", [], |row| row.get(0))
+            .unwrap();
+        let refs: u64 = scene
+            .member
+            .store()
+            .connection()
+            .query_row("SELECT COUNT(*) FROM result_content_refs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        std::fs::write(
+            scene
+                .member
+                .view
+                .canonical_path
+                .to_path_buf()
+                .unwrap()
+                .join("README.md"),
+            b"edited\n",
+        )
+        .unwrap();
+        scene.member.store().connection().execute_batch("CREATE TRIGGER refuse_change_side BEFORE INSERT ON result_content_refs
+            WHEN NEW.owner_kind='successor_change' AND NEW.representation='after:README.md'
+            AND EXISTS(SELECT 1 FROM result_content_refs WHERE owner_kind='successor_change' AND owner_id=NEW.owner_id AND representation='before:README.md')
+            BEGIN SELECT RAISE(ABORT,'injected retention failure'); END;").unwrap();
+        assert_eq!(complete(&scene).unwrap_err().code, "INTERNAL_ERROR");
+        assert_eq!(scene.member.task_state(task), "running");
+        assert_eq!(scene.member.workload_revision(), 0);
+        assert!(scene.member.complete_result_bytes(task).is_none());
+        assert_eq!(
+            scene
+                .member
+                .store()
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM result_content_refs WHERE owner_kind='successor_change'",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            writers(&scene.member).load().unwrap().state,
+            crate::writer::WriterAuthorityState::Active
+        );
+        assert_eq!(scene.member.round_state(task), "counted_accepted");
+        assert_eq!(
+            scene
+                .member
+                .store()
+                .connection()
+                .query_row("SELECT COUNT(*) FROM result_content", [], |row| row
+                    .get::<_, u64>(0))
+                .unwrap(),
+            contents
+        );
+        assert_eq!(
+            scene
+                .member
+                .store()
+                .connection()
+                .query_row("SELECT COUNT(*) FROM result_content_refs", [], |row| row
+                    .get::<_, u64>(0))
+                .unwrap(),
+            refs
+        );
+        scene
+            .member
+            .store()
+            .connection()
+            .execute_batch("DROP TRIGGER refuse_change_side")
+            .unwrap();
+        resettle_member_tasks(
+            &scene.member.state_root,
+            scene.member.member_ref,
+            scene.member.owner(),
+        )
+        .unwrap();
+        assert_eq!(result(&scene.member, task).changes.len(), 1);
+        assert_eq!(scene.member.workload_revision(), 1);
+    }
+
+    #[test]
+    fn managed_async_terminal_observes_cleanup_and_active_write_counts() {
+        let scene = Assignment::new();
+        let first = running(&scene);
+        complete(&scene).unwrap();
+        let before = scene.member.workload_revision();
+        let collected = scene.collect(first).unwrap();
+        assert!(collected.disposition.cleanup_pending);
+        assert_eq!(
+            scene.identity(first).unwrap_err().code,
+            "DISPOSITION_NOT_IDLE"
+        );
+        assert_eq!(scene.member.workload_revision(), before);
+        // A later active write belongs to the held guard rather than stale cleanup.
+        let second = scene.member.accept_write_task("next-write");
+        assert!(!scene.collect(first).unwrap().disposition.cleanup_pending);
+        let json: String = scene
+            .member
+            .store()
+            .connection()
+            .query_row(
+                "SELECT accepted_request_json FROM brokered_task_acceptances WHERE task_id=?1",
+                [second.task_ref.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut tampered: Value = serde_json::from_str(&json).unwrap();
+        tampered["execution_intent"] = json!("read_only");
+        scene
+            .member
+            .store()
+            .connection()
+            .execute(
+                "UPDATE brokered_task_acceptances SET accepted_request_json=?1 WHERE task_id=?2",
+                rusqlite::params![
+                    serde_json::to_string(&tampered).unwrap(),
+                    second.task_ref.to_string()
+                ],
+            )
+            .unwrap();
+        assert!(scene.collect(first).is_err());
+        assert!(scene.identity(first).is_err());
+        scene
+            .member
+            .store()
+            .connection()
+            .execute(
+                "UPDATE brokered_task_acceptances SET accepted_request_json='{}',accepted_request_sha256=?1 WHERE task_id=?2",
+                rusqlite::params![sha256_hex(b"{}"),second.task_ref.to_string()],
+            )
+            .unwrap();
+        assert!(scene.collect(first).is_err());
+        assert!(scene.identity(first).is_err());
+    }
+
+    #[test]
+    fn managed_collect_and_identity_bind_count_and_quiescence_to_one_snapshot() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        for identity in [false, true] {
+            for writer_changes in [false, true] {
+                let scene = Rc::new(Assignment::new());
+                let first = running(&scene);
+                complete(&scene).unwrap();
+                let second = (!writer_changes).then(|| {
+                    scene
+                        .member
+                        .accept_write_task("active-before-observation")
+                        .task_ref
+                });
+                let counts = Rc::new(RefCell::new(Vec::new()));
+                let operation = if identity {
+                    "get_managed_delegation_identity"
+                } else {
+                    "collect_specialist_task"
+                };
+                let mut interleaved = false;
+                let probe = crate::delegation_service::set_managed_observation_probe({
+                    let scene = Rc::clone(&scene);
+                    let counts = Rc::clone(&counts);
+                    move |observed, count| {
+                        if observed != operation {
+                            return;
+                        }
+                        if let Some(count) = count {
+                            counts.borrow_mut().push(count);
+                            return;
+                        }
+                        if interleaved {
+                            return;
+                        }
+                        interleaved = true;
+                        if writer_changes {
+                            scene.member.accept_write_task("active-during-observation");
+                            writers(&scene.member)
+                                .transact(|record| {
+                                    let transaction = Uuid::now_v7();
+                                    record.prepare_release(scene.member.member_ref, transaction)?;
+                                    record.block_unknown(transaction);
+                                    Ok(())
+                                })
+                                .unwrap();
+                        } else {
+                            scene
+                                .member
+                                .store()
+                                .transact(|transaction| {
+                                    assert!(crate::orchestration::settle_successor_task_result(
+                                        transaction,
+                                        scene.member.session_id,
+                                        second.unwrap(),
+                                        "failed",
+                                        Some("TURN_FAILED"),
+                                        None,
+                                        unix_time_ms_semantic()?
+                                    )?);
+                                    Ok(())
+                                })
+                                .unwrap();
+                        }
+                    }
+                });
+                if identity {
+                    assert_eq!(
+                        scene.identity(first).unwrap_err().code,
+                        "DISPOSITION_NOT_IDLE"
+                    );
+                } else {
+                    let observed = scene.collect(first).unwrap();
+                    assert_eq!(observed.disposition.dispatching, 1);
+                    assert_eq!(observed.disposition.cleanup_pending, writer_changes);
+                }
+                drop(probe);
+                assert_eq!(
+                    *counts.borrow(),
+                    if writer_changes { vec![0, 1] } else { vec![1] }
+                );
+                let latest = crate::orchestration::successor_member_quiescence(
+                    scene.member.store().connection(),
+                    &scene.member.view.workspace_id,
+                    scene.member.session_id,
+                    scene.member.member_ref,
+                )
+                .unwrap();
+                assert_eq!(latest.dispatching, u64::from(writer_changes));
+            }
+        }
+    }
+
+    #[test]
+    fn managed_release_failure_after_publication_does_not_resettle() {
+        let scene = Assignment::new();
+        let task = running(&scene);
+        publish_terminal(&scene).unwrap();
+        let broker = crate::orchestration::BrokerCredential::load(
+            &scene
+                .member
+                .state_root
+                .join("orchestration/broker-credentials"),
+            DarwinSystem.current_uid(),
+            scene.member.member_ref,
+        )
+        .unwrap();
+        let carrier = broker.controller_carrier().unwrap();
+        let settle = || {
+            settle_successor_task(
+                &scene.member.view,
+                &scene.member.state_root,
+                scene.member.owner(),
+                scene.member.member_ref,
+                task,
+                "canonical_workspace_write",
+                Some(&carrier),
+            )
+        };
+        assert!(settle().is_err());
+        let bytes = scene.member.complete_result_bytes(task).unwrap();
+        assert_eq!(scene.member.workload_revision(), 1);
+        assert_eq!(
+            writers(&scene.member).load().unwrap().state,
+            crate::writer::WriterAuthorityState::BlockedUnknown
+        );
+        assert!(scene.collect(task).unwrap().disposition.cleanup_pending);
+        assert_eq!(
+            settle().unwrap(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        resettle_member_tasks(
+            &scene.member.state_root,
+            scene.member.member_ref,
+            scene.member.owner(),
+        )
+        .unwrap();
+        assert_eq!(scene.member.complete_result_bytes(task).unwrap(), bytes);
+        assert_eq!(scene.member.workload_revision(), 1);
+    }
+
+    #[test]
+    fn ordinary_closed_managed_run_still_refuses_writer_release() {
+        let scene = Assignment::new();
+        let _task = running(&scene);
+        scene.member.publish_terminal_turn(
+            "write-turn",
+            "completed",
+            "answer",
+            RunLifecycle::Closed,
+        );
+        let broker = crate::orchestration::BrokerCredential::load(
+            &scene
+                .member
+                .state_root
+                .join("orchestration/broker-credentials"),
+            DarwinSystem.current_uid(),
+            scene.member.member_ref,
+        )
+        .unwrap();
+        let carrier = broker.controller_carrier().unwrap();
+        let before = writers(&scene.member).load().unwrap();
+        assert_eq!(
+            release_writer_authorized(
+                &scene.member.view,
+                &scene.member.state_root,
+                scene.member.member_ref,
+                &carrier,
+                None,
+                None
+            )
+            .unwrap_err()
+            .code,
+            "RUN_STATE_CONFLICT"
+        );
+        assert_eq!(writers(&scene.member).load().unwrap(), before);
+    }
+
+    fn broker(member: &ManagedMember) -> CredentialCarrier {
+        crate::orchestration::BrokerCredential::load(
+            &member.state_root.join("orchestration/broker-credentials"),
+            DarwinSystem.current_uid(),
+            member.member_ref,
+        )
+        .unwrap()
+        .controller_carrier()
+        .unwrap()
+    }
+
+    #[test]
+    fn managed_live_close_reader_refusal_or_mismatched_proof_preserves_the_guard() {
+        for failure in 1..=2 {
+            let scene = Assignment::new();
+            let worker = ScriptedWorker::start(&scene, failure);
+            let carrier = broker(&scene.member);
+            hold(
+                &scene.member,
+                scene.member.member_ref,
+                &scene.member.manifest.controller,
+            );
+            let generation = writers(&scene.member).load().unwrap().writer_generation;
+            append_policy(
+                &scene.member.state_root,
+                scene.member.member_ref,
+                AuditKind::WriterAcquired,
+                Uuid::now_v7(),
+                true,
+                generation,
+            );
+            assert!(
+                successor_close_run(
+                    &scene.member.view,
+                    &scene.member.state_root,
+                    scene.member.member_ref,
+                    &carrier,
+                    false
+                )
+                .is_err()
+            );
+            let projection = RunStore::new(SystemWorkspacePlatform, &scene.member.state_root)
+                .load_state_projection(scene.member.member_ref)
+                .unwrap();
+            assert_ne!(projection.lifecycle, RunLifecycle::Closed);
+            let writer = writers(&scene.member).load().unwrap();
+            assert_eq!(writer.holder.unwrap().run_id, scene.member.member_ref);
+            assert_eq!(
+                writer.state,
+                crate::writer::WriterAuthorityState::BlockedUnknown
+            );
+            let (_, ledger) =
+                observe_caller_ledger(&scene.member.state_root, scene.member.member_ref).unwrap();
+            assert!(
+                ledger
+                    .records()
+                    .iter()
+                    .all(|record| record.kind() != AuditKind::CleanupResult)
+            );
+            assert!(
+                !worker
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|call| call == "run.close")
+            );
+            assert_eq!(
+                scene
+                    .member
+                    .store()
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM member_release_operations",
+                        [],
+                        |row| row.get::<_, u64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn external_live_release_verifies_reader_before_close_and_preserves_failed_guard() {
+        use crate::delegation_service::MemberReleaseFailure;
+        for failure in 1..=2 {
+            let scene = super::release_fixture::ReleasableMember::external(
+                super::release_fixture::ReleaseScene::CloseSettlement,
+            );
+            let worker = ScriptedWorker::start_member(
+                &scene.view,
+                &scene.state_root,
+                &scene.manifest,
+                failure,
+            );
+            let writer = crate::writer::WriterStore::new(
+                &scene.state_root,
+                &scene.view.workspace_id,
+                DarwinSystem.current_uid(),
+            );
+            let transaction = Uuid::now_v7();
+            let (_, generation) = writer
+                .transact(|record| {
+                    let (_, generation) = record.prepare_acquire(
+                        scene.member_ref,
+                        crate::writer::WriterStore::holder(
+                            scene.member_ref,
+                            scene.manifest.profile.profile_name.clone(),
+                            &scene.manifest.controller,
+                            1,
+                            scene
+                                .manifest
+                                .profile_capability_snapshot
+                                .server_key
+                                .clone(),
+                            1,
+                            Some("thread-1".to_owned()),
+                            RunLifecycle::Idle,
+                        ),
+                        transaction,
+                    )?;
+                    record.commit_acquire(transaction, generation)?;
+                    Ok(generation)
+                })
+                .unwrap();
+            append_policy(
+                &scene.state_root,
+                scene.member_ref,
+                AuditKind::WriterAcquired,
+                transaction,
+                true,
+                generation,
+            );
+            let membership = membership_for_run(&scene.state_root, &scene.manifest).unwrap();
+            let profile_before = serde_json::to_value(membership.load_existing().unwrap()).unwrap();
+            let result = scene.release(scene.revision);
+            let calls = worker.calls.lock().unwrap().clone();
+            assert!(
+                calls.iter().any(|call| call == "engagement.release_write"),
+                "Reader transition must be attempted before close: {calls:?}"
+            );
+            let (_, ledger) = observe_caller_ledger(&scene.state_root, scene.member_ref).unwrap();
+
+            assert!(
+                !calls.iter().any(|call| call == "engagement.release"),
+                "Reader failure must not reach ExternalClose: {calls:?}"
+            );
+            let MemberReleaseFailure::AfterAdmission { error, .. } = result.unwrap_err() else {
+                panic!("Reader failure must retain its admitted recovery operation");
+            };
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            assert!(!scene.membership_released());
+            assert_eq!(
+                serde_json::to_value(membership.load_existing().unwrap()).unwrap(),
+                profile_before
+            );
+            assert_eq!(scene.member_state(), "releasing");
+            assert!(
+                ledger
+                    .records()
+                    .iter()
+                    .all(|record| record.kind() != AuditKind::CleanupResult)
+            );
+            assert_ne!(
+                RunStore::new(SystemWorkspacePlatform, &scene.state_root)
+                    .load_state_projection(scene.member_ref)
+                    .unwrap()
+                    .lifecycle,
+                RunLifecycle::Closed
+            );
+            let guard = writer.load().unwrap();
+            assert_eq!(
+                guard.state,
+                crate::writer::WriterAuthorityState::BlockedUnknown
+            );
+            assert_eq!(guard.writer_generation, generation);
+            assert_eq!(guard.holder.unwrap().run_id, scene.member_ref);
+            let row = scene.row();
+            assert_eq!(row[11], "recovery_needed");
+            assert_eq!(row[12], "MEMBER_RUN_CLOSE_UNVERIFIED");
+            assert_eq!(row[13], "recover_run");
+        }
+    }
+
+    #[test]
+    fn managed_closed_release_requires_the_lease_authority_and_exact_cleanup() {
+        use super::release_fixture::{ReleasableMember, ReleaseScene};
+        use crate::delegation_service::{MemberReleaseFailure, MemberReleaseOutcome};
+        for blocked in [false, true] {
+            let scene = ReleasableMember::managed(ReleaseScene::AlreadyClosed);
+            if blocked {
+                scene.blocked_writer_guard()
+            } else {
+                scene.active_writer_hold()
+            }
+            let lease = scene.hold_lease();
+            // A held witness with no corresponding recorded owner is recovery.
+            // Busy requires the verified holder of this release operation.
+            assert!(matches!(
+                scene.release(scene.revision).unwrap(),
+                MemberReleaseOutcome::Recovery { .. }
+            ));
+            super::release_probe::set_release_owner_ref(
+                &scene.state_root,
+                scene.member_ref,
+                &lease.owner_ref().unwrap(),
+            );
+            let before = scene.row();
+            assert!(matches!(
+                scene.release(scene.revision).unwrap(),
+                MemberReleaseOutcome::Busy { .. }
+            ));
+            assert_eq!(scene.row(), before);
+            assert!(scene.writer_observation().holds);
+            assert!(!scene.membership_released());
+            drop(lease);
+            let MemberReleaseOutcome::Operation(operation) = scene.release(scene.revision).unwrap()
+            else {
+                panic!("the verified release returns its terminal operation");
+            };
+            assert_eq!(operation.progress, "terminal");
+            assert!(!scene.writer_observation().holds);
+            assert!(scene.membership_released());
+            assert_eq!(scene.member_state(), "retired");
+        }
+        for mismatch in [false, true] {
+            let scene = ReleasableMember::managed(if mismatch {
+                ReleaseScene::AlreadyClosed
+            } else {
+                ReleaseScene::LostLocator
+            });
+            scene.active_writer_hold();
+            if mismatch {
+                scene.rewrite_projection_generation(2)
+            }
+            assert!(matches!(
+                scene.release(scene.revision).unwrap_err(),
+                MemberReleaseFailure::AfterAdmission { .. }
+            ));
+            assert!(scene.writer_observation().holds);
+            assert!(!scene.membership_released());
+        }
+        let scene = ReleasableMember::managed(ReleaseScene::AlreadyClosed);
+        scene.active_writer_hold();
+        let other = Assignment::new();
+        assert!(matches!(
+            settle_member_release(
+                crate::delegation_service::MemberReleaseRequest {
+                    view: &scene.view,
+                    state_root: &scene.state_root,
+                    owner: scene.owner,
+                    workspace_ref: &scene.view.workspace_id,
+                    member_ref: scene.member_ref,
+                    controller: &other.controller,
+                    allow_interrupt: false,
+                    expected_revision: scene.revision
+                },
+                &other.carrier
+            ),
+            Err(MemberReleaseFailure::BeforeAdmission(_))
+        ));
+        assert!(scene.writer_observation().holds);
+        assert!(!scene.membership_released());
+    }
+
+    #[test]
+    fn manifest_four_absent_generation_retires_each_caller_guard() {
+        use super::release_fixture::{ReleasableMember, ReleaseScene};
+        use crate::writer::{WriterAuthorityState, WriterStore};
+        for managed in [false, true] {
+            for state in [
+                WriterAuthorityState::Reserved,
+                WriterAuthorityState::Releasing,
+                WriterAuthorityState::BlockedUnknown,
+            ] {
+                let scene = if managed {
+                    ReleasableMember::managed(ReleaseScene::CloseSettlement)
+                } else {
+                    ReleasableMember::external(ReleaseScene::CloseSettlement)
+                };
+                scene.blocked_writer_guard();
+                let writer = WriterStore::new(
+                    &scene.state_root,
+                    &scene.view.workspace_id,
+                    DarwinSystem.current_uid(),
+                );
+                writer
+                    .transact(|record| {
+                        record.state = state;
+                        Ok(())
+                    })
+                    .unwrap();
+                let before = writer.load().unwrap();
+                append_policy(
+                    &scene.state_root,
+                    scene.member_ref,
+                    AuditKind::ThreadBound,
+                    before.transaction_id.unwrap(),
+                    true,
+                    before.writer_generation,
+                );
+                let (_, record) = scene.write_absent_worker_locator();
+                let mut wrong = record.clone();
+                wrong.identity.run_generation += 1;
+                assert!(retire_absent_generation_writer(&scene.state_root, &wrong).is_err());
+                assert_eq!(writer.load().unwrap(), before);
+                let mut incomplete = record.clone();
+                incomplete.schema_version = 2;
+                incomplete.startup_scope = Some(crate::worker::StartupScopeWitness {
+                    worker_identity: record.identity.clone(),
+                    app_server_epoch: 1,
+                    dedicated_server_identity: None,
+                    app_server_socket_identity: None,
+                    revision: 1,
+                    complete: false,
+                    children: vec![],
+                });
+                assert!(retire_absent_generation_writer(&scene.state_root, &incomplete).is_err());
+                assert_eq!(writer.load().unwrap(), before);
+                retire_absent_generation_writer(&scene.state_root, &record).unwrap();
+                assert_eq!(writer.load().unwrap().state, WriterAuthorityState::None);
+                let (_, policy) =
+                    observe_caller_policy(&scene.state_root, scene.member_ref).unwrap();
+                assert_eq!(policy.access, Access::Unknown);
+                assert_eq!(
+                    policy.verification,
+                    crate::domain::PolicyVerification::Unverified
+                );
+                let (_, ledger) =
+                    observe_caller_ledger(&scene.state_root, scene.member_ref).unwrap();
+                assert_eq!(
+                    ledger
+                        .payloads_of_kind(AuditKind::WriterReleased)
+                        .unwrap()
+                        .last()
+                        .unwrap()["transaction_id"],
+                    json!(before.transaction_id.unwrap())
+                );
+            }
+        }
+    }
+
+    fn change_item(scene: &Assignment, diff: &str, publish: bool) -> PathBuf {
+        use crate::turn::DurableTurnJournal as _;
+        let changes = [crate::interaction_payload::FileChangePayload {
+            path: LosslessPath::Utf8("edited.log".to_owned()),
+            kind: "update".to_owned(),
+            diff: diff.to_owned(),
+            move_path: None,
+        }];
+        let (digest, canonical) =
+            super::successor_fixture::SuccessorMember::file_change_payload_bytes(&changes);
+        let root = run_root(&scene.member.state_root, scene.member.member_ref);
+        let directory = root.join("file-changes");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.join(format!("{digest}.json"));
+        if publish {
+            std::fs::write(&path, canonical).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let audit = root.join("audit.jsonl");
+        if !audit.exists() {
+            std::fs::write(&audit, b"").unwrap();
+            std::fs::set_permissions(audit, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut ledger = crate::ledger::Ledger::open(&root, scene.member.member_ref).unwrap();
+        crate::turn::LedgerTurnJournal::new(&mut ledger, 1)
+            .append_and_sync(crate::turn::JournalEntry::FileChangeSnapshot {
+                thread_id: "thread-1".to_owned(),
+                turn_id: "write-turn".to_owned(),
+                item_id: "change-1".to_owned(),
+                revision: 0,
+                snapshot_sha256: digest,
+            })
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn managed_ignored_changes_require_executor_items_and_preserve_crlf() {
+        let scene = Assignment::new();
+        let workspace = scene.member.view.canonical_path.to_path_buf().unwrap();
+        std::fs::write(workspace.join(".gitignore"), b"*.log\n").unwrap();
+        let task = running(&scene);
+        std::fs::write(workspace.join("shell.log"), b"shell only\n").unwrap();
+        std::fs::write(workspace.join("edited.log"), b"after\r\n").unwrap();
+        change_item(&scene, "@@ -1 +1 @@\n-before\r\n+after\r\n", true);
+        complete(&scene).unwrap();
+        let result = result(&scene.member, task);
+        assert_eq!(result.changes.len(), 1);
+        let change = &result.changes[0];
+        assert_eq!(change.path, "edited.log");
+        assert_eq!(change.before_mode, None);
+        assert_eq!(change.after_mode, Some(0o644));
+        std::fs::remove_file(workspace.join("edited.log")).unwrap();
+        for (side, bytes) in [
+            ("before", b"before\r\n".as_slice()),
+            ("after", b"after\r\n".as_slice()),
+        ] {
+            assert_eq!(
+                crate::engagement::retained_change_side(
+                    scene.member.store().connection(),
+                    task,
+                    "edited.log",
+                    side
+                )
+                .unwrap()
+                .unwrap(),
+                bytes
+            );
+        }
+    }
+
+    #[test]
+    fn managed_invalid_change_content_publishes_only_unavailable() {
+        for failure in 0..4 {
+            let scene = Assignment::new();
+            let workspace = scene.member.view.canonical_path.to_path_buf().unwrap();
+            std::fs::write(workspace.join(".gitignore"), b"*.log\n").unwrap();
+            let task = running(&scene);
+            std::fs::write(workspace.join("README.md"), b"otherwise valid change\n").unwrap();
+            std::fs::write(workspace.join("edited.log"), b"after\n").unwrap();
+            match failure {
+                0 => {
+                    change_item(&scene, "@@ -1 +1 @@\n-before\n+different\n", true);
+                }
+                1 => {
+                    change_item(&scene, "@@ -1 +1 @@\n-before\n+after\n", false);
+                }
+                2 => {
+                    let path = change_item(&scene, "@@ -1 +1 @@\n-before\n+after\n", true);
+                    std::fs::write(path, b"[]").unwrap();
+                }
+                _ => {
+                    std::fs::write(
+                        workspace.join("README.md"),
+                        vec![b'x'; crate::review_target::MAX_FILE_BYTES as usize + 1],
+                    )
+                    .unwrap();
+                }
+            }
+            complete(&scene).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&scene.member.complete_result_bytes(task).unwrap())
+                    .unwrap()["schema"],
+                "dolgorae.complete-result-unavailable/v1"
+            );
+            assert_eq!(
+                scene.collect(task).unwrap_err().code,
+                "COMPLETE_RESULT_UNAVAILABLE"
+            );
+            assert_eq!(
+                scene.identity(task).unwrap_err().code,
+                "COMPLETE_RESULT_UNAVAILABLE"
+            );
+            assert_eq!(scene.member.store().connection().query_row("SELECT COUNT(*) FROM result_content_refs WHERE owner_kind='successor_change'",[],|row|row.get::<_,u64>(0)).unwrap(),0);
+            assert_eq!(scene.member.workload_revision(), 1);
+            resettle_member_tasks(
+                &scene.member.state_root,
+                scene.member.member_ref,
+                scene.member.owner(),
+            )
+            .unwrap();
+            assert_eq!(scene.member.workload_revision(), 1);
+        }
+    }
+
+    #[test]
+    fn external_retention_mid_insert_error_preserves_the_original_execution() {
+        let member = super::successor_fixture::SuccessorMember::new();
+        member.reserve_member_writer();
+        let accepted =
+            member.accept_and_dispatch_task("retention-retry", "canonical_workspace_write", 600);
+        member.record_dispatch_index_for(accepted.task_ref);
+        member.mark_task_running(accepted.task_ref, "turn-1");
+        std::fs::write(
+            member
+                .view
+                .canonical_path
+                .to_path_buf()
+                .unwrap()
+                .join("README.md"),
+            b"edited\n",
+        )
+        .unwrap();
+        member.publish_terminal_turn("turn-1", "completed", "complete answer", RunLifecycle::Idle);
+        let store = member.store();
+        let contents: u64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM result_content", [], |row| row.get(0))
+            .unwrap();
+        let refs: u64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM result_content_refs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let receipt: String=store.connection().query_row("SELECT receipt_json FROM delegation_operations WHERE operation_kind='assign_external_specialist_task'",[],|row|row.get(0)).unwrap();
+        let writer = crate::writer::WriterStore::new(
+            &member.state_root,
+            &member.view.workspace_id,
+            DarwinSystem.current_uid(),
+        )
+        .load()
+        .unwrap();
+        let workload = member.workload_revision();
+        store.connection().execute_batch("CREATE TRIGGER refuse_change_side BEFORE INSERT ON result_content_refs
+            WHEN NEW.owner_kind='successor_change' AND NEW.representation='after:README.md'
+            AND EXISTS(SELECT 1 FROM result_content_refs WHERE owner_kind='successor_change' AND owner_id=NEW.owner_id AND representation='before:README.md')
+            BEGIN SELECT RAISE(ABORT,'injected retention failure'); END;").unwrap();
+        let settle = || {
+            settle_bound_successor_task(
+                &member.state_root,
+                member.member_ref,
+                member.owner(),
+                &member.terminal("turn-1"),
+            )
+        };
+        assert_eq!(settle().unwrap_err().code, "INTERNAL_ERROR");
+        assert_eq!(
+            store
+                .external_task(member.engagement_id, accepted.task_ref)
+                .unwrap()
+                .state,
+            "running"
+        );
+        assert!(
+            store
+                .task_complete_result(member.engagement_id, accepted.task_ref)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(member.workload_revision(), workload);
+        assert_eq!(member.round_state(accepted.task_ref), "counted_accepted");
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM result_content", [], |row| row
+                    .get::<_, u64>(0))
+                .unwrap(),
+            contents
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM result_content_refs", [], |row| row
+                    .get::<_, u64>(0))
+                .unwrap(),
+            refs
+        );
+        assert_eq!(
+            crate::writer::WriterStore::new(
+                &member.state_root,
+                &member.view.workspace_id,
+                DarwinSystem.current_uid()
+            )
+            .load()
+            .unwrap(),
+            writer
+        );
+        store
+            .connection()
+            .execute_batch("DROP TRIGGER refuse_change_side")
+            .unwrap();
+        settle().unwrap();
+        let result = store
+            .task_complete_result(member.engagement_id, accepted.task_ref)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&result.1).unwrap()["changes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(member.workload_revision(), workload + 1);
+        resettle_member_tasks(&member.state_root, member.member_ref, member.owner()).unwrap();
+        assert_eq!(
+            store
+                .task_complete_result(member.engagement_id, accepted.task_ref)
+                .unwrap()
+                .unwrap(),
+            result
+        );
+        assert_eq!(store.connection().query_row("SELECT receipt_json FROM delegation_operations WHERE operation_kind='assign_external_specialist_task'",[],|row|row.get::<_,String>(0)).unwrap(),receipt);
+    }
+}
+
+/// The caller-policy gate: the restart and release decisions a generation-4 successor
+/// member must take exactly like a generation-3 caller Run.
+#[cfg(test)]
+mod caller_lane_gate_tests {
+    /// One valid structured_review_v3 output.
+    const VALID_REVIEW: &str = r#"{"summary":"the answer","findings":[],"criterion_assessments":[],"evidence_limits":[],"overall_assessment":"requirements_met"}"#;
+    use super::*;
+    use crate::delegation_service::RunSettlementPort as _;
+
+    #[test]
+    fn a_manifest_four_member_restarts_into_the_caller_workspace_lane() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        assert_eq!(fixture.manifest.schema_version, 4);
+        for caller in [3, 4] {
+            assert!(
+                crate::run::is_caller_workspace_generation(caller),
+                "{caller}"
+            );
+        }
+        for legacy in [1, 2, 5] {
+            assert!(
+                !crate::run::is_caller_workspace_generation(legacy),
+                "{legacy}"
+            );
+        }
+        assert_eq!(
+            caller_session_safety_policy(&fixture.manifest),
+            crate::turn::SessionSafetyPolicy::CallerWorkspace
+        );
+        assert!(requires_caller_policy_proof(&fixture.manifest));
+        require_caller_runtime(&fixture.manifest).unwrap();
+        // The legacy generations keep the Standard policy and may acknowledge a
+        // writer release without the caller-policy proof.
+        let mut legacy = fixture.manifest.clone();
+        legacy.schema_version = 2;
+        assert_eq!(
+            caller_session_safety_policy(&legacy),
+            crate::turn::SessionSafetyPolicy::Standard
+        );
+        assert!(!requires_caller_policy_proof(&legacy));
+        assert_eq!(
+            require_caller_runtime(&legacy).unwrap_err().code,
+            "WORKSPACE_STARTUP_UNSUPPORTED"
+        );
+        // A generation-3 caller Run takes the same caller-workspace decisions.
+        let mut caller = fixture.manifest.clone();
+        caller.schema_version = 3;
+        assert_eq!(
+            caller_session_safety_policy(&caller),
+            crate::turn::SessionSafetyPolicy::CallerWorkspace
+        );
+        assert!(requires_caller_policy_proof(&caller));
+        require_caller_runtime(&caller).unwrap();
+    }
+
+    /// The settlement port of these cases: the real member Run service.
+    fn settlement_port(
+        fixture: &super::successor_fixture::SuccessorMember,
+    ) -> SemanticRunSettlementPort<'_> {
+        SemanticRunSettlementPort {
+            carrier: &fixture.owner,
+        }
+    }
+
+    /// A read-only dispatch settles once from the member Run's terminal
+    /// Turn, publishes the complete result and collects without re-settling.
+    #[test]
+    fn a_read_only_dispatch_settles_once_from_the_members_terminal_turn() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("settle-read-only", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        let port = settlement_port(&fixture);
+        let request = || crate::delegation_service::MemberTaskSettlement {
+            view: &fixture.view,
+            state_root: &fixture.state_root,
+            owner: fixture.owner(),
+            member_ref: fixture.member_ref,
+            task_ref: accepted.task_ref,
+            execution_intent: "read_only",
+        };
+        // No terminal Turn observed yet: nothing settles.
+        assert_eq!(
+            port.settle_member_task(request()).unwrap(),
+            crate::delegation_service::MemberSettlement::Running
+        );
+        fixture.publish_terminal_turn(
+            "turn-1",
+            "completed",
+            "the complete answer",
+            RunLifecycle::Idle,
+        );
+        assert_eq!(
+            port.settle_member_task(request()).unwrap(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        let store = fixture.store();
+        let settled = store
+            .external_task(fixture.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(settled.state, "completed_not_delivered");
+        assert_eq!(settled.turn_id.as_deref(), Some("turn-1"));
+        // The complete result is published whole: the final response bytes and an
+        // empty change set for a read-only task (MDC:450-486).
+        let (digest, value, complete) = {
+            let (digest, bytes) = store
+                .task_complete_result(fixture.engagement_id, accepted.task_ref)
+                .unwrap()
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let complete: crate::delegation_identity::CompleteResult =
+                serde_json::from_value(value.clone()).unwrap();
+            (digest, value, complete)
+        };
+        // The row keeps the content digest of the published bytes; the identity
+        // digest is the complete-result domain digest of the same object.
+        let canonical =
+            canonicalize(&parse(&serde_json::to_string(&value).unwrap()).unwrap()).unwrap();
+        assert_eq!(crate::jcs::sha256_hex(&canonical), digest);
+        let identity_digest = complete.digest().unwrap();
+        assert!(identity_digest.starts_with("sha256:"));
+        assert!(complete.changes.is_empty());
+        assert_eq!(complete.terminal_outcome, "completed");
+        assert_eq!(
+            complete.final_response.as_ref().unwrap().byte_length,
+            "the complete answer".len() as u64
+        );
+        assert_eq!(complete.source.task_ref, accepted.task_ref.to_string());
+        assert_eq!(fixture.artifact_rows(), 1);
+        // Replay and a later collect never settle twice.
+        assert_eq!(
+            port.settle_member_task(request()).unwrap(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        assert_eq!(fixture.artifact_rows(), 1);
+        let caller = crate::caller_scope::fixture(3);
+        let collected = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+        assert_eq!(collected.task.state, "completed");
+        assert_eq!(
+            collected.task.result_digest.as_deref(),
+            Some(identity_digest.as_str())
+        );
+        assert_eq!(collected.task.complete_result.as_ref(), Some(&value));
+        assert_eq!(collected.disposition.state, "idle");
+        assert!(collected.complete_result.is_some());
+        // Await observes the settled terminal without re-settling it.
+        // The wait's flag reports a timeout, so a satisfied predicate is false.
+        let (observed, timed_out) = crate::delegation_service::await_external_specialist_tasks(
+            &fixture.scope(),
+            crate::delegation_service::AwaitExternalSpecialistTasks {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                tasks: &[accepted.task_ref],
+                predicate: crate::delegation_service::AwaitPredicate::All,
+                timeout_seconds: 1,
+            },
+        )
+        .unwrap();
+        assert!(!timed_out);
+        assert_eq!(observed[0].state, "completed");
+        assert_eq!(fixture.artifact_rows(), 1);
+        // Rounds are unchanged by collect: one accepted assignment, still one.
+        assert_eq!(
+            crate::caller_scope::rounds_used(fixture.store().connection(), &caller).unwrap(),
+            1
+        );
+        // The closed identity exports with the complete result and the ambient
+        // disclosure outside every digest.
+        let view = crate::delegation_service::get_external_delegation_identity(
+            &fixture.scope(),
+            &caller,
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+        assert_eq!(view.identity.result_digest, identity_digest);
+        assert_eq!(view.identity.complete_result, complete);
+        assert_eq!(view.identity.task_ref, accepted.task_ref.to_string());
+        assert_eq!(view.identity.worker_ref, fixture.member_ref.to_string());
+        assert_eq!(view.identity.rounds_used, 1);
+        assert_eq!(view.identity.accepted_assignments, 1);
+        assert_eq!(view.identity.unresolved_assignments, 0);
+        assert_eq!(view.identity.worker_disposition, "idle");
+        assert!(
+            view.ambient_guidance
+                .profile_binding_digest
+                .starts_with("sha256:")
+        );
+    }
+
+    /// A writable task settles once, releases the writer after the
+    /// terminal publication, and its complete result is typed unavailable.
+    #[test]
+    fn a_write_task_settles_once_and_releases_the_writer_after_publication() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("settle-write", "canonical_workspace_write", 1200);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn(
+            "turn-1",
+            "completed",
+            "wrote the files",
+            RunLifecycle::Closed,
+        );
+        let held = fixture.writer_record();
+        assert_eq!(held.state, crate::writer::WriterAuthorityState::Active);
+        let generation = held.writer_generation;
+        let port = settlement_port(&fixture);
+        let request = || crate::delegation_service::MemberTaskSettlement {
+            view: &fixture.view,
+            state_root: &fixture.state_root,
+            owner: fixture.owner(),
+            member_ref: fixture.member_ref,
+            task_ref: accepted.task_ref,
+            execution_intent: "canonical_workspace_write",
+        };
+        assert_eq!(
+            port.settle_member_task(request()).unwrap(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        // The terminal fact is durable and no change set was fabricated.
+        let settled = fixture
+            .store()
+            .external_task(fixture.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(settled.state, "completed_not_delivered");
+        // The published bytes are the typed-unavailable condition, never a
+        // partial complete result.
+        let (_, bytes) = fixture
+            .store()
+            .task_complete_result(fixture.engagement_id, accepted.task_ref)
+            .unwrap()
+            .unwrap();
+        let marker: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(marker["schema"], "dolgorae.complete-result-unavailable/v1");
+        assert!(
+            serde_json::from_value::<crate::delegation_identity::CompleteResult>(marker.clone())
+                .is_err()
+        );
+        assert_eq!(fixture.artifact_rows(), 1);
+        // The writer is released exactly once, after the publication.
+        let released = fixture.writer_record();
+        assert_eq!(released.state, crate::writer::WriterAuthorityState::None);
+        assert_eq!(released.writer_generation, generation);
+        assert_eq!(
+            port.settle_member_task(request()).unwrap(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        assert_eq!(
+            fixture.writer_record().writer_generation,
+            generation,
+            "a settled task never releases again"
+        );
+        // Collect and identity export report the typed condition for this task
+        // only, while idle stays computed from execution facts.
+        let caller = crate::caller_scope::fixture(3);
+        let port = settlement_port(&fixture);
+        let request = || crate::delegation_service::CollectExternalSpecialistTask {
+            engagement_id: fixture.engagement_id,
+            member_ref: fixture.member_ref,
+            task_ref: accepted.task_ref,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        let refused = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            request(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+        // An R call has no product-state effect.
+        assert_eq!(refused.details["effect"], "none");
+        let exported = crate::delegation_service::get_external_delegation_identity(
+            &fixture.scope(),
+            &caller,
+            &port,
+            request(),
+        )
+        .unwrap_err();
+        assert_eq!(exported.code, "COMPLETE_RESULT_UNAVAILABLE");
+        let store = fixture.store();
+        let quiescence = crate::engagement::successor_member_quiescence(
+            store.connection(),
+            &fixture.view.workspace_id,
+            "external_engagement",
+            &fixture.engagement_id.to_string(),
+            &fixture.member_ref.to_string(),
+        )
+        .unwrap();
+        // The unavailable result does not fabricate work: the settled task is
+        // not running, queued, claimed or dispatching, so idle is unchanged.
+        assert_eq!(quiescence.running, 0);
+        assert_eq!(quiescence.dispatching, 0);
+        assert_eq!(quiescence.queued, 0);
+        assert_eq!(quiescence.unresolved, 0);
+        assert!(quiescence.idle());
+    }
+
+    /// A failed writer release after terminal publication is surfaced as
+    /// an accepted effect with recovery, never hidden.
+    #[test]
+    fn a_writer_release_failure_is_surfaced_after_settlement() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("settle-release", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        // An idle member Run with no runtime record cannot complete the release
+        // without a worker: the failure must be surfaced.
+        fixture.publish_terminal_turn("turn-1", "completed", "wrote the files", RunLifecycle::Idle);
+        let port = settlement_port(&fixture);
+        // The execution side surfaces the failed release; the R calls below stay
+        // read-only and therefore never report it.
+        let refused = port
+            .settle_member_task(crate::delegation_service::MemberTaskSettlement {
+                view: &fixture.view,
+                state_root: &fixture.state_root,
+                owner: fixture.owner(),
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                execution_intent: "canonical_workspace_write",
+            })
+            .unwrap_err();
+        assert!(!refused.code.is_empty());
+        // The terminal fact was published before the release attempt.
+        let settled = fixture
+            .store()
+            .external_task(fixture.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(settled.state, "completed_not_delivered");
+        // A caller-policy member keeps the unknown-effect guard: cleanup is
+        // pending until recovery resolves the release.
+        assert_eq!(
+            fixture.writer_record().state,
+            crate::writer::WriterAuthorityState::BlockedUnknown
+        );
+    }
+
+    /// Checked findings are validated before publication; invalid output is
+    /// the failed-output result with no structured payload (MDC:471-473).
+    #[test]
+    fn checked_findings_are_validated_before_publication() {
+        let settle = |fixture: &super::successor_fixture::SuccessorMember, task_ref: Uuid| {
+            super::settle_bound_successor_task(
+                &fixture.state_root,
+                fixture.member_ref,
+                fixture.owner(),
+                &fixture.terminal("turn-1"),
+            )
+            .unwrap();
+            let port = settlement_port(fixture);
+            let collected = crate::delegation_service::collect_external_specialist_task(
+                &fixture.scope(),
+                &port,
+                crate::delegation_service::CollectExternalSpecialistTask {
+                    engagement_id: fixture.engagement_id,
+                    member_ref: fixture.member_ref,
+                    task_ref,
+                    adapter_id: "fixture-adapter",
+                    adapter_version: "unpublished-contract-fixture",
+                },
+            );
+            let state = fixture
+                .store()
+                .external_task(fixture.engagement_id, task_ref)
+                .unwrap()
+                .state;
+            (collected, state)
+        };
+        // A valid v3 output publishes its schema and payload.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let task = fixture.accept_and_dispatch_review_task("findings-valid", "read_only", 600);
+        fixture.mark_task_running(task.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", VALID_REVIEW, RunLifecycle::Idle);
+        let (collected, state) = settle(&fixture, task.task_ref);
+        assert_eq!(state, "completed_not_delivered");
+        let result = collected.unwrap().complete_result.unwrap();
+        assert_eq!(result["structured_output_schema"], "structured_review_v3");
+        assert!(result["structured_output"].is_object());
+        for (key, payload) in [
+            ("findings-non-json", "not json at all"),
+            (
+                "findings-invalid",
+                r#"{"summary":"ok","findings":[{"bogus":1}],"criterion_assessments":[],"evidence_limits":[],"overall_assessment":"requirements_met"}"#,
+            ),
+        ] {
+            let fixture = super::successor_fixture::SuccessorMember::new();
+            let task = fixture.accept_and_dispatch_review_task(key, "read_only", 600);
+            fixture.mark_task_running(task.task_ref, "turn-1");
+            fixture.publish_terminal_turn("turn-1", "completed", payload, RunLifecycle::Idle);
+            let (collected, state) = settle(&fixture, task.task_ref);
+            assert_eq!(state, "failed", "{key}");
+            let result = collected.unwrap().complete_result.unwrap();
+            assert_eq!(result["terminal_outcome"], "failed", "{key}");
+            assert_eq!(
+                result["safe_failure_code"], "FINDINGS_OUTPUT_INVALID",
+                "{key}"
+            );
+            assert!(result["structured_output_schema"].is_null(), "{key}");
+            assert!(result["structured_output"].is_null(), "{key}");
+            assert!(result["final_response"].is_null(), "{key}");
+        }
+    }
+
+    /// MD1 step 2: the reader distinguishes bytes, absence and corruption.
+    #[test]
+    fn the_file_change_payload_reader_distinguishes_absence_and_corruption() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let payload = crate::operation::canonical(
+            &serde_json::json!([{"path": "ignored.log", "kind": "update"}]),
+        )
+        .unwrap();
+        let payload = payload.as_slice();
+        let digest = crate::jcs::sha256_hex(payload);
+        let directory =
+            crate::run::run_root(&fixture.state_root, fixture.manifest.run_id).join("file-changes");
+        std::fs::create_dir_all(&directory).unwrap();
+        // Absent before publication.
+        assert!(
+            super::file_change_payload(&fixture.state_root, fixture.manifest.run_id, &digest)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(directory.join(format!("{digest}.json")), payload).unwrap();
+        assert_eq!(
+            super::file_change_payload(&fixture.state_root, fixture.manifest.run_id, &digest)
+                .unwrap()
+                .unwrap(),
+            payload.to_vec()
+        );
+        // A payload that is not the bytes its digest names is a typed content
+        // condition, never a retryable fault.
+        let other = crate::jcs::sha256_hex(b"other");
+        std::fs::write(directory.join(format!("{other}.json")), payload).unwrap();
+        assert_eq!(
+            super::file_change_payload(&fixture.state_root, fixture.manifest.run_id, &other)
+                .unwrap_err()
+                .code,
+            "COMPLETE_RESULT_UNAVAILABLE"
+        );
+        // An unparsable payload is the same content condition.
+        let broken = crate::jcs::sha256_hex(b"{not json}");
+        std::fs::write(directory.join(format!("{broken}.json")), b"{not json}").unwrap();
+        assert_eq!(
+            super::file_change_payload(&fixture.state_root, fixture.manifest.run_id, &broken)
+                .unwrap_err()
+                .code,
+            "COMPLETE_RESULT_UNAVAILABLE"
+        );
+    }
+
+    /// Settlement requires the resolution record; without it nothing settles,
+    /// with it the resolved response is published, and a corrupt record is typed.
+    #[test]
+    fn a_settlement_waits_for_the_resolution_record() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("resolution-required", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        // The ledger terminal exists, but the resolution record does not yet: the
+        // K attempt is a no-op (never a pre-resolution settlement).
+        fixture.publish_terminal_turn_without_resolution("turn-1", "completed");
+        let view = fixture.view.clone();
+        assert_eq!(
+            super::settle_successor_task(
+                &view,
+                &fixture.state_root,
+                fixture.owner(),
+                fixture.member_ref,
+                accepted.task_ref,
+                "read_only",
+                Some(&fixture.owner),
+            )
+            .unwrap(),
+            crate::delegation_service::MemberSettlement::Running
+        );
+        assert_eq!(fixture.artifact_rows(), 0);
+        assert_eq!(
+            fixture
+                .store()
+                .external_task(fixture.engagement_id, accepted.task_ref)
+                .unwrap()
+                .state,
+            "running"
+        );
+        // The hook publishes the resolution record, then settlement converges and
+        // publishes exactly the resolved response.
+        let resolved = crate::turn::TerminalTurn {
+            thread_id: "thread-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            status: "completed".to_owned(),
+            effort: "high".to_owned(),
+            final_response: Some(crate::turn::FinalResponse::Inline {
+                text: "resolved after the record".to_owned(),
+            }),
+            usage: None,
+        };
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &resolved,
+        )
+        .unwrap();
+        let port = settlement_port(&fixture);
+        let collected = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            collected.complete_result.as_ref().unwrap()["final_response"]["byte_length"],
+            "resolved after the record".len()
+        );
+        // A corrupt record is a typed integrity failure, never a silent absence.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("resolution-corrupt", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn_without_resolution("turn-1", "completed");
+        let directory = crate::run::run_root(&fixture.state_root, fixture.manifest.run_id)
+            .join("terminal-resolutions");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join(super::resolution_record_name("turn-1")),
+            b"{not json}",
+        )
+        .unwrap();
+        let refused = super::settle_successor_task(
+            &fixture.view.clone(),
+            &fixture.state_root,
+            fixture.owner(),
+            fixture.member_ref,
+            accepted.task_ref,
+            "read_only",
+            Some(&fixture.owner),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+    }
+
+    /// The writer and database facts are one observation boundary, so a
+    /// concurrent assign that releases a stale hold is re-observed, not mixed.
+    #[test]
+    fn a_moving_writer_fact_is_re_observed_before_the_proof() {
+        use crate::delegation_service::MemberWriterObservation;
+        use std::cell::RefCell;
+        let fact = |holds: bool, blocked: bool, fingerprint: &str| MemberWriterObservation {
+            holds,
+            blocked_unknown: blocked,
+            fingerprint: fingerprint.to_owned(),
+        };
+        // running write task -> settle -> stale hold -> new assign: the writer fact
+        // moves once and then holds still, so the boundary re-observes and reports
+        // the confirmed attempt together with the fact it read.
+        let script = RefCell::new(vec![
+            fact(true, false, "writer:running-write"),
+            fact(true, false, "writer:stale-hold"),
+            fact(true, false, "writer:stale-hold"),
+        ]);
+        let observed = crate::delegation_service::fixture_consistent_observation(
+            || {
+                let mut facts = script.borrow_mut();
+                Ok(facts.remove(0))
+            },
+            |confirmed| Ok((confirmed.fingerprint.clone(), 0u64)),
+        )
+        .unwrap();
+        assert_eq!(observed.0.1, 0);
+        assert_eq!(observed.1.fingerprint, "writer:stale-hold");
+        // A fact that never holds still is a bounded typed refusal.
+        let script = RefCell::new(vec![
+            fact(true, false, "writer:a"),
+            fact(false, false, "writer:b"),
+            fact(true, false, "writer:c"),
+            fact(false, false, "writer:d"),
+            fact(true, false, "writer:e"),
+            fact(false, false, "writer:f"),
+        ]);
+        let refused = crate::delegation_service::fixture_consistent_observation(
+            || {
+                let mut facts = script.borrow_mut();
+                Ok(facts.remove(0))
+            },
+            |_confirmed| Ok(1u64),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+    }
+
+    /// Part A: a writable task publishes its real change set from the dispatch index.
+    #[test]
+    fn a_write_task_publishes_its_changes_from_the_dispatch_index() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("part-a-changes", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        // The executor edits one tracked file after the index was recorded.
+        std::fs::write(
+            fixture
+                .view
+                .canonical_path
+                .to_path_buf()
+                .unwrap()
+                .join("README.md"),
+            b"edited\n",
+        )
+        .unwrap();
+        fixture.publish_terminal_turn(
+            "turn-1",
+            "completed",
+            "edited the file",
+            RunLifecycle::Closed,
+        );
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let port = settlement_port(&fixture);
+        let collected = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+        let result = collected.complete_result.as_ref().unwrap();
+        let changes = result["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 1, "{result}");
+        assert_eq!(changes[0]["kind"], "modify");
+        assert_eq!(changes[0]["path"], "README.md");
+        assert_eq!(
+            changes[0]["before"]["sha256"],
+            format!("sha256:{}", crate::jcs::sha256_hex(b"baseline\n"))
+        );
+    }
+
+    /// One published complete result's `changes` array (MD1 settlement cases).
+    fn settled_changes(
+        fixture: &super::successor_fixture::SuccessorMember,
+        task_ref: Uuid,
+    ) -> Value {
+        let port = settlement_port(fixture);
+        let collected = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+        collected.complete_result.as_ref().unwrap()["changes"].clone()
+    }
+
+    /// One executor `fileChange` item of the given kind (MD1 fixtures).
+    fn file_change(
+        path: &str,
+        kind: &str,
+        diff: &str,
+        move_path: Option<&str>,
+    ) -> crate::interaction_payload::FileChangePayload {
+        crate::interaction_payload::FileChangePayload {
+            path: LosslessPath::Utf8(path.to_owned()),
+            kind: kind.to_owned(),
+            diff: diff.to_owned(),
+            move_path: move_path.map(|path| LosslessPath::Utf8(path.to_owned())),
+        }
+    }
+
+    /// Every change side's exact bytes are retained with the settlement, so
+    /// they survive a later worktree edit and deletion.
+    #[test]
+    fn a_settled_change_retains_both_sides() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("r1-retain", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        // One tracked file is modified and one ignored file is renamed/added, so
+        // both sides of two changes exist.
+        std::fs::write(workspace.join("README.md"), b"edited\n").unwrap();
+        std::fs::write(workspace.join("new.log"), b"added\n").unwrap();
+        fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                "new.log",
+                "add",
+                "@@ -0,0 +1 @@\n+added\n",
+                None,
+            )],
+        );
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let changes = settled_changes(&fixture, accepted.task_ref);
+        let changes = changes.as_array().unwrap();
+        assert_eq!(changes.len(), 2, "{changes:?}");
+        // The worktree no longer holds either side: the bytes come from the store.
+        std::fs::write(workspace.join("README.md"), b"later edit\n").unwrap();
+        std::fs::remove_file(workspace.join("new.log")).unwrap();
+        let store = fixture.store();
+        for change in changes {
+            let path = change["path"].as_str().unwrap();
+            for side in ["before", "after"] {
+                let Some(reference) = change.get(side).filter(|value| !value.is_null()) else {
+                    continue;
+                };
+                let bytes = crate::engagement::retained_change_side(
+                    store.connection(),
+                    accepted.task_ref,
+                    path,
+                    side,
+                )
+                .unwrap()
+                .unwrap_or_else(|| panic!("{path} {side} must be retained"));
+                assert_eq!(
+                    reference["sha256"],
+                    format!("sha256:{}", crate::jcs::sha256_hex(&bytes)),
+                    "{path} {side}"
+                );
+                assert_eq!(
+                    reference["byte_length"],
+                    bytes.len() as u64,
+                    "{path} {side}"
+                );
+            }
+        }
+        // One reference per published side: the modify keeps both sides and the
+        // add keeps only its after image.
+        let stored: u64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM result_content_refs
+                  WHERE owner_kind='successor_change' AND owner_id=?1",
+                [accepted.task_ref.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 3, "one modify (two sides) and one add (after only)");
+    }
+
+    /// Change content counts against the Run's retained-content aggregate; over it, the
+    /// typed unavailable result is published and no content rows are left behind.
+    #[test]
+    fn change_content_over_the_run_aggregate_publishes_the_unavailable_result() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("r1-quota", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        std::fs::write(workspace.join("README.md"), b"edited\n").unwrap();
+        // Another task of this Run already retains the whole aggregate.
+        fixture
+            .store()
+            .connection()
+            .execute(
+                "INSERT INTO dispatch_indexes(
+                   task_id,workspace_ref,run_ref,head_commit,index_sha256,index_byte_length,
+                   file_count,baseline_bytes,created_at_ms
+                 ) VALUES(?1,?2,?3,NULL,?4,1,0,?5,1)",
+                rusqlite::params![
+                    Uuid::now_v7().to_string(),
+                    fixture.view.workspace_id,
+                    fixture.member_ref.to_string(),
+                    "a".repeat(64),
+                    crate::engagement::MAX_RUN_BASELINE_BYTES,
+                ],
+            )
+            .unwrap();
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let task = fixture
+            .store()
+            .external_task(fixture.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(task.state, "completed_not_delivered");
+        let (_, bytes) = fixture
+            .store()
+            .task_complete_result(fixture.engagement_id, accepted.task_ref)
+            .unwrap()
+            .unwrap();
+        let marker: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(marker["schema"], "dolgorae.complete-result-unavailable/v1");
+        // The rolled-back attempt left no retained change content behind.
+        let stored: u64 = fixture
+            .store()
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM result_content_refs WHERE owner_kind='successor_change'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 0, "a failed retention attempt leaves no rows");
+        let port = settlement_port(&fixture);
+        let refused = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+    }
+
+    /// MD1 both directions: an ignored path changed only by a shell command is not
+    /// result content, while the one this task's executor named in its `fileChange`
+    /// item is — and its past mode is never inferred.
+    #[test]
+    fn only_the_ignored_paths_the_executor_edited_are_result_content() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("md1-ignored", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        // The executor edited this ignored path and said so in its item.
+        std::fs::write(workspace.join("edited.log"), b"one\ntwo changed\n").unwrap();
+        fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                "edited.log",
+                "update",
+                "--- a/edited.log\n+++ b/edited.log\n@@ -1,2 +1,2 @@\n one\n-two\n+two changed\n",
+                None,
+            )],
+        );
+        // A shell command changed this one; no item of this task names it.
+        std::fs::write(workspace.join("shell.log"), b"unrelated\n").unwrap();
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let changes = settled_changes(&fixture, accepted.task_ref);
+        let changes = changes.as_array().unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0]["path"], "edited.log");
+        assert_eq!(changes[0]["kind"], "modify");
+        // The before image is the reverse-applied item, not the worktree.
+        assert_eq!(
+            changes[0]["before"]["sha256"],
+            format!("sha256:{}", crate::jcs::sha256_hex(b"one\ntwo\n"))
+        );
+        assert_eq!(
+            changes[0]["after"]["sha256"],
+            format!("sha256:{}", crate::jcs::sha256_hex(b"one\ntwo changed\n"))
+        );
+        // The payload carries no mode, so a past mode is never inferred.
+        assert!(changes[0]["before_mode"].is_null());
+        assert!(changes[0]["after_mode"].is_u64());
+    }
+
+    /// MD1: a snapshot digest the Turn recorded whose payload is gone makes
+    /// the complete result typed unavailable; it is never silently skipped.
+    #[test]
+    fn a_recorded_snapshot_without_its_payload_makes_the_result_unavailable() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("md1-missing", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        std::fs::write(workspace.join("edited.log"), b"one\n").unwrap();
+        fixture.record_file_change_item_without_payload(
+            "turn-1",
+            "item-1",
+            &[file_change("edited.log", "add", "", None)],
+        );
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        // The execution fact settled; its complete result is the typed condition.
+        let task = fixture
+            .store()
+            .external_task(fixture.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(task.state, "completed_not_delivered");
+        let (_, bytes) = fixture
+            .store()
+            .task_complete_result(fixture.engagement_id, accepted.task_ref)
+            .unwrap()
+            .unwrap();
+        let marker: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(marker["schema"], "dolgorae.complete-result-unavailable/v1");
+        let port = settlement_port(&fixture);
+        let refused = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+    }
+
+    /// MD1: a move item names its source in `path` and its destination in
+    /// `move_path`, and is published as delete + add, never as a rename.
+    #[test]
+    fn a_moved_ignored_path_is_published_as_delete_and_add() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("md1-move", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        // Both sides of the move are ignored, and only the destination exists now.
+        std::fs::write(workspace.join("new.log"), b"first\nnew\n").unwrap();
+        fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                "old.log",
+                "update",
+                "@@ -1,2 +1,2 @@\n first\n-old\n+new\n",
+                Some("new.log"),
+            )],
+        );
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let changes = settled_changes(&fixture, accepted.task_ref);
+        let changes = changes.as_array().unwrap();
+        let published: Vec<(&str, &str)> = changes
+            .iter()
+            .map(|change| {
+                (
+                    change["path"].as_str().unwrap(),
+                    change["kind"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(published, vec![("new.log", "add"), ("old.log", "delete")]);
+        assert!(changes.iter().all(|change| change["old_path"].is_null()));
+        // The delete keeps the source's bytes, reconstructed by reverse application
+        // against the destination (the context line is part of that evidence); the
+        // add has no before image.
+        assert!(changes[0]["before"].is_null());
+        assert_eq!(
+            changes[1]["before"]["sha256"],
+            format!("sha256:{}", crate::jcs::sha256_hex(b"first\nold\n"))
+        );
+        assert!(changes[1]["after"].is_null());
+    }
+
+    /// An item naming a dispatch-domain path never replaces Part A's change.
+    #[test]
+    fn an_item_naming_a_tracked_path_keeps_the_dispatch_index_change() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("c8-tracked", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        // The executor edits a tracked file and names it in a fileChange item.
+        std::fs::write(workspace.join("README.md"), b"edited\n").unwrap();
+        fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                "README.md",
+                "update",
+                "@@ -1 +1 @@\n-baseline\n+edited\n",
+                None,
+            )],
+        );
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let changes = settled_changes(&fixture, accepted.task_ref);
+        let changes = changes.as_array().unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0]["path"], "README.md");
+        assert_eq!(changes[0]["kind"], "modify");
+        // Part A's verified before image and its index modes are kept: the item
+        // side would have published them as null.
+        assert_eq!(
+            changes[0]["before"]["sha256"],
+            format!("sha256:{}", crate::jcs::sha256_hex(b"baseline\n"))
+        );
+        assert_eq!(changes[0]["before_mode"], 0o644);
+        assert_eq!(changes[0]["after_mode"], 0o644);
+    }
+
+    /// A deleted dispatch-domain file named by an item keeps Part A's delete.
+    #[test]
+    fn an_item_naming_a_deleted_tracked_path_keeps_the_dispatch_index_delete() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("c8-deleted", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        // The executor deleted a tracked file and named it in a delete item.
+        std::fs::remove_file(workspace.join(".gitignore")).unwrap();
+        fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                ".gitignore",
+                "delete",
+                "@@ -1 +0,0 @@\n-*.log\n",
+                None,
+            )],
+        );
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let changes = settled_changes(&fixture, accepted.task_ref);
+        let changes = changes.as_array().unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0]["path"], ".gitignore");
+        assert_eq!(changes[0]["kind"], "delete");
+        assert_eq!(
+            changes[0]["before"]["sha256"],
+            format!("sha256:{}", crate::jcs::sha256_hex(b"*.log\n"))
+        );
+        assert!(changes[0]["after"].is_null());
+        // A dispatch-domain path keeps the mode from the dispatch index.
+        assert_eq!(changes[0]["before_mode"], 0o644);
+    }
+
+    /// A move of two tracked paths is Part A's, and its pinned "Moved to:"
+    /// suffix never makes the result unavailable.
+    #[test]
+    fn a_move_of_two_tracked_paths_publishes_the_dispatch_index_changes() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("c7b-tracked", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        std::fs::rename(workspace.join("README.md"), workspace.join("renamed.txt")).unwrap();
+        fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                "README.md",
+                "update",
+                "@@ -1 +1 @@\n-baseline\n+renamed\n\nMoved to: renamed.txt\n",
+                Some("renamed.txt"),
+            )],
+        );
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let changes = settled_changes(&fixture, accepted.task_ref);
+        let changes = changes.as_array().unwrap();
+        let published: Vec<(&str, &str)> = changes
+            .iter()
+            .map(|change| {
+                (
+                    change["path"].as_str().unwrap(),
+                    change["kind"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        // Part A reports the rename as delete + add from the dispatch index.
+        assert_eq!(
+            published,
+            vec![("README.md", "delete"), ("renamed.txt", "add")]
+        );
+        assert_eq!(changes[0]["before_mode"], 0o644);
+        assert!(changes[1]["before"].is_null());
+    }
+
+    /// A move from a tracked source to an ignored destination keeps Part A's
+    /// delete and adds the ignored destination the producer owns.
+    #[test]
+    fn a_move_from_a_tracked_source_to_an_ignored_destination_adds_the_destination() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("c7b-cross", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        std::fs::rename(workspace.join("README.md"), workspace.join("moved.log")).unwrap();
+        fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                "README.md",
+                "update",
+                "@@ -1 +1 @@\n baseline\n\nMoved to: moved.log\n",
+                Some("moved.log"),
+            )],
+        );
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let changes = settled_changes(&fixture, accepted.task_ref);
+        let changes = changes.as_array().unwrap();
+        let published: Vec<(&str, &str)> = changes
+            .iter()
+            .map(|change| {
+                (
+                    change["path"].as_str().unwrap(),
+                    change["kind"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            published,
+            vec![("README.md", "delete"), ("moved.log", "add")]
+        );
+        // The add is the ignored destination's part: current bytes, no before image.
+        assert!(changes[1]["before"].is_null());
+        assert_eq!(
+            changes[1]["after"]["sha256"],
+            format!("sha256:{}", crate::jcs::sha256_hex(b"baseline\n"))
+        );
+    }
+
+    /// Two items keep their first-appearance order while each keeps only its
+    /// latest revision, even when the journal interleaves them.
+    #[test]
+    fn the_snapshot_reader_keeps_item_order_with_interleaved_revisions() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let first =
+            super::successor_fixture::SuccessorMember::file_change_payload_bytes(&[file_change(
+                "first.log",
+                "add",
+                "@@ -0,0 +1 @@\n+one\n",
+                None,
+            )]);
+        let second =
+            super::successor_fixture::SuccessorMember::file_change_payload_bytes(&[file_change(
+                "second.log",
+                "add",
+                "@@ -0,0 +1 @@\n+two\n",
+                None,
+            )]);
+        let first_latest =
+            super::successor_fixture::SuccessorMember::file_change_payload_bytes(&[file_change(
+                "first.log",
+                "update",
+                "@@ -1 +1 @@\n-one\n+one more\n",
+                None,
+            )]);
+        fixture.publish_file_change_payload(&first.1);
+        fixture.publish_file_change_payload(&second.1);
+        fixture.publish_file_change_payload(&first_latest.1);
+        // The journal records item-1, item-2, then item-1's second revision.
+        fixture.journal_file_change_snapshot("turn-1", "item-1", 0, &first.0);
+        fixture.journal_file_change_snapshot("turn-1", "item-2", 0, &second.0);
+        fixture.journal_file_change_snapshot("turn-1", "item-1", 1, &first_latest.0);
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Idle);
+        assert_eq!(
+            super::turn_file_change_snapshots(&fixture.state_root, fixture.member_ref, "turn-1")
+                .unwrap(),
+            vec![first_latest.0, second.0]
+        );
+    }
+
+    /// A payload is read under its bound, not buffered whole and checked after.
+    #[test]
+    fn a_payload_is_read_under_its_bound() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let digest = fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                "debug.log",
+                "add",
+                "@@ -0,0 +1 @@\n+one\n",
+                None,
+            )],
+        );
+        let bytes = super::file_change_payload_within(
+            &fixture.state_root,
+            fixture.member_ref,
+            &digest,
+            4096,
+        )
+        .unwrap()
+        .unwrap();
+        // One byte short of the payload is refused before it is held whole.
+        let refused = super::file_change_payload_within(
+            &fixture.state_root,
+            fixture.member_ref,
+            &digest,
+            bytes.len() as u64 - 1,
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+        // The same payload at exactly its own length is admitted.
+        assert!(
+            super::file_change_payload_within(
+                &fixture.state_root,
+                fixture.member_ref,
+                &digest,
+                bytes.len() as u64,
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    /// The published payload bytes read for one task are bounded in aggregate.
+    #[test]
+    fn the_published_payload_aggregate_is_bounded() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                "debug.log",
+                "add",
+                "@@ -0,0 +1 @@\n+one\n",
+                None,
+            )],
+        );
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Idle);
+        // The real bound accepts this Turn's payloads.
+        let payloads = super::file_change_payloads(
+            &fixture.state_root,
+            fixture.member_ref,
+            "turn-1",
+            crate::review_target::MAX_TARGET_BYTES,
+        )
+        .unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].len(), 1);
+        // A bound smaller than the payload's own bytes is the typed condition.
+        let refused =
+            super::file_change_payloads(&fixture.state_root, fixture.member_ref, "turn-1", 1)
+                .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+    }
+
+    /// A published payload that is no longer the bytes its digest names is a
+    /// deterministic content condition, not a retryable fault.
+    #[test]
+    fn a_corrupt_published_payload_makes_the_result_unavailable() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("c10-corrupt", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        std::fs::write(workspace.join("debug.log"), b"one\n").unwrap();
+        let digest = fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                "debug.log",
+                "add",
+                "@@ -0,0 +1 @@\n+one\n",
+                None,
+            )],
+        );
+        let published = crate::run::run_root(&fixture.state_root, fixture.member_ref)
+            .join("file-changes")
+            .join(format!("{digest}.json"));
+        std::fs::write(&published, b"{not canonical").unwrap();
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let (_, bytes) = fixture
+            .store()
+            .task_complete_result(fixture.engagement_id, accepted.task_ref)
+            .unwrap()
+            .unwrap();
+        let marker: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(marker["schema"], "dolgorae.complete-result-unavailable/v1");
+        let port = settlement_port(&fixture);
+        let refused = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+    }
+
+    /// An unreadable payload is not a content condition, so the settlement
+    /// attempt fails and the task stays running for the retry.
+    #[test]
+    fn an_unreadable_published_payload_fails_the_settlement_attempt() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("c10-unreadable", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        std::fs::write(workspace.join("debug.log"), b"one\n").unwrap();
+        let digest = fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                "debug.log",
+                "add",
+                "@@ -0,0 +1 @@\n+one\n",
+                None,
+            )],
+        );
+        // A directory under the payload's own name makes the read fail with
+        // something other than "not found".
+        let published = crate::run::run_root(&fixture.state_root, fixture.member_ref)
+            .join("file-changes")
+            .join(format!("{digest}.json"));
+        std::fs::remove_file(&published).unwrap();
+        std::fs::create_dir(&published).unwrap();
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        assert!(
+            super::settle_bound_successor_task(
+                &fixture.state_root,
+                fixture.member_ref,
+                fixture.owner(),
+                &fixture.terminal("turn-1"),
+            )
+            .is_err()
+        );
+        // Nothing was published: the task is still running and retryable.
+        let task = fixture
+            .store()
+            .external_task(fixture.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(task.state, "running");
+        assert!(
+            fixture
+                .store()
+                .task_complete_result(fixture.engagement_id, accepted.task_ref)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A change path the closed complete result cannot carry publishes the
+    /// typed unavailable result instead of failing its validation forever.
+    #[test]
+    fn an_unrepresentable_change_path_publishes_the_unavailable_result() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("r6-path", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        // A POSIX path may carry a newline; the closed `ChangeRef` may not.
+        std::fs::write(workspace.join("bad\nname.log"), b"one\ntwo changed\n").unwrap();
+        fixture.record_file_change_item(
+            "turn-1",
+            "item-1",
+            &[file_change(
+                "bad\nname.log",
+                "update",
+                "@@ -1,2 +1,2 @@\n one\n-two\n+two changed\n",
+                None,
+            )],
+        );
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        // The execution fact settles; the result is the typed condition and the
+        // task is never left running.
+        let task = fixture
+            .store()
+            .external_task(fixture.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(task.state, "completed_not_delivered");
+        let (_, bytes) = fixture
+            .store()
+            .task_complete_result(fixture.engagement_id, accepted.task_ref)
+            .unwrap()
+            .unwrap();
+        let marker: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(marker["schema"], "dolgorae.complete-result-unavailable/v1");
+        let port = settlement_port(&fixture);
+        let refused = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+    }
+
+    /// A failed listing propagates, so the settlement attempt fails and the
+    /// task stays running instead of publishing an empty change set.
+    #[test]
+    fn a_failed_listing_fails_the_settlement_attempt() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("r2-listing", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        std::fs::write(workspace.join("README.md"), b"edited\n").unwrap();
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        // The workspace stops being a repository between dispatch and settlement.
+        std::fs::rename(workspace.join(".git"), workspace.join(".git-away")).unwrap();
+        let error = super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap_err();
+        // A git fault is not a deterministic content condition: it is retried.
+        assert!(
+            !super::content_unavailable(&error),
+            "{} is a retryable fault",
+            error.code
+        );
+        let task = fixture
+            .store()
+            .external_task(fixture.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(task.state, "running");
+        assert!(
+            fixture
+                .store()
+                .task_complete_result(fixture.engagement_id, accepted.task_ref)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A path-decided worktree failure is the typed unavailable result, not a
+    /// settlement that retries forever.
+    #[test]
+    fn a_link_in_the_worktree_publishes_the_unavailable_result() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let accepted =
+            fixture.accept_and_dispatch_task("r4-link", "canonical_workspace_write", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.record_dispatch_index_for(accepted.task_ref);
+        let workspace = fixture.view.canonical_path.to_path_buf().unwrap();
+        // A tracked path becomes a link: it cannot be read without traversal, the
+        // same deterministic refusal every retry observes.
+        std::fs::write(workspace.join("elsewhere.txt"), b"outside\n").unwrap();
+        std::fs::remove_file(workspace.join("README.md")).unwrap();
+        std::os::unix::fs::symlink(workspace.join("elsewhere.txt"), workspace.join("README.md"))
+            .unwrap();
+        fixture.publish_terminal_turn("turn-1", "completed", "done", RunLifecycle::Closed);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let task = fixture
+            .store()
+            .external_task(fixture.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(task.state, "completed_not_delivered");
+        let (_, bytes) = fixture
+            .store()
+            .task_complete_result(fixture.engagement_id, accepted.task_ref)
+            .unwrap()
+            .unwrap();
+        let marker: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(marker["schema"], "dolgorae.complete-result-unavailable/v1");
+        let port = settlement_port(&fixture);
+        let refused = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+    }
+
+    /// The cleanup decision reads its write-work fact inside each attempt, so a
+    /// member that starts a write task moves the fact and forces a re-observation.
+    #[test]
+    fn a_changing_write_work_fact_moves_cleanup_within_the_attempt() {
+        use crate::delegation_service::MemberWriterObservation;
+        use std::cell::RefCell;
+        let hold = |fingerprint: &str| MemberWriterObservation {
+            holds: true,
+            blocked_unknown: false,
+            fingerprint: fingerprint.to_owned(),
+        };
+        // Attempt 1: the guard is held with no write work (pending cleanup). The
+        // member then starts a write task, which also moves the writer record, so the
+        // boundary re-observes and takes the next attempt's own snapshot.
+        let observations = RefCell::new(vec![
+            hold("writer:stale-hold"),
+            hold("writer:new-write"),
+            hold("writer:new-write"),
+        ]);
+        let counts = RefCell::new(vec![0u64, 1, 1]);
+        let mut pending_seen = Vec::new();
+        let (pending, confirmed) = crate::delegation_service::fixture_consistent_observation(
+            || Ok(observations.borrow_mut().remove(0)),
+            |confirmed_hold| {
+                let count = counts.borrow_mut().remove(0);
+                let pending = !confirmed_hold.blocked_unknown && confirmed_hold.holds && count == 0;
+                pending_seen.push(pending);
+                Ok(pending)
+            },
+        )
+        .unwrap();
+        assert_eq!(pending_seen, vec![true, false]);
+        assert!(!pending, "a running write task is not pending cleanup");
+        assert_eq!(confirmed.fingerprint, "writer:new-write");
+        // A held guard with no write work in its own snapshot is pending cleanup.
+        let observations = RefCell::new(vec![hold("writer:stale-hold"), hold("writer:stale-hold")]);
+        let (pending, _) = crate::delegation_service::fixture_consistent_observation(
+            || Ok(observations.borrow_mut().remove(0)),
+            |confirmed_hold| Ok(confirmed_hold.holds),
+        )
+        .unwrap();
+        assert!(pending);
+        // A blocked guard is unresolved cleanup whatever the write work is.
+        let blocked = MemberWriterObservation {
+            holds: true,
+            blocked_unknown: true,
+            fingerprint: "writer:blocked".to_owned(),
+        };
+        let (pending, _) = crate::delegation_service::fixture_consistent_observation(
+            || Ok(blocked.clone()),
+            |confirmed_hold| Ok(confirmed_hold.blocked_unknown),
+        )
+        .unwrap();
+        assert!(pending);
+    }
+
+    /// Collect derives its disposition state from the confirmed cleanup of the
+    /// same attempt, so it never reports idle with pending cleanup.
+    #[test]
+    fn collect_never_reports_idle_while_cleanup_is_pending() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("cleanup-consistency", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        // The member still holds the writer with no active write task: pending
+        // owned cleanup, so the disposition cannot be idle.
+        fixture.reserve_member_writer();
+        let port = settlement_port(&fixture);
+        let collected = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+        assert!(collected.disposition.cleanup_pending);
+        assert_ne!(collected.disposition.state, "idle");
+    }
+
+    /// A hostile Turn id cannot name a path; the record name is its hash and
+    /// the id itself stays inside the record.
+    #[test]
+    fn a_hostile_turn_id_maps_to_a_safe_record_name() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        for hostile in [
+            "../../../etc/passwd",
+            "..",
+            "a/../../b",
+            "turn with spaces and ünicode",
+            &"x".repeat(4096),
+        ] {
+            let resolved = crate::turn::TerminalTurn {
+                thread_id: "thread-1".to_owned(),
+                turn_id: hostile.to_owned(),
+                status: "completed".to_owned(),
+                effort: "high".to_owned(),
+                final_response: Some(crate::turn::FinalResponse::Inline {
+                    text: "resolved".to_owned(),
+                }),
+                usage: None,
+            };
+            super::record_resolved_terminal(&fixture.state_root, fixture.member_ref, &resolved)
+                .unwrap();
+            // The id resolves back to the same record and nothing escaped.
+            let retained =
+                super::resolved_terminal(&fixture.state_root, fixture.member_ref, hostile)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(retained.turn_id, hostile);
+        }
+        let directory = crate::run::run_root(&fixture.state_root, fixture.manifest.run_id)
+            .join("terminal-resolutions");
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let name = entry.unwrap().file_name().to_str().unwrap().to_owned();
+            assert_eq!(name.len(), 64 + ".json".len(), "{name}");
+            assert_eq!(name.trim_end_matches(".json").len(), 64, "{name}");
+            assert!(
+                name.trim_end_matches(".json")
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit()),
+                "{name}"
+            );
+        }
+        // The hostile id never created a file outside the resolution directory.
+        assert!(!fixture.state_root.join("etc/passwd").exists());
+    }
+
+    /// Publication is atomic, so a reader never observes a partial record.
+    #[test]
+    fn an_interrupted_publication_never_exposes_a_partial_record() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let directory = crate::run::run_root(&fixture.state_root, fixture.manifest.run_id)
+            .join("terminal-resolutions");
+        std::fs::create_dir_all(&directory).unwrap();
+        // A crash between the temporary write and the exclusive rename leaves only
+        // the temporary file behind.
+        std::fs::write(
+            directory.join(".dolgorae-tmp-interrupted"),
+            b"{\"thread_id\":\"thread-1\",\"turn_id\":\"turn-1\"",
+        )
+        .unwrap();
+        // The successor path never falls back to the pre-resolution ledger record:
+        // an absent record means "not yet resolvable", never a partial resolution.
+        assert!(
+            super::resolved_terminal(&fixture.state_root, fixture.member_ref, "turn-1")
+                .unwrap()
+                .is_none()
+        );
+        // A real publication is complete and readable in one piece.
+        let resolved = crate::turn::TerminalTurn {
+            thread_id: "thread-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            status: "completed".to_owned(),
+            effort: "high".to_owned(),
+            final_response: Some(crate::turn::FinalResponse::Inline {
+                text: "resolved".to_owned(),
+            }),
+            usage: None,
+        };
+        super::record_resolved_terminal(&fixture.state_root, fixture.member_ref, &resolved)
+            .unwrap();
+        let retained = super::resolved_terminal(&fixture.state_root, fixture.member_ref, "turn-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.turn_id, "turn-1");
+    }
+
+    /// Only a true absence of the record path is "no writer"; a dangling
+    /// symlink is an entry and the secure loader refuses it.
+    #[test]
+    fn a_dangling_writer_record_symlink_is_not_absence() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("dangling-writer", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        fixture.initialize_writer_authority();
+        let path = fixture.state_root.join("runtime").join("writer.json");
+        let _ = std::fs::remove_file(&path);
+        std::os::unix::fs::symlink(fixture.state_root.join("missing-target"), &path).unwrap();
+        let port = settlement_port(&fixture);
+        let refused = port
+            .member_writer_observation(crate::delegation_service::MemberCleanupObservation {
+                view: &fixture.view,
+                state_root: &fixture.state_root,
+                owner: SettlementOwner::External {
+                    engagement_id: fixture.engagement_id,
+                },
+                member_ref: fixture.member_ref,
+            })
+            .unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        // Once the entry is truly gone the read is a plain absence again.
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            !port
+                .member_writer_observation(crate::delegation_service::MemberCleanupObservation {
+                    view: &fixture.view,
+                    state_root: &fixture.state_root,
+                    owner: SettlementOwner::External {
+                        engagement_id: fixture.engagement_id
+                    },
+                    member_ref: fixture.member_ref,
+                })
+                .unwrap()
+                .holds
+        );
+    }
+
+    /// The terminal-resolution record is write-once evidence.
+    #[test]
+    fn the_terminal_resolution_record_is_write_once() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let resolved = crate::turn::TerminalTurn {
+            thread_id: "thread-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            status: "completed".to_owned(),
+            effort: "high".to_owned(),
+            final_response: Some(crate::turn::FinalResponse::Inline {
+                text: "resolved".to_owned(),
+            }),
+            usage: None,
+        };
+        super::record_resolved_terminal(&fixture.state_root, fixture.member_ref, &resolved)
+            .unwrap();
+        // An identical rewrite is a no-op.
+        super::record_resolved_terminal(&fixture.state_root, fixture.member_ref, &resolved)
+            .unwrap();
+        // A different rewrite is refused, never overwritten.
+        let mut changed = resolved.clone();
+        changed.final_response = Some(crate::turn::FinalResponse::Inline {
+            text: "replacement".to_owned(),
+        });
+        let refused =
+            super::record_resolved_terminal(&fixture.state_root, fixture.member_ref, &changed)
+                .unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        let retained = super::resolved_terminal(&fixture.state_root, fixture.member_ref, "turn-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained.final_response,
+            Some(crate::turn::FinalResponse::Inline {
+                text: "resolved".to_owned()
+            })
+        );
+    }
+
+    /// A response the coordinator resolved from the history fallback is
+    /// published exactly, through the hook and through the restart sweep.
+    #[test]
+    fn a_resolved_fallback_response_is_published_by_hook_and_sweep() {
+        let fallback = "the resolved history answer";
+        // The hook settles from the resolved TerminalTurn the coordinator produced,
+        // while the ledger record carries no response at all.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("resolved-hook", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn_without_resolution("turn-1", "completed");
+        let resolved = crate::turn::TerminalTurn {
+            thread_id: "thread-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            status: "completed".to_owned(),
+            effort: "high".to_owned(),
+            final_response: Some(crate::turn::FinalResponse::Inline {
+                text: fallback.to_owned(),
+            }),
+            usage: None,
+        };
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &resolved,
+        )
+        .unwrap();
+        let port = settlement_port(&fixture);
+        let collected = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+        let result = collected.complete_result.as_ref().unwrap();
+        assert_eq!(result["final_response"]["byte_length"], fallback.len());
+        // The restart sweep uses the durable resolution record for a task the hook
+        // never settled.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("resolved-sweep", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn_without_resolution("turn-1", "completed");
+        super::record_resolved_terminal(&fixture.state_root, fixture.member_ref, &resolved)
+            .unwrap();
+        super::resettle_member_tasks(&fixture.state_root, fixture.member_ref, fixture.owner())
+            .unwrap();
+        let port = settlement_port(&fixture);
+        let collected = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            collected.complete_result.as_ref().unwrap()["final_response"]["byte_length"],
+            fallback.len()
+        );
+    }
+
+    /// Settlement converges — the fast-completion race, a retried hook and
+    /// exactly one settlement across the K path, the hook and a restart sweep.
+    #[test]
+    fn settlement_converges_across_dispatch_the_hook_and_a_restart() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("converge", "read_only", 600);
+        // Fast completion: the Turn terminal exists before the task names it.
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        let view = fixture.view.clone();
+        // (a) The K path records running, then attempts settlement once.
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        assert_eq!(
+            super::settle_successor_task(
+                &view,
+                &fixture.state_root,
+                fixture.owner(),
+                fixture.member_ref,
+                accepted.task_ref,
+                "read_only",
+                Some(&fixture.owner),
+            )
+            .unwrap(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        assert_eq!(fixture.artifact_rows(), 1);
+        // Exactly once: a second K attempt, the hook and the restart sweep are
+        // all no-ops on the committed fact.
+        assert_eq!(
+            super::settle_successor_task(
+                &view,
+                &fixture.state_root,
+                fixture.owner(),
+                fixture.member_ref,
+                accepted.task_ref,
+                "read_only",
+                Some(&fixture.owner),
+            )
+            .unwrap(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        super::resettle_member_tasks(&fixture.state_root, fixture.member_ref, fixture.owner())
+            .unwrap();
+        assert_eq!(fixture.artifact_rows(), 1);
+        // (b)/(c) A hook settlement that could not run is retried by the sweep.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let failed = fixture.accept_and_dispatch_task("converge-retry", "read_only", 600);
+        fixture.mark_task_running(failed.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "retried answer", RunLifecycle::Idle);
+        // The hook settlement never ran (as when it fails); the restart sweep
+        // settles the task from the same Turn id.
+        super::resettle_member_tasks(&fixture.state_root, fixture.member_ref, fixture.owner())
+            .unwrap();
+        let settled = fixture
+            .store()
+            .external_task(fixture.engagement_id, failed.task_ref)
+            .unwrap();
+        assert_eq!(settled.state, "completed_not_delivered");
+        assert_eq!(fixture.artifact_rows(), 1);
+    }
+
+    /// Await and lookup observe the settled terminal without any collect.
+    #[test]
+    fn await_and_lookup_observe_the_settled_terminal_without_collect() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("observe", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let scope = fixture.scope();
+        let (observed, timed_out) = crate::delegation_service::await_external_specialist_tasks(
+            &scope,
+            crate::delegation_service::AwaitExternalSpecialistTasks {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                tasks: &[accepted.task_ref],
+                predicate: crate::delegation_service::AwaitPredicate::All,
+                timeout_seconds: 1,
+            },
+        )
+        .unwrap();
+        assert!(!timed_out);
+        assert_eq!(observed[0].state, "completed");
+        let lookup = crate::delegation_service::lookup_operation(
+            &scope,
+            "assign_external_specialist_task",
+            Some(("external_engagement", &fixture.engagement_id.to_string())),
+            "observe",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "accepted");
+        assert_eq!(lookup["current_outcome"], "completed");
+        // No collect ran, and the artifact count proves it.
+        assert_eq!(fixture.artifact_rows(), 1);
+    }
+
+    /// Every final-response source the Turn resolves becomes a complete
+    /// result, and only an unavailable or unverifiable artifact is unavailable.
+    #[test]
+    fn a_complete_result_covers_every_final_response_source() {
+        let collect = |fixture: &super::successor_fixture::SuccessorMember, task_ref: Uuid| {
+            let port = settlement_port(fixture);
+            crate::delegation_service::collect_external_specialist_task(
+                &fixture.scope(),
+                &port,
+                crate::delegation_service::CollectExternalSpecialistTask {
+                    engagement_id: fixture.engagement_id,
+                    member_ref: fixture.member_ref,
+                    task_ref,
+                    adapter_id: "fixture-adapter",
+                    adapter_version: "unpublished-contract-fixture",
+                },
+            )
+        };
+        // 1. Inline text.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let task = fixture.accept_and_dispatch_task("source-inline", "read_only", 600);
+        fixture.mark_task_running(task.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let inline = collect(&fixture, task.task_ref).unwrap();
+        assert_eq!(
+            inline.complete_result.as_ref().unwrap()["final_response"]["byte_length"],
+            "the answer".len()
+        );
+
+        // 2. A failed terminal with no response is a valid complete result.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let task = fixture.accept_and_dispatch_task("source-failed", "read_only", 600);
+        fixture.mark_task_running(task.task_ref, "turn-1");
+        fixture.publish_terminal_without_response("turn-1", "failed");
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let failed = collect(&fixture, task.task_ref).unwrap();
+        let result = failed.complete_result.as_ref().unwrap();
+        assert_eq!(result["terminal_outcome"], "failed");
+        assert_eq!(result["safe_failure_code"], "TURN_FAILED");
+        assert!(result["final_response"].is_null());
+
+        // 3. An artifact-backed response is read, bounded and verified.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let task = fixture.accept_and_dispatch_task("source-artifact", "read_only", 600);
+        fixture.mark_task_running(task.task_ref, "turn-1");
+        let bytes = b"artifact answer".to_vec();
+        let artifact_id = fixture.store_final_response_artifact(&bytes);
+        fixture.publish_terminal_artifact("turn-1", artifact_id, bytes.len() as u64);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let artifact = collect(&fixture, task.task_ref).unwrap();
+        assert_eq!(
+            artifact.complete_result.as_ref().unwrap()["final_response"]["byte_length"],
+            bytes.len()
+        );
+
+        // 4. An oversized artifact reference is typed unavailable.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let task = fixture.accept_and_dispatch_task("source-oversized", "read_only", 600);
+        fixture.mark_task_running(task.task_ref, "turn-1");
+        let artifact_id = fixture.store_final_response_artifact(b"small");
+        fixture.publish_terminal_artifact("turn-1", artifact_id, 64 * 1024 * 1024);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let refused = collect(&fixture, task.task_ref).unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+
+        // 5. A mismatched artifact digest is typed unavailable.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let task = fixture.accept_and_dispatch_task("source-tampered", "read_only", 600);
+        fixture.mark_task_running(task.task_ref, "turn-1");
+        let artifact_id = fixture.store_final_response_artifact(b"tampered");
+        fixture.publish_terminal_artifact_with_digest("turn-1", artifact_id, 8, &"0".repeat(64));
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let refused = collect(&fixture, task.task_ref).unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+
+        // 6. A checked-output response publishes its validated structured output.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let task = fixture.accept_and_dispatch_review_task("source-structured", "read_only", 600);
+        fixture.mark_task_running(task.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", VALID_REVIEW, RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let structured = collect(&fixture, task.task_ref).unwrap();
+        let result = structured.complete_result.as_ref().unwrap();
+        assert_eq!(result["structured_output_schema"], "structured_review_v3");
+        assert!(result["structured_output"].is_object());
+    }
+
+    /// The identity proof is one post-result observation — counts, revisions
+    /// and cleanup are read with the proof, not taken from the collect snapshot.
+    #[test]
+    fn the_identity_proof_is_one_post_result_observation() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("proof-observation", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let port = settlement_port(&fixture);
+        let caller = crate::caller_scope::fixture(3);
+        let request = || crate::delegation_service::CollectExternalSpecialistTask {
+            engagement_id: fixture.engagement_id,
+            member_ref: fixture.member_ref,
+            task_ref: accepted.task_ref,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        let view = crate::delegation_service::get_external_delegation_identity(
+            &fixture.scope(),
+            &caller,
+            &port,
+            request(),
+        )
+        .unwrap();
+        let proof = &view.identity.disposition_proof;
+        // The proof reports the current engagement revisions, not a stale snapshot.
+        assert_eq!(proof.workload_revision, fixture.workload_revision());
+        assert_eq!(proof.state, "idle");
+        assert!(!proof.cleanup_pending);
+        assert_eq!(proof.unresolved, 0);
+        assert_eq!(view.identity.rounds_used, 1);
+        // A member that gained work after the result is refused, so the decision
+        // is current rather than the collect-time snapshot.
+        let next = fixture.accept_and_dispatch_task("proof-observation-2", "read_only", 600);
+        assert_eq!(
+            fixture
+                .store()
+                .external_task(fixture.engagement_id, next.task_ref)
+                .unwrap()
+                .state,
+            "dispatching"
+        );
+        let refused = crate::delegation_service::get_external_delegation_identity(
+            &fixture.scope(),
+            &caller,
+            &port,
+            request(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "DISPOSITION_NOT_IDLE");
+        assert_eq!(refused.details["effect"], "none");
+    }
+
+    /// A confirmed absent writer record is no cleanup, while a record that
+    /// exists but cannot be read is unobservable and refuses the read.
+    #[test]
+    fn an_unreadable_writer_record_is_not_absence() {
+        // Absent record: no pending cleanup.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("absent-writer", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let port = settlement_port(&fixture);
+        let observation = || crate::delegation_service::MemberCleanupObservation {
+            view: &fixture.view,
+            state_root: &fixture.state_root,
+            owner: SettlementOwner::External {
+                engagement_id: fixture.engagement_id,
+            },
+            member_ref: fixture.member_ref,
+        };
+        assert!(!port.member_writer_observation(observation()).unwrap().holds);
+        // An unreadable record is unobservable: the read is refused, never idle.
+        fixture.corrupt_writer_record();
+        let refused = port.member_writer_observation(observation()).unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        let refused = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["required_action"], "restore_state");
+    }
+
+    /// Every R error carries no product-state effect.
+    #[test]
+    fn every_read_error_carries_no_effect() {
+        let assert_none = |error: crate::machine::MachineError| {
+            assert_eq!(error.details["schema"], "dolgorae.successor-error/v1");
+            assert_eq!(error.details["effect"], "none", "{}", error.code);
+        };
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let write =
+            fixture.accept_and_dispatch_task("effect-none", "canonical_workspace_write", 600);
+        fixture.mark_task_running(write.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "wrote", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let port = settlement_port(&fixture);
+        let caller = crate::caller_scope::fixture(3);
+        let request = || crate::delegation_service::CollectExternalSpecialistTask {
+            engagement_id: fixture.engagement_id,
+            member_ref: fixture.member_ref,
+            task_ref: write.task_ref,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        // collect: unavailable result.
+        assert_none(
+            crate::delegation_service::collect_external_specialist_task(
+                &fixture.scope(),
+                &port,
+                request(),
+            )
+            .unwrap_err(),
+        );
+        // get identity: unavailable result, then the scope and disposition refusals.
+        assert_none(
+            crate::delegation_service::get_external_delegation_identity(
+                &fixture.scope(),
+                &caller,
+                &port,
+                request(),
+            )
+            .unwrap_err(),
+        );
+        assert_none(
+            crate::delegation_service::get_external_delegation_identity(
+                &fixture.scope(),
+                &crate::caller_scope::fixture_alt(3),
+                &port,
+                request(),
+            )
+            .unwrap_err(),
+        );
+        // await: an invalid predicate.
+        assert_none(
+            crate::delegation_service::await_external_specialist_tasks(
+                &fixture.scope(),
+                crate::delegation_service::AwaitExternalSpecialistTasks {
+                    engagement_id: fixture.engagement_id,
+                    member_ref: fixture.member_ref,
+                    tasks: &[write.task_ref],
+                    predicate: crate::delegation_service::AwaitPredicate::AtLeast(9),
+                    timeout_seconds: 1,
+                },
+            )
+            .unwrap_err(),
+        );
+        // lookup: an empty key.
+        assert_none(
+            crate::delegation_service::lookup_operation(
+                &fixture.scope(),
+                "assign_external_specialist_task",
+                Some(("external_engagement", &fixture.engagement_id.to_string())),
+                "",
+            )
+            .unwrap_err(),
+        );
+    }
+
+    /// Every produced observation and every error uses the frozen facade
+    /// vocabulary, and each error names its own operation.
+    #[test]
+    fn observations_and_errors_use_the_closed_vocabulary_only() {
+        const STATES: [&str; 9] = [
+            "queued",
+            "claimed",
+            "dispatching",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+            "expired",
+            "unknown",
+        ];
+        const ACTIONS: [&str; 5] = [
+            "none",
+            "await_task",
+            "lookup_original_key",
+            "reconcile_operation",
+            "restore_state",
+        ];
+        const AVAILABILITY: [&str; 2] = ["available", "pending"];
+        const EFFECTS: [&str; 3] = ["none", "accepted", "unresolved"];
+        // IDS $defs/error: await_task belongs to the facade task_observation only.
+        const CLASSIFICATIONS: [&str; 4] =
+            ["Rejected", "RetrySameKey", "Unknown", "RecoveryNeeded"];
+        const ERROR_ACTIONS: [&str; 9] = [
+            "fix_request",
+            "lookup_original_key",
+            "replay_same_key",
+            "reconcile_operation",
+            "recover_run",
+            "restore_state",
+            "renegotiate",
+            "resume_maintenance",
+            "none",
+        ];
+        let assert_shape = |observation: &crate::delegation_service::DelegationTaskObservation| {
+            assert!(
+                STATES.contains(&observation.state.as_str()),
+                "{}",
+                observation.state
+            );
+            assert!(
+                ACTIONS.contains(&observation.required_action.as_str()),
+                "{}",
+                observation.required_action
+            );
+            assert!(
+                AVAILABILITY.contains(&observation.content_availability.as_str()),
+                "{}",
+                observation.content_availability
+            );
+            assert_eq!(
+                observation.content_availability == "available",
+                observation.complete_result.is_some(),
+                "availability and the result agree"
+            );
+        };
+        let assert_error = |error: &crate::machine::MachineError, operation: &str| {
+            assert_eq!(error.details["schema"], "dolgorae.successor-error/v1");
+            assert_eq!(error.details["operation_kind"], operation);
+            assert!(EFFECTS.contains(&error.details["effect"].as_str().unwrap_or("")));
+            assert!(
+                CLASSIFICATIONS.contains(&error.details["classification"].as_str().unwrap_or(""))
+            );
+            assert!(
+                ERROR_ACTIONS.contains(&error.details["required_action"].as_str().unwrap_or("")),
+                "{}",
+                error.details["required_action"]
+            );
+        };
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let port = settlement_port(&fixture);
+        let request = |task_ref: Uuid| crate::delegation_service::CollectExternalSpecialistTask {
+            engagement_id: fixture.engagement_id,
+            member_ref: fixture.member_ref,
+            task_ref,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        // Dispatching is reported as `dispatching`, with `pending` availability.
+        let dispatching = fixture.accept_and_dispatch_task("vocabulary-1", "read_only", 600);
+        let observed = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            request(dispatching.task_ref),
+        )
+        .unwrap();
+        assert_eq!(observed.task.state, "dispatching");
+        assert_eq!(observed.task.content_availability, "pending");
+        assert_eq!(observed.task.required_action, "await_task");
+        assert_shape(&observed.task);
+        // A completed task reports `completed`/`available` with a result.
+        fixture.mark_task_running(dispatching.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let observed = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            request(dispatching.task_ref),
+        )
+        .unwrap();
+        assert_eq!(observed.task.state, "completed");
+        assert_eq!(observed.task.content_availability, "available");
+        assert_eq!(observed.task.required_action, "none");
+        assert_shape(&observed.task);
+        // A write task's terminal without a complete result is the typed condition.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let write =
+            fixture.accept_and_dispatch_task("vocabulary-2", "canonical_workspace_write", 600);
+        fixture.mark_task_running(write.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "wrote", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let port = settlement_port(&fixture);
+        let refused = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: write.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+        assert_error(&refused, "collect_external_specialist_task");
+        // The identity path names its own operation even for the unavailable result.
+        let caller = crate::caller_scope::fixture(3);
+        let refused = crate::delegation_service::get_external_delegation_identity(
+            &fixture.scope(),
+            &caller,
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: write.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+        assert_error(&refused, "get_external_delegation_identity");
+    }
+
+    /// The identity export binds the task's original caller scope, so a
+    /// relabelled task is refused with a closed error instead of an identity.
+    #[test]
+    fn an_identity_export_binds_the_tasks_original_caller_scope() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("scope-binding", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let port = settlement_port(&fixture);
+        let request = || crate::delegation_service::CollectExternalSpecialistTask {
+            engagement_id: fixture.engagement_id,
+            member_ref: fixture.member_ref,
+            task_ref: accepted.task_ref,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        // The admitting scope exports, and the assignment is its own.
+        crate::delegation_service::get_external_delegation_identity(
+            &fixture.scope(),
+            &crate::caller_scope::fixture(3),
+            &port,
+            request(),
+        )
+        .unwrap();
+        // Another valid scope may not relabel the task.
+        let refused = crate::delegation_service::get_external_delegation_identity(
+            &fixture.scope(),
+            &crate::caller_scope::fixture_alt(3),
+            &port,
+            request(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "CALLER_SCOPE_MISMATCH");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["classification"], "Rejected");
+        assert_eq!(
+            refused.details["operation_kind"],
+            "get_external_delegation_identity"
+        );
+    }
+
+    /// Collect verifies the retained result's source against the collected
+    /// task, so a result substituted from another task is refused.
+    #[test]
+    fn a_collected_result_must_name_the_task_it_belongs_to() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("result-binding", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let port = settlement_port(&fixture);
+        let request = || crate::delegation_service::CollectExternalSpecialistTask {
+            engagement_id: fixture.engagement_id,
+            member_ref: fixture.member_ref,
+            task_ref: accepted.task_ref,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        // The untouched result collects.
+        crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            request(),
+        )
+        .unwrap();
+        // A self-consistent rewrite that names another task is refused.
+        fixture.substitute_result_task(accepted.task_ref, Uuid::now_v7());
+        let refused = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            request(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "COMPLETE_RESULT_MISMATCH");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(
+            refused.details["operation_kind"],
+            "collect_external_specialist_task"
+        );
+    }
+
+    /// An asynchronous write terminal leaves pending owned cleanup, which
+    /// blocks idle and the identity export until an authorized mutation of the
+    /// same member resolves it.
+    #[test]
+    fn an_async_write_terminal_leaves_pending_cleanup_until_an_authorized_mutation() {
+        let cleanup = |fixture: &super::successor_fixture::SuccessorMember,
+                       port: &SemanticRunSettlementPort<'_>| {
+            port.member_writer_observation(crate::delegation_service::MemberCleanupObservation {
+                view: &fixture.view,
+                state_root: &fixture.state_root,
+                owner: SettlementOwner::External {
+                    engagement_id: fixture.engagement_id,
+                },
+                member_ref: fixture.member_ref,
+            })
+            .unwrap()
+            .holds
+        };
+        // 1. The async terminal holds the writer: cleanup is pending.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let write =
+            fixture.accept_and_dispatch_task("cleanup-write", "canonical_workspace_write", 600);
+        fixture.mark_task_running(write.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "wrote", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let port = settlement_port(&fixture);
+        assert!(cleanup(&fixture, &port));
+        assert_eq!(
+            fixture.writer_record().state,
+            crate::writer::WriterAuthorityState::Active,
+            "the async terminal cannot release the writer"
+        );
+        let refused = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: write.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap_err();
+        // The write task has no complete result yet, so the result condition wins.
+        assert_eq!(refused.code, "COMPLETE_RESULT_UNAVAILABLE");
+
+        // 2. A settled read-only task with the writer still held refuses export
+        //    with the closed disposition error.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let read = fixture.accept_and_dispatch_task("cleanup-read", "read_only", 600);
+        fixture.mark_task_running(read.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        fixture.reserve_member_writer();
+        let port = settlement_port(&fixture);
+        let caller = crate::caller_scope::fixture(3);
+        let request = || crate::delegation_service::CollectExternalSpecialistTask {
+            engagement_id: fixture.engagement_id,
+            member_ref: fixture.member_ref,
+            task_ref: read.task_ref,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        let refused = crate::delegation_service::get_external_delegation_identity(
+            &fixture.scope(),
+            &caller,
+            &port,
+            request(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "DISPOSITION_NOT_IDLE");
+        assert_eq!(refused.details["effect"], "none");
+        assert_eq!(refused.details["required_action"], "none");
+
+        // 3. The next authorized mutation of the member releases the stale hold.
+        //    The member Run is durably closed here so the release can complete
+        //    without a live worker (the documented externally-closed bypass).
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Closed);
+        let accepted = crate::delegation_service::assign_external_specialist_task(
+            &fixture.scope(),
+            &crate::caller_scope::fixture(3),
+            &port,
+            crate::delegation_service::AssignExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task: crate::delegation_service::fixture_task(),
+                execution_intent: "read_only",
+                target: None,
+                deadline_seconds: 600,
+                idempotency_key: "cleanup-next-assign",
+                expected_revision: None,
+            },
+        );
+        // The dispatch itself cannot reach a worker here; the release did happen.
+        assert!(accepted.is_err());
+        assert_eq!(
+            fixture.writer_record().state,
+            crate::writer::WriterAuthorityState::None,
+            "the next assign releases the guard the terminal left behind"
+        );
+        assert!(!cleanup(&fixture, &port));
+        let store = fixture.store();
+        let quiescence = crate::engagement::successor_member_quiescence(
+            store.connection(),
+            &fixture.view.workspace_id,
+            "external_engagement",
+            &fixture.engagement_id.to_string(),
+            &fixture.member_ref.to_string(),
+        )
+        .unwrap();
+        assert!(
+            quiescence.idle(),
+            "the member is idle once cleanup is resolved"
+        );
+
+        // 4. A blocked-unknown guard keeps cleanup pending.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let write =
+            fixture.accept_and_dispatch_task("cleanup-blocked", "canonical_workspace_write", 600);
+        fixture.mark_task_running(write.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "wrote", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        fixture.block_member_writer();
+        let port = settlement_port(&fixture);
+        assert!(
+            cleanup(&fixture, &port),
+            "a blocked guard is unresolved cleanup"
+        );
+    }
+
+    /// The settlement transaction advances the member workload revision
+    /// exactly once, and the disposition observes counts, revisions and rounds in
+    /// one read transaction.
+    #[test]
+    fn a_settlement_advances_the_workload_revision_exactly_once() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("workload-revision", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        let before = fixture.workload_revision();
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let settled = fixture.workload_revision();
+        assert_eq!(
+            settled,
+            before + 1,
+            "one settlement advances the member workload revision once"
+        );
+        // A second settlement attempt (and a reader) never advances it again.
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let port = settlement_port(&fixture);
+        let _ = crate::delegation_service::collect_external_specialist_task(
+            &fixture.scope(),
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+        assert_eq!(fixture.workload_revision(), settled);
+        // The disposition reports the settled revision and the settled counts.
+        let store = fixture.store();
+        let transaction = store.connection().unchecked_transaction().unwrap();
+        let quiescence = crate::engagement::successor_member_quiescence(
+            &transaction,
+            &fixture.view.workspace_id,
+            "external_engagement",
+            &fixture.engagement_id.to_string(),
+            &fixture.member_ref.to_string(),
+        )
+        .unwrap();
+        assert_eq!(quiescence.workload_revision, settled);
+        assert!(quiescence.idle());
+    }
+
+    /// Idle needs a current accepted member, so a degraded, provisioning or
+    /// released member is refused with the closed DISPOSITION_NOT_IDLE.
+    #[test]
+    fn a_member_that_is_not_active_is_never_idle() {
+        for state in ["degraded", "provisioning", "released", "cancelled"] {
+            let fixture = super::successor_fixture::SuccessorMember::new();
+            let accepted =
+                fixture.accept_and_dispatch_task(&format!("not-active-{state}"), "read_only", 600);
+            fixture.mark_task_running(accepted.task_ref, "turn-1");
+            fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+            super::settle_bound_successor_task(
+                &fixture.state_root,
+                fixture.member_ref,
+                fixture.owner(),
+                &fixture.terminal("turn-1"),
+            )
+            .unwrap();
+            fixture.set_member_state(state);
+            let store = fixture.store();
+            let quiescence = crate::engagement::successor_member_quiescence(
+                store.connection(),
+                &fixture.view.workspace_id,
+                "external_engagement",
+                &fixture.engagement_id.to_string(),
+                &fixture.member_ref.to_string(),
+            )
+            .unwrap();
+            assert!(!quiescence.idle(), "{state} must not be idle");
+            let caller = crate::caller_scope::fixture(3);
+            let port = settlement_port(&fixture);
+            let refused = crate::delegation_service::get_external_delegation_identity(
+                &fixture.scope(),
+                &caller,
+                &port,
+                crate::delegation_service::CollectExternalSpecialistTask {
+                    engagement_id: fixture.engagement_id,
+                    member_ref: fixture.member_ref,
+                    task_ref: accepted.task_ref,
+                    adapter_id: "fixture-adapter",
+                    adapter_version: "unpublished-contract-fixture",
+                },
+            )
+            .unwrap_err();
+            assert_eq!(refused.code, "DISPOSITION_NOT_IDLE", "{state}");
+            assert_eq!(refused.details["effect"], "none", "{state}");
+            assert_eq!(refused.details["required_action"], "none", "{state}");
+        }
+        // An active member with the same settled work does export.
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("active-export", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let caller = crate::caller_scope::fixture(3);
+        let port = settlement_port(&fixture);
+        crate::delegation_service::get_external_delegation_identity(
+            &fixture.scope(),
+            &caller,
+            &port,
+            crate::delegation_service::CollectExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task_ref: accepted.task_ref,
+                adapter_id: "fixture-adapter",
+                adapter_version: "unpublished-contract-fixture",
+            },
+        )
+        .unwrap();
+    }
+
+    /// The worker settles an asynchronous completion from the terminal of
+    /// exactly the Turn bound to the task, and never from the Run's last terminal.
+    #[test]
+    fn an_asynchronous_completion_settles_by_turn_id_without_any_collect() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("async-settle", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        // A later Turn on the same member publishes its own terminal first, so the
+        // Run's last terminal is turn-2 while the task is bound to turn-1.
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        fixture.publish_terminal_turn("turn-2", "completed", "another answer", RunLifecycle::Idle);
+        let store = fixture.store();
+        let db = fixture.database();
+        // Settling the later Turn settles nothing: no task is bound to it.
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-2"),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .store()
+                .external_task(fixture.engagement_id, accepted.task_ref)
+                .unwrap()
+                .state,
+            "running",
+            "the Run's last terminal never settles an earlier task"
+        );
+        drop(store);
+        // The bound Turn settles the task with no reader involved.
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        let settled = fixture
+            .store()
+            .external_task(fixture.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(settled.state, "completed_not_delivered");
+        assert_eq!(settled.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(fixture.artifact_rows(), 1);
+        // A settlement retry observes the committed fact and never settles again.
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        assert_eq!(fixture.artifact_rows(), 1);
+        let _ = db;
+    }
+
+    /// Await, collect and lookup read committed state only, so they leave the
+    /// database byte-identical.
+    #[test]
+    fn read_calls_leave_the_database_byte_identical() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("read-only-calls", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        let before = std::fs::read(fixture.database()).unwrap();
+        let scope = fixture.scope();
+        let caller = crate::caller_scope::fixture(3);
+        let _ = crate::delegation_service::await_external_specialist_tasks(
+            &scope,
+            crate::delegation_service::AwaitExternalSpecialistTasks {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                tasks: &[accepted.task_ref],
+                predicate: crate::delegation_service::AwaitPredicate::All,
+                timeout_seconds: 1,
+            },
+        )
+        .unwrap();
+        let request = || crate::delegation_service::CollectExternalSpecialistTask {
+            engagement_id: fixture.engagement_id,
+            member_ref: fixture.member_ref,
+            task_ref: accepted.task_ref,
+            adapter_id: "fixture-adapter",
+            adapter_version: "unpublished-contract-fixture",
+        };
+        // Not settled yet: collect observes the running task and settles nothing.
+        let port = settlement_port(&fixture);
+        let collected =
+            crate::delegation_service::collect_external_specialist_task(&scope, &port, request())
+                .unwrap();
+        assert_eq!(collected.task.state, "running");
+        let _ = crate::delegation_service::lookup_operation(
+            &scope,
+            "assign_external_specialist_task",
+            Some(("external_engagement", &fixture.engagement_id.to_string())),
+            "read-only-calls",
+        )
+        .unwrap();
+        let _ = crate::delegation_service::get_external_delegation_identity(
+            &scope,
+            &caller,
+            &port,
+            request(),
+        );
+        let after = std::fs::read(fixture.database()).unwrap();
+        assert_eq!(before, after, "an R call must not write product state");
+        // The task is still running: no reader settled it.
+        assert_eq!(
+            fixture
+                .store()
+                .external_task(fixture.engagement_id, accepted.task_ref)
+                .unwrap()
+                .state,
+            "running"
+        );
+    }
+
+    /// The member ambient disclosure is a call-time observation of the
+    /// member Run's own Profile, outside every captured and digested object.
+    #[test]
+    fn member_ambient_disclosure_is_a_call_time_observation_outside_every_digest() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let scope = fixture.scope();
+        let codex_home =
+            std::path::PathBuf::from(&fixture.profile_binding.launch_snapshot.canonical_codex_home);
+        let absent = crate::delegation_service::member_ambient_disclosure(
+            &scope,
+            fixture.engagement_id,
+            fixture.member_ref,
+        )
+        .unwrap();
+        assert!(matches!(
+            absent.observation("AGENTS.md"),
+            Some(crate::instructions::AmbientGuidanceObservation::Absent)
+        ));
+        // The observation follows the Profile's files without touching identity.
+        std::fs::write(codex_home.join("AGENTS.md"), "Profile guidance.\n").unwrap();
+        let present = crate::delegation_service::member_ambient_disclosure(
+            &scope,
+            fixture.engagement_id,
+            fixture.member_ref,
+        )
+        .unwrap();
+        assert!(matches!(
+            present.observation("AGENTS.md"),
+            Some(crate::instructions::AmbientGuidanceObservation::Present { .. })
+        ));
+        // The disclosure names its tenant but never enters any identity: the
+        // member's retained configuration digest is unchanged by the observation.
+        let store = fixture.store();
+        let (configuration, _, _) = store
+            .external_member_configuration(fixture.engagement_id, fixture.member_ref)
+            .unwrap();
+        assert_eq!(
+            crate::run::agent_configuration_digest(&configuration).unwrap(),
+            fixture
+                .manifest
+                .aggregate_binding
+                .as_ref()
+                .unwrap()
+                .agent_configuration_sha256
+                .clone()
+                .unwrap()
+        );
+        assert_eq!(
+            present.profile_binding_digest,
+            format!("sha256:{}", fixture.profile_binding.digest().unwrap())
+        );
+        assert_ne!(absent.profile_binding_digest, "");
+    }
+
+    /// A writer acquire that leaves this Run's transition pending has an
+    /// unknown effect, so the dispatch is not Case B — the task is not
+    /// terminalized, the round stays counted and recovery owns the settlement.
+    #[test]
+    fn an_unknown_effect_writer_acquire_keeps_the_task_and_the_round() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        fixture.initialize_writer_authority();
+        fixture.write_idle_projection();
+        // The acquire reserves this Run's transition and then fails on an
+        // unreadable runtime record, leaving the writer blocked-unknown.
+        fixture.write_unreadable_runtime_record();
+        let caller = crate::caller_scope::fixture(2);
+        let scope = fixture.scope();
+        let port = SemanticRunSettlementPort {
+            carrier: &fixture.owner,
+        };
+        let refused = crate::delegation_service::assign_external_specialist_task(
+            &scope,
+            &caller,
+            &port,
+            crate::delegation_service::AssignExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task: crate::delegation_service::fixture_task(),
+                execution_intent: "canonical_workspace_write",
+                target: None,
+                deadline_seconds: 600,
+                idempotency_key: "unknown-acquire",
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        // The accepted effect is surfaced with the recovery action, not a
+        // definitive refusal.
+        assert_eq!(refused.details["effect"], "accepted");
+        assert_eq!(refused.details["classification"], "RecoveryNeeded");
+        assert_eq!(refused.details["required_action"], "reconcile_operation");
+        let store = fixture.store();
+        let (task_id, state): (String, String) = store
+            .connection()
+            .query_row("SELECT task_id,state FROM tasks", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        // No terminalization, and the round stays counted unresolved.
+        assert_eq!(state, "accepted");
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            1
+        );
+        let assignment: String = store
+            .connection()
+            .query_row(
+                "SELECT accounting_state FROM caller_scope_assignments
+                  WHERE assignment_id=?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(assignment, "counted_unresolved");
+        // The pending writer transition is durable, so recovery can settle it.
+        let writer = crate::writer::WriterStore::new(
+            &fixture.state_root,
+            &fixture.view.workspace_id,
+            crate::darwin::DarwinSystem.current_uid(),
+        )
+        .load()
+        .unwrap();
+        assert_eq!(
+            writer.state,
+            crate::writer::WriterAuthorityState::BlockedUnknown
+        );
+        assert!(
+            writer
+                .holder
+                .as_ref()
+                .is_some_and(|holder| holder.run_id == fixture.member_ref)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Managed settlement
+    // -----------------------------------------------------------------------
+
+    /// The complete result one managed task published, re-read from its bytes.
+    fn managed_result(
+        fixture: &super::successor_fixture::ManagedMember,
+        task_ref: Uuid,
+    ) -> crate::delegation_identity::CompleteResult {
+        let bytes = fixture
+            .complete_result_bytes(task_ref)
+            .expect("the managed task published a complete result");
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// A fast managed completion settles in the K path, from the owner's own
+    /// task store, and the member workload revision advances with that terminal.
+    #[test]
+    fn a_managed_k_path_settles_an_immediate_terminal() {
+        let fixture = super::successor_fixture::ManagedMember::new();
+        let accepted = fixture.accept_and_dispatch_task("managed-k", 600);
+        // Fast completion: the Turn terminal exists before the task names it.
+        fixture.publish_terminal_turn("turn-1", "completed", "the answer", RunLifecycle::Idle);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        assert_eq!(fixture.workload_revision(), 0);
+        assert_eq!(
+            super::settle_successor_task(
+                &fixture.view,
+                &fixture.state_root,
+                fixture.owner(),
+                fixture.member_ref,
+                accepted.task_ref,
+                "read_only",
+                None,
+            )
+            .unwrap(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        assert_eq!(
+            fixture.task_state(accepted.task_ref),
+            "completed_not_delivered"
+        );
+        // The workload revision advances exactly with the terminal.
+        assert_eq!(fixture.workload_revision(), 1);
+        let result = managed_result(&fixture, accepted.task_ref);
+        assert_eq!(result.terminal_outcome, "completed");
+        assert_eq!(result.source.scope_kind, "orchestrated_session");
+        assert_eq!(result.source.scope_ref, fixture.session_id.to_string());
+        assert_eq!(result.source.worker_ref, fixture.member_ref.to_string());
+        assert_eq!(result.source.task_ref, accepted.task_ref.to_string());
+        assert!(result.safe_failure_code.is_none());
+        // A managed task is read-only, so its complete result carries the
+        // empty change set and no capture ever ran.
+        assert!(result.changes.is_empty());
+        assert!(result.final_response.is_some());
+    }
+
+    /// The restart sweep settles a managed task from its own Turn id.
+    #[test]
+    fn the_restart_sweep_resettles_a_managed_task_by_turn_id() {
+        let fixture = super::successor_fixture::ManagedMember::new();
+        let accepted = fixture.accept_and_dispatch_task("managed-sweep", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "swept answer", RunLifecycle::Idle);
+        // The hook never ran; the restart sweep settles from the same Turn id.
+        super::resettle_member_tasks(&fixture.state_root, fixture.member_ref, fixture.owner())
+            .unwrap();
+        assert_eq!(
+            fixture.task_state(accepted.task_ref),
+            "completed_not_delivered"
+        );
+        assert_eq!(fixture.complete_result_ref_rows(), 1);
+        assert_eq!(fixture.workload_revision(), 1);
+    }
+
+    /// One managed terminal settles exactly once across the K path, the
+    /// worker hook and the restart sweep, and only its first settlement counts.
+    #[test]
+    fn a_managed_settlement_is_exactly_once_across_the_k_path_hook_and_sweep() {
+        let fixture = super::successor_fixture::ManagedMember::new();
+        let accepted = fixture.accept_and_dispatch_task("managed-once", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "once", RunLifecycle::Idle);
+        let settle = || {
+            super::settle_successor_task(
+                &fixture.view,
+                &fixture.state_root,
+                fixture.owner(),
+                fixture.member_ref,
+                accepted.task_ref,
+                "read_only",
+                None,
+            )
+            .unwrap()
+        };
+        // (a) The K path settles it.
+        assert_eq!(
+            settle(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        assert_eq!(fixture.complete_result_ref_rows(), 1);
+        // (b) The worker hook observes the committed fact and settles nothing.
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        // (c) The restart sweep finds no unsettled task.
+        super::resettle_member_tasks(&fixture.state_root, fixture.member_ref, fixture.owner())
+            .unwrap();
+        // (d) A direct retry is a no-op as well.
+        assert_eq!(
+            settle(),
+            crate::delegation_service::MemberSettlement::Terminal
+        );
+        assert_eq!(fixture.complete_result_ref_rows(), 1);
+        assert_eq!(fixture.workload_revision(), 1);
+        assert_eq!(
+            fixture.task_state(accepted.task_ref),
+            "completed_not_delivered"
+        );
+    }
+
+    /// A settled uncertain dispatch resolves its round, so the member
+    /// becomes idle again instead of staying blocked forever.
+    #[test]
+    fn a_settled_uncertain_managed_dispatch_resolves_its_round() {
+        let fixture = super::successor_fixture::ManagedMember::new();
+        let accepted = fixture.accept_uncertain_dispatch_task("uncertain-sweep", 600);
+        // Before settlement the reservation is durable and the round is counted
+        // conservatively, so the member is not idle.
+        assert_eq!(fixture.task_state(accepted.task_ref), "dispatching");
+        assert_eq!(fixture.round_state(accepted.task_ref), "counted_unresolved");
+        assert!(!fixture.idle());
+        // Recovery learns the Turn, publishes its terminal, and the sweep settles.
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the late answer", RunLifecycle::Idle);
+        super::resettle_member_tasks(&fixture.state_root, fixture.member_ref, fixture.owner())
+            .unwrap();
+        assert_eq!(
+            fixture.task_state(accepted.task_ref),
+            "completed_not_delivered"
+        );
+        assert_eq!(fixture.complete_result_ref_rows(), 1);
+        assert_eq!(fixture.workload_revision(), 1);
+        // The durable terminal proves the dispatch, so the round resolves to
+        // counted_accepted and the total is unchanged.
+        assert_eq!(fixture.round_state(accepted.task_ref), "counted_accepted");
+        assert_eq!(fixture.rounds_used(), 1);
+        // The member is idle again: nothing blocks its disposition or release.
+        assert!(fixture.idle());
+    }
+
+    /// The same liveness applies to an external uncertain dispatch.
+    #[test]
+    fn a_settled_uncertain_external_dispatch_resolves_its_round() {
+        let fixture = super::successor_fixture::SuccessorMember::new();
+        let accepted =
+            fixture.accept_uncertain_dispatch_task("uncertain-external", "read_only", 600);
+        assert_eq!(fixture.round_state(accepted.task_ref), "counted_unresolved");
+        let quiescence = crate::engagement::successor_member_quiescence(
+            fixture.store().connection(),
+            &fixture.view.workspace_id,
+            "external_engagement",
+            &fixture.engagement_id.to_string(),
+            &fixture.member_ref.to_string(),
+        )
+        .unwrap();
+        assert!(!quiescence.idle());
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        fixture.publish_terminal_turn("turn-1", "completed", "the late answer", RunLifecycle::Idle);
+        super::settle_bound_successor_task(
+            &fixture.state_root,
+            fixture.member_ref,
+            fixture.owner(),
+            &fixture.terminal("turn-1"),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .store()
+                .external_task(fixture.engagement_id, accepted.task_ref)
+                .unwrap()
+                .state,
+            "completed_not_delivered"
+        );
+        // The settled terminal resolves the round and the member is idle again.
+        assert_eq!(fixture.round_state(accepted.task_ref), "counted_accepted");
+        assert_eq!(fixture.rounds_used(), 1);
+        let quiescence = crate::engagement::successor_member_quiescence(
+            fixture.store().connection(),
+            &fixture.view.workspace_id,
+            "external_engagement",
+            &fixture.engagement_id.to_string(),
+            &fixture.member_ref.to_string(),
+        )
+        .unwrap();
+        assert!(quiescence.idle());
+    }
+
+    /// A failed or cancelled managed terminal without a final response is a
+    /// valid complete result with a null final response.
+    #[test]
+    fn a_failed_or_cancelled_managed_terminal_without_a_response_is_a_complete_result() {
+        let failed = super::successor_fixture::ManagedMember::new();
+        let accepted = failed.accept_and_dispatch_task("managed-failed", 600);
+        failed.mark_task_running(accepted.task_ref, "turn-1");
+        failed.publish_terminal_without_response("turn-1", "failed");
+        super::settle_bound_successor_task(
+            &failed.state_root,
+            failed.member_ref,
+            failed.owner(),
+            &failed.terminal("turn-1"),
+        )
+        .unwrap();
+        assert_eq!(failed.task_state(accepted.task_ref), "failed");
+        assert_eq!(
+            failed.task_safe_error_code(accepted.task_ref).as_deref(),
+            Some("TURN_FAILED")
+        );
+        let result = managed_result(&failed, accepted.task_ref);
+        assert_eq!(result.terminal_outcome, "failed");
+        assert_eq!(result.safe_failure_code.as_deref(), Some("TURN_FAILED"));
+        assert!(result.final_response.is_none());
+
+        let cancelled = super::successor_fixture::ManagedMember::new();
+        let accepted = cancelled.accept_and_dispatch_task("managed-cancelled", 600);
+        cancelled.mark_task_running(accepted.task_ref, "turn-1");
+        cancelled.publish_terminal_without_response("turn-1", "interrupted");
+        super::settle_bound_successor_task(
+            &cancelled.state_root,
+            cancelled.member_ref,
+            cancelled.owner(),
+            &cancelled.terminal("turn-1"),
+        )
+        .unwrap();
+        assert_eq!(cancelled.task_state(accepted.task_ref), "cancelled");
+        assert_eq!(
+            cancelled.task_safe_error_code(accepted.task_ref).as_deref(),
+            Some("TURN_INTERRUPTED")
+        );
+        let result = managed_result(&cancelled, accepted.task_ref);
+        assert_eq!(result.terminal_outcome, "cancelled");
+        assert_eq!(
+            result.safe_failure_code.as_deref(),
+            Some("TURN_INTERRUPTED")
+        );
+        assert!(result.final_response.is_none());
     }
 }

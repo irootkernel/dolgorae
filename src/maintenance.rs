@@ -3326,6 +3326,61 @@ mod content_tests {
             .unwrap()
         }
     }
+    #[test]
+    fn a_base_only_generation_six_database_plans_content_maintenance() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-base-only-content-{}", Uuid::now_v7()));
+        for path in [
+            &root,
+            &root.join("runtime"),
+            &root.join("runtime/locks"),
+            &root.join("runs"),
+            &root.join("result-content"),
+        ] {
+            fs::create_dir_all(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(root.join("workspace.json"), b"{}").unwrap();
+        fs::set_permissions(
+            root.join("workspace.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        crate::writer::WriterStore::initialize_layout(
+            &root,
+            WORKSPACE_ID,
+            DarwinSystem.current_uid(),
+        )
+        .unwrap();
+        let store = OperatorStore::new(root.join("operator"));
+        let credential = root.join("operator.json");
+        store.initialize(&credential).unwrap();
+        let operator = store
+            .authorize(&CredentialCarrier::open_path(&credential).unwrap())
+            .unwrap();
+        // Exactly what a workspace that never hosted a Broker carries: the base
+        // generation-6 database created by the engagement opener.
+        let path = crate::engagement::EngagementStore::workspace_database_path(&root);
+        drop(crate::engagement::EngagementStore::open(&path).unwrap());
+        let connection = crate::storage_observation::CheckedConnection::open(&path, true).unwrap();
+        assert!(
+            crate::storage_observation::chunk_bindings(&connection)
+                .unwrap()
+                .is_empty()
+        );
+        drop(connection);
+        // Content maintenance therefore plans instead of failing on the absent
+        // orchestration extension.
+        let plan =
+            plan_result_content(&root, WORKSPACE_ID, 1, "garbage_collection", &operator).unwrap();
+        assert_eq!(plan.workspace_ref, WORKSPACE_ID);
+        let retire =
+            plan_result_content(&root, WORKSPACE_ID, 1, "retire_result_content", &operator)
+                .unwrap();
+        assert_eq!(retire.kind, "retire_result_content");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     impl Drop for ContentFixture {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();

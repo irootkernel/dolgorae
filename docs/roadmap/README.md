@@ -22,15 +22,13 @@ boundary immediately before `EPIC-008`.
 `EPIC-008` and its twelve Tasks are `COMPLETE`; they establish the verified
 live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. EPIC-018 is COMPLETE after successor requirements, checked contracts
-and qualified H1 validation. EPIC-019 is COMPLETE; EPIC-020 is PLANNED with
-partial uncommitted TASK-076 work preserved across the EPIC-023 entry handoff,
-resuming only after TASK-092 completes.
+and qualified H1 validation. EPIC-019 is COMPLETE.
 EPIC-023 is COMPLETE with Master's whole-Epic acceptance; TASK-090, TASK-091 and
-TASK-092 are COMPLETE. EPIC-020 and TASK-076 remain PLANNED; no resumption is activated.
+TASK-092 are COMPLETE. With that prerequisite met, Master resumed EPIC-020, which
+is ACTIVE.
 EPIC-009, EPIC-021, and EPIC-022 remain PLANNED for v0.1.4, in that execution
 order. TASK-067 is COMPLETE;
-TASK-068 through TASK-075 are COMPLETE;
-TASK-076 is PLANNED (partial uncommitted work preserved, resumes after TASK-092);
+TASK-068 through TASK-076 are COMPLETE;
 TASK-077 through TASK-089 remain PLANNED.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
@@ -2631,31 +2629,30 @@ production activation or final three-consumer runtime acceptance is inferred.
 
 ## EPIC-020: Delegation Identity, Access, and Approval Integration
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
 
 Goal: Expose accepted delegation evidence and modern public Runs with bounded execution and Controller-owned interactions.
 
 Delivery order: Phase 3, after completed EPIC-019 and EPIC-023, and before EPIC-009.
-Assigned release: v0.1.4. Partial uncommitted TASK-076 work is preserved
-untouched across the EPIC-023 entry handoff; resume only after TASK-092
-completes against its accepted contract selection.
+Assigned release: v0.1.4. Master resumed this Epic after TASK-092 completed. The
+partial work preserved across the EPIC-023 entry handoff is re-baselined:
+TASK-076 starts again from the committed tree and ports only reviewed pieces.
 Execute the member Tasks in the order below. The dossier maps their requirement
 owners, feedback, external boundaries and acceptance cases; the roadmap owns
 membership, ordering and status.
 
 ### TASK-076: Capture and Publish Delegation Identity
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-075.
 
 Outcome: Expose exact Role/configuration/task/result identities and read-by-key recovery. Accept inline Role bodies with dependencies and explicitly selected project guidance under captured-source limits. Define round accounting and membership-proven disposition; preserve task/Role separation and project discovery suppression.
 
-Resumption prerequisite: completed TASK-092/EPIC-023 (partial uncommitted
-TASK-076 work preserved across the EPIC-023 entry handoff; resumes only after
-TASK-092). Implement the shared proof,
+Resumption prerequisite: completed TASK-092/EPIC-023. The prerequisite is met.
+Implement the shared proof,
 retained state, database migration and both durable release owners here; the
 contract correction Epic does not supply that runtime implementation.
 
@@ -2669,9 +2666,9 @@ Status: `PLANNED`
 
 Depends on: TASK-076.
 
-Outcome: Implement the host routes selected and qualified before TASK-068 freeze, exposing the External Specialist facade through host-launched stdio MCP with trusted durable invocation identity and protected owner configuration. Implement and qualify the mandatory Aquarium/Podway supported paths and versioned dolgorae.external/1 and dolgorae.managed/1 exports within this Task's matrix scope. Required consumer-owned code/host qualification is an explicit prerequisite, not a handoff-only outcome.
+Outcome: Implement the host routes selected and qualified before TASK-068 freeze, exposing the External Specialist facade through host-launched stdio MCP with trusted durable invocation identity and protected owner configuration. Implement and qualify the mandatory Aquarium/Podway supported paths and versioned dolgorae.external/1 and dolgorae.managed/1 exports within this Task's matrix scope. Qualify caller-workspace Profile startup under the pinned Codex default features, including the shell snapshot, by enforced disabling or proven process handling. Required consumer-owned code/host qualification is an explicit prerequisite, not a handoff-only outcome.
 
-Verification: Requalify both pinned Codex and Claude host routes without per-call model-sandbox escalation; credentials absent from MCP traffic; exact replay/conflict, concurrent calls, reconnect/restart and response-loss recovery; Podway known-answer cases; no private-store scraping or invented acknowledgement. A typed unsupported result cannot complete mandatory host-support acceptance.
+Verification: Requalify both pinned Codex and Claude host routes without per-call model-sandbox escalation; default-feature Profile startup with unrelaxed process-quiescence proof; credentials absent from MCP traffic; exact replay/conflict, concurrent calls, reconnect/restart and response-loss recovery; Podway known-answer cases; no private-store scraping or invented acknowledgement. A typed unsupported result cannot complete mandatory host-support acceptance.
 
 Handoff: Implemented transport/export and actual consumer-path evidence for this Task's matrix rows. Default/backend activation remains consumer-owned; mandatory compatibility must pass. Group Action equivalence requires the supported contract and explicit Podway-owner mapping.
 

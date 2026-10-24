@@ -17,7 +17,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub const CANDIDATE_TOOL_NAME: &str = "dolgorae_candidate_read";
-pub const SAMPLED_SCOPE_LIMIT: &str = "Admission and acceptance fingerprints are sampled and may miss intervening edits. External writers are outside Dolgorae control; this review provides no snapshot isolation.";
+pub use crate::direct_review_target::SAMPLED_SCOPE_LIMIT;
 
 pub fn candidate_tool_spec() -> Value {
     serde_json::json!({

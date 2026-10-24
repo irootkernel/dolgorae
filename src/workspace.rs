@@ -2075,6 +2075,32 @@ pub(crate) fn atomic_create(
     sync_directory(parent)
 }
 
+/// A `file:` URI for one absolute database path with `immutable=1`.
+///
+/// An immutable open is SQLite's only guarantee that observing a WAL-mode
+/// database creates neither `-wal` nor `-shm` and writes nothing, which is what
+/// the pre-effect generation probe needs. Every byte outside the unreserved set
+/// is percent-encoded, so a path containing `?`, `#` or `%` cannot change the
+/// query.
+pub(crate) fn immutable_database_uri(path: &Path) -> Result<String, MachineError> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| MachineError::runtime_path_invalid(path, error.to_string()))?;
+    let raw = canonical
+        .to_str()
+        .ok_or_else(|| MachineError::runtime_path_invalid(path, "path is not UTF-8"))?;
+    let mut uri = String::with_capacity(raw.len() + 16);
+    uri.push_str("file:");
+    for byte in raw.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            uri.push(char::from(byte));
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri.push_str("?immutable=1");
+    Ok(uri)
+}
+
 pub(crate) fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
     File::open(path)?.sync_all()
 }

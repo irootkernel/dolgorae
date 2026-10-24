@@ -14,12 +14,14 @@ use crate::workspace::{
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+pub const SAMPLED_SCOPE_LIMIT: &str = "Admission and acceptance fingerprints are sampled and may miss intervening edits. External writers are outside Dolgorae control; this review provides no snapshot isolation.";
 
 const MAX_FILES: usize = 10_000;
 const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
@@ -375,6 +377,8 @@ impl DirectTarget {
         path: &str,
         review_id: Uuid,
     ) -> Result<Vec<u8>, MachineError> {
+        #[cfg(test)]
+        tests::source_read_fault(root)?;
         validate_path(path)?;
         let entry = self
             .entries
@@ -382,7 +386,8 @@ impl DirectTarget {
             .find(|entry| entry.side == side && entry.path == path)
             .ok_or_else(|| unavailable(Some(review_id)))?;
         let bytes = if let Some(oid) = &entry.blob_oid {
-            git(root, &["cat-file", "blob", oid]).map_err(|_| unavailable(Some(review_id)))?
+            git_status(root, &["cat-file", "blob", oid])?
+                .ok_or_else(|| unavailable(Some(review_id)))?
         } else {
             let (before, bytes) =
                 read_worktree_file(root, path)?.ok_or_else(|| unavailable(Some(review_id)))?;
@@ -594,6 +599,36 @@ impl DirectTargetReader {
         }
     }
 
+    /// Bind an accepted task to its exact admitted target, without re-admission.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create_for_admitted_task(
+        state_root: &Path,
+        workspace: &Path,
+        mode: WorkspaceMode,
+        task_id: Uuid,
+        run_id: Uuid,
+        target: DirectTarget,
+        create: bool,
+    ) -> Result<Self, MachineError> {
+        let root = state_root.join("direct-reviews").join(task_id.to_string());
+        match fs::symlink_metadata(&root) {
+            Ok(_) => {
+                let reader = Self::open(state_root, task_id, run_id)?;
+                if reader.workspace()? != fs::canonicalize(workspace).map_err(control_error)?
+                    || reader.workspace_mode() != mode
+                    || reader.target() != &target
+                {
+                    return Err(provenance_invalid(task_id));
+                }
+                Ok(reader)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+                Self::create_root(state_root, workspace, mode, task_id, run_id, target)
+            }
+            Err(error) => Err(control_error(error)),
+        }
+    }
+
     fn create_root(
         state_root: &Path,
         workspace: &Path,
@@ -706,6 +741,33 @@ impl DirectTargetReader {
             return Err(provenance_invalid(self.review_id()));
         }
         Ok(response.final_response)
+    }
+
+    pub(crate) fn retained_history_response(
+        &self,
+        thread: &str,
+        turn: &str,
+    ) -> Result<Option<Option<crate::turn::FinalResponse>>, MachineError> {
+        let key = value_digest(&json!([thread, turn]))?;
+        let record = read_control_if_present::<HistoryResponse>(
+            &self
+                .root
+                .join("history")
+                .join(format!("{key}.response.json")),
+            MAX_CONTROL_BYTES,
+        )?;
+        record
+            .map(|record| {
+                if record.schema != "dolgorae-direct-review-history-response/v1"
+                    || record.review_id != self.review_id()
+                    || record.thread_id != thread
+                    || record.turn_id != turn
+                {
+                    return Err(provenance_invalid(self.review_id()));
+                }
+                Ok(record.final_response)
+            })
+            .transpose()
     }
 
     pub fn for_run(state_root: &Path, run_id: Uuid) -> Result<Option<Self>, MachineError> {
@@ -1045,15 +1107,37 @@ impl DirectTargetReader {
                 } else if let Some(call_id) = item.get("id").and_then(Value::as_str) {
                     let key = value_digest(&json!([thread_id, turn_id, call_id]))?;
                     let path = self.root.join("reads").join(format!("{key}.json"));
-                    match read_control::<IssuedRead>(&path) {
-                        Ok(read) => {
+                    let response = if item.get("success").is_some_and(|v| !v.is_null())
+                        || item.get("contentItems").is_some_and(|v| !v.is_null())
+                    {
+                        Some(self.completed_host_response(item)?)
+                    } else {
+                        None
+                    };
+                    if let Some(Err(error)) = &response {
+                        if matches!(
+                            error.code.as_str(),
+                            "REVIEW_TARGET_UNAVAILABLE"
+                                | "REVIEW_TARGET_DRIFTED"
+                                | "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                        ) {
+                            return Err(error.clone());
+                        }
+                        self.reverify_failed_host_read(error)?;
+                        return Ok(());
+                    }
+                    match read_control_if_present::<IssuedRead>(&path, MAX_CONTROL_BYTES)? {
+                        Some(read) => {
                             read.thread_id == thread_id
                                 && read.turn_id == turn_id
                                 && read.call_id == call_id
                                 && read.receipt.review_id == self.binding.review_id
                                 && read.receipt.target_sha256 == self.binding.target.target_sha256
+                                && response.as_ref().is_none_or(|value| {
+                                    value.as_ref().is_ok_and(|receipt| receipt == &read.receipt)
+                                })
                         }
-                        Err(_) => false,
+                        None => return Err(control_error("candidate receipt is unavailable")),
                     }
                 } else {
                     false
@@ -1067,13 +1151,289 @@ impl DirectTargetReader {
         Ok(())
     }
 
+    /// This is the existing native dynamic-tool response, not a new control
+    /// record. A missing response cannot prove either issuance or a violation.
+    fn completed_host_response(
+        &self,
+        item: &Value,
+    ) -> Result<Result<CandidateReadReceipt, MachineError>, MachineError> {
+        let malformed = || control_error("candidate host response cannot be verified");
+        if !matches!(
+            item.get("status").and_then(Value::as_str),
+            Some("completed" | "failed")
+        ) || item.get("namespace").is_some_and(|v| !v.is_null())
+        {
+            return Err(malformed());
+        }
+        let success = item
+            .get("success")
+            .and_then(Value::as_bool)
+            .ok_or_else(malformed)?;
+        let content = item
+            .get("contentItems")
+            .and_then(Value::as_array)
+            .filter(|items| items.len() == 1)
+            .ok_or_else(malformed)?;
+        let fields = content[0]
+            .as_object()
+            .filter(|fields| fields.len() == 2)
+            .ok_or_else(malformed)?;
+        if fields.get("type").and_then(Value::as_str) != Some("inputText") {
+            return Err(malformed());
+        }
+        let text = fields
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(malformed)?;
+        if text.len() > MAX_READ_BYTES as usize * 2 + 16384 {
+            return Err(malformed());
+        }
+        let body = crate::jcs::parse(text)
+            .and_then(|v| crate::jcs::canonicalize(&v))
+            .map_err(|_| malformed())?;
+        let body: Value = serde_json::from_slice(&body).map_err(|_| malformed())?;
+        if !success {
+            let object = body
+                .as_object()
+                .filter(|fields| fields.len() == 1)
+                .ok_or_else(malformed)?;
+            let value = object
+                .get("error")
+                .and_then(Value::as_object)
+                .filter(|fields| {
+                    fields.len() == 4
+                        && ["code", "message", "retryable", "details"]
+                            .iter()
+                            .all(|key| fields.contains_key(*key))
+                })
+                .ok_or_else(malformed)?;
+            let error: MachineError =
+                serde_json::from_value(Value::Object(value.clone())).map_err(|_| malformed())?;
+            if !matches!(
+                error.code.as_str(),
+                "INVALID_ARGUMENT"
+                    | "REVIEW_TARGET_UNAVAILABLE"
+                    | "REVIEW_TARGET_DRIFTED"
+                    | "REVIEW_TARGET_LIMIT_EXCEEDED"
+                    | "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                    | "RUNTIME_STATE_INVALID"
+                    | "REVIEW_TARGET_UNSAFE_PATH"
+                    | "REVIEW_TARGET_UNSAFE_FILE"
+                    | "REVIEW_TARGET_GIT_FAILED"
+                    | "REVIEW_TARGET_IO_FAILURE"
+                    | "REVIEW_TARGET_SECRET_DETECTED"
+                    | "INTERNAL_ERROR"
+                    | "REVIEW_TARGET_TIMEOUT"
+            ) {
+                return Err(malformed());
+            }
+            if error.code.starts_with("REVIEW_")
+                && error
+                    .details
+                    .get("review_id")
+                    .is_some_and(|id| !id.is_null() && id != &json!(self.review_id()))
+            {
+                self.record_unmediated_tool()?;
+                return Err(provenance_invalid(self.review_id()));
+            }
+            return Ok(Err(error));
+        }
+        let object = body
+            .as_object()
+            .filter(|fields| fields.len() == 3)
+            .ok_or_else(malformed)?;
+        let receipt: CandidateReadReceipt =
+            serde_json::from_value(object.get("receipt").cloned().ok_or_else(malformed)?)
+                .map_err(|_| malformed())?;
+        let request: CandidateReadRequest =
+            serde_json::from_value(item.get("arguments").cloned().ok_or_else(malformed)?)
+                .map_err(|_| malformed())?;
+        let encoded = object
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(malformed)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| malformed())?;
+        if object.get("encoding").and_then(Value::as_str) != Some("base64")
+            || bytes.len() as u64 != request.byte_length
+            || base64::engine::general_purpose::STANDARD.encode(&bytes) != encoded
+            || receipt.review_id != self.review_id()
+            || receipt.target_sha256 != self.target().target_sha256
+            || receipt.receipt_id.get_version_num() != 7
+            || receipt.side != request.side
+            || receipt.path != request.path
+            || receipt.byte_offset != request.byte_offset
+            || receipt.byte_length != request.byte_length
+            || receipt.schema
+                != if request.side == "metadata" {
+                    "dolgorae-target-metadata-read-receipt/v1"
+                } else {
+                    "dolgorae-candidate-read-receipt/v1"
+                }
+        {
+            self.record_unmediated_tool()?;
+            return Err(provenance_invalid(self.review_id()));
+        }
+        Ok(Ok(receipt))
+    }
+
+    /// An unsuccessful host response does not prove that its storage or source
+    /// fault has gone away. Recheck the existing evidence without reissuing the
+    /// call or changing its recorded response.
+    fn reverify_failed_host_read(&self, original: &MachineError) -> Result<(), MachineError> {
+        let fault = matches!(
+            original.code.as_str(),
+            "RUNTIME_STATE_INVALID"
+                | "REVIEW_TARGET_GIT_FAILED"
+                | "REVIEW_TARGET_IO_FAILURE"
+                | "INTERNAL_ERROR"
+                | "REVIEW_TARGET_TIMEOUT"
+        );
+        let storage = self.verify_failed_read_storage();
+        if let Err(error) = storage {
+            return Err(
+                if matches!(
+                    error.code.as_str(),
+                    "REVIEW_TARGET_UNAVAILABLE" | "REVIEW_TARGET_DRIFTED"
+                ) {
+                    error
+                } else if fault || error.code == original.code {
+                    original.clone()
+                } else {
+                    control_error(&error.message)
+                },
+            );
+        }
+        if fault {
+            let workspace = self.workspace()?;
+            for entry in &self.binding.target.entries {
+                if let Err(error) = self.binding.target.file_bytes(
+                    &workspace,
+                    &entry.side,
+                    &entry.path,
+                    self.review_id(),
+                ) {
+                    return Err(
+                        if matches!(
+                            error.code.as_str(),
+                            "REVIEW_TARGET_UNAVAILABLE" | "REVIEW_TARGET_DRIFTED"
+                        ) {
+                            error
+                        } else {
+                            original.clone()
+                        },
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_failed_read_storage(&self) -> Result<(), MachineError> {
+        let _guard = self.lock()?;
+        let state = self
+            .root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| control_error("reader root is invalid"))?;
+        let restored = Self::open(state, self.review_id(), self.run_id())?;
+        if restored.binding.schema != self.binding.schema
+            || restored.binding.workspace != self.binding.workspace
+            || restored.binding.workspace_mode != self.binding.workspace_mode
+            || restored.binding.target != self.binding.target
+        {
+            return Err(control_error("reader binding changed"));
+        }
+        let lock: Value = read_control(&self.root.join("reader.lock"))?;
+        if lock != json!({}) {
+            return Err(control_error("reader lock changed"));
+        }
+        let metadata = self.binding.target.metadata_bytes()?;
+        let mut bounds = BTreeMap::from([(
+            ("metadata".to_owned(), "target.json".to_owned()),
+            (sha256_hex(&metadata), metadata.len() as u64),
+        )]);
+        for entry in &self.binding.target.entries {
+            bounds.insert(
+                (entry.side.clone(), entry.path.clone()),
+                (entry.sha256.clone(), entry.byte_length),
+            );
+        }
+        for (count, entry) in fs::read_dir(self.root.join("reads"))
+            .map_err(control_error)?
+            .enumerate()
+        {
+            if count >= MAX_RECEIPTS {
+                return Err(control_error("receipt directory exceeds its bound"));
+            }
+            let entry = entry.map_err(control_error)?;
+            let read: IssuedRead = read_control(&entry.path())?;
+            let receipt = &read.receipt;
+            let request = CandidateReadRequest {
+                side: receipt.side.clone(),
+                path: receipt.path.clone(),
+                byte_offset: receipt.byte_offset,
+                byte_length: receipt.byte_length,
+            };
+            let key = value_digest(&json!([read.thread_id, read.turn_id, read.call_id]))?;
+            if [
+                read.thread_id.as_str(),
+                read.turn_id.as_str(),
+                read.call_id.as_str(),
+            ]
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 128 || id.chars().any(char::is_control))
+                || entry.file_name() != std::ffi::OsStr::new(&format!("{key}.json"))
+                || read.request_sha256
+                    != value_digest(&serde_json::to_value(&request).map_err(control_error)?)?
+                || receipt.schema
+                    != if request.side == "metadata" {
+                        "dolgorae-target-metadata-read-receipt/v1"
+                    } else {
+                        "dolgorae-candidate-read-receipt/v1"
+                    }
+                || receipt.receipt_id.get_version_num() != 7
+                || receipt.review_id != self.review_id()
+                || receipt.target_sha256 != self.target().target_sha256
+                || request.byte_length > MAX_READ_BYTES
+            {
+                return Err(control_error("stored receipt cannot be verified"));
+            }
+            validate_path(&request.path)?;
+            let source = (request.side.clone(), request.path.clone());
+            if !bounds.contains_key(&source) && request.side == "diff" {
+                let content = self.target().content(
+                    &self.workspace()?,
+                    &request.side,
+                    &request.path,
+                    self.review_id(),
+                )?;
+                bounds.insert(source.clone(), (sha256_hex(&content), content.len() as u64));
+            }
+            let (digest, length) = bounds
+                .get(&source)
+                .ok_or_else(|| control_error("stored receipt source is foreign"))?;
+            if &receipt.sha256 != digest
+                || request
+                    .byte_offset
+                    .checked_add(request.byte_length)
+                    .is_none_or(|end| end > *length)
+            {
+                return Err(control_error("stored receipt content changed"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn check_acceptance(&self) -> Result<(), MachineError> {
         if !self.pending_histories()?.is_empty() {
             return Err(provenance_invalid(self.review_id()));
         }
         match fs::symlink_metadata(self.root.join("provenance-violation.json")) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            _ => return Err(provenance_invalid(self.binding.review_id)),
+            Ok(_) => return Err(provenance_invalid(self.binding.review_id)),
+            Err(error) => return Err(control_error(error)),
         }
         self.binding.target.check_drift(
             &self.binding.workspace.to_path_buf()?,
@@ -1384,8 +1744,16 @@ fn read_control_bounded<T: for<'de> Deserialize<'de>>(
     path: &Path,
     maximum: u64,
 ) -> Result<T, MachineError> {
-    let file = open_secure_file_if_present(path, current_uid())?
-        .ok_or_else(|| control_error("missing control file"))?;
+    read_control_if_present(path, maximum)?.ok_or_else(|| control_error("missing control file"))
+}
+
+fn read_control_if_present<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    maximum: u64,
+) -> Result<Option<T>, MachineError> {
+    let Some(file) = open_secure_file_if_present(path, current_uid())? else {
+        return Ok(None);
+    };
     let mut bytes = Vec::new();
     file.take(maximum + 1)
         .read_to_end(&mut bytes)
@@ -1393,7 +1761,9 @@ fn read_control_bounded<T: for<'de> Deserialize<'de>>(
     if bytes.len() as u64 > maximum {
         return Err(limit());
     }
-    serde_json::from_slice(&bytes).map_err(|_| control_error("invalid control JSON"))
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| control_error("invalid control JSON"))
 }
 
 fn control_error(_error: impl std::fmt::Display) -> MachineError {
@@ -1416,7 +1786,73 @@ fn limit() -> MachineError {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::process::Command;
+
+    thread_local! {
+        static SOURCE_READ_FAULT: std::cell::RefCell<Option<PathBuf>> = const {std::cell::RefCell::new(None)};
+    }
+    pub(crate) struct SourceReadFault(Option<PathBuf>);
+    impl SourceReadFault {
+        pub(crate) fn at(root: &Path) -> Self {
+            Self(SOURCE_READ_FAULT.with(|state| state.replace(Some(root.to_owned()))))
+        }
+    }
+    impl Drop for SourceReadFault {
+        fn drop(&mut self) {
+            SOURCE_READ_FAULT.with(|state| state.replace(self.0.take()));
+        }
+    }
+    pub(super) fn source_read_fault(root: &Path) -> Result<(), MachineError> {
+        if SOURCE_READ_FAULT.with(|state| state.borrow().as_deref() == Some(root)) {
+            Err(MachineError::new(
+                "REVIEW_TARGET_IO_FAILURE",
+                "source read failed",
+                false,
+                json!({}),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn fill_receipt_directory(reader: &DirectTargetReader) {
+        let request = CandidateReadRequest {
+            side: "metadata".to_owned(),
+            path: "target.json".to_owned(),
+            byte_offset: 0,
+            byte_length: 1,
+        };
+        reader
+            .read("thread-1", "turn-1", "capacity-0", &request)
+            .unwrap();
+        let first = fs::read_dir(reader.root.join("reads"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let template: IssuedRead = read_control(&first).unwrap();
+        for index in 1..MAX_RECEIPTS {
+            let mut record = template.clone();
+            record.call_id = format!("capacity-{index}");
+            record.receipt.receipt_id = new_uuid_v7();
+            let key =
+                value_digest(&json!([record.thread_id, record.turn_id, record.call_id])).unwrap();
+            let path = reader.root.join("reads").join(format!("{key}.json"));
+            fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+            fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    pub(crate) fn oversize_control_file(path: &Path) {
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(MAX_CONTROL_BYTES + 1)
+            .unwrap();
+    }
 
     pub(crate) struct Fixture {
         root: PathBuf,
@@ -1424,6 +1860,99 @@ pub(crate) mod tests {
         pub(crate) state: PathBuf,
         home: PathBuf,
         mode: WorkspaceMode,
+    }
+
+    #[test]
+    fn recorded_candidate_response_cases_remain_distinct() {
+        for case in 0..16 {
+            let fixture = Fixture::new(false);
+            fs::write(fixture.source.join("file.txt"), b"candidate\n").unwrap();
+            let reader = fixture.reader(fixture.admit("workspace", None));
+            let request = CandidateReadRequest {
+                side: "current".to_owned(),
+                path: "file.txt".to_owned(),
+                byte_offset: 0,
+                byte_length: 10,
+            };
+            let response = reader.read("thread-1", "turn-1", "read", &request).unwrap();
+            let mut item = json!({"type":"dynamicToolCall","id":"read","tool":"dolgorae_candidate_read",
+                "status":"completed","success":true,"arguments":request,
+                "contentItems":[{"type":"inputText","text":response.to_string()}]});
+            let path = fs::read_dir(reader.root.join("reads"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let bytes = fs::read(&path).unwrap();
+            if matches!(case, 0 | 1 | 3 | 14) {
+                item.as_object_mut().unwrap().remove("success");
+                item.as_object_mut().unwrap().remove("contentItems");
+            }
+            match case {
+                1 | 2 => fs::remove_file(&path).unwrap(),
+                3 => fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap(),
+                4 => fs::write(&path, b"broken JSON").unwrap(),
+                5 | 14 => {
+                    let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+                    value["receipt"]["review_id"] = json!(new_uuid_v7());
+                    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+                }
+                6 => {
+                    item.as_object_mut().unwrap().remove("contentItems");
+                }
+                7 => item["status"] = json!("in_progress"),
+                8 => item["namespace"] = json!("foreign"),
+                9 => item["contentItems"][0]["text"] = json!("not JSON"),
+                10 => {
+                    item["success"] = json!(false);
+                    item["contentItems"][0]["text"]=json!(json!({"error":MachineError::new("UNKNOWN_FAILURE","unknown",false,json!({}))}).to_string());
+                }
+                11 => {
+                    item["contentItems"][0]["text"] = json!("{\"receipt\":null,\"receipt\":null}")
+                }
+                12 => {
+                    let mut value = response;
+                    value["receipt"]["review_id"] = json!(new_uuid_v7());
+                    item["contentItems"][0]["text"] = json!(value.to_string());
+                }
+                13 => item["threadId"] = json!("foreign-thread"),
+                15 => {
+                    oversize_control_file(&path);
+                    item["success"] = json!(false);
+                    item["contentItems"][0]["text"] = json!(json!({"error":limit()}).to_string());
+                }
+                _ => {}
+            }
+            let result = reader.observe_item("thread-1", "turn-1", &item, true);
+            if case == 15 {
+                assert_eq!(
+                    result.as_ref().unwrap_err().code,
+                    "REVIEW_TARGET_LIMIT_EXCEEDED"
+                );
+            }
+            let violation = matches!(case, 5 | 12 | 13 | 14);
+            assert_eq!(
+                reader.root.join("provenance-violation.json").exists(),
+                violation,
+                "case={case}"
+            );
+            assert_eq!(
+                result.is_ok(),
+                case == 0 || matches!(case, 5 | 13 | 14),
+                "case={case}: {result:?}"
+            );
+            if matches!(case, 1 | 2 | 3 | 4 | 15) {
+                fs::write(&path, &bytes).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                assert!(
+                    reader
+                        .observe_item("thread-1", "turn-1", &item, true)
+                        .is_ok(),
+                    "case={case}"
+                );
+            }
+        }
     }
 
     impl Fixture {

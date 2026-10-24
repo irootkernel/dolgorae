@@ -864,6 +864,36 @@ pub fn retire_pid(pid: u32) -> Result<(), MachineError> {
     Ok(())
 }
 
+/// How many retained process registrations one Run's owned generation still
+/// carries, of any state.
+///
+/// The registrations outlive a Run's runtime locator and exist from prepare
+/// onward — the verified cleanup retires them before it removes the locator —
+/// so a locator-missing Run with any remaining registration lost it without
+/// that cleanup. Profile-wide registrations name no Run and are not this
+/// generation's.
+pub(crate) fn run_registration_count(run_id: Uuid) -> Result<usize, MachineError> {
+    let directory = root()?;
+    let mut count = 0_usize;
+    for entry in fs::read_dir(&directory).map_err(|error| unsafe_state(error.to_string()))? {
+        let path = entry
+            .map_err(|error| unsafe_state(error.to_string()))?
+            .path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(record) = read_record_if_present(&path)? else {
+            continue;
+        };
+        if record.run_id == Some(run_id)
+            && matches!(record.kind.as_str(), "worker" | "dedicated_server")
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

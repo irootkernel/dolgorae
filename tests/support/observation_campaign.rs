@@ -722,6 +722,7 @@ fn policy() -> InstalledSpecialistPolicy {
                 role_reference: Some("reviewer".to_owned()),
                 normalized_instructions: "Inspect the evidence and return a bounded result."
                     .to_owned(),
+                admitted_configuration: None,
                 instructions: InstructionSnapshot {
                     schema: "dolgorae.instructions/v1".to_owned(),
                     common_prefix_version: 1,

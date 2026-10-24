@@ -524,6 +524,20 @@ impl WriterStore {
         Self::new(state_root, workspace_id, uid).load().map(|_| ())
     }
 
+    /// Whether this workspace has a writer record path entry at all.
+    ///
+    /// Only a true absence of the path entry (`symlink_metadata` reporting
+    /// `NotFound`) means "no writer authority". A dangling symlink is an entry, so
+    /// it is reported present and the secure loader refuses it: an unobservable
+    /// record must never read as "no writer".
+    #[must_use]
+    pub fn record_exists(&self) -> bool {
+        match fs::symlink_metadata(self.record_path()) {
+            Ok(_) => true,
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        }
+    }
+
     pub fn load(&self) -> Result<WriterRecord, MachineError> {
         verify_secure_file(&self.record_path(), self.uid)?;
         let bytes =

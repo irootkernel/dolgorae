@@ -37,11 +37,13 @@ development commits.
   and access choices while preserving accepted records and recovery contracts.
 - Install private common and default Markdown Role templates during explicit init,
   preserving existing files and rejecting unsafe or invalid instruction sources.
+- Capture exact delegated Role, configuration, task and result identities with
+  keyed recovery across managed writes, review targets and v4 Reviewer tasks.
 
 ### Fixed
 
-- Define state-based member release proofs and retained release operations in a
-  separately selected H1 contract erratum, pending runtime implementation.
+- Enforce state-based member release proofs and retained release operations from
+  the separately selected H1 contract erratum on Engagement store generation 6.
 
 - Resume retained session Close after gateway or worker loss, preserve failure
   causes, and recover quiescent worker generations across executable changes

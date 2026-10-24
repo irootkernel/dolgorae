@@ -1,6 +1,7 @@
 //! Durable External Specialist Engagement authority.
 
 use crate::controller::{CredentialCarrier, authorize_controller};
+use crate::delegation_identity::{AcceptedSubjects, LookupNamespace, OperationReceipt};
 use crate::global_runtime::GlobalProfileBinding;
 use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::MachineError;
@@ -12,7 +13,9 @@ use crate::specialist::{
     ReviewerRuntimePlan, validate_reviewer_output, validate_reviewer_output_v3,
 };
 use crate::task_request::{STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt as _;
@@ -21,7 +24,341 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
+
+/// The exact accepted base tables of workspace Engagement database generation 6.
+///
+/// This is the single DDL source for generation 6: the fresh bootstrap and the
+/// `5 -> 6` migration both execute it, so a new workspace and a migrated one
+/// cannot drift. `metadata.orchestration_schema_version` stays `3`.
+///
+/// Every statement is strict: no object is created `IF NOT EXISTS`. A database
+/// that claims an older generation while already carrying any generation-6
+/// object is therefore not a verified shape, and the owning transaction rolls
+/// back with a typed failure instead of silently converging on a schema that
+/// only looks migrated.
+const GENERATION_SIX_DDL: &str = "
+CREATE TABLE delegation_operations(
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  operation_ref TEXT NOT NULL UNIQUE,
+  schema_version INTEGER NOT NULL DEFAULT 2,
+  state TEXT NOT NULL,
+  workspace_ref TEXT NOT NULL,
+  controller_principal TEXT NOT NULL,
+  controller_generation INTEGER NOT NULL,
+  scope_kind TEXT,
+  scope_ref TEXT,
+  operation_kind TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  mutation_envelope_json TEXT NOT NULL,
+  mutation_envelope_digest TEXT NOT NULL,
+  expected_revision INTEGER,
+  trusted_invocation_json TEXT,
+  accepted_subjects_json TEXT NOT NULL,
+  receipt_json TEXT,
+  definitive_refusal TEXT,
+  refusal_revision INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  CHECK(schema_version = 2),
+  CHECK(state IN ('prepared','accepted','resolved_not_accepted','unresolved')),
+  CHECK(controller_generation BETWEEN 1 AND 9007199254740991),
+  CHECK((scope_kind IS NULL) = (scope_ref IS NULL)),
+  CHECK(CASE state
+    WHEN 'prepared' THEN receipt_json IS NULL AND definitive_refusal IS NULL
+      AND refusal_revision IS NULL
+    WHEN 'unresolved' THEN receipt_json IS NULL AND definitive_refusal IS NULL
+      AND refusal_revision IS NULL
+    WHEN 'accepted' THEN receipt_json IS NOT NULL AND definitive_refusal IS NULL
+      AND refusal_revision IS NULL
+    WHEN 'resolved_not_accepted' THEN receipt_json IS NULL
+      AND definitive_refusal IS NOT NULL AND refusal_revision IS NOT NULL
+    ELSE 0 END)
+) STRICT;
+CREATE UNIQUE INDEX delegation_key_scoped ON delegation_operations(
+  workspace_ref, controller_principal, controller_generation,
+  scope_kind, scope_ref, operation_kind, idempotency_key)
+  WHERE scope_kind IS NOT NULL AND state <> 'resolved_not_accepted';
+CREATE UNIQUE INDEX delegation_key_prealloc ON delegation_operations(
+  workspace_ref, controller_principal, controller_generation, operation_kind, idempotency_key)
+  WHERE scope_kind IS NULL AND state <> 'resolved_not_accepted';
+CREATE TRIGGER delegation_identity_fixed BEFORE UPDATE ON delegation_operations
+WHEN NEW.operation_ref IS NOT OLD.operation_ref
+  OR NEW.schema_version IS NOT OLD.schema_version
+  OR NEW.workspace_ref IS NOT OLD.workspace_ref
+  OR NEW.controller_principal IS NOT OLD.controller_principal
+  OR NEW.controller_generation IS NOT OLD.controller_generation
+  OR NEW.scope_kind IS NOT OLD.scope_kind OR NEW.scope_ref IS NOT OLD.scope_ref
+  OR NEW.operation_kind IS NOT OLD.operation_kind
+  OR NEW.idempotency_key IS NOT OLD.idempotency_key
+  OR NEW.mutation_envelope_json IS NOT OLD.mutation_envelope_json
+  OR NEW.mutation_envelope_digest IS NOT OLD.mutation_envelope_digest
+BEGIN SELECT RAISE(ABORT,'operation identity changed'); END;
+CREATE TRIGGER delegation_receipt_frozen BEFORE UPDATE ON delegation_operations
+WHEN NOT(
+  (OLD.receipt_json IS NULL AND NEW.receipt_json IS NOT NULL
+     AND NEW.state = 'accepted' AND OLD.state IN ('prepared','unresolved'))
+  OR (OLD.definitive_refusal IS NULL AND NEW.definitive_refusal IS NOT NULL
+     AND NEW.refusal_revision IS NOT NULL
+     AND NEW.state = 'resolved_not_accepted' AND OLD.state IN ('prepared','unresolved'))
+  OR (OLD.receipt_json IS NEW.receipt_json
+     AND OLD.definitive_refusal IS NEW.definitive_refusal
+     AND OLD.refusal_revision IS NEW.refusal_revision))
+BEGIN SELECT RAISE(ABORT,'operation receipt is immutable'); END;
+CREATE TRIGGER delegation_state_transition BEFORE UPDATE OF state ON delegation_operations
+WHEN NOT(OLD.state = NEW.state
+  OR (OLD.state = 'prepared' AND NEW.state IN ('accepted','unresolved','resolved_not_accepted'))
+  OR (OLD.state = 'unresolved' AND NEW.state IN ('accepted','resolved_not_accepted')))
+BEGIN SELECT RAISE(ABORT,'operation state transition'); END;
+CREATE TABLE caller_scope_assignments(
+  assignment_id TEXT PRIMARY KEY,
+  binding_ref TEXT NOT NULL,
+  podway_workspace_ref TEXT NOT NULL,
+  podway_session_ref TEXT NOT NULL,
+  podway_attempt_ref TEXT NOT NULL,
+  delegated_placement_ref TEXT NOT NULL,
+  workspace_ref TEXT NOT NULL,
+  aggregate_scope_kind TEXT NOT NULL,
+  aggregate_scope_ref TEXT NOT NULL,
+  member_ref TEXT NOT NULL,
+  max_rounds INTEGER NOT NULL,
+  accounting_state TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  CHECK(max_rounds BETWEEN 1 AND 32),
+  CHECK(accounting_state IN ('counted_unresolved','counted_accepted','proved_nondispatch'))
+) STRICT;
+CREATE INDEX caller_scope_namespace ON caller_scope_assignments(
+  binding_ref, podway_workspace_ref, podway_session_ref, podway_attempt_ref,
+  delegated_placement_ref);
+CREATE TRIGGER assignment_identity_fixed BEFORE UPDATE ON caller_scope_assignments
+WHEN NEW.assignment_id IS NOT OLD.assignment_id
+  OR NEW.binding_ref IS NOT OLD.binding_ref
+  OR NEW.podway_workspace_ref IS NOT OLD.podway_workspace_ref
+  OR NEW.podway_session_ref IS NOT OLD.podway_session_ref
+  OR NEW.podway_attempt_ref IS NOT OLD.podway_attempt_ref
+  OR NEW.delegated_placement_ref IS NOT OLD.delegated_placement_ref
+  OR NEW.workspace_ref IS NOT OLD.workspace_ref
+  OR NEW.aggregate_scope_kind IS NOT OLD.aggregate_scope_kind
+  OR NEW.aggregate_scope_ref IS NOT OLD.aggregate_scope_ref
+  OR NEW.member_ref IS NOT OLD.member_ref
+  OR NEW.max_rounds IS NOT OLD.max_rounds
+  OR NEW.created_at_ms IS NOT OLD.created_at_ms
+BEGIN SELECT RAISE(ABORT,'caller assignment identity changed'); END;
+CREATE TRIGGER caller_scope_budget_fixed BEFORE INSERT ON caller_scope_assignments
+WHEN EXISTS(
+  SELECT 1 FROM caller_scope_assignments a
+   WHERE a.binding_ref = NEW.binding_ref
+     AND a.podway_workspace_ref = NEW.podway_workspace_ref
+     AND a.podway_session_ref = NEW.podway_session_ref
+     AND a.podway_attempt_ref = NEW.podway_attempt_ref
+     AND a.delegated_placement_ref = NEW.delegated_placement_ref
+     AND a.max_rounds <> NEW.max_rounds)
+BEGIN SELECT RAISE(ABORT,'caller scope budget changed'); END;
+CREATE TRIGGER accounting_transition BEFORE UPDATE OF accounting_state
+ON caller_scope_assignments
+WHEN NOT(OLD.accounting_state = NEW.accounting_state
+  OR (OLD.accounting_state = 'counted_unresolved'
+      AND NEW.accounting_state IN ('counted_accepted','proved_nondispatch')))
+BEGIN SELECT RAISE(ABORT,'caller assignment accounting transition'); END;
+CREATE TABLE scope_membership_revisions(
+  workspace_ref TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  scope_ref TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(workspace_ref, scope_kind, scope_ref),
+  CHECK(scope_kind IN ('external_engagement','orchestrated_session')),
+  CHECK(revision BETWEEN 0 AND 9007199254740991)
+) STRICT;
+CREATE TRIGGER scope_membership_monotonic BEFORE UPDATE ON scope_membership_revisions
+WHEN NEW.revision < OLD.revision
+BEGIN SELECT RAISE(ABORT,'scope revision decreased'); END;
+CREATE TABLE member_workload_revisions(
+  workspace_ref TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  scope_ref TEXT NOT NULL,
+  member_ref TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(workspace_ref, scope_kind, scope_ref, member_ref),
+  CHECK(scope_kind IN ('external_engagement','orchestrated_session')),
+  CHECK(revision BETWEEN 0 AND 9007199254740991)
+) STRICT;
+CREATE TRIGGER member_workload_monotonic BEFORE UPDATE ON member_workload_revisions
+WHEN NEW.revision < OLD.revision
+BEGIN SELECT RAISE(ABORT,'member workload revision decreased'); END;
+CREATE TABLE member_release_operations(
+  operation_ref TEXT PRIMARY KEY,
+  operation_kind TEXT NOT NULL,
+  workspace_ref TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  scope_ref TEXT NOT NULL,
+  member_ref TEXT NOT NULL,
+  run_ref TEXT NOT NULL,
+  controller_principal TEXT NOT NULL,
+  controller_generation INTEGER NOT NULL,
+  admitted_membership_revision INTEGER NOT NULL,
+  owner_ref TEXT,
+  progress TEXT NOT NULL,
+  safe_failure_code TEXT,
+  required_action TEXT NOT NULL,
+  terminal_membership_revision INTEGER,
+  settled_workload_revision INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  UNIQUE(workspace_ref, scope_kind, scope_ref, member_ref),
+  CHECK((operation_kind = 'release_external_specialist'
+         AND scope_kind = 'external_engagement')
+     OR (operation_kind = 'release_specialist' AND scope_kind = 'orchestrated_session')),
+  CHECK(controller_generation BETWEEN 1 AND 9007199254740991),
+  CHECK(admitted_membership_revision BETWEEN 0 AND 9007199254740991),
+  CHECK(CASE progress
+    WHEN 'requested' THEN terminal_membership_revision IS NULL
+      AND settled_workload_revision IS NULL AND safe_failure_code IS NULL
+      AND required_action = 'none'
+    WHEN 'settling' THEN terminal_membership_revision IS NULL
+      AND settled_workload_revision IS NULL AND safe_failure_code IS NULL
+      AND required_action = 'none'
+    WHEN 'terminal' THEN terminal_membership_revision IS NOT NULL
+      AND settled_workload_revision IS NOT NULL AND safe_failure_code IS NULL
+      AND required_action = 'none'
+      AND terminal_membership_revision > admitted_membership_revision
+      AND terminal_membership_revision BETWEEN 0 AND 9007199254740991
+      AND settled_workload_revision BETWEEN 0 AND 9007199254740991
+    WHEN 'cleanup_failed' THEN terminal_membership_revision IS NULL
+      AND settled_workload_revision IS NULL AND safe_failure_code IS NOT NULL
+      AND required_action IN ('reconcile_operation','recover_run','restore_state')
+    WHEN 'recovery_needed' THEN terminal_membership_revision IS NULL
+      AND settled_workload_revision IS NULL AND safe_failure_code IS NOT NULL
+      AND required_action IN ('reconcile_operation','recover_run','restore_state')
+    ELSE 0 END)
+) STRICT;
+CREATE TRIGGER release_admission_immutable BEFORE UPDATE ON member_release_operations
+WHEN NEW.operation_ref IS NOT OLD.operation_ref
+  OR NEW.operation_kind IS NOT OLD.operation_kind
+  OR NEW.workspace_ref IS NOT OLD.workspace_ref
+  OR NEW.scope_kind IS NOT OLD.scope_kind OR NEW.scope_ref IS NOT OLD.scope_ref
+  OR NEW.member_ref IS NOT OLD.member_ref OR NEW.run_ref IS NOT OLD.run_ref
+  OR NEW.controller_principal IS NOT OLD.controller_principal
+  OR NEW.controller_generation IS NOT OLD.controller_generation
+  OR NEW.admitted_membership_revision IS NOT OLD.admitted_membership_revision
+BEGIN SELECT RAISE(ABORT,'release admission changed'); END;
+CREATE TRIGGER release_terminal_frozen BEFORE UPDATE ON member_release_operations
+WHEN OLD.progress = 'terminal'
+  AND (NEW.progress IS NOT OLD.progress
+       OR NEW.terminal_membership_revision IS NOT OLD.terminal_membership_revision
+       OR NEW.settled_workload_revision IS NOT OLD.settled_workload_revision)
+BEGIN SELECT RAISE(ABORT,'settled release is immutable'); END;
+CREATE TABLE dispatch_indexes(
+  task_id TEXT PRIMARY KEY,
+  workspace_ref TEXT NOT NULL,
+  run_ref TEXT NOT NULL,
+  head_commit TEXT,
+  index_sha256 TEXT NOT NULL,
+  index_byte_length INTEGER NOT NULL,
+  file_count INTEGER NOT NULL,
+  baseline_bytes INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  CHECK(length(index_sha256) = 64 AND index_sha256 NOT GLOB '*[^0-9a-f]*'),
+  CHECK(file_count BETWEEN 0 AND 10000),
+  CHECK(index_byte_length BETWEEN 1 AND 67108864),
+  CHECK(baseline_bytes BETWEEN 0 AND 268435456)
+) STRICT;
+CREATE INDEX dispatch_indexes_by_run ON dispatch_indexes(run_ref);
+CREATE TRIGGER dispatch_index_fixed BEFORE UPDATE ON dispatch_indexes
+BEGIN SELECT RAISE(ABORT,'dispatch index is immutable'); END;
+";
+
+/// The file that proves which namespace this workspace's Engagement database
+/// belongs to. Created by whichever path creates the database and republished
+/// from the database by the next writable open when it is missing.
+pub const NAMESPACE_BIRTH_FILE: &str = "namespace-birth.json";
+const NAMESPACE_BIRTH_SCHEMA: &str = "dolgorae.namespace-birth/v1";
+/// The SHA-256 of zero bytes, i.e. the digest of the empty provenance.
+///
+/// The v5 successor open request carries no external controller reference, so
+/// its bootstrap event records the digest of that empty provenance instead of
+/// guessing a synthetic reference. Legacy opens always record their real one.
+const NO_EXTERNAL_PROVENANCE_SHA256: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+/// The per-Run aggregate bound over retained dispatch-index baseline bytes and
+/// retained change content together.
+pub(crate) const MAX_RUN_BASELINE_BYTES: u64 = 268_435_456;
+
+/// The content-store owner kind of one retained change side.
+///
+/// The owner is the accepted task, and the representation is `before:<path>` or
+/// `after:<path>`, so a retained side names its task, its path and its side.
+const SUCCESSOR_CHANGE_KIND: &str = "successor_change";
+
+/// Retain the exact bytes one `ChangeRef` side names.
+///
+/// The reference is written in the caller's transaction so the settlement and its
+/// retained content commit together, and identical bytes are stored once because
+/// the content row is keyed by their digest.
+pub(crate) fn retain_change_side(
+    transaction: &Transaction<'_>,
+    task_id: Uuid,
+    path: &str,
+    side: &str,
+    bytes: &[u8],
+) -> Result<(), MachineError> {
+    crate::storage_observation::put_content(
+        transaction,
+        SUCCESSOR_CHANGE_KIND,
+        &task_id.to_string(),
+        &format!("{side}:{path}"),
+        bytes,
+    )
+    .map(|_| ())
+}
+
+/// The bytes one retained change side names, if it is retained.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn retained_change_side(
+    connection: &Connection,
+    task_id: Uuid,
+    path: &str,
+    side: &str,
+) -> Result<Option<Vec<u8>>, MachineError> {
+    crate::storage_observation::read_content(
+        connection,
+        SUCCESSOR_CHANGE_KIND,
+        &task_id.to_string(),
+        &format!("{side}:{path}"),
+    )
+}
+
+/// The bytes one Run retains under its per-Run aggregate.
+///
+/// The dispatch index retains the bytes of every dirty and untracked path at
+/// dispatch; a settlement additionally retains the complete before and after bytes
+/// its changes name. Both count against one per-Run bound, so a Run cannot exhaust
+/// storage twice over.
+pub(crate) fn run_retained_bytes(
+    connection: &Connection,
+    run_ref: Uuid,
+) -> Result<u64, MachineError> {
+    let baseline: u64 = connection
+        .query_row(
+            "SELECT COALESCE(SUM(baseline_bytes),0) FROM dispatch_indexes WHERE run_ref=?1",
+            [run_ref.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    let changes: u64 = connection
+        .query_row(
+            "SELECT COALESCE(SUM(r.byte_length),0)
+               FROM result_content_refs r
+               JOIN dispatch_indexes d ON d.task_id = r.owner_id
+              WHERE r.owner_kind=?1 AND d.run_ref=?2",
+            params![SUCCESSOR_CHANGE_KIND, run_ref.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    baseline
+        .checked_add(changes)
+        .ok_or_else(|| internal("the Run's retained bytes are unrepresentable"))
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EngagementBarrier {
@@ -65,6 +402,8 @@ pub enum EngagementBarrier {
     AfterExternalMemberReleaseCommit,
     BeforeExternalCloseCommit,
     AfterExternalCloseCommit,
+    BeforeMigrationV6Commit,
+    AfterMigrationV6Commit,
 }
 
 pub trait EngagementFaultInjector: Send + Sync {
@@ -302,30 +641,67 @@ impl EngagementStore {
                 "orchestration database path must be absolute",
             ));
         }
-        if path.exists() {
-            let mut connection = crate::storage_observation::CheckedConnection::open(path, false)?;
-            let has_metadata:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata')",[],|row|row.get(0)).map_err(internal)?;
-            if has_metadata {
-                let observed: Option<String> = connection
-                    .query_row(
-                        "SELECT value FROM metadata WHERE key='schema_version'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(internal)?;
-                if observed.as_deref() == Some("5") {
-                    crate::storage_observation::initialize_content(&mut connection)?;
-                    return Ok(Self { connection, faults });
+        // The pre-effect gate runs before any writable open, `chmod`, WAL pragma
+        // or DDL. The generation probe runs first so an unsupported generation
+        // always reports `ORCHESTRATION_SCHEMA_UNSUPPORTED`, even beside a corrupt
+        // birth record (RPC:508-517). The record is then read as an
+        // independent refusal: a record whose database is missing, empty or still
+        // a legacy generation can never be repaired by creating or migrating a
+        // database, so nothing is created.
+        let probe = admit_generation(path)?;
+        let record = read_birth_record(&birth_record_path(path)?)?;
+        let Some(probe) = probe else {
+            if record.is_some() {
+                return Err(namespace_record_without_database());
+            }
+            return Self::create_fresh(path, faults);
+        };
+        match probe.schema_generation {
+            AdmittedGeneration::Six => {
+                let birth_id = probe_birth_id(&probe)?;
+                drop(probe);
+                if record.is_some_and(|record| record != birth_id) {
+                    return Err(namespace_record_mismatch());
                 }
+                // Verification and the workspace lease are established before
+                // the first writable effect, and the missing birth record is
+                // published while that admission is still held.
+                let mut connection =
+                    crate::storage_observation::CheckedConnection::open(path, false)?;
+                publish_birth_record(path, birth_id)?;
+                crate::storage_observation::initialize_content(&mut connection)?;
+                Ok(Self { connection, faults })
+            }
+            AdmittedGeneration::Legacy(generation) => {
+                drop(probe);
+                if record.is_some() {
+                    return Err(namespace_record_mismatch());
+                }
+                Self::migrate_legacy(path, generation, faults)
             }
         }
+    }
+
+    /// Bootstrap one brand-new database and its namespace birth record.
+    ///
+    /// The historical bootstrap creates a valid generation 5 database and the
+    /// single `5 -> 6` transaction takes it to the current generation. The
+    /// admission lease is held from before the first write through publication,
+    /// so a migration or birth never runs while workspace maintenance excludes
+    /// database access.
+    fn create_fresh(
+        path: &Path,
+        faults: Arc<dyn EngagementFaultInjector>,
+    ) -> Result<Self, MachineError> {
+        // Admission needs only the state root and its `workspace.json`, so it is
+        // taken before the first filesystem effect: a workspace whose maintenance
+        // lease excludes database access must not even gain a directory.
+        let admission = crate::storage_observation::database_admission(path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(internal)?;
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(internal)?;
         }
-        let _initialization_admission = crate::storage_observation::database_admission(path)?;
         let mut connection = Connection::open(path).map_err(internal)?;
         crate::storage_observation::install_trace(&connection)?;
         crate::storage_observation::count_migration();
@@ -437,108 +813,10 @@ impl EngagementStore {
                  COMMIT;",
             )
             .map_err(internal)?;
-        connection
-            .execute(
-                "INSERT OR IGNORE INTO metadata(key,value) VALUES('schema_version',?1)",
-                [SCHEMA_VERSION.to_string()],
-            )
-            .map_err(internal)?;
-        let observed: String = connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(internal)?;
-        if observed == "1" {
-            connection
-                .execute_batch("PRAGMA foreign_keys=OFF;")
-                .map_err(internal)?;
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(internal)?;
-            let locked_observed: String = transaction
-                .query_row(
-                    "SELECT value FROM metadata WHERE key='schema_version'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(internal)?;
-            if locked_observed == "1" {
-                transaction
-                    .execute_batch(
-                        "ALTER TABLE delivery_receipts RENAME TO delivery_receipts_v1;
-                     ALTER TABLE artifacts RENAME TO artifacts_v1;
-                     CREATE TABLE artifacts(
-                       artifact_id TEXT PRIMARY KEY,
-                       engagement_id TEXT NOT NULL UNIQUE,
-                       result_sha256 TEXT NOT NULL,
-                       canonical_json TEXT NOT NULL,
-                       FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
-                     ) STRICT;
-                     INSERT INTO artifacts(
-                       artifact_id, engagement_id, result_sha256, canonical_json
-                     ) SELECT
-                       artifact_id, engagement_id, result_sha256, canonical_json
-                     FROM artifacts_v1;
-                     CREATE TABLE delivery_receipts(
-                       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                       task_id TEXT NOT NULL UNIQUE,
-                       artifact_id TEXT NOT NULL,
-                       delivered_at_ms INTEGER NOT NULL,
-                       FOREIGN KEY(task_id) REFERENCES tasks(task_id),
-                       FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
-                     ) STRICT;
-                     INSERT INTO delivery_receipts(
-                       sequence, task_id, artifact_id, delivered_at_ms
-                     ) SELECT
-                       sequence, task_id, artifact_id, delivered_at_ms
-                     FROM delivery_receipts_v1;
-                     DROP TABLE delivery_receipts_v1;
-                     DROP TABLE artifacts_v1;
-                     UPDATE metadata SET value='2' WHERE key='schema_version';",
-                    )
-                    .map_err(internal)?;
-                let violation: i64 = transaction
-                    .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                        row.get(0)
-                    })
-                    .map_err(internal)?;
-                if violation != 0 {
-                    return Err(internal(
-                        "orchestration v1 migration violated a foreign key",
-                    ));
-                }
-            } else if !["2", "3", "4", "5"].contains(&locked_observed.as_str()) {
-                return Err(MachineError::new(
-                    "ORCHESTRATION_SCHEMA_UNSUPPORTED",
-                    "orchestration schema is not supported",
-                    false,
-                    serde_json::json!({"observed":locked_observed}),
-                ));
-            }
-            crate::storage_observation::commit(transaction).map_err(internal)?;
-            connection
-                .execute_batch("PRAGMA foreign_keys=ON;")
-                .map_err(internal)?;
-        } else if !["2", "3", "4", "5"].contains(&observed.as_str()) {
-            return Err(MachineError::new(
-                "ORCHESTRATION_SCHEMA_UNSUPPORTED",
-                "orchestration schema is not supported",
-                false,
-                serde_json::json!({"observed":observed}),
-            ));
-        }
-        let observed: String = connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(internal)?;
-        if observed == "2" {
-            migrate_v2_to_v3(&mut connection)?;
-        }
+        // The historical bootstrap creates the generation-1 tables, so the
+        // accepted chain completes generations 4 and 5 exactly as HEAD did, and
+        // the generation-6 tables then come from the single DDL source in the
+        // one transaction that also writes the namespace birth id.
         migrate_v3_to_v4(&mut connection)?;
         migrate_v4_to_v5(&mut connection)?;
         connection
@@ -548,10 +826,57 @@ impl EngagementStore {
                    WHERE state IN ('accepted','queued','claimed','dispatching','running');",
             )
             .map_err(internal)?;
+        let birth_id = fresh_birth_id();
+        migrate_v5_to_v6(&mut connection, birth_id, &faults)?;
+        let birth_id = database_birth_id(&connection)?;
         crate::storage_observation::initialize_content(&mut connection)?;
         drop(connection);
+        publish_birth_record(path, birth_id)?;
+        drop(admission);
+        // Between dropping the bootstrap admission and this checked open the
+        // database is a complete generation-6 namespace, so a maintenance owner
+        // that wins the lease in that window sees a valid database and the
+        // checked open either re-admits it or refuses with a typed busy error.
         let connection = crate::storage_observation::CheckedConnection::open(path, false)?;
         Ok(Self { connection, faults })
+    }
+
+    /// Migrate one existing legacy database directly into generation 6.
+    ///
+    /// Generation 5 and below already carry the base tables, so this path never
+    /// re-runs the fresh bootstrap batch (no `CREATE TABLE`, `chmod` or WAL
+    /// pragma before the owning migration). Verification and the workspace lease
+    /// are established by the checked open before the first writable effect, and
+    /// the same lease is retained as the store connection.
+    fn migrate_legacy(
+        path: &Path,
+        generation: i64,
+        faults: Arc<dyn EngagementFaultInjector>,
+    ) -> Result<Self, MachineError> {
+        let mut lease = crate::storage_observation::CheckedConnection::open(path, false)?;
+        {
+            let connection: &mut Connection = &mut lease;
+            connection
+                .execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")
+                .map_err(internal)?;
+            if generation == 1 {
+                migrate_v1_to_v2(connection)?;
+            }
+            if generation <= 2 {
+                migrate_v2_to_v3(connection)?;
+            }
+            migrate_v3_to_v4(connection)?;
+            migrate_v4_to_v5(connection)?;
+            let birth_id = fresh_birth_id();
+            migrate_v5_to_v6(connection, birth_id, &faults)?;
+            let birth_id = database_birth_id(connection)?;
+            crate::storage_observation::initialize_content(connection)?;
+            publish_birth_record(path, birth_id)?;
+        }
+        Ok(Self {
+            connection: lease,
+            faults,
+        })
     }
 
     pub(crate) fn into_connection(self) -> crate::storage_observation::CheckedConnection {
@@ -566,25 +891,22 @@ impl EngagementStore {
                 "orchestration database path must be absolute",
             ));
         }
+        // The same effect-free gate as the writable openers: an unsupported or
+        // inconsistent generation fails before any connection is pooled. A
+        // never-bootstrapped database is observationally identical to a missing
+        // one, so it gets the same refusal.
+        if admit_generation(path)?.is_none() {
+            return Err(MachineError::new(
+                "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+                "orchestration database is not initialized",
+                false,
+                serde_json::json!({"observed":null}),
+            ));
+        }
         let connection = crate::storage_observation::CheckedConnection::open(path, true)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(internal)?;
-        let observed: String = connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(internal)?;
-        if !["1", "2", "3", "4", "5"].contains(&observed.as_str()) {
-            return Err(MachineError::new(
-                "ORCHESTRATION_SCHEMA_UNSUPPORTED",
-                "orchestration schema is not supported",
-                false,
-                serde_json::json!({"observed":observed}),
-            ));
-        }
         Ok(Self {
             connection,
             faults: Arc::new(NoEngagementFaults),
@@ -1560,17 +1882,7 @@ impl EngagementStore {
     ) -> Result<ExternalEngagementSnapshot, MachineError> {
         checked(workspace_id, 512, "workspace_id")?;
         checked(idempotency_key, 256, "idempotency_key")?;
-        if binding.identity.generation != 1
-            || !matches!(
-                binding.identity.kind.as_str(),
-                "workflow_orchestrator" | "automation"
-            )
-        {
-            return Err(invalid(
-                "controller",
-                "engagement owner must be a generation-1 workflow_orchestrator or automation Controller",
-            ));
-        }
+        require_external_owner_binding(binding)?;
         if let Some(label) = label {
             checked(label, 256, "label")?;
         }
@@ -1607,44 +1919,20 @@ impl EngagementStore {
         )? {
             return Ok(replay);
         }
-        transaction
-            .execute(
-                "INSERT INTO engagements(
-               engagement_id,workspace_id,controller_sha256,state,revision,
-               bootstrap_operation_id,external_controller_ref_json,
-               external_controller_ref_sha256,label,controller_binding_json,
-               created_at_ms,updated_at_ms,authority_kind
-             ) VALUES(?1,?2,?3,'active',1,?4,?5,?6,?7,?8,?9,?9,'external_v1')",
-                params![
-                    engagement_id.to_string(),
-                    workspace_id,
-                    sha256_hex(binding_json.as_bytes()),
-                    bootstrap_operation_id.to_string(),
-                    external_json,
-                    external_sha256,
-                    label,
-                    binding_json,
-                    now,
-                ],
-            )
-            .map_err(internal)?;
-        let bootstrap_payload = format!(
-            "{bootstrap_operation_id}\0{external_sha256}\0{}",
-            sha256_hex(binding_json.as_bytes())
-        );
-        append_event(
+        let result = open_external_engagement_in(
             &transaction,
-            engagement_id,
-            "external_engagement_opened",
-            &bootstrap_payload,
+            ExternalOpenCore {
+                engagement_id,
+                workspace_id,
+                controller_sha256: &sha256_hex(binding_json.as_bytes()),
+                bootstrap_operation_id,
+                external_json: Some(&external_json),
+                external_sha256: Some(&external_sha256),
+                label,
+                binding_json: &binding_json,
+                now_ms: now,
+            },
         )?;
-        let result = ExternalEngagementSnapshot {
-            engagement_id,
-            state: "active".to_owned(),
-            external_controller_ref: external_controller_ref.clone(),
-            revision: 1,
-            specialists: Vec::new(),
-        };
         scoped_record(
             &transaction,
             &scope,
@@ -1938,46 +2226,20 @@ impl EngagementStore {
         )? {
             return Ok((replay, false));
         }
-        require_current(
+        let result = reserve_external_hire_in(
             &transaction,
-            engagement_id,
-            &["active", "degraded", "recovering"],
-        )?;
-        transaction
-            .execute(
-                "INSERT INTO members(
-               specialist_run_id,engagement_id,hire_operation_id,
-               configuration_sha256,state,role_ref,configuration_json,
-               objective_sha256,requested_access,actor_residency,created_at_ms,updated_at_ms
-             ) VALUES(?1,?2,?3,?4,'provisioning',?5,?6,?7,?8,'unstarted',?9,?9)",
-                params![
-                    specialist_run_id.to_string(),
-                    engagement_id.to_string(),
-                    hire_operation_id.to_string(),
-                    configuration_sha256,
-                    role_ref,
-                    configuration_json,
-                    objective_sha256,
-                    requested_access,
-                    now
-                ],
-            )
-            .map_err(internal)?;
-        transaction.execute(
-            "UPDATE engagements SET revision=revision+1,updated_at_ms=?2 WHERE engagement_id=?1",
-            params![engagement_id.to_string(), now],
-        ).map_err(internal)?;
-        let result = ExternalHireReservation {
-            engagement_id,
-            hire_operation_id,
-            specialist_run_id,
-            state: "provisioning".to_owned(),
-        };
-        append_event(
-            &transaction,
-            engagement_id,
-            "external_hire_reserved",
-            &request,
+            ExternalHireReservationCore {
+                engagement_id,
+                hire_operation_id,
+                specialist_run_id,
+                role_ref,
+                configuration_json: &configuration_json,
+                configuration_sha256: &configuration_sha256,
+                objective_sha256: Some(&objective_sha256),
+                requested_access,
+                event_payload: &request,
+                now_ms: now,
+            },
         )?;
         scoped_record(
             &transaction,
@@ -2002,41 +2264,10 @@ impl EngagementStore {
         outcome: RuntimeOutcome,
         idempotency_key: &str,
     ) -> Result<ExternalHireReservation, MachineError> {
-        let state = match outcome {
-            RuntimeOutcome::Accepted => "active",
-            RuntimeOutcome::Rejected => "degraded",
-            RuntimeOutcome::Unknown => "degraded",
-        };
-        let response_state = match outcome {
-            RuntimeOutcome::Accepted => "ready",
-            RuntimeOutcome::Rejected | RuntimeOutcome::Unknown => "recovery_required",
-        };
         let now = unix_time_ms()?;
-        let result = ExternalHireReservation {
-            state: response_state.to_owned(),
-            ..reservation.clone()
-        };
         let faults = Arc::clone(&self.faults);
         let transaction = self.transaction()?;
-        let changed = transaction
-            .execute(
-                "UPDATE members SET state=?2,actor_residency=?3,updated_at_ms=?4
-             WHERE specialist_run_id=?1 AND state='provisioning'",
-                params![
-                    reservation.specialist_run_id.to_string(),
-                    state,
-                    if outcome == RuntimeOutcome::Accepted {
-                        "unstarted"
-                    } else if outcome == RuntimeOutcome::Unknown {
-                        "recovering"
-                    } else {
-                        "unavailable"
-                    },
-                    now
-                ],
-            )
-            .map_err(internal)?;
-        if changed != 1 {
+        let Some(result) = settle_external_hire_in(&transaction, reservation, outcome, now)? else {
             let matching_receipt: bool = transaction
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM operations
@@ -2079,25 +2310,13 @@ impl EngagementStore {
                 },
                 ..reservation.clone()
             });
-        }
-        if outcome != RuntimeOutcome::Accepted {
-            transaction.execute(
-                "UPDATE engagements SET state='degraded',revision=revision+1,updated_at_ms=?2 WHERE engagement_id=?1",
-                params![reservation.engagement_id.to_string(), now],
-            ).map_err(internal)?;
-        }
+        };
         scoped_update_response(
             &transaction,
             &reservation.engagement_id.to_string(),
             "hire_external_specialist",
             idempotency_key,
             &result,
-        )?;
-        append_event(
-            &transaction,
-            reservation.engagement_id,
-            "external_hire_outcome",
-            response_state,
         )?;
         commit_with(
             &faults,
@@ -2179,6 +2398,149 @@ impl EngagementStore {
             access,
             state,
         ))
+    }
+
+    /// The authenticated owner binding one external engagement recorded at open.
+    ///
+    /// Successor services verify this binding against the trusted Controller of
+    /// the current call before they admit any keyed operation, so an aggregate
+    /// has exactly the owner it was opened with (MDC:137).
+    pub(crate) fn external_owner_binding(
+        &self,
+        engagement_id: Uuid,
+    ) -> Result<(String, ControllerBinding), MachineError> {
+        let row: Option<(String, Option<String>, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT workspace_id,controller_binding_json,controller_sha256,authority_kind
+                 FROM engagements WHERE engagement_id=?1",
+                [engagement_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(internal)?;
+        let (workspace_id, binding_json, digest, kind) = row.ok_or_else(not_found)?;
+        if kind != "external_v1" {
+            return Err(not_found());
+        }
+        let binding_json = binding_json.ok_or_else(|| integrity("owner binding is missing"))?;
+        if digest != sha256_hex(binding_json.as_bytes()) {
+            return Err(integrity("owner binding digest does not match"));
+        }
+        let binding: ControllerBinding = serde_json::from_str(&binding_json)
+            .map_err(|_| integrity("owner binding is invalid"))?;
+        Ok((workspace_id, binding))
+    }
+
+    /// The accepted `install_provisioning` intent that retained one snapshot.
+    ///
+    /// A published snapshot is installed only when its own keyed install was
+    /// accepted; a published-but-unaccepted snapshot never admits a member.
+    pub(crate) fn accepted_install_receipt(
+        &self,
+        workspace_ref: &str,
+        provisioning_ref: &str,
+    ) -> Result<Option<OperationReceipt>, MachineError> {
+        /// One retained install receipt row, in its stored column order.
+        type InstallReceiptRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        );
+        let row: Option<InstallReceiptRow> = self
+            .connection
+            .query_row(
+                "SELECT operation_ref,mutation_envelope_digest,receipt_json,accepted_subjects_json,
+                        mutation_envelope_json,controller_principal,controller_generation,
+                        scope_kind,scope_ref,operation_kind,idempotency_key
+                   FROM delegation_operations
+                  WHERE workspace_ref=?1 AND operation_kind='install_provisioning'
+                    AND state='accepted'
+                    AND json_extract(receipt_json,'$.accepted_subjects.provisioning_ref')=?2
+                  ORDER BY sequence DESC LIMIT 1",
+                params![workspace_ref, provisioning_ref],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(internal)?;
+        let Some((
+            operation_ref,
+            digest,
+            receipt_json,
+            subjects_json,
+            envelope_json,
+            principal,
+            generation,
+            scope_kind,
+            scope_ref,
+            operation_kind,
+            idempotency_key,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let namespace = LookupNamespace {
+            controller_principal: principal,
+            controller_generation: u64::try_from(generation)
+                .map_err(|_| intent_corrupt("the retained controller generation is invalid"))?,
+            workspace_ref: workspace_ref.to_owned(),
+            scope_kind,
+            scope_ref,
+            operation_kind,
+            idempotency_key,
+        };
+        intent_receipt(
+            &namespace,
+            intent_operation_ref(&operation_ref)?,
+            &digest,
+            &envelope_json,
+            Some(&receipt_json),
+            &subjects_json,
+        )
+        .map(Some)
+    }
+
+    /// The membership state and actor residency of one external member.
+    ///
+    /// Successor lookup derives a hire's current outcome from the member row,
+    /// so it reads the same durable state the legacy facade exposes.
+    pub(crate) fn external_member_state(
+        &self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+    ) -> Result<(String, String), MachineError> {
+        self.connection
+            .query_row(
+                "SELECT state,COALESCE(actor_residency,'unavailable') FROM members
+                 WHERE engagement_id=?1 AND specialist_run_id=?2",
+                params![engagement_id.to_string(), specialist_run_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(|| specialist_not_member(specialist_run_id))
     }
 
     pub fn external_member_actor_residency(
@@ -2320,79 +2682,21 @@ impl EngagementStore {
         )? {
             return external_task_in(&transaction, engagement_id, replay.task_id);
         }
-        require_current(
+        let objective_sha256 = sha256_hex(objective.as_bytes());
+        let result = reserve_external_task_in(
             &transaction,
-            engagement_id,
-            &["active", "degraded", "recovering"],
-        )?;
-        let (member_state, requested_access): (String, Option<String>) = transaction.query_row(
-            "SELECT state,requested_access FROM members WHERE engagement_id=?1 AND specialist_run_id=?2",
-            params![engagement_id.to_string(), specialist_run_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional().map_err(internal)?.ok_or_else(|| specialist_not_member(specialist_run_id))?;
-        if member_state != "active" {
-            return Err(conflict("Specialist membership is not active"));
-        }
-        if !access_allows(
-            requested_access.as_deref().unwrap_or("read_only"),
-            execution_intent,
-        ) {
-            return Err(policy_denied(
-                "task execution intent exceeds the hired access",
-            ));
-        }
-        let inserted = transaction.execute(
-            "INSERT INTO tasks(
-               task_id,engagement_id,specialist_run_id,objective_sha256,state,
-               external_request_ref_json,request_json,execution_intent,
-               deadline_seconds,created_at_ms,updated_at_ms
-             ) VALUES(?1,?2,?3,?4,'accepted',?5,?6,?7,?8,?9,?9)",
-            params![
-                task_id.to_string(),
-                engagement_id.to_string(),
-                specialist_run_id.to_string(),
-                sha256_hex(objective.as_bytes()),
-                external_json,
-                request_json,
+            ExternalTaskReservationCore {
+                engagement_id,
+                specialist_run_id,
+                task_id,
+                objective_sha256: Some(&objective_sha256),
+                external_request_json: Some(&external_json),
+                request_json: &request_json,
+                request_sha256: &request_sha256,
                 execution_intent,
-                i64::try_from(deadline_seconds).map_err(internal)?,
-                now
-            ],
-        );
-        if let Err(error) = inserted {
-            let active: bool = transaction
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM tasks
-                     WHERE specialist_run_id=?1
-                       AND state IN ('accepted','queued','claimed','dispatching','running'))",
-                    [specialist_run_id.to_string()],
-                    |row| row.get(0),
-                )
-                .map_err(internal)?;
-            if active {
-                return Err(conflict("Specialist already has an active task"));
-            }
-            return Err(internal(error));
-        }
-        let result = ExternalTaskSnapshot {
-            task_id,
-            specialist_run_id,
-            state: "accepted".to_owned(),
-            turn_id: None,
-            result_artifact_ref: None,
-            result: None,
-            safe_error_code: None,
-            diagnostic: None,
-        };
-        transaction.execute(
-            "UPDATE engagements SET revision=revision+1,updated_at_ms=?2 WHERE engagement_id=?1",
-            params![engagement_id.to_string(),now],
-        ).map_err(internal)?;
-        append_event(
-            &transaction,
-            engagement_id,
-            "external_task_reserved",
-            &request_sha256,
+                deadline_seconds,
+                now_ms: now,
+            },
         )?;
         scoped_record(
             &transaction,
@@ -2650,18 +2954,27 @@ impl EngagementStore {
         } else {
             (None, None)
         };
-        let changed = transaction.execute(
-            "UPDATE tasks SET state=?3,result_sha256=?4,artifact_id=?5,safe_error_code=?6,updated_at_ms=?7,diagnostic_json=?8
-             WHERE engagement_id=?1 AND task_id=?2 AND state IN ('accepted','queued','claimed','dispatching','running')",
-            params![engagement_id.to_string(),task_id.to_string(),state,result_sha256,
-                artifact_id.map(|value| value.to_string()),safe_error_code,now,
-                diagnostic.map(serde_json::to_string).transpose().map_err(internal)?],
-        ).map_err(internal)?;
-        if changed != 1 {
+        let diagnostic_json = diagnostic
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(internal)?;
+        let Some(result) = terminalize_external_task_in(
+            &transaction,
+            TaskTerminal {
+                engagement_id,
+                task_id,
+                state,
+                safe_error_code,
+                result_sha256: result_sha256.as_deref(),
+                artifact_id,
+                diagnostic_json: diagnostic_json.as_deref(),
+                now_ms: now,
+            },
+        )?
+        else {
+            // The task was already terminal: nothing to commit.
             return external_task_in(&transaction, engagement_id, task_id);
-        }
-        append_event(&transaction, engagement_id, "external_task_terminal", state)?;
-        let result = external_task_in(&transaction, engagement_id, task_id)?;
+        };
         commit_with(
             &faults,
             transaction,
@@ -3203,6 +3516,41 @@ impl EngagementStore {
         if active {
             return Err(conflict("engagement has active tasks"));
         }
+        // A successor member is released by its own release owner: while
+        // one is unreleased the aggregate close refuses with the typed guard;
+        // once every member is released the same close proceeds.
+        {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT specialist_run_id FROM members
+                      WHERE engagement_id=?1 AND state<>'released'",
+                )
+                .map_err(internal)?;
+            let mut rows = statement
+                .query(params![engagement_id.to_string()])
+                .map_err(internal)?;
+            let mut successor_unreleased = false;
+            while let Some(row) = rows.next().map_err(internal)? {
+                let member: String = row.get(0).map_err(internal)?;
+                if successor_hire_member(&transaction, &member)? {
+                    successor_unreleased = true;
+                    break;
+                }
+            }
+            drop(rows);
+            drop(statement);
+            if successor_unreleased {
+                return Err(MachineError::new(
+                    "SUCCESSOR_MEMBER_UNRELEASED",
+                    "a successor member must be released by its own release owner",
+                    false,
+                    serde_json::json!({
+                        "engagement_id":engagement_id,
+                        "required_action":"reconcile_operation"
+                    }),
+                ));
+            }
+        }
         let unreleased: bool = transaction
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM members WHERE engagement_id=?1 AND state!='released')",
@@ -3300,6 +3648,23 @@ impl EngagementStore {
                         .sha256
                         .clone(),
                 );
+            } else if captured.schema_version == 4 {
+                // A successor (delegated) member binds the closed role snapshot
+                // digest; the aggregate binding carries its bare form.
+                if agent_configuration_digest(&captured).map_err(internal)? != configuration {
+                    return Err(integrity(
+                        "stored member configuration digest does not match",
+                    ));
+                }
+                role_digest = Some(
+                    captured
+                        .instructions
+                        .delegation()
+                        .ok_or_else(|| integrity("delegated member has no instruction capture"))?
+                        .role_snapshot_digest
+                        .trim_start_matches("sha256:")
+                        .to_owned(),
+                );
             }
         }
         if binding.operation_id.to_string() != operation
@@ -3319,6 +3684,409 @@ impl EngagementStore {
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(internal)
+    }
+
+    /// Run one successor transaction: it commits only if the closure succeeds.
+    ///
+    /// Successor keyed operations need their receipt and their state change in
+    /// one transaction, so the store exposes the owning transaction instead of
+    /// committing internally.
+    pub(crate) fn transact<T>(
+        &mut self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, MachineError>,
+    ) -> Result<T, MachineError> {
+        let transaction = self.transaction()?;
+        let value = operation(&transaction)?;
+        crate::storage_observation::commit(transaction).map_err(internal)?;
+        Ok(value)
+    }
+
+    /// The store's verified connection for successor helpers that run their own
+    /// transaction-scoped SQL (caller-scope accounting, retained task reads).
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// The accepted successor assignment one assign key retained.
+    ///
+    /// A generation-4 member has no legacy `operations` receipt; its key maps to
+    /// the accepted task through the shared intent store instead.
+    pub(crate) fn external_task_for_successor_key(
+        &self,
+        workspace_ref: &str,
+        engagement_id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<Option<Uuid>, MachineError> {
+        let receipt: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT receipt_json FROM delegation_operations
+                  WHERE workspace_ref=?1 AND scope_kind='external_engagement' AND scope_ref=?2
+                    AND operation_kind='assign_external_specialist_task'
+                    AND idempotency_key=?3 AND state='accepted'",
+                params![workspace_ref, engagement_id.to_string(), idempotency_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        let Some(receipt) = receipt else {
+            return Ok(None);
+        };
+        let receipt: OperationReceipt = serde_json::from_str(&receipt)
+            .map_err(|_| integrity("the retained receipt is invalid"))?;
+        receipt
+            .accepted_subjects
+            .task_ref
+            .as_deref()
+            .map(|task| {
+                Uuid::parse_str(task)
+                    .map_err(|_| integrity("the retained task reference is invalid"))
+            })
+            .transpose()
+    }
+
+    /// The execution intent and retained deadline one member dispatch renders
+    /// with.
+    pub(crate) fn external_task_dispatch_facts(
+        &self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<(String, u64), MachineError> {
+        let row: Option<(Option<String>, Option<i64>)> = self
+            .connection
+            .query_row(
+                "SELECT execution_intent,deadline_seconds FROM tasks
+                  WHERE engagement_id=?1 AND task_id=?2",
+                params![engagement_id.to_string(), task_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(internal)?;
+        let Some((Some(intent), Some(deadline))) = row else {
+            return Err(integrity("the retained dispatch facts are missing"));
+        };
+        Ok((
+            intent,
+            u64::try_from(deadline).map_err(|_| integrity("the retained deadline is invalid"))?,
+        ))
+    }
+
+    /// The canonical acceptance body digest one accepted successor assignment
+    /// froze in its immutable intent envelope.
+    pub(crate) fn accepted_assignment_body_digest(
+        &self,
+        workspace_ref: &str,
+        engagement_id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<Option<String>, MachineError> {
+        let row: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT mutation_envelope_json,mutation_envelope_digest
+                   FROM delegation_operations
+                  WHERE workspace_ref=?1 AND scope_kind='external_engagement'
+                    AND scope_ref=?2 AND operation_kind='assign_external_specialist_task'
+                    AND idempotency_key=?3 AND state='accepted'",
+                params![workspace_ref, engagement_id.to_string(), idempotency_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(internal)?;
+        let Some((envelope_json, digest)) = row else {
+            return Ok(None);
+        };
+        let parsed = crate::jcs::parse(&envelope_json)
+            .map_err(|_| integrity("the retained mutation envelope is not canonical JSON"))?;
+        let canonical = crate::jcs::canonicalize(&parsed)
+            .map_err(|_| integrity("the retained mutation envelope cannot be re-encoded"))?;
+        let envelope: crate::operation::Envelope = serde_json::from_slice(&canonical)
+            .map_err(|_| integrity("the retained mutation envelope is not the closed envelope"))?;
+        if crate::operation::envelope_digest(&envelope)
+            .map_err(|_| integrity("the retained mutation envelope cannot be re-digested"))?
+            != digest
+        {
+            return Err(integrity(
+                "the retained mutation envelope differs from its intent row",
+            ));
+        }
+        Ok(Some(envelope.request_body.sha256))
+    }
+
+    /// Every unsettled task of one member, with the Turn it is bound to.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn unsettled_member_tasks(
+        &self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+    ) -> Result<Vec<(Uuid, String, String)>, MachineError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT task_id,execution_intent,turn_id FROM tasks
+                  WHERE engagement_id=?1 AND specialist_run_id=?2
+                    AND state IN ('dispatching','running') AND turn_id IS NOT NULL
+                  ORDER BY created_at_ms",
+            )
+            .map_err(internal)?;
+        let rows = statement
+            .query_map(
+                params![engagement_id.to_string(), specialist_run_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        let mut tasks = Vec::with_capacity(rows.len());
+        for (task, intent, turn) in rows {
+            let task = Uuid::parse_str(&task)
+                .map_err(|_| integrity("the retained task reference is invalid"))?;
+            tasks.push((task, intent.unwrap_or_else(|| "read_only".to_owned()), turn));
+        }
+        Ok(tasks)
+    }
+
+    /// The retained dispatch-index object of one task (Part A).
+    pub(crate) fn dispatch_index_object(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Option<Vec<u8>>, MachineError> {
+        crate::storage_observation::read_content(
+            &self.connection,
+            "dispatch_index",
+            &task_id.to_string(),
+            "index",
+        )
+    }
+
+    /// The complete bytes retained for one task's dirty and untracked paths.
+    pub(crate) fn dispatch_index_baseline(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Vec<(String, Vec<u8>)>, MachineError> {
+        let owner = task_id.to_string();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT representation FROM result_content_refs
+                  WHERE owner_kind='dispatch_index' AND owner_id=?1
+                    AND representation LIKE 'baseline:%' ORDER BY representation",
+            )
+            .map_err(internal)?;
+        let representations = statement
+            .query_map([owner.as_str()], |row| row.get::<_, String>(0))
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        let mut baseline = Vec::with_capacity(representations.len());
+        for representation in representations {
+            let path = representation
+                .strip_prefix("baseline:")
+                .ok_or_else(|| integrity("the retained baseline representation is invalid"))?
+                .to_owned();
+            let bytes = crate::storage_observation::read_content(
+                &self.connection,
+                "dispatch_index",
+                &owner,
+                &representation,
+            )?
+            .ok_or_else(|| integrity("the retained baseline bytes are missing"))?;
+            baseline.push((path, bytes));
+        }
+        Ok(baseline)
+    }
+
+    /// How many write tasks of one member are in flight (cleanup fact).
+    pub(crate) fn active_write_task_count(
+        connection: &Connection,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+    ) -> Result<u64, MachineError> {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM tasks
+                  WHERE engagement_id=?1 AND specialist_run_id=?2
+                    AND state IN ('dispatching','running')
+                    AND execution_intent='canonical_workspace_write'",
+                params![engagement_id.to_string(), specialist_run_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(internal)
+    }
+
+    /// The successor task one member Turn is bound to.
+    ///
+    /// A worker settles the task whose dispatch recorded exactly this Turn id, so
+    /// a later Turn on the same member never settles an earlier one.
+    pub(crate) fn task_for_member_turn(
+        &self,
+        engagement_id: Uuid,
+        specialist_run_id: Uuid,
+        turn_id: &str,
+    ) -> Result<Option<(Uuid, String)>, MachineError> {
+        let row: Option<(String, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT task_id,execution_intent FROM tasks
+                  WHERE engagement_id=?1 AND specialist_run_id=?2 AND turn_id=?3
+                    AND state IN ('dispatching','running')
+                  ORDER BY created_at_ms DESC LIMIT 1",
+                params![
+                    engagement_id.to_string(),
+                    specialist_run_id.to_string(),
+                    turn_id
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(internal)?;
+        let Some((task, intent)) = row else {
+            return Ok(None);
+        };
+        let task = Uuid::parse_str(&task)
+            .map_err(|_| integrity("the retained task reference is invalid"))?;
+        Ok(Some((
+            task,
+            intent.unwrap_or_else(|| "read_only".to_owned()),
+        )))
+    }
+
+    /// The published complete result of one task.
+    ///
+    /// The bytes live in the content store the acceptance already uses; the task
+    /// row only names the digest and the artifact.
+    pub(crate) fn task_complete_result(
+        &self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<Option<(String, Vec<u8>)>, MachineError> {
+        let row: Option<(Option<String>, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT result_sha256,artifact_id FROM tasks
+                  WHERE engagement_id=?1 AND task_id=?2",
+                params![engagement_id.to_string(), task_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(internal)?;
+        let Some((Some(digest), Some(artifact))) = row else {
+            return Ok(None);
+        };
+        let artifact_id = Uuid::parse_str(&artifact)
+            .map_err(|_| integrity("the retained artifact reference is invalid"))?;
+        let bytes = crate::storage_observation::read_content(
+            &self.connection,
+            "external_artifact",
+            &artifact_id.to_string(),
+            "json",
+        )?
+        .ok_or_else(|| integrity("the retained complete result bytes are missing"))?;
+        Ok(Some((digest, bytes)))
+    }
+
+    /// The accepted task identity one member task retained.
+    pub(crate) fn external_task_identity(
+        &self,
+        engagement_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<Option<crate::delegation_identity::AcceptedTask>, MachineError> {
+        let request: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT request_json FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+                params![engagement_id.to_string(), task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        let Some(Some(request)) = request else {
+            return Ok(None);
+        };
+        let accepted: crate::delegation_identity::AcceptedTask = serde_json::from_str(&request)
+            .map_err(|_| integrity("the accepted task identity is invalid"))?;
+        // The row must still be the identity the acceptance recorded, not a
+        // rewrite of the row and its bytes together.
+        let recorded: Option<(String, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT objective_sha256,external_request_ref_json FROM tasks
+                  WHERE engagement_id=?1 AND task_id=?2",
+                params![engagement_id.to_string(), task_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(internal)?;
+        let (objective, external) =
+            recorded.ok_or_else(|| integrity("the retained task is missing"))?;
+        if let Some(external) = external {
+            let external: serde_json::Value = serde_json::from_str(&external)
+                .map_err(|_| integrity("the retained task reference is invalid"))?;
+            if let Some(accepted_digest) = external
+                .get("accepted_task_digest")
+                .and_then(serde_json::Value::as_str)
+            {
+                let digest = accepted.digest()?;
+                if accepted_digest != digest || objective != digest {
+                    return Err(integrity(
+                        "the retained task identity differs from the accepted one",
+                    ));
+                }
+            }
+        }
+        // The retained bytes are the acceptance's own evidence: every reference
+        // must still resolve to the byte it names.
+        let (task_body, contexts, target) = accepted_task_content(&self.connection, task_id)?
+            .ok_or_else(|| integrity("the accepted task bytes are missing"))?;
+        let digest_of = |bytes: &[u8]| format!("sha256:{}", sha256_hex(bytes));
+        if digest_of(&task_body) != accepted.task_body.sha256 {
+            return Err(integrity(
+                "the accepted task body differs from its reference",
+            ));
+        }
+        for reference in &accepted.contexts {
+            let bytes = match reference.kind.as_str() {
+                "accepted_context" => contexts
+                    .iter()
+                    .find(|(identity, _)| identity == &reference.identity)
+                    .map(|(_, bytes)| bytes),
+                "review_target" => target.as_ref(),
+                _ => None,
+            }
+            .ok_or_else(|| integrity("the accepted task context is missing"))?;
+            if digest_of(bytes) != reference.content.sha256 {
+                return Err(integrity(
+                    "the accepted task context differs from its reference",
+                ));
+            }
+        }
+        Ok(Some(accepted))
+    }
+
+    /// Read one keyed intent namespace without any write effect.
+    pub(crate) fn intent_lookup(
+        &self,
+        namespace: &LookupNamespace,
+    ) -> Result<IntentLookup, MachineError> {
+        // One deferred read transaction: the collision, key, refusal and
+        // watermark reads observe one consistent snapshot, so an `Absent` proof
+        // can never carry a watermark that already includes a matching row.
+        let transaction = self.connection.unchecked_transaction().map_err(internal)?;
+        intent_lookup(&transaction, namespace)
+    }
+
+    pub(crate) fn scope_membership_revision(
+        &self,
+        workspace_ref: &str,
+        scope_kind: &str,
+        scope_ref: &str,
+    ) -> Result<u64, MachineError> {
+        scope_membership_revision(&self.connection, workspace_ref, scope_kind, scope_ref)
     }
 
     fn idempotent_transition(
@@ -3433,7 +4201,2779 @@ impl EngagementStore {
     }
 }
 
+/// Retain the exact accepted task bytes with the acceptance.
+///
+/// The content store keeps one representation per accepted reference, so a
+/// later dispatch renders the Turn from these bytes instead of re-reading
+/// caller input.
+pub(crate) fn retain_accepted_task_content(
+    transaction: &Transaction<'_>,
+    task_id: Uuid,
+    task_body: &[u8],
+    contexts: &[(String, Vec<u8>)],
+    target: Option<&[u8]>,
+    _now_ms: i64,
+) -> Result<(), MachineError> {
+    crate::storage_observation::put_content(
+        transaction,
+        "accepted_task",
+        &task_id.to_string(),
+        "task_body",
+        task_body,
+    )?;
+    for (identity, bytes) in contexts {
+        crate::storage_observation::put_content(
+            transaction,
+            "accepted_task",
+            &task_id.to_string(),
+            &format!("context:{identity}"),
+            bytes,
+        )?;
+    }
+    if let Some(target) = target {
+        crate::storage_observation::put_content(
+            transaction,
+            "accepted_task",
+            &task_id.to_string(),
+            "target",
+            target,
+        )?;
+    }
+    Ok(())
+}
+
+/// The retained accepted-task bytes of one dispatch: the canonical task body,
+/// one body per accepted context in accepted order, and the optional direct
+/// target.
+pub(crate) type AcceptedTaskBytes = (Vec<u8>, Vec<(String, Vec<u8>)>, Option<Vec<u8>>);
+
+/// Read the exact accepted task bytes back for one dispatch.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn accepted_task_content(
+    connection: &Connection,
+    task_id: Uuid,
+) -> Result<Option<AcceptedTaskBytes>, MachineError> {
+    let owner = task_id.to_string();
+    let Some(task_body) =
+        crate::storage_observation::read_content(connection, "accepted_task", &owner, "task_body")?
+    else {
+        return Ok(None);
+    };
+    let mut contexts = Vec::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT representation FROM result_content_refs
+              WHERE owner_kind='accepted_task' AND owner_id=?1
+                AND representation LIKE 'context:%' ORDER BY rowid",
+        )
+        .map_err(internal)?;
+    let representations = statement
+        .query_map([owner.as_str()], |row| row.get::<_, String>(0))
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)?;
+    for representation in representations {
+        let identity = representation
+            .strip_prefix("context:")
+            .ok_or_else(|| integrity("accepted context representation is invalid"))?
+            .to_owned();
+        let bytes = crate::storage_observation::read_content(
+            connection,
+            "accepted_task",
+            &owner,
+            &representation,
+        )?
+        .ok_or_else(|| integrity("accepted context bytes are missing"))?;
+        contexts.push((identity, bytes));
+    }
+    let target =
+        crate::storage_observation::read_content(connection, "accepted_task", &owner, "target")?;
+    Ok(Some((task_body, contexts, target)))
+}
+
+/// Retain a validated canonical checked payload with its result transaction.
+pub(crate) fn retain_checked_task_output(
+    transaction: &Transaction<'_>,
+    task: Uuid,
+    bytes: &[u8],
+    response: &[u8],
+) -> Result<(), MachineError> {
+    crate::storage_observation::put_content(
+        transaction,
+        "accepted_task",
+        &task.to_string(),
+        "structured_output",
+        bytes,
+    )?;
+    crate::storage_observation::put_content(
+        transaction,
+        "accepted_task",
+        &task.to_string(),
+        "final_response",
+        response,
+    )
+    .map(|_| ())
+}
+
+/// Retain one task's result bytes and their artifact row.
+///
+/// The bytes go to the same content store the legacy result path uses, and the
+/// artifact row names their digest so every reader observes one object.
+pub(crate) fn retain_task_result(
+    transaction: &Transaction<'_>,
+    engagement_id: Uuid,
+    task_id: Uuid,
+    bytes: &[u8],
+    digest: &str,
+) -> Result<Uuid, MachineError> {
+    let artifact_id = Uuid::now_v7();
+    crate::storage_observation::put_content(
+        transaction,
+        "external_artifact",
+        &artifact_id.to_string(),
+        "json",
+        bytes,
+    )?;
+    let specialist: String = transaction
+        .query_row(
+            "SELECT specialist_run_id FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+            params![engagement_id.to_string(), task_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    transaction
+        .execute(
+            "INSERT INTO artifacts(
+               artifact_id,engagement_id,task_id,specialist_run_id,
+               result_sha256,canonical_json
+             ) VALUES(?1,?2,?3,?4,?5,'')",
+            params![
+                artifact_id.to_string(),
+                engagement_id.to_string(),
+                task_id.to_string(),
+                specialist,
+                digest
+            ],
+        )
+        .map_err(internal)?;
+    Ok(artifact_id)
+}
+
+/// One member task reservation, without its legacy receipt or commit.
+pub(crate) struct ExternalTaskReservationCore<'a> {
+    pub engagement_id: Uuid,
+    pub specialist_run_id: Uuid,
+    pub task_id: Uuid,
+    /// `None` when the admitted task carries no separate objective digest.
+    pub objective_sha256: Option<&'a str>,
+    pub external_request_json: Option<&'a str>,
+    pub request_json: &'a str,
+    pub request_sha256: &'a str,
+    pub execution_intent: &'a str,
+    pub deadline_seconds: u64,
+    pub now_ms: i64,
+}
+
+/// Reserve one member task inside the caller's transaction.
+pub(crate) fn reserve_external_task_in(
+    transaction: &Transaction<'_>,
+    core: ExternalTaskReservationCore<'_>,
+) -> Result<ExternalTaskSnapshot, MachineError> {
+    require_current(
+        transaction,
+        core.engagement_id,
+        &["active", "degraded", "recovering"],
+    )?;
+    let (member_state, requested_access): (String, Option<String>) = transaction
+        .query_row(
+            "SELECT state,requested_access FROM members
+              WHERE engagement_id=?1 AND specialist_run_id=?2",
+            params![
+                core.engagement_id.to_string(),
+                core.specialist_run_id.to_string()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?
+        .ok_or_else(|| specialist_not_member(core.specialist_run_id))?;
+    if member_state != "active" {
+        return Err(conflict("Specialist membership is not active"));
+    }
+    if !access_allows(
+        requested_access.as_deref().unwrap_or("read_only"),
+        core.execution_intent,
+    ) {
+        return Err(policy_denied(
+            "task execution intent exceeds the hired access",
+        ));
+    }
+    let inserted = transaction.execute(
+        "INSERT INTO tasks(
+           task_id,engagement_id,specialist_run_id,objective_sha256,state,
+           external_request_ref_json,request_json,execution_intent,
+           deadline_seconds,created_at_ms,updated_at_ms
+         ) VALUES(?1,?2,?3,?4,'accepted',?5,?6,?7,?8,?9,?9)",
+        params![
+            core.task_id.to_string(),
+            core.engagement_id.to_string(),
+            core.specialist_run_id.to_string(),
+            core.objective_sha256,
+            core.external_request_json,
+            core.request_json,
+            core.execution_intent,
+            i64::try_from(core.deadline_seconds).map_err(internal)?,
+            core.now_ms
+        ],
+    );
+    if let Err(error) = inserted {
+        let active: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks
+                 WHERE specialist_run_id=?1
+                   AND state IN ('accepted','queued','claimed','dispatching','running'))",
+                [core.specialist_run_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if active {
+            return Err(conflict("Specialist already has an active task"));
+        }
+        return Err(internal(error));
+    }
+    let result = ExternalTaskSnapshot {
+        task_id: core.task_id,
+        specialist_run_id: core.specialist_run_id,
+        state: "accepted".to_owned(),
+        turn_id: None,
+        result_artifact_ref: None,
+        result: None,
+        safe_error_code: None,
+        diagnostic: None,
+    };
+    transaction
+        .execute(
+            "UPDATE engagements SET revision=revision+1,updated_at_ms=?2 WHERE engagement_id=?1",
+            params![core.engagement_id.to_string(), core.now_ms],
+        )
+        .map_err(internal)?;
+    append_event(
+        transaction,
+        core.engagement_id,
+        "external_task_reserved",
+        core.request_sha256,
+    )?;
+    Ok(result)
+}
+
+/// One terminal task fact, without its legacy receipt or commit.
+pub(crate) struct TaskTerminal<'a> {
+    pub engagement_id: Uuid,
+    pub task_id: Uuid,
+    pub state: &'a str,
+    pub safe_error_code: Option<&'a str>,
+    pub result_sha256: Option<&'a str>,
+    pub artifact_id: Option<Uuid>,
+    pub diagnostic_json: Option<&'a str>,
+    pub now_ms: i64,
+}
+
+/// Record one terminal task fact inside the caller's transaction.
+///
+/// Returns `None` when the task was already terminal, so each caller keeps its
+/// own replay reasoning while the effect stays shared.
+pub(crate) fn terminalize_external_task_in(
+    transaction: &Transaction<'_>,
+    core: TaskTerminal<'_>,
+) -> Result<Option<ExternalTaskSnapshot>, MachineError> {
+    let state: Option<String> = transaction
+        .query_row(
+            "SELECT state FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+            params![core.engagement_id.to_string(), core.task_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some(state) = state else {
+        return Ok(None);
+    };
+    if !matches!(
+        state.as_str(),
+        "accepted" | "queued" | "claimed" | "dispatching" | "running"
+    ) {
+        return Ok(None);
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE tasks SET state=?3,result_sha256=?4,artifact_id=?5,safe_error_code=?6,
+                    updated_at_ms=?7,diagnostic_json=?8
+              WHERE engagement_id=?1 AND task_id=?2
+                AND state IN ('accepted','queued','claimed','dispatching','running')",
+            params![
+                core.engagement_id.to_string(),
+                core.task_id.to_string(),
+                core.state,
+                core.result_sha256,
+                core.artifact_id.map(|value| value.to_string()),
+                core.safe_error_code,
+                core.now_ms,
+                core.diagnostic_json
+            ],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Ok(None);
+    }
+    append_event(
+        transaction,
+        core.engagement_id,
+        "external_task_terminal",
+        core.state,
+    )?;
+    external_task_in(transaction, core.engagement_id, core.task_id).map(Some)
+}
+
+/// Move one accepted task to `dispatching` without a legacy receipt.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn mark_external_task_dispatching_in(
+    transaction: &Transaction<'_>,
+    engagement_id: Uuid,
+    task_id: Uuid,
+    now_ms: i64,
+) -> Result<ExternalTaskSnapshot, MachineError> {
+    let changed = transaction
+        .execute(
+            "UPDATE tasks SET state='dispatching',updated_at_ms=?3
+              WHERE engagement_id=?1 AND task_id=?2 AND state='accepted'",
+            params![engagement_id.to_string(), task_id.to_string(), now_ms],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        let current = external_task_in(transaction, engagement_id, task_id)?;
+        if current.state == "dispatching" {
+            return Ok(current);
+        }
+        return Err(conflict("task is not at the accepted dispatch boundary"));
+    }
+    append_event(
+        transaction,
+        engagement_id,
+        "external_task_dispatching",
+        &task_id.to_string(),
+    )?;
+    external_task_in(transaction, engagement_id, task_id)
+}
+
+/// Move one dispatching task to `running` with its accepted Turn.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn mark_external_task_running_in(
+    transaction: &Transaction<'_>,
+    engagement_id: Uuid,
+    task_id: Uuid,
+    turn_id: &str,
+    now_ms: i64,
+) -> Result<ExternalTaskSnapshot, MachineError> {
+    let changed = transaction
+        .execute(
+            "UPDATE tasks SET state='running',turn_id=?3,updated_at_ms=?4
+              WHERE engagement_id=?1 AND task_id=?2 AND state IN ('dispatching','accepted','queued')",
+            params![
+                engagement_id.to_string(),
+                task_id.to_string(),
+                turn_id,
+                now_ms
+            ],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(conflict("task is not at an admissible dispatch boundary"));
+    }
+    append_event(transaction, engagement_id, "external_task_running", turn_id)?;
+    external_task_in(transaction, engagement_id, task_id)
+}
+
+/// Record one dispatch index with its content inside the caller's transaction.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_dispatch_index_with_content(
+    transaction: &Transaction<'_>,
+    record: DispatchIndexRecord<'_>,
+    index: &[u8],
+    baseline: &[(String, Vec<u8>)],
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    crate::storage_observation::put_content(
+        transaction,
+        "dispatch_index",
+        &record.task_id.to_string(),
+        "index",
+        index,
+    )?;
+    for (path, bytes) in baseline {
+        crate::storage_observation::put_content(
+            transaction,
+            "dispatch_index",
+            &record.task_id.to_string(),
+            &format!("baseline:{path}"),
+            bytes,
+        )?;
+    }
+    record_dispatch_index(transaction, record, now_ms)
+}
+
+/// The admitted External Specialist Engagement owner authority.
+pub(crate) fn require_external_owner_binding(
+    binding: &ControllerBinding,
+) -> Result<(), MachineError> {
+    if binding.identity.generation != 1
+        || !matches!(
+            binding.identity.kind.as_str(),
+            "workflow_orchestrator" | "automation"
+        )
+    {
+        return Err(invalid(
+            "controller",
+            "engagement owner must be a generation-1 workflow_orchestrator or automation Controller",
+        ));
+    }
+    Ok(())
+}
+
+/// One engagement open, without its legacy receipt or commit.
+pub(crate) struct ExternalOpenCore<'a> {
+    pub engagement_id: Uuid,
+    pub workspace_id: &'a str,
+    pub controller_sha256: &'a str,
+    pub bootstrap_operation_id: Uuid,
+    /// `None` when the trusted successor open carries no external provenance.
+    pub external_json: Option<&'a str>,
+    pub external_sha256: Option<&'a str>,
+    pub label: Option<&'a str>,
+    pub binding_json: &'a str,
+    pub now_ms: i64,
+}
+
+/// Create one External Specialist Engagement inside the caller's transaction.
+///
+/// The successor keyed open and the legacy facade-v4 open share this effect, so
+/// the row, its bootstrap event and its revision cannot drift between them.
+pub(crate) fn open_external_engagement_in(
+    transaction: &Transaction<'_>,
+    core: ExternalOpenCore<'_>,
+) -> Result<ExternalEngagementSnapshot, MachineError> {
+    transaction
+        .execute(
+            "INSERT INTO engagements(
+               engagement_id,workspace_id,controller_sha256,state,revision,
+               bootstrap_operation_id,external_controller_ref_json,
+               external_controller_ref_sha256,label,controller_binding_json,
+               created_at_ms,updated_at_ms,authority_kind
+             ) VALUES(?1,?2,?3,'active',1,?4,?5,?6,?7,?8,?9,?9,'external_v1')",
+            params![
+                core.engagement_id.to_string(),
+                core.workspace_id,
+                core.controller_sha256,
+                core.bootstrap_operation_id.to_string(),
+                core.external_json,
+                core.external_sha256,
+                core.label,
+                core.binding_json,
+                core.now_ms,
+            ],
+        )
+        .map_err(internal)?;
+    // A successor open has no external provenance; the bootstrap payload still
+    // records the absent provenance deterministically rather than guessing one.
+    let external_sha256 = core
+        .external_sha256
+        .unwrap_or(NO_EXTERNAL_PROVENANCE_SHA256);
+    let bootstrap_payload = format!(
+        "{}\0{external_sha256}\0{}",
+        core.bootstrap_operation_id, core.controller_sha256
+    );
+    append_event(
+        transaction,
+        core.engagement_id,
+        "external_engagement_opened",
+        &bootstrap_payload,
+    )?;
+    Ok(ExternalEngagementSnapshot {
+        engagement_id: core.engagement_id,
+        state: "active".to_owned(),
+        external_controller_ref: core
+            .external_json
+            .map(|json| serde_json::from_str(json).map_err(internal))
+            .transpose()?
+            .unwrap_or(Value::Null),
+        revision: 1,
+        specialists: Vec::new(),
+    })
+}
+
+/// One member reservation, without its legacy receipt or commit.
+pub(crate) struct ExternalHireReservationCore<'a> {
+    pub engagement_id: Uuid,
+    pub hire_operation_id: Uuid,
+    pub specialist_run_id: Uuid,
+    pub role_ref: &'a str,
+    pub configuration_json: &'a str,
+    pub configuration_sha256: &'a str,
+    /// `None` when the admitted member carries no separate objective.
+    pub objective_sha256: Option<&'a str>,
+    pub requested_access: &'a str,
+    pub event_payload: &'a str,
+    pub now_ms: i64,
+}
+
+/// Reserve one admitted member inside the caller's transaction.
+pub(crate) fn reserve_external_hire_in(
+    transaction: &Transaction<'_>,
+    core: ExternalHireReservationCore<'_>,
+) -> Result<ExternalHireReservation, MachineError> {
+    require_current(
+        transaction,
+        core.engagement_id,
+        &["active", "degraded", "recovering"],
+    )?;
+    transaction
+        .execute(
+            "INSERT INTO members(
+               specialist_run_id,engagement_id,hire_operation_id,
+               configuration_sha256,state,role_ref,configuration_json,
+               objective_sha256,requested_access,actor_residency,created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,?3,?4,'provisioning',?5,?6,?7,?8,'unstarted',?9,?9)",
+            params![
+                core.specialist_run_id.to_string(),
+                core.engagement_id.to_string(),
+                core.hire_operation_id.to_string(),
+                core.configuration_sha256,
+                core.role_ref,
+                core.configuration_json,
+                core.objective_sha256,
+                core.requested_access,
+                core.now_ms
+            ],
+        )
+        .map_err(internal)?;
+    transaction
+        .execute(
+            "UPDATE engagements SET revision=revision+1,updated_at_ms=?2 WHERE engagement_id=?1",
+            params![core.engagement_id.to_string(), core.now_ms],
+        )
+        .map_err(internal)?;
+    append_event(
+        transaction,
+        core.engagement_id,
+        "external_hire_reserved",
+        core.event_payload,
+    )?;
+    Ok(ExternalHireReservation {
+        engagement_id: core.engagement_id,
+        hire_operation_id: core.hire_operation_id,
+        specialist_run_id: core.specialist_run_id,
+        state: "provisioning".to_owned(),
+    })
+}
+
+/// Settle one reserved member from its Run start outcome.
+///
+/// Returns `None` when the member was already settled, so each caller keeps its
+/// own replay reasoning and the effect stays shared.
+pub(crate) fn settle_external_hire_in(
+    transaction: &Transaction<'_>,
+    reservation: &ExternalHireReservation,
+    outcome: RuntimeOutcome,
+    now_ms: i64,
+) -> Result<Option<ExternalHireReservation>, MachineError> {
+    let state = match outcome {
+        RuntimeOutcome::Accepted => "active",
+        RuntimeOutcome::Rejected | RuntimeOutcome::Unknown => "degraded",
+    };
+    let response_state = match outcome {
+        RuntimeOutcome::Accepted => "ready",
+        RuntimeOutcome::Rejected | RuntimeOutcome::Unknown => "recovery_required",
+    };
+    let changed = transaction
+        .execute(
+            "UPDATE members SET state=?2,actor_residency=?3,updated_at_ms=?4
+             WHERE specialist_run_id=?1 AND state='provisioning'",
+            params![
+                reservation.specialist_run_id.to_string(),
+                state,
+                match outcome {
+                    RuntimeOutcome::Accepted => "unstarted",
+                    RuntimeOutcome::Unknown => "recovering",
+                    RuntimeOutcome::Rejected => "unavailable",
+                },
+                now_ms
+            ],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Ok(None);
+    }
+    if outcome != RuntimeOutcome::Accepted {
+        transaction
+            .execute(
+                "UPDATE engagements SET state='degraded',revision=revision+1,updated_at_ms=?2 WHERE engagement_id=?1",
+                params![reservation.engagement_id.to_string(), now_ms],
+            )
+            .map_err(internal)?;
+    }
+    append_event(
+        transaction,
+        reservation.engagement_id,
+        "external_hire_outcome",
+        response_state,
+    )?;
+    Ok(Some(ExternalHireReservation {
+        state: response_state.to_owned(),
+        ..reservation.clone()
+    }))
+}
+
+/// The verified generation state of an existing Engagement database.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdmittedGeneration {
+    /// Base generation 1 through 5; the next writable open migrates in place.
+    Legacy(i64),
+    /// Base generation 6, the current accepted shape.
+    Six,
+}
+
+/// One effect-free observation of an existing Engagement database.
+///
+/// The probe never creates a file, a lock, a WAL sidecar or a directory, never
+/// changes a permission and never runs DDL. It refuses to guess: a database
+/// whose generation keys are absent, unreadable or outside the supported set is
+/// a typed unsupported-generation or recovery failure, not a legacy shape.
+pub(crate) struct GenerationProbe {
+    schema_generation: AdmittedGeneration,
+    namespace_birth_id: Option<String>,
+}
+
+/// How one probe observes an existing database without writing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProbeOpen {
+    /// No sidecar exists: an immutable read can neither create nor write one.
+    Immutable,
+    /// A live WAL pair or a rollback journal: an ordinary read-only open
+    /// observes coordination state and rolls back a hot journal.
+    ReadOnly,
+    /// A one-sided WAL pair that persisted across re-observation.
+    RecoveryRequired,
+}
+
+/// How many times a transient one-sided sidecar pair is re-observed before it is
+/// classified as recovery, and how long each re-observation waits.
+const SIDECAR_REOBSERVATIONS: usize = 5;
+const SIDECAR_REOBSERVE_DELAY: Duration = Duration::from_millis(10);
+
+/// The open mode for one observed sidecar state.
+const fn probe_open_mode(state: SidecarState) -> ProbeOpen {
+    match state {
+        SidecarState::Neither => ProbeOpen::Immutable,
+        SidecarState::Both | SidecarState::JournalOnly => ProbeOpen::ReadOnly,
+        SidecarState::LogOnly | SidecarState::MemoryOnly => ProbeOpen::RecoveryRequired,
+    }
+}
+
+/// Settle a one-sided sidecar observation.
+///
+/// SQLite is not atomic about the pair: a WAL open creates `-wal` before `-shm`,
+/// and the last close unlinks `-shm` before deleting `-wal`. A concurrent probe
+/// can therefore see a one-sided pair during a normal open or close, which is not
+/// a recovery condition. A one-sided state is re-observed a bounded number of
+/// times and only a persistent one is classified as recovery.
+fn settle_sidecars(
+    path: &Path,
+    observe: &mut impl FnMut(&Path) -> Result<SidecarState, MachineError>,
+) -> Result<SidecarState, MachineError> {
+    let mut state = observe(path)?;
+    for _ in 0..SIDECAR_REOBSERVATIONS {
+        if probe_open_mode(state) != ProbeOpen::RecoveryRequired {
+            return Ok(state);
+        }
+        std::thread::sleep(SIDECAR_REOBSERVE_DELAY);
+        state = observe(path)?;
+    }
+    Ok(state)
+}
+
+impl GenerationProbe {
+    fn open(path: &Path) -> Result<Option<Self>, MachineError> {
+        let sidecars = settle_sidecars(path, &mut SidecarState::observe)?;
+        let mode = probe_open_mode(sidecars);
+        if mode == ProbeOpen::RecoveryRequired {
+            return Err(recovery_required(
+                if sidecars == SidecarState::LogOnly {
+                    "wal"
+                } else {
+                    "shm"
+                },
+                if sidecars == SidecarState::LogOnly {
+                    "log without memory"
+                } else {
+                    "memory without log"
+                },
+            ));
+        }
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection = if mode == ProbeOpen::Immutable {
+            // `immutable=1` is the only open that cannot write, but it also skips
+            // hot-journal rollback, so it is used only when no sidecar at all
+            // exists.
+            Connection::open_with_flags(
+                crate::workspace::immutable_database_uri(path)?,
+                flags | OpenFlags::SQLITE_OPEN_URI,
+            )
+        } else {
+            Connection::open_with_flags(path, flags)
+        }
+        .map_err(|_| database_unavailable())?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(internal)?;
+        // A database with no schema objects was created but never bootstrapped:
+        // `Connection::open` creates the file before the bootstrap commits, so a
+        // crash there must stay reachable. Creating openers bootstrap it; readers
+        // treat it as missing.
+        let objects: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
+            .map_err(|_| database_unavailable())?;
+        if objects == 0 {
+            return Ok(None);
+        }
+        let has_metadata: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| database_unavailable())?;
+        if !has_metadata {
+            // Generation 1 created `metadata` at birth, so a non-empty database
+            // without it is not a verified legacy shape.
+            return Err(MachineError::new(
+                "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+                "orchestration database does not carry a verified schema generation",
+                false,
+                serde_json::json!({"observed":null}),
+            ));
+        }
+        let read = |key: &str| -> Result<Option<String>, MachineError> {
+            connection
+                .query_row("SELECT value FROM metadata WHERE key=?1", [key], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map_err(|_| database_unavailable())
+        };
+        let observed = read("schema_version")?;
+        let schema_generation = match observed.as_deref() {
+            Some("1" | "2" | "3" | "4" | "5") => AdmittedGeneration::Legacy(
+                observed
+                    .as_deref()
+                    .unwrap()
+                    .parse::<i64>()
+                    .map_err(|_| database_unavailable())?,
+            ),
+            Some("6") => AdmittedGeneration::Six,
+            _ => {
+                return Err(MachineError::new(
+                    "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+                    "orchestration schema is not supported",
+                    false,
+                    serde_json::json!({"observed":observed}),
+                ));
+            }
+        };
+        // Validate the extension generation here; it is not retained.
+        match read("orchestration_schema_version")? {
+            // External-only workspaces never create the extension tables.
+            None => {}
+            Some(value) if matches!(value.as_str(), "1" | "2" | "3") => {}
+            Some(value) => {
+                return Err(MachineError::new(
+                    "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+                    "orchestration extension schema is not supported",
+                    false,
+                    serde_json::json!({"observed":value}),
+                ));
+            }
+        }
+        if matches!(schema_generation, AdmittedGeneration::Legacy(_))
+            && !connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' \
+                     AND name='engagements')",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|_| database_unavailable())?
+        {
+            return Err(MachineError::new(
+                "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+                "orchestration database does not carry a verified legacy shape",
+                false,
+                serde_json::json!({"observed":observed}),
+            ));
+        }
+        let namespace_birth_id = read("namespace_birth_id")?;
+        drop(connection);
+        Ok(Some(Self {
+            schema_generation,
+            namespace_birth_id,
+        }))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SidecarState {
+    /// No log, shared memory or rollback journal.
+    Neither,
+    /// A live WAL pair, which is recoverable coordination state.
+    Both,
+    /// A rollback journal, which a plain read-only open either rolls back or
+    /// fails closed on.
+    JournalOnly,
+    LogOnly,
+    MemoryOnly,
+}
+
+impl SidecarState {
+    fn observe(path: &Path) -> Result<Self, MachineError> {
+        let log = sidecar(path, "-wal")?;
+        let memory = sidecar(path, "-shm")?;
+        let journal = sidecar(path, "-journal")?;
+        Ok(match (log, memory, journal) {
+            (false, false, false) => Self::Neither,
+            (false, false, true) => Self::JournalOnly,
+            (true, true, _) => Self::Both,
+            (true, false, _) => Self::LogOnly,
+            (false, true, _) => Self::MemoryOnly,
+        })
+    }
+}
+
+fn sidecar(path: &Path, suffix: &str) -> Result<bool, MachineError> {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    match std::fs::symlink_metadata(Path::new(&name)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(database_unavailable()),
+    }
+}
+
+/// The effect-free pre-effect generation gate shared by every opener.
+///
+/// A missing database is reported as `None` so a creating caller can bootstrap
+/// it; an existing database yields its verified generation. Nothing here has a
+/// filesystem or database write effect.
+pub(crate) fn admit_generation(path: &Path) -> Result<Option<GenerationProbe>, MachineError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(database_unavailable()),
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(database_unavailable());
+        }
+        Ok(_) => {}
+    }
+    GenerationProbe::open(path)
+}
+
+fn database_unavailable() -> MachineError {
+    MachineError::new(
+        "INTERNAL_ERROR",
+        "the orchestration database is unavailable",
+        false,
+        serde_json::json!({"invariant":"orchestration database observation failed"}),
+    )
+}
+
+fn recovery_required(subject: &str, state: &str) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the orchestration database sidecar state is inconsistent",
+        false,
+        serde_json::json!({"subject":subject,"state":state,"required_action":"restore_state"}),
+    )
+}
+
+/// The set-up state of the workspace delegation namespace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DelegationNamespace {
+    /// Neither the database nor the birth record exists.
+    NotSetUp,
+    /// A generation-6 database whose birth record matches.
+    Ready { birth_id: Uuid },
+    /// A birth record and a database disagree about the namespace.
+    RecoveryRequired,
+}
+
+impl DelegationNamespace {
+    #[must_use]
+    pub const fn is_ready(self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+}
+
+/// Where the namespace birth record lives for one workspace state root.
+#[must_use]
+pub fn namespace_birth_path(state_root: &Path) -> PathBuf {
+    state_root.join("orchestration").join(NAMESPACE_BIRTH_FILE)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamespaceBirth {
+    schema: String,
+    namespace_birth_id: String,
+}
+
+/// Read-only namespace authority check for callers that must not create state.
+///
+/// Successor keyed operations and lookups use this before any store open: a
+/// missing namespace is `NotSetUp` (never authoritative absence), and an
+/// inconsistent one is `RecoveryRequired`.
+pub fn delegation_namespace(state_root: &Path) -> Result<DelegationNamespace, MachineError> {
+    let path = EngagementStore::workspace_database_path(state_root);
+    let file = read_birth_record(&birth_record_path(&path)?)?;
+    let Some(probe) = admit_generation(&path)? else {
+        return Ok(match file {
+            Some(_) => DelegationNamespace::RecoveryRequired,
+            None => DelegationNamespace::NotSetUp,
+        });
+    };
+    if probe.schema_generation != AdmittedGeneration::Six {
+        // A legacy database can never be migrated while a birth record already
+        // names a namespace: that is a recovery condition, not a fresh setup.
+        return Ok(match file {
+            Some(_) => DelegationNamespace::RecoveryRequired,
+            None => DelegationNamespace::NotSetUp,
+        });
+    }
+    let Some(database_birth_id) = probe.namespace_birth_id else {
+        return Ok(DelegationNamespace::RecoveryRequired);
+    };
+    let Ok(database_birth_id) = Uuid::parse_str(&database_birth_id) else {
+        return Ok(DelegationNamespace::RecoveryRequired);
+    };
+    Ok(match file {
+        Some(record) if record == database_birth_id => DelegationNamespace::Ready {
+            birth_id: database_birth_id,
+        },
+        Some(_) => DelegationNamespace::RecoveryRequired,
+        // The database is authoritative: a missing file is republished by the
+        // next writable open.
+        None => DelegationNamespace::Ready {
+            birth_id: database_birth_id,
+        },
+    })
+}
+
+/// Require a set-up namespace, mapping its absence to the typed precondition.
+pub fn require_delegation_namespace(state_root: &Path) -> Result<Uuid, MachineError> {
+    match delegation_namespace(state_root)? {
+        DelegationNamespace::Ready { birth_id } => Ok(birth_id),
+        DelegationNamespace::NotSetUp => Err(MachineError::new(
+            "DELEGATION_NAMESPACE_UNSET",
+            "the workspace delegation namespace is not set up",
+            false,
+            serde_json::json!({"required_action":"restore_state","effect":"none"}),
+        )),
+        DelegationNamespace::RecoveryRequired => Err(MachineError::new(
+            "RECOVERY_REQUIRED",
+            "the workspace delegation namespace is inconsistent",
+            false,
+            serde_json::json!({"required_action":"restore_state","effect":"none"}),
+        )),
+    }
+}
+
+/// Explicit setup for a workspace that has no delegation namespace yet.
+pub fn ensure_delegation_namespace(state_root: &Path) -> Result<Uuid, MachineError> {
+    let path = EngagementStore::workspace_database_path(state_root);
+    drop(EngagementStore::open(&path)?);
+    require_delegation_namespace(state_root)
+}
+
+// The recording caller is the settlement port's dispatch path, which the
+// successor adapters construct at run time; the unit tests exercise it.
+/// One retained dispatch index for a canonical-write task.
+///
+/// The index object and its baseline bytes live in the content store; this row
+/// owns only the digest, the bounds and the recorded `HEAD` anchor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DispatchIndexRecord<'a> {
+    pub task_id: Uuid,
+    pub workspace_ref: &'a str,
+    pub run_ref: Uuid,
+    pub head_commit: Option<&'a str>,
+    /// Bare lowercase hex of the retained index object.
+    pub index_sha256: &'a str,
+    pub index_byte_length: u64,
+    pub file_count: u64,
+    pub baseline_bytes: u64,
+}
+
+/// Retain one dispatch index inside the accepted-task transaction.
+///
+/// Bounds: 10,000 files, a 64 MiB index-only ceiling, an 8 MiB-per-side
+/// baseline already enforced by capture, and a 256 MiB aggregate over a Run's
+/// retained baselines. Exceeding any bound is a typed capacity refusal, never a
+/// truncated index.
+pub(crate) fn record_dispatch_index(
+    transaction: &Transaction<'_>,
+    record: DispatchIndexRecord<'_>,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    let bounded_hex = record.index_sha256.len() == 64
+        && record
+            .index_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if !bounded_hex
+        || record.index_byte_length == 0
+        || record.index_byte_length > 67_108_864
+        || record.file_count > 10_000
+        || record.baseline_bytes > MAX_RUN_BASELINE_BYTES
+    {
+        return Err(MachineError::new(
+            "STORAGE_CAPACITY_EXCEEDED",
+            "the dispatch index exceeds its retained bounds",
+            false,
+            serde_json::json!({"subject":"dispatch_index","required_action":"fix_request"}),
+        ));
+    }
+    let retained: u64 = run_retained_bytes(transaction, record.run_ref)?;
+    if retained.saturating_add(record.baseline_bytes) > MAX_RUN_BASELINE_BYTES {
+        return Err(MachineError::new(
+            "STORAGE_CAPACITY_EXCEEDED",
+            "the Run's retained dispatch baselines exceed the per-Run bound",
+            false,
+            serde_json::json!({"subject":"dispatch_index","required_action":"fix_request"}),
+        ));
+    }
+    transaction
+        .execute(
+            "INSERT INTO dispatch_indexes(
+               task_id,workspace_ref,run_ref,head_commit,index_sha256,index_byte_length,
+               file_count,baseline_bytes,created_at_ms
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                record.task_id.to_string(),
+                record.workspace_ref,
+                record.run_ref.to_string(),
+                record.head_commit,
+                record.index_sha256,
+                record.index_byte_length,
+                record.file_count,
+                record.baseline_bytes,
+                now_ms
+            ],
+        )
+        .map_err(|error| {
+            use rusqlite::ErrorCode;
+            if matches!(
+                error,
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error {
+                        code: ErrorCode::ConstraintViolation,
+                        extended_code: rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY,
+                        ..
+                    },
+                    _
+                )
+            ) {
+                conflict("a dispatch index already exists for this task")
+            } else {
+                internal(error)
+            }
+        })?;
+    Ok(())
+}
+
+// The successor producer reads the index object through `dispatch_index_object`,
+// so no production caller reads this typed row yet; the unit tests exercise it.
+/// The retained dispatch index of one task, if any.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn dispatch_index(
+    connection: &Connection,
+    task_id: Uuid,
+) -> Result<Option<(String, u64, u64, u64)>, MachineError> {
+    connection
+        .query_row(
+            "SELECT index_sha256,index_byte_length,file_count,baseline_bytes
+               FROM dispatch_indexes WHERE task_id=?1",
+            [task_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(internal)
+}
+
+/// One member's successor disposition counts.
+///
+/// `interrupted_unknown`/`unknown` tasks and counted-unresolved assignments are
+/// `unresolved`, so they block `idle` and release terminal. The legacy
+/// `member_task_state` keeps its own semantics and callers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MemberQuiescence {
+    /// `members.state == 'active'`: a released, degraded or still-provisioning
+    /// member is never idle (MDC:626).
+    pub member_active: bool,
+    pub running: u64,
+    pub queued: u64,
+    pub claimed: u64,
+    pub dispatching: u64,
+    pub unresolved: u64,
+    pub pending_interaction: bool,
+    pub cleanup_pending: bool,
+    pub membership_revision: u64,
+    pub workload_revision: u64,
+}
+
+impl MemberQuiescence {
+    /// Whether this member holds no work this store can see.
+    #[must_use]
+    pub(crate) fn idle(&self) -> bool {
+        self.member_active
+            && self.running == 0
+            && self.queued == 0
+            && self.claimed == 0
+            && self.dispatching == 0
+            && self.unresolved == 0
+            && !self.pending_interaction
+            && !self.cleanup_pending
+    }
+}
+
+/// The successor quiescence of one member.
+///
+/// This store owns no interaction rows, so `pending_interaction` is always
+/// `false` here — the read-side limit until TASK-079 reflects actual
+/// interactions — and `cleanup_pending` is filled by the callers from their
+/// writer observation, not by this query. The release gate is the reader that
+/// consults the Run's own durable interactions separately. The counts below
+/// are the execution facts a disposition is allowed to use.
+pub(crate) fn successor_member_quiescence(
+    connection: &Connection,
+    workspace_ref: &str,
+    scope_kind: &str,
+    scope_ref: &str,
+    member_ref: &str,
+) -> Result<MemberQuiescence, MachineError> {
+    let count = |state: &str| -> Result<u64, MachineError> {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM tasks
+                  WHERE engagement_id=?1 AND specialist_run_id=?2 AND state=?3",
+                params![scope_ref, member_ref, state],
+                |row| row.get(0),
+            )
+            .map_err(internal)
+    };
+    let unresolved_tasks: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM tasks
+              WHERE engagement_id=?1 AND specialist_run_id=?2
+                AND state IN ('interrupted_unknown','unknown')",
+            params![scope_ref, member_ref],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    // A counted-unresolved assignment is an uncertain dispatch: only the
+    // accounting row proves it, so it is counted even when the task row settled.
+    let uncertain: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM caller_scope_assignments a
+               JOIN tasks t ON t.task_id = a.assignment_id
+              WHERE t.engagement_id=?1 AND t.specialist_run_id=?2
+                AND a.accounting_state='counted_unresolved'",
+            params![scope_ref, member_ref],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    let member_state: Option<String> = connection
+        .query_row(
+            "SELECT state FROM members WHERE engagement_id=?1 AND specialist_run_id=?2",
+            params![scope_ref, member_ref],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    let member_active = member_state.as_deref() == Some("active");
+    let membership_revision =
+        scope_membership_revision(connection, workspace_ref, scope_kind, scope_ref)?;
+    let workload_revision =
+        member_workload_revision(connection, workspace_ref, scope_kind, scope_ref, member_ref)?;
+    Ok(MemberQuiescence {
+        member_active,
+        running: count("running")?,
+        queued: count("queued")?.saturating_add(count("accepted")?),
+        claimed: count("claimed")?,
+        dispatching: count("dispatching")?,
+        unresolved: unresolved_tasks.saturating_add(uncertain),
+        pending_interaction: false,
+        cleanup_pending: false,
+        membership_revision,
+        workload_revision,
+    })
+}
+
+/// One successor keyed admission, written `prepared` before its acceptance
+/// transaction (MDC:60-61).
+pub(crate) struct IntentAdmission<'a> {
+    pub operation_ref: Uuid,
+    pub namespace: &'a LookupNamespace,
+    pub mutation_envelope_json: &'a str,
+    pub mutation_envelope_digest: &'a str,
+    pub expected_revision: Option<u64>,
+    pub now_ms: i64,
+}
+
+/// What one `prepared` insert established for its key. The retained
+/// receipt is boxed: it dominates the unit and refusal variants.
+#[derive(Debug)]
+pub(crate) enum IntentPreparation {
+    /// This call owns the key and wrote the `prepared` intent.
+    Created,
+    /// The key already owns this exact accepted intent: replay its receipt.
+    Accepted(Box<OperationReceipt>),
+    /// The key owns an intent whose effect is not settled; never redispatch it.
+    Unresolved { operation_ref: Uuid },
+}
+
+/// One complete lookup result before it is projected onto the closed shape.
+#[derive(Debug)]
+pub(crate) enum IntentLookup {
+    Accepted(Box<OperationReceipt>),
+    NotAccepted {
+        operation_ref: Uuid,
+        input_digest: String,
+        refusal_code: String,
+        durable_refusal_revision: u64,
+    },
+    Unresolved {
+        operation_ref: Uuid,
+        known_subjects: Box<AcceptedSubjects>,
+    },
+    /// Only a complete read of a set-up namespace can establish this.
+    Absent {
+        durable_watermark: u64,
+    },
+}
+
+/// The five caller references that name one successor intent key.
+type IntentKey<'a> = (
+    &'a str,
+    &'a str,
+    i64,
+    Option<&'a str>,
+    Option<&'a str>,
+    &'a str,
+    &'a str,
+);
+
+fn intent_key(namespace: &LookupNamespace) -> IntentKey<'_> {
+    (
+        &namespace.workspace_ref,
+        &namespace.controller_principal,
+        i64::try_from(namespace.controller_generation).unwrap_or(i64::MAX),
+        namespace.scope_kind.as_deref(),
+        namespace.scope_ref.as_deref(),
+        &namespace.operation_kind,
+        &namespace.idempotency_key,
+    )
+}
+
+const INTENT_ROW: &str = "SELECT operation_ref,state,mutation_envelope_digest,receipt_json,
+        accepted_subjects_json,mutation_envelope_json
+   FROM delegation_operations
+  WHERE workspace_ref=?1 AND controller_principal=?2 AND controller_generation=?3
+    AND scope_kind IS ?4 AND scope_ref IS ?5 AND operation_kind=?6 AND idempotency_key=?7
+    AND state <> 'resolved_not_accepted'";
+
+/// Write one `prepared` intent, or report what the key already owns.
+///
+/// The legacy-key collision check runs inside this transaction, so a caller
+/// that admits directly cannot create a second owner for a legacy key.
+pub(crate) fn intent_prepare(
+    transaction: &Transaction<'_>,
+    admission: IntentAdmission<'_>,
+) -> Result<IntentPreparation, MachineError> {
+    let namespace = admission.namespace;
+    checked(&namespace.idempotency_key, 256, "idempotency_key")?;
+    checked(&namespace.operation_kind, 128, "operation_kind")?;
+    checked(&namespace.workspace_ref, 512, "workspace_ref")?;
+    checked(&namespace.controller_principal, 512, "controller_principal")?;
+    if let Some(scope) = &namespace.scope_ref {
+        checked(scope, 512, "scope_ref")?;
+    }
+    legacy_operation_collision(transaction, namespace)?;
+    let key = intent_key(namespace);
+    let existing: Option<(String, String, String, Option<String>, String, String)> = transaction
+        .query_row(
+            INTENT_ROW,
+            params![key.0, key.1, key.2, key.3, key.4, key.5, key.6],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(internal)?;
+    if let Some((operation_ref, state, digest, receipt, subjects, envelope)) = existing {
+        if digest != admission.mutation_envelope_digest {
+            return Err(intent_conflict());
+        }
+        let operation_ref = intent_operation_ref(&operation_ref)?;
+        return match state.as_str() {
+            "accepted" => Ok(IntentPreparation::Accepted(Box::new(intent_receipt(
+                namespace,
+                operation_ref,
+                &digest,
+                &envelope,
+                receipt.as_deref(),
+                &subjects,
+            )?))),
+            "prepared" | "unresolved" => {
+                intent_envelope(namespace, &digest, &envelope)?;
+                Ok(IntentPreparation::Unresolved { operation_ref })
+            }
+            _ => Err(intent_corrupt("the retained intent state is unknown")),
+        };
+    }
+    // A definitively refused key may be retried only with the latest
+    // refused accepted-input digest; any other identity is a conflict.
+    if let Some(refused) = latest_refusal_digest(transaction, namespace)?
+        && refused != admission.mutation_envelope_digest
+    {
+        return Err(intent_conflict());
+    }
+    let subjects = canonical_string(
+        &serde_json::to_value(AcceptedSubjects::default())
+            .map_err(|_| intent_corrupt("the prepared subjects are unrepresentable"))?,
+    )?;
+    transaction
+        .execute(
+            "INSERT INTO delegation_operations(
+               operation_ref,state,workspace_ref,controller_principal,controller_generation,
+               scope_kind,scope_ref,operation_kind,idempotency_key,mutation_envelope_json,
+               mutation_envelope_digest,expected_revision,trusted_invocation_json,
+               accepted_subjects_json,created_at_ms,updated_at_ms
+             ) VALUES(?1,'prepared',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,NULL,?12,?13,?13)",
+            params![
+                admission.operation_ref.to_string(),
+                key.0,
+                key.1,
+                key.2,
+                key.3,
+                key.4,
+                key.5,
+                key.6,
+                admission.mutation_envelope_json,
+                admission.mutation_envelope_digest,
+                admission.expected_revision.map(|revision| revision as i64),
+                subjects,
+                admission.now_ms
+            ],
+        )
+        .map_err(|error| {
+            if intent_constraint(&error) {
+                intent_conflict()
+            } else {
+                internal(error)
+            }
+        })?;
+    Ok(IntentPreparation::Created)
+}
+
+/// Accept one prepared intent: the receipt and the effect commit together.
+///
+/// The retained receipt is immutable after this transition, and the
+/// legacy-key collision check runs again inside the acceptance transaction.
+pub(crate) fn intent_accept(
+    transaction: &Transaction<'_>,
+    operation_ref: Uuid,
+    receipt: &OperationReceipt,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    receipt
+        .validate()
+        .map_err(|_| intent_corrupt("the accepted receipt is invalid"))?;
+    let namespace = &receipt.namespace;
+    if receipt.operation_ref != operation_ref.to_string() {
+        return Err(intent_corrupt("the receipt names another operation"));
+    }
+    legacy_operation_collision(transaction, namespace)?;
+    let key = intent_key(namespace);
+    let retained: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT state,mutation_envelope_digest FROM delegation_operations
+              WHERE operation_ref=?1 AND workspace_ref=?2 AND controller_principal=?3
+                AND controller_generation=?4 AND scope_kind IS ?5 AND scope_ref IS ?6
+                AND operation_kind=?7 AND idempotency_key=?8",
+            params![
+                operation_ref.to_string(),
+                key.0,
+                key.1,
+                key.2,
+                key.3,
+                key.4,
+                key.5,
+                key.6
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((state, digest)) = retained else {
+        return Err(intent_corrupt("the accepted intent is missing"));
+    };
+    if digest != receipt.accepted_input_digest {
+        return Err(intent_corrupt(
+            "the receipt carries another accepted input digest",
+        ));
+    }
+    if !matches!(state.as_str(), "prepared" | "unresolved") {
+        return Err(intent_conflict());
+    }
+    let subjects = canonical_string(
+        &serde_json::to_value(&receipt.accepted_subjects)
+            .map_err(|_| intent_corrupt("the accepted subjects are unrepresentable"))?,
+    )?;
+    let body = canonical_string(
+        &serde_json::to_value(receipt)
+            .map_err(|_| intent_corrupt("the receipt is unrepresentable"))?,
+    )?;
+    let changed = transaction
+        .execute(
+            "UPDATE delegation_operations
+                SET state='accepted',receipt_json=?2,accepted_subjects_json=?3,updated_at_ms=?4
+              WHERE operation_ref=?1 AND state IN ('prepared','unresolved')",
+            params![operation_ref.to_string(), body, subjects, now_ms],
+        )
+        .map_err(|error| {
+            if intent_constraint(&error) {
+                intent_corrupt("the retained intent refused its acceptance transition")
+            } else {
+                internal(error)
+            }
+        })?;
+    if changed != 1 {
+        return Err(intent_conflict());
+    }
+    Ok(())
+}
+
+/// Resolve one intent as definitively not accepted before any effect (Case A).
+///
+/// The refusal revision is the refused row's durable sequence, which is what
+/// `lookup_not_accepted` reports as `durable_refusal_revision`.
+pub(crate) fn intent_refuse_before_acceptance(
+    transaction: &Transaction<'_>,
+    operation_ref: Uuid,
+    refusal_code: &str,
+    now_ms: i64,
+) -> Result<u64, MachineError> {
+    if refusal_code.is_empty()
+        || refusal_code.len() > 128
+        || !refusal_code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(invalid("refusal_code", "refusal code is not a safe code"));
+    }
+    let sequence: i64 = transaction
+        .query_row(
+            "SELECT sequence FROM delegation_operations WHERE operation_ref=?1",
+            [operation_ref.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?
+        .ok_or_else(|| intent_corrupt("the refused intent is missing"))?;
+    let changed = transaction
+        .execute(
+            "UPDATE delegation_operations
+                SET state='resolved_not_accepted',definitive_refusal=?2,
+                    refusal_revision=?3,updated_at_ms=?4
+              WHERE operation_ref=?1 AND state IN ('prepared','unresolved')",
+            params![operation_ref.to_string(), refusal_code, sequence, now_ms],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(intent_conflict());
+    }
+    u64::try_from(sequence).map_err(|_| intent_corrupt("the refusal revision is invalid"))
+}
+
+/// Mark one intent's effect unresolved; its accepted receipt never changes.
+pub(crate) fn intent_mark_unresolved(
+    transaction: &Transaction<'_>,
+    operation_ref: Uuid,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    let changed = transaction
+        .execute(
+            "UPDATE delegation_operations SET state='unresolved',updated_at_ms=?2
+              WHERE operation_ref=?1 AND state='prepared'",
+            params![operation_ref.to_string(), now_ms],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(intent_conflict());
+    }
+    Ok(())
+}
+
+/// Read one keyed intent namespace under its four closed lookup states.
+///
+/// The read is effect free: it never creates the database, never writes, and it
+/// refuses a legacy-owned key or a corrupt retained row instead of reporting
+/// authoritative absence (MDC:186-200).
+pub(crate) fn intent_lookup(
+    connection: &Connection,
+    namespace: &LookupNamespace,
+) -> Result<IntentLookup, MachineError> {
+    let key = intent_key(namespace);
+    let existing: Option<(String, String, String, Option<String>, String, String)> = connection
+        .query_row(
+            INTENT_ROW,
+            params![key.0, key.1, key.2, key.3, key.4, key.5, key.6],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(internal)?;
+    if let Some((operation_ref, state, digest, receipt, subjects, envelope)) = existing {
+        let operation_ref = intent_operation_ref(&operation_ref)?;
+        return match state.as_str() {
+            "accepted" => Ok(IntentLookup::Accepted(Box::new(intent_receipt(
+                namespace,
+                operation_ref,
+                &digest,
+                &envelope,
+                receipt.as_deref(),
+                &subjects,
+            )?))),
+            "prepared" | "unresolved" => {
+                intent_envelope(namespace, &digest, &envelope)?;
+                Ok(IntentLookup::Unresolved {
+                    operation_ref,
+                    known_subjects: Box::new(intent_subjects(&subjects)?),
+                })
+            }
+            _ => Err(intent_corrupt("the retained intent state is unknown")),
+        };
+    }
+    legacy_operation_collision(connection, namespace)?;
+    let refusal: Option<(String, String, String, i64, String)> = connection
+        .query_row(
+            "SELECT operation_ref,mutation_envelope_digest,definitive_refusal,refusal_revision,
+                    mutation_envelope_json
+               FROM delegation_operations
+              WHERE workspace_ref=?1 AND controller_principal=?2 AND controller_generation=?3
+                AND scope_kind IS ?4 AND scope_ref IS ?5 AND operation_kind=?6
+                AND idempotency_key=?7 AND state='resolved_not_accepted'
+              ORDER BY sequence DESC LIMIT 1",
+            params![key.0, key.1, key.2, key.3, key.4, key.5, key.6],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(internal)?;
+    if let Some((operation_ref, input_digest, refusal_code, refusal_revision, envelope)) = refusal {
+        if refusal_code.is_empty() {
+            return Err(intent_corrupt("the retained refusal is incomplete"));
+        }
+        // A refused row is retained evidence too: it must be the closed
+        // envelope over this namespace before it can report not_accepted.
+        intent_envelope(namespace, &input_digest, &envelope)?;
+        return Ok(IntentLookup::NotAccepted {
+            operation_ref: intent_operation_ref(&operation_ref)?,
+            input_digest,
+            refusal_code,
+            durable_refusal_revision: u64::try_from(refusal_revision)
+                .map_err(|_| intent_corrupt("the retained refusal revision is invalid"))?,
+        });
+    }
+    let watermark: i64 = connection
+        .query_row(
+            "SELECT COALESCE(MAX(sequence),0) FROM delegation_operations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    Ok(IntentLookup::Absent {
+        durable_watermark: u64::try_from(watermark)
+            .map_err(|_| intent_corrupt("the durable watermark is invalid"))?,
+    })
+}
+
+/// The accepted member one successor spawn intent admitted, if it accepted here.
+///
+/// A successor managed member is identified by its accepted spawn intent,
+/// on top of the successor marker its Broker row carries.
+pub(crate) fn successor_spawn_member(
+    connection: &Connection,
+    operation_ref: &str,
+) -> Result<Option<String>, MachineError> {
+    let subjects: Option<String> = connection
+        .query_row(
+            "SELECT accepted_subjects_json FROM delegation_operations
+              WHERE operation_ref=?1 AND operation_kind='spawn_specialist' AND state='accepted'",
+            [operation_ref],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some(subjects) = subjects else {
+        return Ok(None);
+    };
+    let subjects: AcceptedSubjects = serde_json::from_str(&subjects)
+        .map_err(|_| intent_corrupt("the accepted subjects are invalid"))?;
+    match subjects.member_ref {
+        Some(member) => Ok(Some(member)),
+        None => Err(intent_corrupt("the accepted spawn names no member")),
+    }
+}
+
+/// Whether one external member was admitted by a successor hire.
+///
+/// A legacy facade-v4 hire leaves no successor intent, so only an accepted
+/// `hire_external_specialist` subject names a successor member; that fact is
+/// what separates the two release owners.
+// The release settlement is constructed by the semantic release owner.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn successor_hire_member(
+    connection: &Connection,
+    member_ref: &str,
+) -> Result<bool, MachineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT accepted_subjects_json FROM delegation_operations
+              WHERE operation_kind='hire_external_specialist' AND state='accepted'",
+        )
+        .map_err(internal)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)?;
+    for subjects in rows {
+        let subjects: AcceptedSubjects = serde_json::from_str(&subjects)
+            .map_err(|_| intent_corrupt("the accepted subjects are invalid"))?;
+        if subjects.member_ref.as_deref() == Some(member_ref) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The scoped membership revision a successor acceptance fences (RPC §3).
+pub(crate) fn scope_membership_revision(
+    connection: &Connection,
+    workspace_ref: &str,
+    scope_kind: &str,
+    scope_ref: &str,
+) -> Result<u64, MachineError> {
+    let revision: Option<i64> = connection
+        .query_row(
+            "SELECT revision FROM scope_membership_revisions
+              WHERE workspace_ref=?1 AND scope_kind=?2 AND scope_ref=?3",
+            params![workspace_ref, scope_kind, scope_ref],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    match revision {
+        Some(revision) => {
+            u64::try_from(revision).map_err(|_| intent_corrupt("the scope revision is invalid"))
+        }
+        None => Ok(0),
+    }
+}
+
+/// One member's workload revision, zero before its first change.
+pub(crate) fn member_workload_revision(
+    connection: &Connection,
+    workspace_ref: &str,
+    scope_kind: &str,
+    scope_ref: &str,
+    member_ref: &str,
+) -> Result<u64, MachineError> {
+    let revision: Option<i64> = connection
+        .query_row(
+            "SELECT revision FROM member_workload_revisions
+              WHERE workspace_ref=?1 AND scope_kind=?2 AND scope_ref=?3 AND member_ref=?4",
+            params![workspace_ref, scope_kind, scope_ref, member_ref],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    match revision {
+        Some(revision) => {
+            u64::try_from(revision).map_err(|_| intent_corrupt("the workload revision is invalid"))
+        }
+        None => Ok(0),
+    }
+}
+
+/// Advance one member's workload revision inside the accepting transaction.
+pub(crate) fn advance_member_workload_revision(
+    transaction: &Transaction<'_>,
+    workspace_ref: &str,
+    scope_kind: &str,
+    scope_ref: &str,
+    member_ref: &str,
+) -> Result<u64, MachineError> {
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO member_workload_revisions(
+               workspace_ref,scope_kind,scope_ref,member_ref,revision)
+             VALUES(?1,?2,?3,?4,0)",
+            params![workspace_ref, scope_kind, scope_ref, member_ref],
+        )
+        .map_err(internal)?;
+    transaction
+        .execute(
+            "UPDATE member_workload_revisions SET revision=revision+1
+              WHERE workspace_ref=?1 AND scope_kind=?2 AND scope_ref=?3 AND member_ref=?4",
+            params![workspace_ref, scope_kind, scope_ref, member_ref],
+        )
+        .map_err(internal)?;
+    member_workload_revision(
+        transaction,
+        workspace_ref,
+        scope_kind,
+        scope_ref,
+        member_ref,
+    )
+}
+
+/// Advance one scoped membership revision inside the accepting transaction.
+pub(crate) fn advance_scope_membership_revision(
+    transaction: &Transaction<'_>,
+    workspace_ref: &str,
+    scope_kind: &str,
+    scope_ref: &str,
+) -> Result<u64, MachineError> {
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO scope_membership_revisions(workspace_ref,scope_kind,scope_ref,revision)
+             VALUES(?1,?2,?3,0)",
+            params![workspace_ref, scope_kind, scope_ref],
+        )
+        .map_err(internal)?;
+    transaction
+        .execute(
+            "UPDATE scope_membership_revisions SET revision=revision+1
+              WHERE workspace_ref=?1 AND scope_kind=?2 AND scope_ref=?3",
+            params![workspace_ref, scope_kind, scope_ref],
+        )
+        .map_err(internal)?;
+    scope_membership_revision(transaction, workspace_ref, scope_kind, scope_ref)
+}
+
+/// The durable release operation of one member, if one was admitted.
+///
+/// Anchored by `(workspace_ref, scope_kind, scope_ref, member_ref)` because the
+/// `S` release owners carry no idempotency key (RPC:219-241, RPC §7).
+// The release owner is constructed by the semantic release admission.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn member_release_operation(
+    connection: &Connection,
+    workspace_ref: &str,
+    scope_kind: &str,
+    scope_ref: &str,
+    member_ref: &str,
+) -> Result<Option<crate::delegation_identity::MemberReleaseOperation>, MachineError> {
+    type Row = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+        Option<i64>,
+        Option<i64>,
+    );
+    let row: Option<Row> = connection
+        .query_row(
+            "SELECT operation_ref,operation_kind,workspace_ref,scope_kind,scope_ref,
+                    member_ref,run_ref,controller_principal,controller_generation,
+                    admitted_membership_revision,owner_ref,progress,safe_failure_code,
+                    required_action,terminal_membership_revision,settled_workload_revision
+               FROM member_release_operations
+              WHERE workspace_ref=?1 AND scope_kind=?2 AND scope_ref=?3 AND member_ref=?4",
+            params![workspace_ref, scope_kind, scope_ref, member_ref],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let unsigned = |value: i64, reason: &str| -> Result<u64, MachineError> {
+        u64::try_from(value).map_err(|_| integrity(reason))
+    };
+    let operation = crate::delegation_identity::MemberReleaseOperation {
+        schema: crate::delegation_identity::MEMBER_RELEASE_OPERATION_SCHEMA.to_owned(),
+        operation_ref: row.0,
+        operation_kind: row.1,
+        workspace_ref: row.2,
+        scope_kind: row.3,
+        scope_ref: row.4,
+        member_ref: row.5,
+        run_ref: row.6,
+        controller_principal: row.7,
+        controller_generation: unsigned(row.8, "the release Controller generation is invalid")?,
+        admitted_membership_revision: unsigned(row.9, "the release admission revision is invalid")?,
+        owner_ref: row.10,
+        progress: row.11,
+        safe_failure_code: row.12,
+        required_action: row.13,
+        terminal_membership_revision: row
+            .14
+            .map(|value| unsigned(value, "the release terminal revision is invalid"))
+            .transpose()?,
+        settled_workload_revision: row
+            .15
+            .map(|value| unsigned(value, "the release workload revision is invalid"))
+            .transpose()?,
+    };
+    operation
+        .validate()
+        .map_err(|_| integrity("the retained release operation is invalid"))?;
+    Ok(Some(operation))
+}
+
+/// One durable release admission (RPC:242-264).
+// The release owner is constructed by the semantic release admission.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct MemberReleaseAdmission<'a> {
+    pub operation_ref: Uuid,
+    pub workspace_ref: &'a str,
+    pub scope_kind: &'a str,
+    pub scope_ref: &'a str,
+    pub member_ref: Uuid,
+    pub run_ref: Uuid,
+    pub controller_principal: &'a str,
+    pub controller_generation: u64,
+    pub admitted_membership_revision: u64,
+    pub now_ms: i64,
+}
+
+/// Insert one `requested` release row inside the admitting transaction.
+// The release owner is constructed by the semantic release admission.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn admit_member_release(
+    transaction: &Transaction<'_>,
+    admission: MemberReleaseAdmission<'_>,
+) -> Result<crate::delegation_identity::MemberReleaseOperation, MachineError> {
+    let operation_kind = match admission.scope_kind {
+        "external_engagement" => "release_external_specialist",
+        "orchestrated_session" => "release_specialist",
+        _ => return Err(integrity("the release scope kind is not a member owner")),
+    };
+    if admission.controller_generation == 0
+        || admission.controller_generation > crate::domain::MAX_JCS_SAFE_INTEGER
+        || admission.admitted_membership_revision > crate::domain::MAX_JCS_SAFE_INTEGER
+    {
+        return Err(integrity("the release admission bounds are invalid"));
+    }
+    transaction
+        .execute(
+            "INSERT INTO member_release_operations(
+               operation_ref,operation_kind,workspace_ref,scope_kind,scope_ref,
+               member_ref,run_ref,controller_principal,controller_generation,
+               admitted_membership_revision,owner_ref,progress,safe_failure_code,
+               required_action,terminal_membership_revision,settled_workload_revision,
+               created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULL,'requested',NULL,'none',
+                      NULL,NULL,?11,?11)",
+            params![
+                admission.operation_ref.to_string(),
+                operation_kind,
+                admission.workspace_ref,
+                admission.scope_kind,
+                admission.scope_ref,
+                admission.member_ref.to_string(),
+                admission.run_ref.to_string(),
+                admission.controller_principal,
+                i64::try_from(admission.controller_generation)
+                    .map_err(|_| integrity("the release Controller generation is invalid"))?,
+                i64::try_from(admission.admitted_membership_revision)
+                    .map_err(|_| integrity("the release admission revision is invalid"))?,
+                admission.now_ms,
+            ],
+        )
+        .map_err(internal)?;
+    member_release_operation(
+        transaction,
+        admission.workspace_ref,
+        admission.scope_kind,
+        admission.scope_ref,
+        &admission.member_ref.to_string(),
+    )?
+    .ok_or_else(|| integrity("the admitted release operation is missing"))
+}
+
+/// Insert one `requested` release row inside the admitting transaction, or
+/// converge on a concurrent admission's row (RPC:433-456).
+///
+/// The `S` release has no idempotency key, so two callers that both read no
+/// row can race into this transaction; the later one joins the committed
+/// operation instead of fencing or colliding on the member's uniqueness.
+// The release settlement is constructed by the semantic release owner.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn admit_or_join_member_release(
+    transaction: &Transaction<'_>,
+    admission: MemberReleaseAdmission<'_>,
+) -> Result<crate::delegation_identity::MemberReleaseOperation, MachineError> {
+    if let Some(existing) = member_release_operation(
+        transaction,
+        admission.workspace_ref,
+        admission.scope_kind,
+        admission.scope_ref,
+        &admission.member_ref.to_string(),
+    )? {
+        return Ok(existing);
+    }
+    admit_member_release(transaction, admission)
+}
+
+/// The typed progress one owner attempt records on a release row.
+// The release owner is constructed by the semantic release admission.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum MemberReleaseProgress<'a> {
+    /// This attempt holds the member Run lease and now owns settlement.
+    Owned { owner_ref: &'a str },
+    /// This attempt could not continue; completion revisions stay null.
+    Failed {
+        progress: &'a str,
+        safe_failure_code: &'a str,
+        required_action: &'a str,
+    },
+}
+
+/// Record one release progress transition inside its own transaction.
+///
+/// The row's identity, initiating Controller and admission revision are never
+/// written here, and a `terminal` row refuses every transition
+/// (RPC:296-301, :433-456).
+// The release owner is constructed by the semantic release admission.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_member_release_progress(
+    transaction: &Transaction<'_>,
+    operation_ref: Uuid,
+    progress: MemberReleaseProgress<'_>,
+    now_ms: i64,
+) -> Result<crate::delegation_identity::MemberReleaseOperation, MachineError> {
+    let changed = match progress {
+        MemberReleaseProgress::Owned { owner_ref } => {
+            if owner_ref.is_empty() || !owner_ref.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(integrity(
+                    "the release owner reference is not a witness digest",
+                ));
+            }
+            transaction
+                .execute(
+                    "UPDATE member_release_operations
+                        SET owner_ref=?2,progress='settling',safe_failure_code=NULL,
+                            required_action='none',updated_at_ms=?3
+                      WHERE operation_ref=?1 AND progress<>'terminal'",
+                    params![operation_ref.to_string(), owner_ref, now_ms],
+                )
+                .map_err(internal)?
+        }
+        MemberReleaseProgress::Failed {
+            progress,
+            safe_failure_code,
+            required_action,
+        } => {
+            if !matches!(progress, "cleanup_failed" | "recovery_needed") {
+                return Err(integrity(
+                    "the release failure progress is not a recorded state",
+                ));
+            }
+            if !matches!(
+                required_action,
+                "reconcile_operation" | "recover_run" | "restore_state"
+            ) {
+                return Err(integrity(
+                    "the release failure action is not a closed action",
+                ));
+            }
+            if safe_failure_code.is_empty()
+                || !safe_failure_code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte == b'_' || byte.is_ascii_digit())
+            {
+                return Err(integrity("the release failure code is not a safe code"));
+            }
+            transaction
+                .execute(
+                    "UPDATE member_release_operations
+                        SET progress=?2,safe_failure_code=?3,required_action=?4,
+                            terminal_membership_revision=NULL,settled_workload_revision=NULL,
+                            updated_at_ms=?5
+                      WHERE operation_ref=?1 AND progress<>'terminal'",
+                    params![
+                        operation_ref.to_string(),
+                        progress,
+                        safe_failure_code,
+                        required_action,
+                        now_ms
+                    ],
+                )
+                .map_err(internal)?
+        }
+    };
+    if changed != 1 {
+        return Err(conflict("the release operation cannot advance"));
+    }
+    let row: (String, String, String, String) = transaction
+        .query_row(
+            "SELECT workspace_ref,scope_kind,scope_ref,member_ref
+               FROM member_release_operations WHERE operation_ref=?1",
+            [operation_ref.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(internal)?;
+    member_release_operation(transaction, &row.0, &row.1, &row.2, &row.3)?
+        .ok_or_else(|| integrity("the advanced release operation is missing"))
+}
+
+/// Mark one external member `releasing` inside the admission transaction.
+// The release owner is constructed by the semantic release admission.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn mark_external_member_releasing(
+    transaction: &Transaction<'_>,
+    engagement_id: Uuid,
+    member_ref: Uuid,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    let changed = transaction
+        .execute(
+            "UPDATE members SET state='releasing',updated_at_ms=?3
+              WHERE engagement_id=?1 AND specialist_run_id=?2
+                AND state NOT IN ('released','retired')",
+            params![engagement_id.to_string(), member_ref.to_string(), now_ms],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(conflict("the member cannot enter release"));
+    }
+    append_event(
+        transaction,
+        engagement_id,
+        "member_release_requested",
+        &member_ref.to_string(),
+    )
+}
+
+/// Transition one external member to terminally `released` inside the release
+/// terminal transaction (RPC:388-394).
+// The release settlement is constructed by the semantic release owner.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn retire_external_member_released(
+    transaction: &Transaction<'_>,
+    engagement_id: Uuid,
+    member_ref: Uuid,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    let changed = transaction
+        .execute(
+            "UPDATE members SET state='released',actor_residency='terminal',updated_at_ms=?3
+              WHERE engagement_id=?1 AND specialist_run_id=?2
+                AND state IN ('releasing','active','degraded')",
+            params![engagement_id.to_string(), member_ref.to_string(), now_ms],
+        )
+        .map_err(internal)?;
+    if changed == 0 {
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT state FROM members WHERE engagement_id=?1 AND specialist_run_id=?2",
+                params![engagement_id.to_string(), member_ref.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        if existing.as_deref() != Some("released") {
+            return Err(conflict("the member cannot be released"));
+        }
+    }
+    append_event(
+        transaction,
+        engagement_id,
+        "external_member_released",
+        &member_ref.to_string(),
+    )
+}
+
+/// Freeze one release operation at `terminal` with both completion revisions
+/// inside the same transaction that settles the member (RPC:388-394).
+// The release settlement is constructed by the semantic release owner.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn commit_member_release_terminal(
+    transaction: &Transaction<'_>,
+    operation_ref: Uuid,
+    terminal_membership_revision: u64,
+    settled_workload_revision: u64,
+    now_ms: i64,
+) -> Result<crate::delegation_identity::MemberReleaseOperation, MachineError> {
+    if terminal_membership_revision > crate::domain::MAX_JCS_SAFE_INTEGER
+        || settled_workload_revision > crate::domain::MAX_JCS_SAFE_INTEGER
+    {
+        return Err(integrity("the release completion revisions are invalid"));
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE member_release_operations
+                SET progress='terminal',terminal_membership_revision=?2,
+                    settled_workload_revision=?3,safe_failure_code=NULL,
+                    required_action='none',updated_at_ms=?4
+              WHERE operation_ref=?1 AND progress<>'terminal'",
+            params![
+                operation_ref.to_string(),
+                i64::try_from(terminal_membership_revision)
+                    .map_err(|_| integrity("the release terminal revision is invalid"))?,
+                i64::try_from(settled_workload_revision)
+                    .map_err(|_| integrity("the release workload revision is invalid"))?,
+                now_ms
+            ],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(conflict("the release operation cannot settle"));
+    }
+    let row: (String, String, String, String) = transaction
+        .query_row(
+            "SELECT workspace_ref,scope_kind,scope_ref,member_ref
+               FROM member_release_operations WHERE operation_ref=?1",
+            [operation_ref.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(internal)?;
+    member_release_operation(transaction, &row.0, &row.1, &row.2, &row.3)?
+        .ok_or_else(|| integrity("the settled release operation is missing"))
+}
+
+fn intent_operation_ref(value: &str) -> Result<Uuid, MachineError> {
+    Uuid::parse_str(value)
+        .map_err(|_| intent_corrupt("the retained operation reference is invalid"))
+}
+
+fn intent_subjects(value: &str) -> Result<AcceptedSubjects, MachineError> {
+    serde_json::from_str(value).map_err(|_| intent_corrupt("the retained subjects are invalid"))
+}
+
+/// Rebuild one accepted receipt and bind it to its retained intent row.
+fn intent_receipt(
+    namespace: &LookupNamespace,
+    operation_ref: Uuid,
+    digest: &str,
+    envelope_json: &str,
+    receipt_json: Option<&str>,
+    subjects_json: &str,
+) -> Result<OperationReceipt, MachineError> {
+    intent_envelope(namespace, digest, envelope_json)?;
+    let receipt_json =
+        receipt_json.ok_or_else(|| intent_corrupt("the accepted receipt is missing"))?;
+    let receipt: OperationReceipt = serde_json::from_str(receipt_json)
+        .map_err(|_| intent_corrupt("the retained receipt is malformed"))?;
+    receipt
+        .validate()
+        .map_err(|_| intent_corrupt("the retained receipt is invalid"))?;
+    receipt
+        .verify_digest()
+        .map_err(|_| intent_corrupt("the retained receipt digest does not verify"))?;
+    if receipt.namespace != *namespace
+        || receipt.operation_ref != operation_ref.to_string()
+        || receipt.accepted_input_digest != digest
+        || receipt.accepted_subjects != intent_subjects(subjects_json)?
+    {
+        return Err(intent_corrupt(
+            "the retained receipt differs from its intent row",
+        ));
+    }
+    Ok(receipt)
+}
+
+/// Require one retained mutation envelope to be the closed envelope over this
+/// row's own namespace with the digest the row recorded.
+fn intent_envelope(
+    namespace: &LookupNamespace,
+    digest: &str,
+    envelope_json: &str,
+) -> Result<(), MachineError> {
+    // Parse through the repository JCS reader first: it rejects duplicate
+    // object keys and non-canonical input, which a plain JSON reader would
+    // silently collapse (MDC:212-215).
+    let parsed = crate::jcs::parse(envelope_json)
+        .map_err(|_| intent_corrupt("the retained mutation envelope is not canonical JSON"))?;
+    let canonical = crate::jcs::canonicalize(&parsed)
+        .map_err(|_| intent_corrupt("the retained mutation envelope cannot be re-encoded"))?;
+    let envelope: crate::operation::Envelope = serde_json::from_slice(&canonical)
+        .map_err(|_| intent_corrupt("the retained mutation envelope is not the closed envelope"))?;
+    if envelope.schema != crate::operation::ENVELOPE_SCHEMA
+        || LookupNamespace::from(&envelope.namespace) != *namespace
+        || crate::operation::envelope_digest(&envelope)
+            .map_err(|_| intent_corrupt("the retained mutation envelope cannot be re-digested"))?
+            != digest
+    {
+        return Err(intent_corrupt(
+            "the retained mutation envelope differs from its intent row",
+        ));
+    }
+    Ok(())
+}
+
+/// The accepted-input digest of the latest durable refusal for one key.
+///
+/// The refused row is verified like every other retained intent before it can
+/// become a re-entry basis: a corrupt refusal is recovery, never a comparison.
+fn latest_refusal_digest(
+    connection: &Connection,
+    namespace: &LookupNamespace,
+) -> Result<Option<String>, MachineError> {
+    let key = intent_key(namespace);
+    let row: Option<(String, String)> = connection
+        .query_row(
+            "SELECT mutation_envelope_digest,mutation_envelope_json FROM delegation_operations
+              WHERE workspace_ref=?1 AND controller_principal=?2 AND controller_generation=?3
+                AND scope_kind IS ?4 AND scope_ref IS ?5 AND operation_kind=?6
+                AND idempotency_key=?7 AND state='resolved_not_accepted'
+              ORDER BY sequence DESC LIMIT 1",
+            params![key.0, key.1, key.2, key.3, key.4, key.5, key.6],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((digest, envelope)) = row else {
+        return Ok(None);
+    };
+    intent_envelope(namespace, &digest, &envelope)?;
+    Ok(Some(digest))
+}
+
+/// A key that a legacy facade-v4 path owns is never absent and never new.
+fn legacy_operation_collision(
+    connection: &Connection,
+    namespace: &LookupNamespace,
+) -> Result<(), MachineError> {
+    let Some((scope_id, operation)) = legacy_key_scope(namespace) else {
+        return Ok(());
+    };
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations
+              WHERE scope_id=?1 AND operation=?2 AND idempotency_key=?3)",
+            params![scope_id, operation, namespace.idempotency_key],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    if exists {
+        return Err(legacy_namespace_refusal());
+    }
+    Ok(())
+}
+
+/// The legacy `operations` scope one successor key would have used, if any.
+fn legacy_key_scope(namespace: &LookupNamespace) -> Option<(String, &'static str)> {
+    let engagement_scope = || match (&namespace.scope_kind, &namespace.scope_ref) {
+        (Some(kind), Some(scope)) if kind == "external_engagement" => Some(scope.clone()),
+        _ => None,
+    };
+    match namespace.operation_kind.as_str() {
+        "open_external_engagement" => Some((
+            format!("workspace:{}", namespace.workspace_ref),
+            "open_external_engagement",
+        )),
+        "hire_external_specialist" => {
+            engagement_scope().map(|scope| (scope, "hire_external_specialist"))
+        }
+        "assign_external_specialist_task" => {
+            engagement_scope().map(|scope| (scope, "assign_external_specialist_task"))
+        }
+        _ => None,
+    }
+}
+
+fn legacy_namespace_refusal() -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the idempotency key belongs to the legacy operation namespace",
+        false,
+        serde_json::json!({
+            "subject":"legacy_operation_namespace",
+            "required_action":"reconcile_operation",
+            "effect":"none"
+        }),
+    )
+}
+
+fn intent_conflict() -> MachineError {
+    MachineError::new(
+        "IDEMPOTENCY_CONFLICT",
+        "the idempotency key already names a different delegated operation",
+        false,
+        serde_json::json!({"required_action":"use_original_input_or_new_key"}),
+    )
+}
+
+fn intent_corrupt(reason: &str) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        reason,
+        false,
+        serde_json::json!({
+            "subject":"delegation_operations",
+            "required_action":"restore_state",
+            "effect":"none"
+        }),
+    )
+}
+
+fn intent_constraint(error: &rusqlite::Error) -> bool {
+    use rusqlite::ErrorCode;
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::ConstraintViolation,
+                ..
+            },
+            _
+        )
+    )
+}
+
+fn read_birth_record(path: &Path) -> Result<Option<Uuid>, MachineError> {
+    let bytes = match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(namespace_record_corrupt("the birth record is unreadable")),
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(namespace_record_corrupt(
+                "the namespace birth record is not a regular file",
+            ));
+        }
+        Ok(_) => std::fs::read(path)
+            .map_err(|_| namespace_record_corrupt("the namespace birth record cannot be read"))?,
+    };
+    let record: NamespaceBirth = serde_json::from_slice(&bytes)
+        .map_err(|_| namespace_record_corrupt("the namespace birth record is malformed"))?;
+    if record.schema != NAMESPACE_BIRTH_SCHEMA {
+        return Err(namespace_record_corrupt(
+            "the namespace birth record has an unknown schema",
+        ));
+    }
+    Uuid::parse_str(&record.namespace_birth_id)
+        .map(Some)
+        .map_err(|_| namespace_record_corrupt("the namespace birth id is not a UUID"))
+}
+
+/// Publish the birth record once.
+///
+/// A mismatching existing record is never overwritten: the namespace identity
+/// must not be replaced silently. A concurrent opener that published the same
+/// id first is convergence, not failure.
+fn publish_birth_record(database: &Path, birth_id: Uuid) -> Result<(), MachineError> {
+    match read_birth_record(&birth_record_path(database)?)? {
+        Some(existing) if existing == birth_id => return Ok(()),
+        Some(_) => return Err(namespace_record_mismatch()),
+        None => {}
+    }
+    let path = birth_record_path(database)?;
+    let parent = path.parent().ok_or_else(database_unavailable)?;
+    std::fs::create_dir_all(parent).map_err(internal)?;
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(internal)?;
+    let record = NamespaceBirth {
+        schema: NAMESPACE_BIRTH_SCHEMA.to_owned(),
+        namespace_birth_id: birth_id.to_string(),
+    };
+    let mut bytes = crate::jcs::canonicalize(
+        &crate::jcs::parse(&serde_json::to_string(&record).map_err(internal)?)
+            .map_err(|_| database_unavailable())?,
+    )
+    .map_err(|_| database_unavailable())?;
+    bytes.push(b'\n');
+    match crate::workspace::atomic_create(
+        &crate::workspace::SystemWorkspacePlatform,
+        &path,
+        &bytes,
+        0o600,
+    ) {
+        Ok(()) => Ok(()),
+        // Another opener won the exclusive publication. The same id is
+        // convergence; a different id is a namespace conflict.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match read_birth_record(&path)? {
+                Some(existing) if existing == birth_id => Ok(()),
+                Some(_) => Err(namespace_record_mismatch()),
+                None => Err(database_unavailable()),
+            }
+        }
+        Err(error) => Err(internal(error)),
+    }
+}
+
+/// The birth record that belongs to one Engagement database.
+///
+/// Production layout: `<state_root>/orchestration/namespace-birth.json`, beside
+/// the database, which is exactly `namespace_birth_path`. Isolated/fixture
+/// convention: `<database file name>.namespace-birth.json` in the database's own
+/// directory (for example `orchestration.sqlite3.namespace-birth.json`), so two
+/// databases in one directory can never be mistaken for one namespace. The
+/// isolated name is **not** a production layout.
+fn birth_record_path(database: &Path) -> Result<PathBuf, MachineError> {
+    let parent = database.parent().ok_or_else(database_unavailable)?;
+    if parent
+        .file_name()
+        .is_some_and(|name| name == "orchestration")
+    {
+        return Ok(parent.join(NAMESPACE_BIRTH_FILE));
+    }
+    let name = database
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(database_unavailable)?;
+    Ok(parent.join(format!("{name}.{NAMESPACE_BIRTH_FILE}")))
+}
+
+/// A birth record that cannot be trusted is a recovery condition, never
+/// authoritative absence.
+fn namespace_record_corrupt(reason: &str) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        reason,
+        false,
+        serde_json::json!({"required_action":"restore_state","subject":"namespace_birth"}),
+    )
+}
+
+/// Turn a created generation-6 database back into a genuine older shape.
+///
+/// Removing only `metadata.schema_version` leaves the generation-6 objects
+/// in place, which is not a shape the runtime accepts. A real historical
+/// database carries neither those tables nor a namespace birth id, and it has
+/// no birth record beside it.
+#[cfg(test)]
+pub(crate) fn downgrade_to_legacy_for_test(
+    database: &Path,
+    connection: &Connection,
+    generation: u8,
+) {
+    assert!((1..=5).contains(&generation));
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             DROP TABLE IF EXISTS dispatch_indexes;
+             DROP TABLE IF EXISTS member_release_operations;
+             DROP TABLE IF EXISTS member_workload_revisions;
+             DROP TABLE IF EXISTS scope_membership_revisions;
+             DROP TABLE IF EXISTS caller_scope_assignments;
+             DROP TABLE IF EXISTS delegation_operations;
+             DELETE FROM metadata WHERE key='namespace_birth_id';",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE metadata SET value=?1 WHERE key='schema_version'",
+            [generation.to_string()],
+        )
+        .unwrap();
+    // The fixture mutation must be durable before the sidecars are cleared,
+    // and the namespace record must not survive an older shape.
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    if let Ok(path) = birth_record_path(database) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The namespace birth id a generation-6 database must carry.
+fn probe_birth_id(probe: &GenerationProbe) -> Result<Uuid, MachineError> {
+    probe
+        .namespace_birth_id
+        .as_deref()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| {
+            MachineError::new(
+                "RECOVERY_REQUIRED",
+                "the generation-6 orchestration database has no namespace birth id",
+                false,
+                serde_json::json!({"required_action":"restore_state","subject":"namespace_birth"}),
+            )
+        })
+}
+
+/// A birth record without the database it describes can never be repaired by
+/// creating a new namespace.
+fn namespace_record_without_database() -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the namespace birth record has no database",
+        false,
+        serde_json::json!({"required_action":"restore_state","subject":"namespace_birth"}),
+    )
+}
+
+/// A birth record that does not describe this database.
+fn namespace_record_mismatch() -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "the namespace birth record names another namespace",
+        false,
+        serde_json::json!({"required_action":"restore_state","subject":"namespace_birth"}),
+    )
+}
+
+fn fresh_birth_id() -> Uuid {
+    Uuid::now_v7()
+}
+
+fn migrate_v5_to_v6(
+    connection: &mut Connection,
+    birth_id: Uuid,
+    faults: &Arc<dyn EngagementFaultInjector>,
+) -> Result<(), MachineError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(internal)?;
+    let observed: String = transaction
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    if !["5", SCHEMA_VERSION.to_string().as_str()].contains(&observed.as_str()) {
+        return Err(MachineError::new(
+            "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+            "orchestration schema is not supported",
+            false,
+            serde_json::json!({"observed":observed}),
+        ));
+    }
+    if observed == "5" {
+        // A generation-5 database that already carries a generation-6 object is
+        // not a verified shape: refuse before the DDL so the caller gets a typed
+        // schema refusal instead of a failed `CREATE TABLE`.
+        let carried: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN (
+                   'delegation_operations','caller_scope_assignments',
+                   'scope_membership_revisions','member_workload_revisions',
+                   'member_release_operations','dispatch_indexes')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if carried != 0 {
+            return Err(MachineError::new(
+                "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+                "orchestration database carries generation-6 objects but claims generation 5",
+                false,
+                serde_json::json!({"observed":observed}),
+            ));
+        }
+        crate::storage_observation::count_migration();
+        transaction
+            .execute_batch(GENERATION_SIX_DDL)
+            .map_err(internal)?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO metadata(key,value) VALUES('namespace_birth_id',?1)",
+                [birth_id.to_string()],
+            )
+            .map_err(internal)?;
+        transaction
+            .execute(
+                "UPDATE metadata SET value=?1 WHERE key='schema_version'",
+                [SCHEMA_VERSION.to_string()],
+            )
+            .map_err(internal)?;
+    }
+    faults
+        .check(EngagementBarrier::BeforeMigrationV6Commit)
+        .map_err(internal)?;
+    crate::storage_observation::commit(transaction).map_err(internal)?;
+    faults
+        .check(EngagementBarrier::AfterMigrationV6Commit)
+        .map_err(internal)
+}
+
+/// Read the accepted birth id of a generation-6 database.
+fn database_birth_id(connection: &Connection) -> Result<Uuid, MachineError> {
+    let value: Option<String> = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='namespace_birth_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    value
+        .and_then(|value| Uuid::parse_str(&value).ok())
+        .ok_or_else(|| {
+            MachineError::new(
+                "RECOVERY_REQUIRED",
+                "the orchestration database has no namespace birth id",
+                false,
+                serde_json::json!({"required_action":"restore_state"}),
+            )
+        })
+}
+
+fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), MachineError> {
+    // Foreign-key enforcement is connection state, not transaction state, and
+    // this connection is pooled: it is restored on every exit path.
+    let result = migrate_v1_to_v2_inner(connection);
+    let restored = connection
+        .execute_batch("PRAGMA foreign_keys=ON;")
+        .map_err(internal);
+    result.and(restored)
+}
+
+fn migrate_v1_to_v2_inner(connection: &mut Connection) -> Result<(), MachineError> {
+    // Generation 1 renamed and rebuilt its artifact and receipt pair. The
+    // accepted migration preserves every historical row and revalidates
+    // foreign keys before it commits.
+    connection
+        .execute_batch("PRAGMA foreign_keys=OFF;")
+        .map_err(internal)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(internal)?;
+    let locked_observed: String = transaction
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    if locked_observed == "1" {
+        transaction
+            .execute_batch(
+                "ALTER TABLE delivery_receipts RENAME TO delivery_receipts_v1;
+             ALTER TABLE artifacts RENAME TO artifacts_v1;
+             CREATE TABLE artifacts(
+               artifact_id TEXT PRIMARY KEY,
+               engagement_id TEXT NOT NULL UNIQUE,
+               result_sha256 TEXT NOT NULL,
+               canonical_json TEXT NOT NULL,
+               FOREIGN KEY(engagement_id) REFERENCES engagements(engagement_id)
+             ) STRICT;
+             INSERT INTO artifacts(
+               artifact_id, engagement_id, result_sha256, canonical_json
+             ) SELECT
+               artifact_id, engagement_id, result_sha256, canonical_json
+             FROM artifacts_v1;
+             CREATE TABLE delivery_receipts(
+               sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+               task_id TEXT NOT NULL UNIQUE,
+               artifact_id TEXT NOT NULL,
+               delivered_at_ms INTEGER NOT NULL,
+               FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+               FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
+             ) STRICT;
+             INSERT INTO delivery_receipts(
+               sequence, task_id, artifact_id, delivered_at_ms
+             ) SELECT
+               sequence, task_id, artifact_id, delivered_at_ms
+             FROM delivery_receipts_v1;
+             DROP TABLE delivery_receipts_v1;
+             DROP TABLE artifacts_v1;
+             UPDATE metadata SET value='2' WHERE key='schema_version';",
+            )
+            .map_err(internal)?;
+        let violation: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .map_err(internal)?;
+        if violation != 0 {
+            return Err(internal(
+                "orchestration v1 migration violated a foreign key",
+            ));
+        }
+    } else if !["2", "3", "4", "5", "6"].contains(&locked_observed.as_str()) {
+        return Err(MachineError::new(
+            "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+            "orchestration schema is not supported",
+            false,
+            serde_json::json!({"observed":locked_observed}),
+        ));
+    }
+    crate::storage_observation::commit(transaction).map_err(internal)?;
+    Ok(())
+}
+
 fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), MachineError> {
+    // See `migrate_v1_to_v2`: the pooled connection restores the pragma on every
+    // exit path.
+    let result = migrate_v2_to_v3_inner(connection);
+    let restored = connection
+        .execute_batch("PRAGMA foreign_keys=ON;")
+        .map_err(internal);
+    result.and(restored)
+}
+
+fn migrate_v2_to_v3_inner(connection: &mut Connection) -> Result<(), MachineError> {
     connection
         .execute_batch("PRAGMA foreign_keys=OFF;")
         .map_err(internal)?;
@@ -3580,7 +7120,7 @@ fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), MachineError> {
                 "orchestration v2 migration violated a foreign key",
             ));
         }
-    } else if !["3", "4", "5"].contains(&observed.as_str()) {
+    } else if !["3", "4", "5", "6"].contains(&observed.as_str()) {
         return Err(MachineError::new(
             "ORCHESTRATION_SCHEMA_UNSUPPORTED",
             "orchestration schema is not supported",
@@ -3588,10 +7128,7 @@ fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), MachineError> {
             serde_json::json!({"observed":observed}),
         ));
     }
-    crate::storage_observation::commit(transaction).map_err(internal)?;
-    connection
-        .execute_batch("PRAGMA foreign_keys=ON;")
-        .map_err(internal)
+    crate::storage_observation::commit(transaction).map_err(internal)
 }
 
 fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), MachineError> {
@@ -3621,7 +7158,7 @@ fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), MachineError> {
              UPDATE metadata SET value='4' WHERE key='schema_version';",
             )
             .map_err(internal)?;
-    } else if !["4", "5"].contains(&observed.as_str()) {
+    } else if !["4", "5", "6"].contains(&observed.as_str()) {
         return Err(MachineError::new(
             "ORCHESTRATION_SCHEMA_UNSUPPORTED",
             "orchestration schema is not supported",
@@ -3643,13 +7180,19 @@ fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), MachineError> {
             |row| row.get(0),
         )
         .map_err(internal)?;
-    if !["4", "5"].contains(&observed.as_str()) {
+    if !["4", "5", "6"].contains(&observed.as_str()) {
         return Err(MachineError::new(
             "ORCHESTRATION_SCHEMA_UNSUPPORTED",
             "orchestration schema is not supported",
             false,
             serde_json::json!({"observed":observed}),
         ));
+    }
+    // Generation 6 already carries this step's objects. A fresh bootstrap is
+    // born at generation 5 without them, so "5" still runs the step.
+    if observed == "6" {
+        crate::storage_observation::commit(transaction).map_err(internal)?;
+        return Ok(());
     }
     transaction
         .execute_batch(
@@ -4254,6 +7797,1781 @@ mod tests {
     use crate::workspace::LosslessPath;
     use std::collections::BTreeMap;
 
+    // ---- generation 6 ------------------------------------------------------
+
+    /// Build a workspace-shaped state root so `birth_record_path` and
+    /// `database_admission` see the production layout.
+    fn open_error(result: Result<EngagementStore, MachineError>) -> MachineError {
+        match result {
+            Ok(_) => panic!("expected a typed open failure"),
+            Err(error) => error,
+        }
+    }
+
+    fn generation_root() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("dolgorae-generation-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("state/orchestration")).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(root.join("state"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(
+            root.join("state/orchestration"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        root
+    }
+
+    fn generation_database(root: &Path) -> std::path::PathBuf {
+        root.join("state/orchestration/orchestration.sqlite3")
+    }
+
+    /// Create one historical generation from the committed birth fixtures.
+    fn legacy_database(root: &Path, generation: u8) -> std::path::PathBuf {
+        assert!((1..=5).contains(&generation));
+        let fixture = match generation {
+            1 => include_str!("../tests/fixtures/engagement-generations/base-1.sql"),
+            2 => include_str!("../tests/fixtures/engagement-generations/base-2.sql"),
+            3 => include_str!("../tests/fixtures/engagement-generations/base-3.sql"),
+            4 => include_str!("../tests/fixtures/engagement-generations/base-4.sql"),
+            _ => include_str!("../tests/fixtures/engagement-generations/base-5.sql"),
+        };
+        let path = generation_database(root);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(fixture).unwrap();
+        connection
+            .execute(
+                "INSERT INTO metadata(key,value) VALUES('legacy_canary','keep')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    }
+
+    fn table_exists(connection: &Connection, name: &str) -> bool {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [name],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    }
+
+    fn observed_generation(path: &Path) -> Option<String> {
+        let connection =
+            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    const GENERATION_SIX_TABLES: [&str; 6] = [
+        "delegation_operations",
+        "caller_scope_assignments",
+        "scope_membership_revisions",
+        "member_workload_revisions",
+        "member_release_operations",
+        "dispatch_indexes",
+    ];
+
+    #[test]
+    fn generation_five_carrying_a_generation_six_object_fails_closed() {
+        let root = generation_root();
+        let path = legacy_database(&root, 5);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE dispatch_indexes(task_id TEXT PRIMARY KEY) STRICT;")
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+        let error = open_error(EngagementStore::open(&path));
+        // A generation-5 database carrying a generation-6 object is refused
+        // before the DDL, and the transaction rolls back with no partial schema.
+        assert_eq!(error.code, "ORCHESTRATION_SCHEMA_UNSUPPORTED");
+        assert_eq!(observed_generation(&path).as_deref(), Some("5"));
+        let connection = Connection::open(&path).unwrap();
+        for table in GENERATION_SIX_TABLES {
+            if table == "dispatch_indexes" {
+                // The pre-existing foreign object is the one the fixture created.
+                continue;
+            }
+            assert!(!table_exists(&connection, table), "leaked {table}");
+        }
+        drop(connection);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!namespace_birth_path(&root.join("state")).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_birth_record_without_its_database_blocks_creation() {
+        for empty_database in [false, true] {
+            let root = generation_root();
+            let state = root.join("state");
+            let path = generation_database(&root);
+            if empty_database {
+                // A database whose bootstrap never committed carries no objects.
+                std::fs::write(&path, b"").unwrap();
+            }
+            let record = format!(
+                "{{\"namespace_birth_id\":\"{}\",\"schema\":\"dolgorae.namespace-birth/v1\"}}\n",
+                Uuid::now_v7()
+            );
+            std::fs::create_dir_all(state.join("orchestration")).unwrap();
+            std::fs::write(namespace_birth_path(&state), record.as_bytes()).unwrap();
+            let error = open_error(EngagementStore::open(&path));
+            assert_eq!(error.code, "RECOVERY_REQUIRED", "empty={empty_database}");
+            assert_eq!(
+                std::fs::read_to_string(namespace_birth_path(&state)).unwrap(),
+                record
+            );
+            if empty_database {
+                assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+            } else {
+                assert!(!path.exists());
+            }
+            assert_eq!(
+                delegation_namespace(&state).unwrap(),
+                DelegationNamespace::RecoveryRequired
+            );
+            assert_eq!(
+                ensure_delegation_namespace(&state).unwrap_err().code,
+                "RECOVERY_REQUIRED"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_birth_record_blocks_migrating_a_legacy_database() {
+        let root = generation_root();
+        let state = root.join("state");
+        let path = legacy_database(&root, 5);
+        let before = std::fs::read(&path).unwrap();
+        std::fs::write(
+            namespace_birth_path(&state),
+            format!(
+                "{{\"namespace_birth_id\":\"{}\",\"schema\":\"dolgorae.namespace-birth/v1\"}}\n",
+                Uuid::now_v7()
+            ),
+        )
+        .unwrap();
+        let error = open_error(EngagementStore::open(&path));
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(observed_generation(&path).as_deref(), Some("5"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            delegation_namespace(&state).unwrap(),
+            DelegationNamespace::RecoveryRequired
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_legacy_database_is_verified_and_admitted_before_it_is_migrated() {
+        // An insecure-mode legacy database is refused before any migration.
+        let root = generation_root();
+        let path = legacy_database(&root, 5);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = open_error(EngagementStore::open(&path));
+        // The checked open verifies the file mode before any migration effect;
+        // the raw secure-file check refuses a group-readable database.
+        assert_eq!(error.code, "RUNTIME_PATH_INVALID");
+        assert_eq!(
+            error.details["reason"],
+            "file must be current-uid-owned mode 0600 without symlink traversal"
+        );
+        assert_eq!(observed_generation(&path).as_deref(), Some("5"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!namespace_birth_path(&root.join("state")).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn probe_open_mode_covers_every_sidecar_state() {
+        assert_eq!(probe_open_mode(SidecarState::Neither), ProbeOpen::Immutable);
+        assert_eq!(probe_open_mode(SidecarState::Both), ProbeOpen::ReadOnly);
+        assert_eq!(
+            probe_open_mode(SidecarState::JournalOnly),
+            ProbeOpen::ReadOnly
+        );
+        assert_eq!(
+            probe_open_mode(SidecarState::LogOnly),
+            ProbeOpen::RecoveryRequired
+        );
+        assert_eq!(
+            probe_open_mode(SidecarState::MemoryOnly),
+            ProbeOpen::RecoveryRequired
+        );
+    }
+
+    #[test]
+    fn a_transient_one_sided_sidecar_pair_is_re_observed_before_recovery() {
+        let path = Path::new("/unused");
+        // A close that unlinks `-shm` before deleting `-wal` is transient, not
+        // recovery: a settled state is admitted.
+        let mut script = vec![
+            SidecarState::LogOnly,
+            SidecarState::Neither,
+            SidecarState::Neither,
+        ]
+        .into_iter();
+        let settled = settle_sidecars(path, &mut |_| {
+            Ok(script.next().unwrap_or(SidecarState::Neither))
+        })
+        .unwrap();
+        assert_eq!(settled, SidecarState::Neither);
+        assert_eq!(probe_open_mode(settled), ProbeOpen::Immutable);
+
+        // An open that created `-wal` before `-shm` settles into a live pair.
+        let mut script = vec![SidecarState::MemoryOnly, SidecarState::Both].into_iter();
+        let settled = settle_sidecars(path, &mut |_| {
+            Ok(script.next().unwrap_or(SidecarState::Both))
+        })
+        .unwrap();
+        assert_eq!(settled, SidecarState::Both);
+        assert_eq!(probe_open_mode(settled), ProbeOpen::ReadOnly);
+
+        // A persistent one-sided pair stays a recovery condition.
+        let mut observations = 0;
+        let settled = settle_sidecars(path, &mut |_| {
+            observations += 1;
+            Ok(SidecarState::LogOnly)
+        })
+        .unwrap();
+        assert_eq!(settled, SidecarState::LogOnly);
+        assert_eq!(probe_open_mode(settled), ProbeOpen::RecoveryRequired);
+        assert_eq!(observations, SIDECAR_REOBSERVATIONS + 1);
+    }
+
+    #[test]
+    fn an_empty_schema_database_is_refused_by_observers_like_a_missing_one() {
+        for wal in [false, true] {
+            let root = generation_root();
+            let path = generation_database(&root);
+            if wal {
+                let connection = Connection::open(&path).unwrap();
+                connection
+                    .execute_batch("PRAGMA journal_mode=WAL;")
+                    .unwrap();
+                drop(connection);
+            } else {
+                std::fs::write(&path, b"").unwrap();
+            }
+            let empty = open_error(EngagementStore::open_read_only(&path));
+            let missing = open_error(EngagementStore::open_read_only(
+                &root.join("state/orchestration/missing.sqlite3"),
+            ));
+            assert_eq!(empty.code, missing.code, "wal={wal}");
+            assert!(
+                !namespace_birth_path(&root.join("state")).exists(),
+                "wal={wal}"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_failed_migration_restores_foreign_key_enforcement() {
+        let root = generation_root();
+        let path = legacy_database(&root, 1);
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF;
+                     DROP TABLE delivery_receipts;
+                     CREATE TABLE delivery_receipts(
+                       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                       task_id TEXT NOT NULL UNIQUE,
+                       artifact_id TEXT NOT NULL,
+                       delivered_at_ms INTEGER NOT NULL,
+                       FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+                       FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
+                     ) STRICT;
+                     INSERT INTO delivery_receipts(sequence,task_id,artifact_id,delivered_at_ms)
+                     VALUES(1,'missing-task','missing-artifact',1);",
+                )
+                .unwrap();
+            connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+        }
+        // The end-to-end open fails on that dangling reference.
+        let error = open_error(EngagementStore::open(&path));
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(observed_generation(&path).as_deref(), Some("1"));
+
+        // Foreign-key enforcement is connection state, and the failed migration
+        // returns its connection to the pool. A reused connection must still
+        // enforce it.
+        {
+            let mut lease =
+                crate::storage_observation::CheckedConnection::open(&path, false).unwrap();
+            assert!(migrate_v1_to_v2(&mut lease).is_err());
+        }
+        let lease = crate::storage_observation::CheckedConnection::open(&path, false).unwrap();
+        let enforced: i64 = lease
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .unwrap();
+        assert_eq!(enforced, 1, "a failed migration leaked foreign_keys=OFF");
+        drop(lease);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_maintenance_lease_excludes_every_writable_open() {
+        let root = generation_root();
+        let state = root.join("state");
+        // The production layout a maintenance owner gates.
+        std::fs::write(state.join("workspace.json"), b"{}").unwrap();
+        for directory in ["runtime", "runtime/locks"] {
+            std::fs::create_dir_all(state.join(directory)).unwrap();
+            std::fs::set_permissions(
+                state.join(directory),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        let legacy = legacy_database(&root, 5);
+        let before = std::fs::read(&legacy).unwrap();
+        let lease = crate::ledger_generation::WorkspaceLease::acquire(&state, true).unwrap();
+        assert!(
+            crate::ledger_generation::WorkspaceLease::acquire(&state, true).is_err(),
+            "an exclusive lease must exclude a second acquisition"
+        );
+
+        // A legacy database is neither migrated nor given a birth record.
+        let error = open_error(EngagementStore::open(&legacy));
+        assert_eq!(error.code, "CAPABILITY_UNSUPPORTED");
+        assert_eq!(observed_generation(&legacy).as_deref(), Some("5"));
+        assert_eq!(std::fs::read(&legacy).unwrap(), before);
+        assert!(!namespace_birth_path(&state).exists());
+
+        // A brand-new database is not even created.
+        let fresh_root = generation_root();
+        let fresh_state = fresh_root.join("state");
+        std::fs::write(fresh_state.join("workspace.json"), b"{}").unwrap();
+        for directory in ["runtime", "runtime/locks"] {
+            std::fs::create_dir_all(fresh_state.join(directory)).unwrap();
+            std::fs::set_permissions(
+                fresh_state.join(directory),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        let fresh = generation_database(&fresh_root);
+        let fresh_lease =
+            crate::ledger_generation::WorkspaceLease::acquire(&fresh_state, true).unwrap();
+        let error = open_error(EngagementStore::open(&fresh));
+        assert_eq!(error.code, "CAPABILITY_UNSUPPORTED");
+        assert!(!fresh.exists());
+        assert!(!namespace_birth_path(&fresh_state).exists());
+        drop(fresh_lease);
+
+        drop(lease);
+        // Once the owner releases the lease the same opens succeed.
+        drop(EngagementStore::open(&legacy).unwrap());
+        assert!(require_delegation_namespace(&state).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(fresh_root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_publication_of_one_birth_record_converges() {
+        let birth_id = Uuid::now_v7();
+        let root = generation_root();
+        let path = generation_database(&root);
+        let shared = path.clone();
+        let first = std::thread::spawn(move || publish_birth_record(&shared, birth_id));
+        let second = std::thread::spawn({
+            let path = path.clone();
+            move || publish_birth_record(&path, birth_id)
+        });
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        assert_eq!(
+            read_birth_record(&namespace_birth_path(&root.join("state"))).unwrap(),
+            Some(birth_id)
+        );
+
+        // Two different ids can never both own one namespace.
+        let other_root = generation_root();
+        let other = generation_database(&other_root);
+        let one = Uuid::now_v7();
+        let two = Uuid::now_v7();
+        let loser = std::thread::spawn({
+            let path = other.clone();
+            move || publish_birth_record(&path, two)
+        });
+        let winner = publish_birth_record(&other, one);
+        let loser = loser.join().unwrap();
+        assert!(winner.is_ok() ^ loser.is_ok());
+        let recorded = read_birth_record(&namespace_birth_path(&other_root.join("state")))
+            .unwrap()
+            .unwrap();
+        assert!(recorded == one || recorded == two);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other_root).unwrap();
+    }
+
+    #[test]
+    fn later_generation_steps_treat_generation_six_as_applied() {
+        let root = generation_root();
+        let path = generation_database(&root);
+        drop(EngagementStore::open(&path).unwrap());
+        let mut connection = Connection::open(&path).unwrap();
+        // Each accepted legacy step is a no-op over the current generation.
+        migrate_v2_to_v3(&mut connection).unwrap();
+        migrate_v3_to_v4(&mut connection).unwrap();
+        migrate_v4_to_v5(&mut connection).unwrap();
+        assert_eq!(observed_generation(&path).as_deref(), Some("6"));
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_empty_database_is_bootstrapped_instead_of_refused() {
+        for wal in [false, true] {
+            let root = generation_root();
+            let path = generation_database(&root);
+            if wal {
+                // A never-committed WAL database: an empty schema in WAL mode.
+                let connection = Connection::open(&path).unwrap();
+                connection
+                    .execute_batch("PRAGMA journal_mode=WAL;")
+                    .unwrap();
+                drop(connection);
+            } else {
+                std::fs::write(&path, b"").unwrap();
+            }
+            let store = EngagementStore::open(&path).unwrap();
+            assert_eq!(
+                observed_generation(&path).as_deref(),
+                Some(SCHEMA_VERSION.to_string().as_str())
+            );
+            assert!(database_birth_id(&store.connection).is_ok());
+            assert!(namespace_birth_path(&root.join("state")).exists());
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_rollback_journal_is_observed_without_the_immutable_open() {
+        let root = generation_root();
+        let path = generation_database(&root);
+        drop(EngagementStore::open(&path).unwrap());
+        let _ = std::fs::remove_file(path.with_file_name("orchestration.sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_file_name("orchestration.sqlite3-shm"));
+        std::fs::write(path.with_file_name("orchestration.sqlite3-journal"), b"").unwrap();
+        assert_eq!(
+            SidecarState::observe(&path).unwrap(),
+            SidecarState::JournalOnly
+        );
+        // The probe chose the plain read-only open rather than the immutable one,
+        // so a hot journal could fail closed instead of being ignored. A writable
+        // recovery still converges on the same generation and namespace.
+        drop(EngagementStore::open(&path).unwrap());
+        assert_eq!(
+            observed_generation(&path).as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str())
+        );
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let _ =
+                std::fs::remove_file(path.with_file_name(format!("orchestration.sqlite3{suffix}")));
+        }
+        assert_eq!(
+            delegation_namespace(&root.join("state")).unwrap(),
+            DelegationNamespace::Ready {
+                birth_id: read_birth_record(&namespace_birth_path(&root.join("state")))
+                    .unwrap()
+                    .unwrap()
+            }
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn every_immutable_generation_six_column_refuses_an_update() {
+        let root = generation_root();
+        let path = generation_database(&root);
+        let store = EngagementStore::open(&path).unwrap();
+        let connection = &store.connection;
+        let digest = "a".repeat(64);
+        connection
+            .execute(
+                "INSERT INTO dispatch_indexes(task_id,workspace_ref,run_ref,head_commit,
+                   index_sha256,index_byte_length,file_count,baseline_bytes,created_at_ms)
+                 VALUES('t','w',?1,'head',?2,4096,1,10,1)",
+                params![Uuid::now_v7().to_string(), digest],
+            )
+            .unwrap();
+        for update in [
+            "UPDATE dispatch_indexes SET head_commit='other'",
+            "UPDATE dispatch_indexes SET created_at_ms=2",
+            "UPDATE dispatch_indexes SET baseline_bytes=11",
+            "UPDATE dispatch_indexes SET file_count=2",
+        ] {
+            assert!(connection.execute(update, []).is_err(), "{update}");
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO caller_scope_assignments(
+                   assignment_id,binding_ref,podway_workspace_ref,podway_session_ref,
+                   podway_attempt_ref,delegated_placement_ref,workspace_ref,
+                   aggregate_scope_kind,aggregate_scope_ref,member_ref,max_rounds,
+                   accounting_state,created_at_ms,updated_at_ms)
+                 VALUES('a','b','w','s','p','d','workspace:fixture',
+                        'external_engagement','engagement:1','member:1',4,
+                        'counted_unresolved',1,1);",
+            )
+            .unwrap();
+        for update in [
+            "UPDATE caller_scope_assignments SET max_rounds=5",
+            "UPDATE caller_scope_assignments SET workspace_ref='other'",
+            "UPDATE caller_scope_assignments SET aggregate_scope_kind='orchestrated_session'",
+            "UPDATE caller_scope_assignments SET aggregate_scope_ref='engagement:2'",
+            "UPDATE caller_scope_assignments SET created_at_ms=2",
+        ] {
+            assert!(connection.execute(update, []).is_err(), "{update}");
+        }
+        // `accounting_state` and `updated_at_ms` stay mutable.
+        connection
+            .execute(
+                "UPDATE caller_scope_assignments SET accounting_state='counted_accepted',
+                   updated_at_ms=2 WHERE assignment_id='a'",
+                [],
+            )
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn operation_receipt_and_refusal_fields_freeze_after_acceptance() {
+        let root = generation_root();
+        let path = generation_database(&root);
+        let store = EngagementStore::open(&path).unwrap();
+        let connection = &store.connection;
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let insert = |key: &str| {
+            connection
+                .execute(
+                    "INSERT INTO delegation_operations(
+                       operation_ref,state,workspace_ref,controller_principal,controller_generation,
+                       scope_kind,scope_ref,operation_kind,idempotency_key,
+                       mutation_envelope_json,mutation_envelope_digest,accepted_subjects_json,
+                       created_at_ms,updated_at_ms)
+                     VALUES(?1,'prepared','workspace:fixture','principal:fixture',1,
+                            'external_engagement','engagement:1','hire_external_specialist',?2,
+                            '{}',?3,'{}',1,1)",
+                    params![Uuid::now_v7().to_string(), key, digest],
+                )
+                .unwrap();
+        };
+        insert("k1");
+        // A receipt may only appear with the accepted transition.
+        assert!(
+            connection
+                .execute(
+                    "UPDATE delegation_operations SET receipt_json='{}' WHERE idempotency_key='k1'",
+                    [],
+                )
+                .is_err()
+        );
+        connection
+            .execute(
+                "UPDATE delegation_operations SET state='accepted',receipt_json='{}'
+                  WHERE idempotency_key='k1'",
+                [],
+            )
+            .unwrap();
+        for update in [
+            "UPDATE delegation_operations SET receipt_json='{\"a\":1}' WHERE idempotency_key='k1'",
+            "UPDATE delegation_operations SET definitive_refusal='POLICY_DENIED' WHERE idempotency_key='k1'",
+            "UPDATE delegation_operations SET refusal_revision=1 WHERE idempotency_key='k1'",
+        ] {
+            assert!(connection.execute(update, []).is_err(), "{update}");
+        }
+        // A refusal may only appear with the resolved-not-accepted transition.
+        insert("k2");
+        assert!(
+            connection
+                .execute(
+                    "UPDATE delegation_operations SET definitive_refusal='POLICY_DENIED',
+                       refusal_revision=1 WHERE idempotency_key='k2'",
+                    [],
+                )
+                .is_err()
+        );
+        connection
+            .execute(
+                "UPDATE delegation_operations SET state='resolved_not_accepted',
+                   definitive_refusal='POLICY_DENIED',refusal_revision=1
+                 WHERE idempotency_key='k2'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            connection
+                .execute(
+                    "UPDATE delegation_operations SET definitive_refusal='OTHER'
+                      WHERE idempotency_key='k2'",
+                    [],
+                )
+                .is_err()
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fresh_database_is_born_at_generation_six_with_its_birth_record() {
+        let root = generation_root();
+        let path = generation_database(&root);
+        let store = EngagementStore::open(&path).unwrap();
+        assert_eq!(
+            observed_generation(&path).as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str())
+        );
+        for table in GENERATION_SIX_TABLES {
+            assert!(table_exists(&store.connection, table), "missing {table}");
+        }
+        // The orchestration extension generation is unchanged.
+        let extension: Option<String> = store
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='orchestration_schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(extension.is_none() || extension.as_deref() == Some("3"));
+        let birth_id = database_birth_id(&store.connection).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(namespace_birth_path(&root.join("state"))).unwrap(),
+            format!(
+                "{{\"namespace_birth_id\":\"{birth_id}\",\"schema\":\"dolgorae.namespace-birth/v1\"}}\n"
+            )
+        );
+        assert_eq!(
+            require_delegation_namespace(&root.join("state")).unwrap(),
+            birth_id
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn generation_five_migrates_directly_and_never_backfills() {
+        let root = generation_root();
+        let path = legacy_database(&root, 5);
+        let before_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        drop(EngagementStore::open(&path).unwrap());
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            observed_generation(&path).as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str())
+        );
+        assert!(database_birth_id(&connection).is_ok());
+        for table in GENERATION_SIX_TABLES {
+            assert!(table_exists(&connection, table), "missing {table}");
+            let rows: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table} was backfilled");
+        }
+        let canary: String = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='legacy_canary'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(canary, "keep");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            before_mode
+        );
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn generation_six_objects(connection: &Connection) -> Vec<String> {
+        connection
+            .prepare("SELECT name FROM sqlite_master ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// Seed one historical row per accepted legacy table, as each shape allows.
+    fn seed_legacy_rows(connection: &Connection, generation: u8) {
+        connection
+            .execute_batch(
+                "INSERT INTO engagements(engagement_id,workspace_id,controller_sha256,
+                   state,revision)
+                 VALUES('engagement-1','workspace','aaaa','active',2);
+                 INSERT INTO members(specialist_run_id,engagement_id,hire_operation_id,
+                   configuration_sha256,state)
+                 VALUES('run-1','engagement-1','hire-1','bbbb','active');
+                 INSERT INTO tasks(task_id,engagement_id,specialist_run_id,
+                   objective_sha256,state,result_sha256)
+                 VALUES('task-1','engagement-1','run-1','cccc','delivered','dddd');
+                 INSERT INTO operations(operation,idempotency_key,request_sha256,response_json)
+                 VALUES('open','key-1','eeee','{}');
+                 INSERT INTO events(engagement_id,kind,payload_sha256,previous_hash,
+                   event_hash,created_at_ms)
+                 VALUES('engagement-1','opened','ffff','gggg','hhhh',7);",
+            )
+            .unwrap();
+        let (artifact, receipt) = if generation <= 2 {
+            (
+                "INSERT INTO artifacts(artifact_id,engagement_id,result_sha256,canonical_json)
+                 VALUES('artifact-1','engagement-1','dddd','{}');",
+                "INSERT INTO delivery_receipts(sequence,task_id,artifact_id,delivered_at_ms)
+                 VALUES(3,'task-1','artifact-1',9);",
+            )
+        } else {
+            (
+                "INSERT INTO artifacts(artifact_id,engagement_id,task_id,specialist_run_id,
+                   result_sha256,canonical_json)
+                 VALUES('artifact-1','engagement-1','task-1','run-1','dddd','{}');",
+                "INSERT INTO delivery_receipts(sequence,task_id,artifact_id,delivered_at_ms)
+                 VALUES(3,'task-1','artifact-1',9);",
+            )
+        };
+        connection.execute_batch(artifact).unwrap();
+        connection.execute_batch(receipt).unwrap();
+    }
+
+    /// Every seeded historical value, read back after the whole chain.
+    fn legacy_rows(connection: &Connection) -> Vec<String> {
+        vec![
+            connection
+                .query_row(
+                    "SELECT engagement_id||'|'||workspace_id||'|'||controller_sha256||'|'||
+                            state||'|'||revision FROM engagements WHERE engagement_id='engagement-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT specialist_run_id||'|'||engagement_id||'|'||hire_operation_id||'|'||
+                            configuration_sha256||'|'||state FROM members
+                      WHERE specialist_run_id='run-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT task_id||'|'||engagement_id||'|'||specialist_run_id||'|'||
+                            objective_sha256||'|'||state||'|'||result_sha256 FROM tasks
+                      WHERE task_id='task-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT artifact_id||'|'||engagement_id||'|'||result_sha256||'|'||
+                            canonical_json FROM artifacts WHERE artifact_id='artifact-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT sequence||'|'||task_id||'|'||artifact_id||'|'||delivered_at_ms
+                       FROM delivery_receipts WHERE task_id='task-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT engagement_id||'|'||kind||'|'||payload_sha256||'|'||previous_hash||'|'||
+                            event_hash||'|'||created_at_ms FROM events WHERE engagement_id='engagement-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT operation||'|'||idempotency_key||'|'||request_sha256||'|'||
+                            response_json FROM operations WHERE idempotency_key='key-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        ]
+    }
+
+    #[test]
+    fn every_historical_generation_migrates_to_generation_six() {
+        for generation in 1..=5u8 {
+            let root = generation_root();
+            let path = legacy_database(&root, generation);
+            let seeded = {
+                let connection = Connection::open(&path).unwrap();
+                seed_legacy_rows(&connection, generation);
+                connection
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                    .unwrap();
+                let rows = legacy_rows(&connection);
+                drop(connection);
+                rows
+            };
+            drop(
+                EngagementStore::open(&path)
+                    .unwrap_or_else(|error| panic!("generation {generation}: {}", error.code)),
+            );
+            assert_eq!(
+                legacy_rows(&Connection::open(&path).unwrap()),
+                seeded,
+                "generation {generation} changed its historical rows"
+            );
+            let connection = Connection::open(&path).unwrap();
+            assert_eq!(
+                observed_generation(&path).as_deref(),
+                Some(SCHEMA_VERSION.to_string().as_str()),
+                "generation {generation} did not reach 6"
+            );
+            assert!(database_birth_id(&connection).is_ok());
+            let canary: String = connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='legacy_canary'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(canary, "keep", "generation {generation} lost history");
+            assert_eq!(
+                require_delegation_namespace(&root.join("state")).unwrap(),
+                database_birth_id(&connection).unwrap()
+            );
+            drop(connection);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn interrupted_generation_six_migration_is_atomic() {
+        // A failure before the commit leaves generation 5 complete and untouched.
+        let root = generation_root();
+        let path = legacy_database(&root, 5);
+        let seeded = {
+            let connection = Connection::open(&path).unwrap();
+            seed_legacy_rows(&connection, 5);
+            connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+            let rows = legacy_rows(&connection);
+            drop(connection);
+            rows
+        };
+        let error = open_error(EngagementStore::open_with_faults(
+            &path,
+            Arc::new(FailAt(EngagementBarrier::BeforeMigrationV6Commit)),
+        ));
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(observed_generation(&path).as_deref(), Some("5"));
+        let connection = Connection::open(&path).unwrap();
+        for table in GENERATION_SIX_TABLES {
+            assert!(!table_exists(&connection, table), "leaked {table}");
+        }
+        assert!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='namespace_birth_id'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .unwrap()
+                .is_none()
+        );
+        assert!(!namespace_birth_path(&root.join("state")).exists());
+        // The seeded historical rows are unchanged by the failed transaction.
+        assert_eq!(legacy_rows(&connection), seeded);
+        drop(connection);
+
+        // A failure after the commit leaves a complete generation 6 with no
+        // published birth record; the next open completes publication.
+        let error = open_error(EngagementStore::open_with_faults(
+            &path,
+            Arc::new(FailAt(EngagementBarrier::AfterMigrationV6Commit)),
+        ));
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(observed_generation(&path).as_deref(), Some("6"));
+        assert!(!namespace_birth_path(&root.join("state")).exists());
+        // Every generation-6 object, its indexes and triggers are present.
+        let committed = Connection::open(&path).unwrap();
+        let objects = generation_six_objects(&committed);
+        for table in GENERATION_SIX_TABLES {
+            assert!(objects.iter().any(|name| name == table), "missing {table}");
+        }
+        for object in [
+            "delegation_key_scoped",
+            "delegation_key_prealloc",
+            "delegation_identity_fixed",
+            "delegation_receipt_frozen",
+            "delegation_state_transition",
+            "assignment_identity_fixed",
+            "caller_scope_budget_fixed",
+            "accounting_transition",
+            "caller_scope_namespace",
+            "scope_membership_monotonic",
+            "member_workload_monotonic",
+            "release_admission_immutable",
+            "release_terminal_frozen",
+            "dispatch_indexes_by_run",
+            "dispatch_index_fixed",
+        ] {
+            assert!(
+                objects.iter().any(|name| name == object),
+                "missing {object}"
+            );
+        }
+        assert!(database_birth_id(&committed).is_ok());
+        drop(committed);
+        drop(EngagementStore::open(&path).unwrap());
+        assert!(namespace_birth_path(&root.join("state")).exists());
+        assert!(require_delegation_namespace(&root.join("state")).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_fresh_creation_completes_on_the_next_open() {
+        let root = generation_root();
+        let path = generation_database(&root);
+        let error = open_error(EngagementStore::open_with_faults(
+            &path,
+            Arc::new(FailAt(EngagementBarrier::BeforeMigrationV6Commit)),
+        ));
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        // The historical bootstrap committed, so generation 5 is valid but has no
+        // birth id and no record.
+        assert_eq!(observed_generation(&path).as_deref(), Some("5"));
+        let connection = Connection::open(&path).unwrap();
+        assert!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='namespace_birth_id'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .unwrap()
+                .is_none()
+        );
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(connection);
+        assert!(!namespace_birth_path(&root.join("state")).exists());
+        // The next writable open migrates 5 -> 6 and writes both.
+        let store = EngagementStore::open(&path).unwrap();
+        assert_eq!(
+            observed_generation(&path).as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str())
+        );
+        assert!(database_birth_id(&store.connection).is_ok());
+        assert!(namespace_birth_path(&root.join("state")).exists());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unsupported_generations_fail_closed_before_any_effect() {
+        for (generation, extension) in [("7", None), ("6", Some("4"))] {
+            let root = generation_root();
+            let path = generation_database(&root);
+            // A real generation-6 database, then the requested mutation.
+            drop(EngagementStore::open(&path).unwrap());
+            std::fs::remove_file(namespace_birth_path(&root.join("state"))).unwrap();
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute(
+                    "UPDATE metadata SET value=?1 WHERE key='schema_version'",
+                    [generation],
+                )
+                .unwrap();
+            if let Some(extension) = extension {
+                connection
+                    .execute(
+                        "INSERT OR REPLACE INTO metadata(key,value) \
+                         VALUES('orchestration_schema_version',?1)",
+                        [extension],
+                    )
+                    .unwrap();
+            }
+            let schema_before: Vec<String> = connection
+                .prepare("SELECT name FROM sqlite_master ORDER BY name")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            // The fixture mutation must be durable before the sidecars are
+            // cleared, or deleting the log would discard it.
+            connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+            drop(connection);
+            // The fixture itself may leave a WAL pair; the refusal below must not
+            // create one from a clean start.
+            let _ = std::fs::remove_file(path.with_file_name("orchestration.sqlite3-wal"));
+            let _ = std::fs::remove_file(path.with_file_name("orchestration.sqlite3-shm"));
+            std::fs::write(root.join("state/workspace.json"), b"{}").unwrap();
+            // A writable open in this layout would take the exclusive maintenance
+            // lease and create its lock; the gate must refuse before that.
+            for directory in ["runtime", "runtime/locks"] {
+                std::fs::create_dir_all(root.join("state").join(directory)).unwrap();
+                std::fs::set_permissions(
+                    root.join("state").join(directory),
+                    std::fs::Permissions::from_mode(0o700),
+                )
+                .unwrap();
+            }
+            let mode_before = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+
+            let writable = open_error(EngagementStore::open(&path));
+            assert_eq!(
+                writable.code, "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+                "{}: {} {:?}",
+                writable.code, writable.message, writable.details
+            );
+            let read_only = open_error(EngagementStore::open_read_only(&path));
+            assert_eq!(read_only.code, "ORCHESTRATION_SCHEMA_UNSUPPORTED");
+            let observer =
+                crate::orchestration::OrchestrationStore::open_observer(&root.join("state"))
+                    .err()
+                    .expect("observer refuses");
+            assert_eq!(observer.code, "ORCHESTRATION_SCHEMA_UNSUPPORTED");
+            let orchestration = crate::orchestration::OrchestrationStore::open(&root.join("state"))
+                .err()
+                .expect("orchestration store refuses");
+            assert_eq!(orchestration.code, "ORCHESTRATION_SCHEMA_UNSUPPORTED");
+
+            // No sidecar, no maintenance lock, no permission change, no DDL.
+            assert!(
+                !root
+                    .join("state/orchestration/orchestration.sqlite3-wal")
+                    .exists()
+            );
+            assert!(
+                !root
+                    .join("state/orchestration/orchestration.sqlite3-shm")
+                    .exists()
+            );
+            assert!(
+                !root
+                    .join("state/runtime/locks/ledger-maintenance.lock")
+                    .exists()
+            );
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                mode_before
+            );
+            let connection =
+                Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let schema_after: Vec<String> = connection
+                .prepare("SELECT name FROM sqlite_master ORDER BY name")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert_eq!(schema_before, schema_after);
+            drop(connection);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_live_wal_pair_is_observed_without_touching_the_database() {
+        let root = generation_root();
+        let path = generation_database(&root);
+        let store = EngagementStore::open(&path).unwrap();
+        let birth_id = database_birth_id(&store.connection).unwrap();
+        // A second live connection keeps a real WAL pair beside the database.
+        let live = Connection::open(&path).unwrap();
+        live.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        live.execute(
+            "INSERT INTO metadata(key,value) VALUES('live_canary','1')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(SidecarState::observe(&path).unwrap(), SidecarState::Both);
+        let bytes_before = std::fs::read(&path).unwrap();
+        let metadata_before: Vec<(String, String)> = live
+            .prepare("SELECT key,value FROM metadata ORDER BY key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let data_version_before: i64 = live
+            .pragma_query_value(None, "data_version", |row| row.get(0))
+            .unwrap();
+        let mode_before = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        // The read-only probe creates no file and changes no database state.
+        let probe = admit_generation(&path).expect("probe succeeds");
+        assert!(probe.is_some());
+        assert_eq!(SidecarState::observe(&path).unwrap(), SidecarState::Both);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes_before);
+        let metadata_after: Vec<(String, String)> = live
+            .prepare("SELECT key,value FROM metadata ORDER BY key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(metadata_after, metadata_before);
+        assert_eq!(
+            live.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            data_version_before
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            mode_before
+        );
+        assert_eq!(
+            read_birth_record(&namespace_birth_path(&root.join("state"))).unwrap(),
+            Some(birth_id)
+        );
+        drop(live);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn probe_refuses_unverified_shapes_and_inconsistent_sidecars() {
+        // A database without `metadata` is not generation 1.
+        let root = generation_root();
+        let path = generation_database(&root);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE unrelated(key TEXT PRIMARY KEY) STRICT;")
+            .unwrap();
+        drop(connection);
+        let error = open_error(EngagementStore::open(&path));
+        assert_eq!(error.code, "ORCHESTRATION_SCHEMA_UNSUPPORTED");
+        assert!(!namespace_birth_path(&root.join("state")).exists());
+
+        // A WAL log without its shared memory is an inconsistent sidecar pair.
+        std::fs::write(path.with_file_name("orchestration.sqlite3-wal"), b"").unwrap();
+        let error = open_error(EngagementStore::open(&path));
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        std::fs::remove_file(path.with_file_name("orchestration.sqlite3-wal")).unwrap();
+
+        // Shared memory without a log is equally inconsistent.
+        std::fs::write(path.with_file_name("orchestration.sqlite3-shm"), b"").unwrap();
+        let error = open_error(EngagementStore::open_read_only(&path));
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        std::fs::remove_file(path.with_file_name("orchestration.sqlite3-shm")).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delegation_namespace_reports_setup_recovery_and_absence() {
+        // Neither record nor database.
+        let root = generation_root();
+        let state = root.join("state");
+        assert_eq!(
+            delegation_namespace(&state).unwrap(),
+            DelegationNamespace::NotSetUp
+        );
+        assert_eq!(
+            require_delegation_namespace(&state).unwrap_err().code,
+            "DELEGATION_NAMESPACE_UNSET"
+        );
+
+        // A birth record without its database can never be authoritative.
+        let birth = format!(
+            "{{\"namespace_birth_id\":\"{}\",\"schema\":\"dolgorae.namespace-birth/v1\"}}\n",
+            Uuid::now_v7()
+        );
+        std::fs::write(namespace_birth_path(&state), birth.as_bytes()).unwrap();
+        assert_eq!(
+            delegation_namespace(&state).unwrap(),
+            DelegationNamespace::RecoveryRequired
+        );
+        assert_eq!(
+            require_delegation_namespace(&state).unwrap_err().code,
+            "RECOVERY_REQUIRED"
+        );
+        std::fs::remove_file(namespace_birth_path(&state)).unwrap();
+
+        // A completed migration sets the namespace up.
+        let path = generation_database(&root);
+        drop(EngagementStore::open(&path).unwrap());
+        let ready = delegation_namespace(&state).unwrap();
+        assert!(ready.is_ready());
+
+        // A replaced birth record is a recovery condition, never a takeover.
+        std::fs::write(
+            namespace_birth_path(&state),
+            format!(
+                "{{\"namespace_birth_id\":\"{}\",\"schema\":\"dolgorae.namespace-birth/v1\"}}\n",
+                Uuid::now_v7()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            delegation_namespace(&state).unwrap(),
+            DelegationNamespace::RecoveryRequired
+        );
+        assert_eq!(
+            ensure_delegation_namespace(&state).unwrap_err().code,
+            "RECOVERY_REQUIRED"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_birth_record_is_republished_from_the_database() {
+        let root = generation_root();
+        let state = root.join("state");
+        let path = generation_database(&root);
+        let store = EngagementStore::open(&path).unwrap();
+        let birth_id = database_birth_id(&store.connection).unwrap();
+        drop(store);
+        std::fs::remove_file(namespace_birth_path(&state)).unwrap();
+        // Read-only observation reports the database's namespace as set up.
+        assert_eq!(
+            delegation_namespace(&state).unwrap(),
+            DelegationNamespace::Ready { birth_id }
+        );
+        assert!(!namespace_birth_path(&state).exists());
+        // The next writable open republishes the record.
+        drop(EngagementStore::open(&path).unwrap());
+        assert_eq!(
+            read_birth_record(&namespace_birth_path(&state)).unwrap(),
+            Some(birth_id)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn every_invalid_operation_state_combination_is_refused() {
+        let root = generation_root();
+        let path = generation_database(&root);
+        let store = EngagementStore::open(&path).unwrap();
+        let insert = |state: &str,
+                      receipt: Option<bool>,
+                      refusal: Option<bool>,
+                      refusal_revision: Option<bool>,
+                      key: &str| {
+            let literal = |present: Option<bool>| match present {
+                Some(true) => "1".to_owned(),
+                _ => "NULL".to_owned(),
+            };
+            let sql = format!(
+                "INSERT INTO delegation_operations(
+                   operation_ref,state,workspace_ref,controller_principal,controller_generation,
+                   scope_kind,scope_ref,operation_kind,idempotency_key,
+                   mutation_envelope_json,mutation_envelope_digest,accepted_subjects_json,
+                   receipt_json,definitive_refusal,refusal_revision,created_at_ms,updated_at_ms)
+                 VALUES(?1,?2,'workspace:fixture','principal:fixture',1,
+                        'external_engagement','engagement:1','hire_external_specialist',?3,
+                        '{{}}',?4,'{{}}',{},{},{},1,1)",
+                literal(receipt),
+                literal(refusal),
+                literal(refusal_revision)
+            );
+            store
+                .connection
+                .execute(
+                    &sql,
+                    params![
+                        Uuid::now_v7().to_string(),
+                        state,
+                        key,
+                        format!("sha256:{}", "a".repeat(64))
+                    ],
+                )
+                .is_ok()
+        };
+        // Valid rows for each accepted state.
+        assert!(insert("prepared", None, None, None, "v-prepared"));
+        assert!(insert("unresolved", None, None, None, "v-unresolved"));
+        assert!(insert("accepted", Some(true), None, None, "v-accepted"));
+        assert!(insert(
+            "resolved_not_accepted",
+            None,
+            Some(true),
+            Some(true),
+            "v-refused"
+        ));
+        // Accepted without a receipt.
+        assert!(!insert(
+            "accepted",
+            None,
+            None,
+            None,
+            "i-accepted-no-receipt"
+        ));
+        // Prepared and unresolved with a receipt, a refusal or a refusal revision.
+        for state in ["prepared", "unresolved"] {
+            assert!(!insert(
+                state,
+                Some(true),
+                None,
+                None,
+                &format!("i-{state}-receipt")
+            ));
+            assert!(!insert(
+                state,
+                None,
+                Some(true),
+                None,
+                &format!("i-{state}-refusal")
+            ));
+            assert!(!insert(
+                state,
+                None,
+                None,
+                Some(true),
+                &format!("i-{state}-revision")
+            ));
+        }
+        // Resolved without either refusal field.
+        assert!(!insert(
+            "resolved_not_accepted",
+            None,
+            None,
+            Some(true),
+            "i-refused-no-code"
+        ));
+        assert!(!insert(
+            "resolved_not_accepted",
+            None,
+            Some(true),
+            None,
+            "i-refused-no-revision"
+        ));
+        // A receipt together with a refusal.
+        assert!(!insert(
+            "resolved_not_accepted",
+            Some(true),
+            Some(true),
+            Some(true),
+            "i-both"
+        ));
+        // A half-null scope is refused on otherwise valid rows.
+        for (kind, reference) in [
+            (Some("external_engagement"), None),
+            (None, Some("engagement:1")),
+        ] {
+            let kind = kind.map_or("NULL".to_owned(), |value| format!("'{value}'"));
+            let reference = reference.map_or("NULL".to_owned(), |value| format!("'{value}'"));
+            let sql = format!(
+                "INSERT INTO delegation_operations(
+                   operation_ref,state,workspace_ref,controller_principal,controller_generation,
+                   scope_kind,scope_ref,operation_kind,idempotency_key,
+                   mutation_envelope_json,mutation_envelope_digest,accepted_subjects_json,
+                   created_at_ms,updated_at_ms)
+                 VALUES(?1,'prepared','workspace:fixture','principal:fixture',1,
+                        {kind},{reference},'hire_external_specialist',?2,
+                        '{{}}',?3,'{{}}',1,1)"
+            );
+            assert!(
+                store
+                    .connection
+                    .execute(
+                        &sql,
+                        params![
+                            Uuid::now_v7().to_string(),
+                            format!("i-half-{kind}"),
+                            format!("sha256:{}", "a".repeat(64))
+                        ],
+                    )
+                    .is_err()
+            );
+        }
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delegation_operation_states_and_partial_key_indexes_hold() {
+        let root = generation_root();
+        let path = generation_database(&root);
+        let store = EngagementStore::open(&path).unwrap();
+        let connection = &store.connection;
+        let insert = |state: &str, scope: Option<(&str, &str)>, key: &str| -> bool {
+            let (scope_kind, scope_ref) = match scope {
+                Some((kind, reference)) => (kind.to_owned(), reference.to_owned()),
+                None => (String::new(), String::new()),
+            };
+            let receipt = if state == "accepted" { "'{}'" } else { "NULL" };
+            let refusal = if state == "resolved_not_accepted" {
+                "'POLICY_DENIED'"
+            } else {
+                "NULL"
+            };
+            let refusal_revision = if state == "resolved_not_accepted" {
+                "1"
+            } else {
+                "NULL"
+            };
+            let scope_kind = if scope_kind.is_empty() {
+                "NULL".to_owned()
+            } else {
+                format!("'{scope_kind}'")
+            };
+            let scope_ref = if scope_ref.is_empty() {
+                "NULL".to_owned()
+            } else {
+                format!("'{scope_ref}'")
+            };
+            connection
+                .execute(
+                    &format!(
+                        "INSERT INTO delegation_operations(
+                           operation_ref,schema_version,state,workspace_ref,controller_principal,
+                           controller_generation,scope_kind,scope_ref,operation_kind,
+                           idempotency_key,mutation_envelope_json,mutation_envelope_digest,
+                           accepted_subjects_json,receipt_json,definitive_refusal,
+                           refusal_revision,created_at_ms,updated_at_ms)
+                         VALUES(?1,2,?2,'workspace:fixture','principal:fixture',1,
+                                {scope_kind},{scope_ref},'install_provisioning',?3,
+                                '{{}}',?4,'{{}}',{receipt},{refusal},{refusal_revision},1,1)"
+                    ),
+                    params![
+                        Uuid::now_v7().to_string(),
+                        state,
+                        key,
+                        format!("sha256:{}", "a".repeat(64))
+                    ],
+                )
+                .is_ok()
+        };
+        // Every accepted state is insertable; no other state is.
+        for state in [
+            "prepared",
+            "unresolved",
+            "accepted",
+            "resolved_not_accepted",
+        ] {
+            assert!(
+                insert(state, Some(("external_engagement", "engagement:1")), state),
+                "{state}"
+            );
+        }
+        assert!(!insert(
+            "settled",
+            Some(("external_engagement", "engagement:1")),
+            "bad"
+        ));
+        // A half-null scope is refused by the paired-scope CHECK.
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO delegation_operations(
+                       operation_ref,workspace_ref,controller_principal,controller_generation,
+                       scope_kind,scope_ref,operation_kind,idempotency_key,
+                       mutation_envelope_json,mutation_envelope_digest,
+                       accepted_subjects_json,created_at_ms,updated_at_ms)
+                     VALUES(?1,'workspace:fixture','principal:fixture',1,
+                            'external_engagement',NULL,'install_provisioning','half',
+                            '{}',?2,'{}',1,1)",
+                    params![
+                        Uuid::now_v7().to_string(),
+                        format!("sha256:{}", "a".repeat(64))
+                    ],
+                )
+                .is_err()
+        );
+        // One live row per key. A definitive refusal resolves that row, and only
+        // then may the same key be admitted again as a new operation.
+        assert!(insert(
+            "prepared",
+            Some(("external_engagement", "engagement:2")),
+            "retry-key"
+        ));
+        assert!(!insert(
+            "unresolved",
+            Some(("external_engagement", "engagement:2")),
+            "retry-key"
+        ));
+        let resolved = connection
+            .execute(
+                "UPDATE delegation_operations
+                    SET state='resolved_not_accepted',definitive_refusal='POLICY_DENIED',
+                        refusal_revision=1
+                  WHERE idempotency_key='retry-key'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(resolved, 1);
+        assert!(insert(
+            "accepted",
+            Some(("external_engagement", "engagement:2")),
+            "retry-key"
+        ));
+        // The accepted row is terminal.
+        assert!(
+            connection
+                .execute(
+                    "UPDATE delegation_operations SET state='unresolved'
+                      WHERE idempotency_key='retry-key' AND state='accepted'",
+                    [],
+                )
+                .is_err()
+        );
+        // Pre-allocation keys collide on the null-scope partial index.
+        assert!(insert("prepared", None, "install-key"));
+        assert!(!insert("unresolved", None, "install-key"));
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn release_and_accounting_triggers_hold_their_invariants() {
+        let root = generation_root();
+        let path = generation_database(&root);
+        let store = EngagementStore::open(&path).unwrap();
+        let connection = &store.connection;
+        connection
+            .execute_batch(
+                "INSERT INTO member_release_operations(
+                   operation_ref,operation_kind,workspace_ref,scope_kind,scope_ref,member_ref,
+                   run_ref,controller_principal,controller_generation,
+                   admitted_membership_revision,owner_ref,progress,safe_failure_code,
+                   required_action,terminal_membership_revision,settled_workload_revision,
+                   created_at_ms,updated_at_ms)
+                 VALUES('op','release_external_specialist','workspace:fixture',
+                        'external_engagement','engagement:1','member:1','run:1',
+                        'principal:fixture',1,4,NULL,'requested',NULL,'none',NULL,NULL,1,1);",
+            )
+            .unwrap();
+        // Terminal state requires both frozen revisions and forbids a failure.
+        assert!(
+            connection
+                .execute(
+                    "UPDATE member_release_operations SET progress='terminal' \
+                     WHERE operation_ref='op'",
+                    [],
+                )
+                .is_err()
+        );
+        connection
+            .execute(
+                "UPDATE member_release_operations SET progress='terminal',
+                   terminal_membership_revision=5,settled_workload_revision=2
+                 WHERE operation_ref='op'",
+                [],
+            )
+            .unwrap();
+        // A settled release cannot be rewritten.
+        assert!(
+            connection
+                .execute(
+                    "UPDATE member_release_operations SET terminal_membership_revision=6 \
+                     WHERE operation_ref='op'",
+                    [],
+                )
+                .is_err()
+        );
+        // The initiating authority and admitted revision are immutable.
+        assert!(
+            connection
+                .execute(
+                    "UPDATE member_release_operations SET controller_generation=2 \
+                     WHERE operation_ref='op'",
+                    [],
+                )
+                .is_err()
+        );
+
+        connection
+            .execute_batch(
+                "INSERT INTO caller_scope_assignments(
+                   assignment_id,binding_ref,podway_workspace_ref,podway_session_ref,
+                   podway_attempt_ref,delegated_placement_ref,workspace_ref,
+                   aggregate_scope_kind,aggregate_scope_ref,member_ref,max_rounds,
+                   accounting_state,created_at_ms,updated_at_ms)
+                 VALUES('a1','b','pw','ps','pa','dp','workspace:fixture',
+                        'external_engagement','engagement:1','member:1',4,
+                        'counted_unresolved',1,1);",
+            )
+            .unwrap();
+        // `counted_accepted` is final for counting.
+        connection
+            .execute(
+                "UPDATE caller_scope_assignments SET accounting_state='counted_accepted' \
+                 WHERE assignment_id='a1'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            connection
+                .execute(
+                    "UPDATE caller_scope_assignments SET accounting_state='proved_nondispatch' \
+                     WHERE assignment_id='a1'",
+                    [],
+                )
+                .is_err()
+        );
+        // One immutable budget per caller scope.
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO caller_scope_assignments VALUES(
+                       'a2','b','pw','ps','pa','dp','workspace:fixture',
+                       'external_engagement','engagement:2','member:1',5,
+                       'counted_unresolved',1,1)",
+                    [],
+                )
+                .is_err()
+        );
+        // Revisions never decrease.
+        connection
+            .execute_batch(
+                "INSERT INTO scope_membership_revisions VALUES('workspace:fixture',
+                   'external_engagement','engagement:1',3);
+                 INSERT INTO member_workload_revisions VALUES('workspace:fixture',
+                   'external_engagement','engagement:1','member:1',2);",
+            )
+            .unwrap();
+        assert!(
+            connection
+                .execute("UPDATE scope_membership_revisions SET revision=2", [],)
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute("UPDATE member_workload_revisions SET revision=1", [])
+                .is_err()
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_index_bounds_and_the_run_aggregate_hold() {
+        let root = generation_root();
+        let path = generation_database(&root);
+        let mut store = EngagementStore::open(&path).unwrap();
+        let run_id = Uuid::now_v7();
+        let workspace = "workspace:fixture";
+        let transaction = store.transaction().unwrap();
+        let digest = "a".repeat(64);
+        record_dispatch_index(
+            &transaction,
+            DispatchIndexRecord {
+                task_id: Uuid::now_v7(),
+                workspace_ref: workspace,
+                run_ref: run_id,
+                head_commit: Some("0123456789abcdef"),
+                index_sha256: &digest,
+                index_byte_length: 4096,
+                file_count: 12,
+                baseline_bytes: 268_435_456,
+            },
+            7,
+        )
+        .unwrap();
+        crate::storage_observation::commit(transaction).unwrap();
+        let task: Uuid = store
+            .connection
+            .query_row("SELECT task_id FROM dispatch_indexes", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+            .parse()
+            .unwrap();
+        let (sha, length, files, baseline) =
+            dispatch_index(&store.connection, task).unwrap().unwrap();
+        assert_eq!(sha, digest);
+        assert_eq!((length, files, baseline), (4096, 12, 268_435_456));
+
+        // A second task would exceed the Run's 256 MiB aggregate.
+        let transaction = store.transaction().unwrap();
+        let error = record_dispatch_index(
+            &transaction,
+            DispatchIndexRecord {
+                task_id: Uuid::now_v7(),
+                workspace_ref: workspace,
+                run_ref: run_id,
+                head_commit: None,
+                index_sha256: &digest,
+                index_byte_length: 4096,
+                file_count: 1,
+                baseline_bytes: 1,
+            },
+            8,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "STORAGE_CAPACITY_EXCEEDED");
+        // A different Run starts its own aggregate.
+        record_dispatch_index(
+            &transaction,
+            DispatchIndexRecord {
+                task_id: Uuid::now_v7(),
+                workspace_ref: workspace,
+                run_ref: Uuid::now_v7(),
+                head_commit: None,
+                index_sha256: &digest,
+                index_byte_length: 4096,
+                file_count: 1,
+                baseline_bytes: 1,
+            },
+            8,
+        )
+        .unwrap();
+        // Per-row bounds refuse before dispatch.
+        for (files, index_bytes, baseline) in [
+            (10_001u64, 4096u64, 0u64),
+            (1, 67_108_865, 0),
+            (1, 1, 268_435_457),
+        ] {
+            let error = record_dispatch_index(
+                &transaction,
+                DispatchIndexRecord {
+                    task_id: Uuid::now_v7(),
+                    workspace_ref: workspace,
+                    run_ref: Uuid::now_v7(),
+                    head_commit: None,
+                    index_sha256: &digest,
+                    index_byte_length: index_bytes,
+                    file_count: files,
+                    baseline_bytes: baseline,
+                },
+                9,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "STORAGE_CAPACITY_EXCEEDED");
+        }
+        crate::storage_observation::commit(transaction).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn store_error_projections_preserve_closed_contract_details() {
         let run_id = Uuid::now_v7();
@@ -4777,9 +10095,14 @@ mod tests {
         let existing = store
             .open_engagement("workspace", &"a".repeat(64), "legacy")
             .unwrap();
-        store.connection.execute_batch("DROP TABLE one_shot_operations; UPDATE metadata SET value='4' WHERE key='schema_version';").unwrap();
         drop(store);
         let database = root.join("orchestration.sqlite3");
+        let fixture = Connection::open(&database).unwrap();
+        fixture
+            .execute_batch("DROP TABLE one_shot_operations;")
+            .unwrap();
+        downgrade_to_legacy_for_test(&database, &fixture, 4);
+        drop(fixture);
         let observer = EngagementStore::open_read_only(&database).unwrap();
         assert!(observer.one_shot(Uuid::now_v7()).unwrap().is_none());
         assert_eq!(observer.snapshot(existing.engagement_id).unwrap(), existing);
@@ -4807,7 +10130,7 @@ mod tests {
                     |row| row.get::<_, String>(0)
                 )
                 .unwrap(),
-            "5"
+            SCHEMA_VERSION.to_string()
         );
         let missing = root.join("does-not-exist").join("orchestration.sqlite3");
         assert!(EngagementStore::open_read_only(&missing).is_err());
@@ -7167,9 +12490,10 @@ mod tests {
                    'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
                    'accepted'
                  );
-                 UPDATE metadata SET value='1' WHERE key='schema_version';"#,
+                 "#,
             )
             .unwrap();
+        downgrade_to_legacy_for_test(&database, &connection, 1);
         drop(connection);
         let migrated = EngagementStore::open(&database).unwrap();
         let version: String = migrated
@@ -7180,7 +12504,8 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "5");
+        // The accepted migration chain now ends at the current generation.
+        assert_eq!(version, SCHEMA_VERSION.to_string());
         let artifact: (String, String, String, String) = migrated
             .connection
             .query_row(
@@ -7318,9 +12643,10 @@ mod tests {
                    'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
                    '{}'
                  );
-                 UPDATE metadata SET value='1' WHERE key='schema_version';",
+                 ",
             )
             .unwrap();
+        downgrade_to_legacy_for_test(&database, &connection, 1);
         drop(connection);
 
         let error = match EngagementStore::open(&database) {
@@ -7710,13 +13036,12 @@ mod tests {
             .unwrap();
         store
             .connection
-            .execute_batch(
-                "ALTER TABLE tasks DROP COLUMN diagnostic_json;
-             UPDATE metadata SET value='3' WHERE key='schema_version';",
-            )
+            .execute_batch("ALTER TABLE tasks DROP COLUMN diagnostic_json;")
             .unwrap();
+        let database = root.join("orchestration.sqlite3");
+        downgrade_to_legacy_for_test(&database, &store.connection, 3);
         drop(store);
-        let mut migrated = EngagementStore::open(&root.join("orchestration.sqlite3")).unwrap();
+        let mut migrated = EngagementStore::open(&database).unwrap();
         let historical = migrated
             .external_task(opened.engagement_id, task.task_id)
             .unwrap();
@@ -8855,6 +14180,560 @@ mod tests {
             assert_eq!(event_hash, previous);
         }
         drop(statement);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn intent_namespace(kind: &str, key: &str, scope: Option<(&str, &str)>) -> LookupNamespace {
+        LookupNamespace {
+            controller_principal: format!("sha256:{}", "a".repeat(64)),
+            controller_generation: 1,
+            workspace_ref: "workspace".to_owned(),
+            scope_kind: scope.map(|(kind, _)| kind.to_owned()),
+            scope_ref: scope.map(|(_, reference)| reference.to_owned()),
+            operation_kind: kind.to_owned(),
+            idempotency_key: key.to_owned(),
+        }
+    }
+
+    /// The closed mutation envelope and digest one intent row retains.
+    fn intent_envelope_for(namespace: &LookupNamespace) -> (String, String) {
+        let envelope = crate::operation::Envelope {
+            schema: crate::operation::ENVELOPE_SCHEMA.to_owned(),
+            request_schema: "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/install_provisioning_normalized_body".to_owned(),
+            namespace: crate::operation::Namespace {
+                controller_principal: namespace.controller_principal.clone(),
+                controller_generation: namespace.controller_generation,
+                workspace_ref: namespace.workspace_ref.clone(),
+                scope_kind: namespace.scope_kind.clone(),
+                scope_ref: namespace.scope_ref.clone(),
+                operation_kind: namespace.operation_kind.clone(),
+                idempotency_key: namespace.idempotency_key.clone(),
+            },
+            trusted_invocation_ref: None,
+            request_body: crate::operation::BytesRef {
+                byte_length: 2,
+                sha256: format!("sha256:{}", "a".repeat(64)),
+            },
+        };
+        let digest = crate::operation::envelope_digest(&envelope).unwrap();
+        let json = crate::jcs::canonicalize(
+            &crate::jcs::parse(&serde_json::to_string(&envelope).unwrap()).unwrap(),
+        )
+        .unwrap();
+        (String::from_utf8(json).unwrap(), digest)
+    }
+
+    fn intent_receipt_for(
+        namespace: &LookupNamespace,
+        operation_ref: Uuid,
+        digest: &str,
+        revision: u64,
+    ) -> OperationReceipt {
+        let reference = Some(Uuid::now_v7().to_string());
+        let subjects = match namespace.operation_kind.as_str() {
+            "hire_external_specialist" => AcceptedSubjects {
+                member_ref: reference,
+                ..AcceptedSubjects::default()
+            },
+            "open_external_engagement" => AcceptedSubjects {
+                engagement_ref: reference,
+                ..AcceptedSubjects::default()
+            },
+            "install_provisioning" => AcceptedSubjects {
+                provisioning_ref: reference,
+                ..AcceptedSubjects::default()
+            },
+            _ => AcceptedSubjects {
+                run_ref: reference,
+                ..AcceptedSubjects::default()
+            },
+        };
+        let mut receipt = OperationReceipt {
+            schema: "dolgorae.operation-receipt/v1".to_owned(),
+            operation_ref: operation_ref.to_string(),
+            namespace: namespace.clone(),
+            accepted_input_digest: digest.to_owned(),
+            accepted_subjects: subjects,
+            receipt_digest: String::new(),
+            accepted_revision: revision,
+            result_digest: None,
+        };
+        receipt.receipt_digest = receipt.compute_digest().unwrap();
+        receipt
+    }
+
+    fn intent_admission<'a>(
+        operation_ref: Uuid,
+        namespace: &'a LookupNamespace,
+        envelope_json: &'a str,
+        digest: &'a str,
+    ) -> IntentAdmission<'a> {
+        IntentAdmission {
+            operation_ref,
+            namespace,
+            mutation_envelope_json: envelope_json,
+            mutation_envelope_digest: digest,
+            expected_revision: None,
+            now_ms: 1,
+        }
+    }
+
+    /// Prepare one intent with its own closed envelope, returning its digest.
+    fn prepare_intent(
+        store: &mut EngagementStore,
+        namespace: &LookupNamespace,
+        operation_ref: Uuid,
+    ) -> (IntentPreparation, String) {
+        let (envelope, digest) = intent_envelope_for(namespace);
+        let preparation = store
+            .transact(|transaction| {
+                intent_prepare(
+                    transaction,
+                    intent_admission(operation_ref, namespace, &envelope, &digest),
+                )
+            })
+            .unwrap();
+        (preparation, digest)
+    }
+
+    fn accept_intent(store: &mut EngagementStore, operation_ref: Uuid, receipt: &OperationReceipt) {
+        store
+            .transact(|transaction| intent_accept(transaction, operation_ref, receipt, 2))
+            .unwrap();
+    }
+
+    #[test]
+    fn intent_prepare_accept_and_lookup_hold_the_retained_receipt() {
+        let (mut store, root) = store();
+        let namespace = intent_namespace(
+            "hire_external_specialist",
+            "key-1",
+            Some(("external_engagement", "engagement")),
+        );
+        let operation_ref = Uuid::now_v7();
+        let (preparation, digest) = prepare_intent(&mut store, &namespace, operation_ref);
+        assert!(matches!(preparation, IntentPreparation::Created));
+        assert!(matches!(
+            store.intent_lookup(&namespace).unwrap(),
+            IntentLookup::Unresolved { operation_ref: retained, .. } if retained == operation_ref
+        ));
+        let receipt = intent_receipt_for(&namespace, operation_ref, &digest, 1);
+        accept_intent(&mut store, operation_ref, &receipt);
+        match store.intent_lookup(&namespace).unwrap() {
+            IntentLookup::Accepted(retained) => assert_eq!(*retained, receipt),
+            other => panic!("expected accepted, got {other:?}"),
+        }
+        // The exact key replays its retained receipt instead of a new intent.
+        let (replay, _) = prepare_intent(&mut store, &namespace, operation_ref);
+        match replay {
+            IntentPreparation::Accepted(retained) => assert_eq!(*retained, receipt),
+            _ => panic!("expected accepted replay"),
+        }
+        // The same key with another accepted input digest conflicts.
+        let (other_envelope, other_digest) = intent_envelope_for(&namespace);
+        let mut changed = other_envelope;
+        changed = changed.replace(&digest, &format!("sha256:{}", "c".repeat(64)));
+        assert_eq!(
+            store
+                .transact(|transaction| intent_prepare(
+                    transaction,
+                    intent_admission(
+                        Uuid::now_v7(),
+                        &namespace,
+                        &changed,
+                        &format!("sha256:{}", "c".repeat(64))
+                    ),
+                ))
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        assert!(other_digest.starts_with("sha256:"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_prepared_intent_reports_unresolved_and_records_its_uncertainty() {
+        let (mut store, root) = store();
+        let namespace = intent_namespace("open_external_engagement", "key-2", None);
+        let operation_ref = Uuid::now_v7();
+        let (_, digest) = prepare_intent(&mut store, &namespace, operation_ref);
+        store
+            .transact(|transaction| intent_mark_unresolved(transaction, operation_ref, 3))
+            .unwrap();
+        assert!(matches!(
+            store.intent_lookup(&namespace).unwrap(),
+            IntentLookup::Unresolved { operation_ref: retained, .. } if retained == operation_ref
+        ));
+        // An accepted intent never becomes unresolved again.
+        let receipt = intent_receipt_for(&namespace, operation_ref, &digest, 0);
+        accept_intent(&mut store, operation_ref, &receipt);
+        assert_eq!(
+            store
+                .transact(|transaction| intent_mark_unresolved(transaction, operation_ref, 4))
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn case_a_refusal_is_terminal_and_reports_the_row_sequence() {
+        let (mut store, root) = store();
+        let namespace = intent_namespace("install_provisioning", "key-3", None);
+        let operation_ref = Uuid::now_v7();
+        let (_, digest) = prepare_intent(&mut store, &namespace, operation_ref);
+        let revision = store
+            .transact(|transaction| {
+                intent_refuse_before_acceptance(transaction, operation_ref, "REVISION_CONFLICT", 5)
+            })
+            .unwrap();
+        match store.intent_lookup(&namespace).unwrap() {
+            IntentLookup::NotAccepted {
+                operation_ref: retained,
+                input_digest,
+                refusal_code,
+                durable_refusal_revision,
+            } => {
+                assert_eq!(retained, operation_ref);
+                assert_eq!(input_digest, digest);
+                assert_eq!(refusal_code, "REVISION_CONFLICT");
+                assert_eq!(durable_refusal_revision, revision);
+                assert!(revision > 0);
+            }
+            other => panic!("expected not_accepted, got {other:?}"),
+        }
+        // A refused intent is terminal for its operation reference.
+        assert_eq!(
+            store
+                .transact(|transaction| {
+                    intent_refuse_before_acceptance(transaction, operation_ref, "OTHER", 6)
+                })
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_latest_refusal_is_selected_for_one_key() {
+        let (mut store, root) = store();
+        let namespace = intent_namespace("install_provisioning", "key-4", None);
+        let first = Uuid::now_v7();
+        prepare_intent(&mut store, &namespace, first);
+        let first_revision = store
+            .transact(|transaction| {
+                intent_refuse_before_acceptance(transaction, first, "FIRST_REFUSAL", 7)
+            })
+            .unwrap();
+        let second = Uuid::now_v7();
+        prepare_intent(&mut store, &namespace, second);
+        let second_revision = store
+            .transact(|transaction| {
+                intent_refuse_before_acceptance(transaction, second, "SECOND_REFUSAL", 8)
+            })
+            .unwrap();
+        assert!(second_revision > first_revision);
+        match store.intent_lookup(&namespace).unwrap() {
+            IntentLookup::NotAccepted {
+                operation_ref,
+                refusal_code,
+                durable_refusal_revision,
+                ..
+            } => {
+                assert_eq!(operation_ref, second);
+                assert_eq!(refusal_code, "SECOND_REFUSAL");
+                assert_eq!(durable_refusal_revision, second_revision);
+            }
+            other => panic!("expected the latest refusal, got {other:?}"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_legacy_operations_key_is_refused_inside_admission_and_lookup() {
+        let (mut store, root) = store();
+        let namespace = intent_namespace(
+            "hire_external_specialist",
+            "legacy-key",
+            Some(("external_engagement", "engagement")),
+        );
+        let (envelope, digest) = intent_envelope_for(&namespace);
+        store
+            .connection
+            .execute(
+                "INSERT INTO operations(scope_id,operation,idempotency_key,request_sha256,response_json)
+                 VALUES('engagement','hire_external_specialist','legacy-key',?1,'{}')",
+                [digest.clone()],
+            )
+            .unwrap();
+        // Direct admission without a prior lookup is refused, not admitted.
+        assert_eq!(
+            store
+                .transact(|transaction| intent_prepare(
+                    transaction,
+                    intent_admission(Uuid::now_v7(), &namespace, &envelope, &digest),
+                ))
+                .unwrap_err()
+                .code,
+            "RECOVERY_REQUIRED"
+        );
+        // Lookup never reports authoritative absence for a legacy-owned key.
+        assert_eq!(
+            store.intent_lookup(&namespace).unwrap_err().code,
+            "RECOVERY_REQUIRED"
+        );
+        let retained: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM delegation_operations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(retained, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_corrupt_retained_intent_is_a_recovery_condition() {
+        let (mut store, root) = store();
+        let namespace = intent_namespace("install_provisioning", "key-5", None);
+        let operation_ref = Uuid::now_v7();
+        let (_, digest) = prepare_intent(&mut store, &namespace, operation_ref);
+        let receipt = intent_receipt_for(&namespace, operation_ref, &digest, 0);
+        accept_intent(&mut store, operation_ref, &receipt);
+        store
+            .connection
+            .execute(
+                "UPDATE delegation_operations SET accepted_subjects_json='{}' WHERE operation_ref=?1",
+                [operation_ref.to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            store.intent_lookup(&namespace).unwrap_err().code,
+            "RECOVERY_REQUIRED"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn absent_reports_the_durable_watermark_and_the_scope_revision_advances() {
+        let (mut store, root) = store();
+        let namespace = intent_namespace("install_provisioning", "key-6", None);
+        assert!(matches!(
+            store.intent_lookup(&namespace).unwrap(),
+            IntentLookup::Absent {
+                durable_watermark: 0
+            }
+        ));
+        prepare_intent(&mut store, &namespace, Uuid::now_v7());
+        match store.intent_lookup(&namespace).unwrap() {
+            IntentLookup::Unresolved { .. } => {}
+            other => panic!("expected unresolved, got {other:?}"),
+        }
+        let other_namespace = intent_namespace("install_provisioning", "key-7", None);
+        match store.intent_lookup(&other_namespace).unwrap() {
+            IntentLookup::Absent { durable_watermark } => assert!(durable_watermark >= 1),
+            other => panic!("expected absent, got {other:?}"),
+        }
+        let first = store
+            .transact(|transaction| {
+                advance_scope_membership_revision(
+                    transaction,
+                    "workspace",
+                    "external_engagement",
+                    "engagement",
+                )
+            })
+            .unwrap();
+        let second = store
+            .transact(|transaction| {
+                advance_scope_membership_revision(
+                    transaction,
+                    "workspace",
+                    "external_engagement",
+                    "engagement",
+                )
+            })
+            .unwrap();
+        assert_eq!((first, second), (1, 2));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_refused_key_retries_only_with_its_latest_refused_input() {
+        let (mut store, root) = store();
+        let namespace = intent_namespace("install_provisioning", "refused-retry", None);
+        let (envelope, digest) = intent_envelope_for(&namespace);
+        let first = Uuid::now_v7();
+        store
+            .transact(|transaction| {
+                intent_prepare(
+                    transaction,
+                    intent_admission(first, &namespace, &envelope, &digest),
+                )
+            })
+            .unwrap();
+        store
+            .transact(|transaction| {
+                intent_refuse_before_acceptance(transaction, first, "REVISION_CONFLICT", 9)
+            })
+            .unwrap();
+        // A different accepted-input digest is a conflict and creates no row.
+        let changed = format!("sha256:{}", "e".repeat(64));
+        assert_eq!(
+            store
+                .transact(|transaction| {
+                    intent_prepare(
+                        transaction,
+                        intent_admission(Uuid::now_v7(), &namespace, &envelope, &changed),
+                    )
+                })
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        let rows: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM delegation_operations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1);
+        // The exact refused input is admitted as a new operation reference.
+        let retry = Uuid::now_v7();
+        match store
+            .transact(|transaction| {
+                intent_prepare(
+                    transaction,
+                    intent_admission(retry, &namespace, &envelope, &digest),
+                )
+            })
+            .unwrap()
+        {
+            IntentPreparation::Created => {}
+            _ => panic!("the exact refused input must be retryable"),
+        }
+        let receipt = intent_receipt_for(&namespace, retry, &digest, 0);
+        accept_intent(&mut store, retry, &receipt);
+        match store.intent_lookup(&namespace).unwrap() {
+            IntentLookup::Accepted(retained) => {
+                assert_eq!(retained.operation_ref, retry.to_string())
+            }
+            other => panic!("expected the retried acceptance, got {other:?}"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_corrupt_retained_envelope_or_receipt_is_a_recovery_condition() {
+        let (mut store, root) = store();
+        // An envelope that does not re-digest to the row's digest is refused.
+        let namespace = intent_namespace("install_provisioning", "envelope-bogus", None);
+        let (envelope, _) = intent_envelope_for(&namespace);
+        let bogus = format!("sha256:{}", "b".repeat(64));
+        store
+            .transact(|transaction| {
+                intent_prepare(
+                    transaction,
+                    intent_admission(Uuid::now_v7(), &namespace, &envelope, &bogus),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            store.intent_lookup(&namespace).unwrap_err().code,
+            "RECOVERY_REQUIRED"
+        );
+        // A retained envelope that is not the closed envelope is refused too.
+        let other = intent_namespace("open_external_engagement", "envelope-open", None);
+        let (_, digest) = intent_envelope_for(&other);
+        store
+            .transact(|transaction| {
+                intent_prepare(
+                    transaction,
+                    intent_admission(Uuid::now_v7(), &other, "{\"schema\":\"other\"}", &digest),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            store.intent_lookup(&other).unwrap_err().code,
+            "RECOVERY_REQUIRED"
+        );
+        // A receipt whose retained digest does not verify is the same class.
+        let receipt_namespace = intent_namespace("install_provisioning", "receipt", None);
+        let operation_ref = Uuid::now_v7();
+        let (_, receipt_digest) = prepare_intent(&mut store, &receipt_namespace, operation_ref);
+        let mut receipt = intent_receipt_for(&receipt_namespace, operation_ref, &receipt_digest, 0);
+        receipt.receipt_digest = format!("sha256:{}", "f".repeat(64));
+        accept_intent(&mut store, operation_ref, &receipt);
+        assert_eq!(
+            store.intent_lookup(&receipt_namespace).unwrap_err().code,
+            "RECOVERY_REQUIRED"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_envelope_with_duplicate_keys_or_a_corrupt_refusal_is_a_recovery_condition() {
+        let (mut store, root) = store();
+        // A duplicate object key is not the closed envelope: the JCS reader
+        // refuses it before any shape or digest comparison.
+        let duplicate = intent_namespace("install_provisioning", "duplicate-key", None);
+        let (_, digest) = intent_envelope_for(&duplicate);
+        store
+            .transact(|transaction| {
+                intent_prepare(
+                    transaction,
+                    intent_admission(
+                        Uuid::now_v7(),
+                        &duplicate,
+                        "{\"schema\":\"a\",\"schema\":\"b\"}",
+                        &digest,
+                    ),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            store.intent_lookup(&duplicate).unwrap_err().code,
+            "RECOVERY_REQUIRED"
+        );
+        // A refused row is retained evidence too: when its envelope does not
+        // verify it can be neither not_accepted nor a re-entry basis.
+        let corrupt = intent_namespace("install_provisioning", "corrupt-refusal", None);
+        let (envelope, _) = intent_envelope_for(&corrupt);
+        let wrong = format!("sha256:{}", "b".repeat(64));
+        let refused = Uuid::now_v7();
+        store
+            .transact(|transaction| {
+                intent_prepare(
+                    transaction,
+                    intent_admission(refused, &corrupt, &envelope, &wrong),
+                )
+            })
+            .unwrap();
+        store
+            .transact(|transaction| {
+                intent_refuse_before_acceptance(transaction, refused, "REVISION_CONFLICT", 11)
+            })
+            .unwrap();
+        assert_eq!(
+            store.intent_lookup(&corrupt).unwrap_err().code,
+            "RECOVERY_REQUIRED"
+        );
+        // A refused key may not be re-admitted on a corrupt refusal either.
+        assert_eq!(
+            store
+                .transact(|transaction| {
+                    intent_prepare(
+                        transaction,
+                        intent_admission(Uuid::now_v7(), &corrupt, &envelope, &wrong),
+                    )
+                })
+                .unwrap_err()
+                .code,
+            "RECOVERY_REQUIRED"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

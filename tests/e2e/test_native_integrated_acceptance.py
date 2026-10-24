@@ -222,12 +222,38 @@ def main() -> int:
     with patch.dict(os.environ, {}, clear=True), patch.object(probe, "executable_identity") as identity:
         assert probe.main() == 2
         rejected(lambda: probe.campaign(Path("unused"), Path("unused"), Path("unused")))
+        rejected(lambda: probe.successor_campaign(Path("unused"), Path("unused")))
         identity.assert_not_called()
     with patch.dict(os.environ, {probe.OPT_IN: "1"}), patch.object(
         probe, "executable_identity", return_value={"sha256": "0" * 64}
     ), patch.object(probe.tempfile, "mkdtemp") as allocation:
         rejected(lambda: probe.campaign(Path("unused"), Path("unused"), Path("unused")))
+        rejected(lambda: probe.successor_campaign(Path("unused"), Path("unused")))
         allocation.assert_not_called()
+    # The successor fixture inherits instruction and return correlation checks,
+    # and admits exactly its two approved native write tasks.
+    def successor():
+        result = object.__new__(probe.SuccessorResponses)
+        result.lock = threading.Lock()
+        result.posts, result.steps, result.failure = 0, 0, None
+        return result
+
+    value = successor()
+    rejected(lambda: value.respond(first_request()))
+    value = successor()
+    for marker in ("native-managed-writer", "native-external-writer"):
+        request = first_request()
+        request["instructions"] = "\n".join((probe.CORE_PREFIX, probe.COMMON, probe.GENERAL))
+        request["input"][0]["content"][-1]["text"] = marker
+        issued = value.respond(request)[1]["item"]
+        assert issued["name"] == "exec_command"
+        assert "file.txt" in json.loads(issued["arguments"])["cmd"]
+        rejected(lambda: value.respond({"input": [{"type": "function_call_output",
+            "call_id": "foreign", "output": "Process exited with code 0\nOutput:\nwritten\n"}]}))
+        value.respond({"input": [{"type": "function_call_output", "call_id": value.call_id,
+            "output": "Process exited with code 0\nOutput:\nwritten\n"}]})
+    assert value.steps == 2 and not value.pending
+    rejected(lambda: value.respond(first_request()))
     value = fixture()
     request = first_request()
     request["instructions"] += "\n" + probe.AMBIENT[0]

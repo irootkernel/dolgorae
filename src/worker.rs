@@ -603,6 +603,30 @@ fn append_private_diagnostic(path: &Path, diagnostic: &Value) {
     }
 }
 
+/// The dedicated Server argv a caller-workspace Run launches with.
+///
+/// A generation-3 and a generation-4 Run present the same argv. The owned-runtime
+/// qualification compares the launched server against this exact value, so the
+/// Run start and restart side composes it here instead of repeating the
+/// generation test.
+pub(crate) fn caller_workspace_argv(manifest: &crate::run::RunManifest) -> Vec<String> {
+    let mut argv = manifest.profile.normalized_argv.clone();
+    if crate::run::is_caller_workspace_generation(manifest.schema_version) {
+        argv.extend(["-c".to_owned(), "project_doc_max_bytes=0".to_owned()]);
+    }
+    argv
+}
+
+/// The caller-workspace session a generation-3 or generation-4 Run requires.
+///
+/// The owned-runtime gate and the runtime-qualification gate consult this one
+/// predicate, so a successor member is qualified exactly like a generation-3
+/// caller Run.
+fn caller_workspace_session(schema_version: u32, session: &WorkerSessionBootstrap) -> bool {
+    crate::run::is_caller_workspace_generation(schema_version)
+        && session.safety_policy == SessionSafetyPolicy::CallerWorkspace
+}
+
 impl QualifiedCallerRuntime {
     fn from_owned_server(
         manifest: &crate::run::RunManifest,
@@ -615,16 +639,14 @@ impl QualifiedCallerRuntime {
             .global_profile_binding
             .as_ref()
             .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
-        let mut argv = manifest.profile.normalized_argv.clone();
-        argv.extend(["-c".to_owned(), "project_doc_max_bytes=0".to_owned()]);
+        let argv = caller_workspace_argv(manifest);
         let prefix = manifest
             .agent_configuration
             .normalized_instructions
             .as_str();
         if !binding.caller_workspace_supported()
-            || manifest.schema_version != 3
+            || !caller_workspace_session(manifest.schema_version, session)
             || manifest.execution_lane != crate::domain::ExecutionLane::Dedicated
-            || session.safety_policy != SessionSafetyPolicy::CallerWorkspace
             || session
                 .dedicated_server
                 .as_ref()
@@ -862,7 +884,7 @@ impl CallerPolicyProof {
         if self.schema != "dolgorae.caller-policy-proof/v1"
             || self.operation_id.get_version_num() != 7
             || self.operation_id != expected.operation_id
-            || manifest.schema_version != 3
+            || !crate::run::is_caller_workspace_generation(manifest.schema_version)
             || manifest.execution_lane != ExecutionLane::Dedicated
             || manifest.run_id != self.identity.run_id
             || manifest.workspace_id != self.identity.workspace_id
@@ -2283,6 +2305,28 @@ fn lifecycle_lock_path(state_root: &Path, run_id: Uuid) -> PathBuf {
 }
 
 impl RunLifecycleLease {
+    pub(crate) fn verify_scope(
+        &self,
+        state_root: &Path,
+        workspace_id: &str,
+        run_id: Uuid,
+    ) -> Result<(), WorkerProtocolError> {
+        self.lock.revalidate()?;
+        let owner = self
+            .lock
+            .read_owner(0)?
+            .ok_or(WorkerProtocolError::InvalidOwnerRecord)?;
+        if self.lock.path() != lifecycle_lock_path(state_root, run_id)
+            || owner.identity.workspace_id != workspace_id
+            || owner.identity.run_id != run_id
+            || owner.identity.pid != std::process::id()
+            || classify_process_identity(&owner.identity) != ProcessIdentityVerdict::Match
+        {
+            return Err(WorkerProtocolError::InvalidOwnerRecord);
+        }
+        Ok(())
+    }
+
     pub fn acquire(
         state_root: &Path,
         workspace_id: &str,
@@ -2303,6 +2347,22 @@ impl RunLifecycleLease {
             run_generation.max(1),
         )?)?;
         Ok(lease)
+    }
+}
+
+impl RunLifecycleLease {
+    /// The witness digest this lease just wrote (RPC:314).
+    ///
+    /// `acquire` writes the slot-0 owner record, so a successful acquire owns a
+    /// freshly written witness and this is the value a release row records as
+    /// `owner_ref`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn owner_ref(&self) -> Result<String, WorkerProtocolError> {
+        let record = self
+            .lock
+            .read_owner(0)?
+            .ok_or(WorkerProtocolError::InvalidOwnerRecord)?;
+        owner_witness_digest(&record).ok_or(WorkerProtocolError::InvalidOwnerRecord)
     }
 }
 
@@ -2337,6 +2397,80 @@ pub(crate) fn lifecycle_owner_active(state_root: &Path, workspace_id: &str, run_
                 && classify_process_identity(&owner.identity) == ProcessIdentityVerdict::Match
         }
         Err(_) => false,
+    }
+}
+
+/// The lifecycle owner facts one member-Run release must distinguish.
+///
+/// * `Free` — no live lease holds the Run.
+/// * `HeldVerified(digest)` — the lease is held and its slot-0 witness is
+///   readable, revalidates, and names a live process matching this Run;
+///   `digest` is that witness's process-identity digest, the value a release row
+///   records as `owner_ref`.
+/// * `HeldUnverifiable` — the lease is held but the witness cannot be proven
+///   (unreadable, failing revalidation, or a non-matching process identity).
+///   It is never a takeover (RPC:316-318).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LifecycleOwnerVerdict {
+    Free,
+    HeldVerified(String),
+    HeldUnverifiable,
+}
+
+/// The digest a release row records for the lease holder (RPC:314).
+///
+/// It is the SHA-256 over the JCS of the slot-0 `StartupOwnerRecord` read after
+/// `revalidate()`, so a reader recomputes the same value from the live witness.
+fn owner_witness_digest(record: &StartupOwnerRecord) -> Option<String> {
+    let text = serde_json::to_string(record).ok()?;
+    let parsed = crate::jcs::parse(&text).ok()?;
+    let canonical = crate::jcs::canonicalize(&parsed).ok()?;
+    Some(crate::jcs::sha256_hex(&canonical))
+}
+
+/// The lease verdict for one member Run's lifecycle owner (RPC:314-318).
+///
+/// It mirrors `lifecycle_owner_active` — which stays unchanged for its current
+/// callers — and separates the two facts that one boolean collapses: *busy* and
+/// *active owner of this release operation*. A held lease is therefore never a
+/// takeover candidate here, whatever its witness says.
+// The release admission is its only production caller.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn lifecycle_owner_verdict(
+    state_root: &Path,
+    workspace_id: &str,
+    run_id: Uuid,
+) -> LifecycleOwnerVerdict {
+    let Ok(lock) = StartupLockFile::open_with_create(
+        &lifecycle_lock_path(state_root, run_id),
+        DarwinSystem.current_uid(),
+        false,
+    ) else {
+        // The verdict is only meaningful after an acquire proved the lock is
+        // held; an observation that cannot even open it is never a free owner.
+        return LifecycleOwnerVerdict::HeldUnverifiable;
+    };
+    match DarwinSystem.lock_exclusive_nonblocking(&lock.file) {
+        Ok(()) => {
+            let _ = DarwinSystem.unlock(&lock.file);
+            LifecycleOwnerVerdict::Free
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            let Ok(Some(owner)) = lock.read_owner(0) else {
+                return LifecycleOwnerVerdict::HeldUnverifiable;
+            };
+            let verified = owner.identity.workspace_id == workspace_id
+                && owner.identity.run_id == run_id
+                && lock.revalidate().is_ok()
+                && classify_process_identity(&owner.identity) == ProcessIdentityVerdict::Match;
+            if !verified {
+                return LifecycleOwnerVerdict::HeldUnverifiable;
+            }
+            owner_witness_digest(&owner).map_or(LifecycleOwnerVerdict::HeldUnverifiable, |digest| {
+                LifecycleOwnerVerdict::HeldVerified(digest)
+            })
+        }
+        Err(_) => LifecycleOwnerVerdict::HeldUnverifiable,
     }
 }
 
@@ -2504,6 +2638,24 @@ impl StartupLockFile {
             .unlock_byte(&self.file, offset)
             .map_err(|_| WorkerProtocolError::Io);
         clear.and(unlock)
+    }
+
+    /// Release the startup/mutation range while leaving every slot record
+    /// byte-identical.
+    ///
+    /// For a caller that never wrote a slot-0 owner record — an observer that
+    /// only serialized against worker startup — `release_startup_range`'s
+    /// `clear_owner(0)` would erase another operation's evidence. This
+    /// variant releases only the byte-range lock; the write paths that own
+    /// their slot-0 record keep releasing through `release_startup_range`.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn unlock_startup_range_preserving_records(
+        &self,
+    ) -> Result<(), WorkerProtocolError> {
+        let offset = startup_range_offset()?;
+        crate::darwin::DarwinSystem
+            .unlock_byte(&self.file, offset)
+            .map_err(|_| WorkerProtocolError::Io)
     }
 
     fn revalidate(&self) -> Result<(), WorkerProtocolError> {
@@ -3274,7 +3426,7 @@ impl RunControllerAuthority {
     ) -> Result<(), MachineError> {
         let runs = RunStore::new(SystemWorkspacePlatform, &self.state_root);
         let manifest = runs.load_manifest(self.run_id)?;
-        let binding = manifest.aggregate_binding.ok_or_else(|| {
+        let binding = manifest.aggregate_binding.as_ref().ok_or_else(|| {
             MachineError::new(
                 "INTERNAL_ERROR",
                 "external engagement integrity check failed",
@@ -3295,14 +3447,31 @@ impl RunControllerAuthority {
         }
         let database = EngagementStore::workspace_database_path(&self.state_root);
         let store = EngagementStore::open(&database)?;
-        store.authorize_external_owner(
-            &manifest.workspace_id,
-            engagement_id,
-            operation,
-            carrier,
-        )?;
-        store.validate_external_member_binding(engagement_id, self.run_id, &binding)?;
-        if !store.external_member_is_active(engagement_id, self.run_id)? {
+        if manifest.schema_version == 4 {
+            // A successor engagement has no legacy facade-v4 open receipt; its
+            // authority is the owner binding recorded at open.
+            let (owner_workspace, owner) = store.external_owner_binding(engagement_id)?;
+            if owner_workspace != manifest.workspace_id || owner != manifest.controller {
+                return Err(MachineError::new(
+                    "CONTROLLER_MISMATCH",
+                    "the engagement owner does not authorize this member mutation",
+                    false,
+                    serde_json::json!({"run_id": self.run_id, "engagement_id": engagement_id, "operation": operation}),
+                ));
+            }
+            crate::controller::authorize_controller(self.run_id, operation, &owner, carrier)?;
+        } else {
+            store.authorize_external_owner(
+                &manifest.workspace_id,
+                engagement_id,
+                operation,
+                carrier,
+            )?;
+        }
+        store.validate_external_member_binding(engagement_id, self.run_id, binding)?;
+        if !store.external_member_is_active(engagement_id, self.run_id)?
+            && !self.owns_successor_external_release(&store, &manifest, engagement_id, operation)?
+        {
             return Err(MachineError::new(
                 "ENGAGEMENT_STATE_CONFLICT",
                 "specialist Run is not an active engagement member",
@@ -3311,6 +3480,42 @@ impl RunControllerAuthority {
             ));
         }
         Ok(())
+    }
+
+    // Admission changes membership to releasing before sending these cleanup
+    // commands. Bind that narrow authority to the same live lease the release
+    // row records; a releasing member never regains ordinary active authority.
+    fn owns_successor_external_release(
+        &self,
+        store: &EngagementStore,
+        manifest: &crate::run::RunManifest,
+        engagement_id: Uuid,
+        operation: &str,
+    ) -> Result<bool, MachineError> {
+        if manifest.schema_version != 4
+            || !matches!(operation, "engagement.release" | "engagement.release_write")
+            || store.external_member_state(engagement_id, self.run_id)?.0 != "releasing"
+        {
+            return Ok(false);
+        }
+        let Some(release) = crate::engagement::member_release_operation(
+            store.connection(),
+            &manifest.workspace_id,
+            "external_engagement",
+            &engagement_id.to_string(),
+            &self.run_id.to_string(),
+        )?
+        else {
+            return Ok(false);
+        };
+        Ok(release.progress == "settling"
+            && release.operation_kind == "release_external_specialist"
+            && release.run_ref == self.run_id.to_string()
+            && release.controller_principal
+                == format!("controller:{}", manifest.controller.identity.controller_id)
+            && release.controller_generation == manifest.controller.identity.generation
+            && matches!(lifecycle_owner_verdict(&self.state_root, &manifest.workspace_id, self.run_id),
+                LifecycleOwnerVerdict::HeldVerified(digest) if release.owner_ref.as_deref()==Some(digest.as_str())))
     }
 
     fn authorize_mutation(
@@ -4209,6 +4414,76 @@ impl FileArtifactStore {
         Ok(Self {
             root: root.to_owned(),
         })
+    }
+
+    /// Publish the reference already retained by a recovery preparation. The
+    /// caller owns the quota lease through history and resolution publication.
+    pub(crate) fn store_prepared(
+        &self,
+        quota: &crate::artifact::ArtifactQuotaLease,
+        stored: &StoredArtifact,
+        bytes: &[u8],
+    ) -> Result<(), MachineError> {
+        quota.verify_for(&self.root)?;
+        let invalid = || {
+            MachineError::new(
+                "RECOVERY_REQUIRED",
+                "prepared response artifact cannot be verified",
+                false,
+                serde_json::json!({"required_action":"restore_state"}),
+            )
+        };
+        let path = self.root.join(format!("{}.bin", stored.artifact_id));
+        if let Some(mut file) =
+            crate::workspace::open_secure_file_if_present(&path, DarwinSystem.current_uid())?
+        {
+            use std::io::Read as _;
+            let mut old = Vec::new();
+            std::io::Read::by_ref(&mut file)
+                .take(bytes.len() as u64 + 1)
+                .read_to_end(&mut old)
+                .map_err(|_| invalid())?;
+            if old != bytes {
+                return Err(invalid());
+            }
+            fs::File::open(&self.root)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| invalid())?;
+            return Ok(());
+        }
+        let retained = crate::artifact::logical_artifact_bytes(&self.root)?;
+        if retained
+            .checked_add(bytes.len() as u64)
+            .is_none_or(|n| n > crate::artifact::MAX_RUN_ARTIFACT_BYTES)
+        {
+            return Err(MachineError::new(
+                "STORAGE_CAPACITY_EXCEEDED",
+                "prepared response exceeds the Run artifact quota",
+                false,
+                serde_json::json!({"required_action":"restore_state"}),
+            ));
+        }
+        let temporary = self.root.join(format!(".{}", stored.artifact_id));
+        if crate::workspace::open_secure_file_if_present(&temporary, DarwinSystem.current_uid())?
+            .is_some()
+        {
+            fs::remove_file(&temporary).map_err(|_| invalid())?;
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&temporary)
+            .map_err(|_| invalid())?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| invalid())?;
+        fs::rename(&temporary, &path).map_err(|_| invalid())?;
+        fs::File::open(&self.root)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| invalid())?;
+        Ok(())
     }
 }
 
@@ -5467,9 +5742,18 @@ impl WorkerSession {
                 })
             })
             .transpose()?;
-        let mut candidate_reader =
+        let successor_review = crate::delegation_service::qualified_successor_review(&manifest);
+        let mut candidate_reader = if manifest.schema_version == 4 {
+            if member_owner_for(&manifest).is_some() {
+                crate::delegation_service::successor_restart_reader(state_root, &manifest)
+                    .map_err(|_| WorkerProtocolError::LedgerReplay)?
+            } else {
+                None
+            }
+        } else {
             crate::direct_review_target::DirectTargetReader::for_run(state_root, facts.run_id)
-                .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                .map_err(|_| WorkerProtocolError::LedgerReplay)?
+        };
         let mut reusable_reviewer = false;
         let external_reviewer = manifest.schema_version == 3
             && manifest.purpose.kind == crate::domain::PurposeKind::Review
@@ -5529,13 +5813,13 @@ impl WorkerSession {
                 }
             }
         }
-        let candidate_tools = reusable_reviewer || candidate_reader.is_some();
+        let candidate_tools = successor_review || reusable_reviewer || candidate_reader.is_some();
         if candidate_tools
             && (primary_tool.is_some()
                 || session.sandbox != "read-only"
                 || session.approval_policy != "never"
                 || manifest.initial_access != crate::domain::Access::Read
-                || manifest.schema_version != 3
+                || (manifest.schema_version != 3 && !successor_review)
                 || manifest
                     .global_profile_binding
                     .as_ref()
@@ -5554,7 +5838,7 @@ impl WorkerSession {
                 || reader.target().workspace_id != manifest.workspace_id
                 || reader.workspace_mode() != manifest.workspace_mode
                 || manifest.initial_access != crate::domain::Access::Read
-                || manifest.schema_version != 3
+                || (manifest.schema_version != 3 && !successor_review)
                 || manifest
                     .global_profile_binding
                     .as_ref()
@@ -5698,6 +5982,14 @@ impl WorkerSession {
                     primary_tool,
                     candidate_tools,
                     candidate_reader,
+                    // Only a manifest-4 successor member publishes its Turn's
+                    // normalized file-change payloads; a legacy (manifest-3,
+                    // facade-v4) external member stays unchanged (MD1).
+                    file_change_publication_dir: file_change_publication_dir(
+                        &manifest,
+                        state_root,
+                        facts.run_id,
+                    ),
                 },
                 &session.canonical_codex_home,
             )
@@ -5706,9 +5998,7 @@ impl WorkerSession {
                     Some(serde_json::json!({"coordinator_error": format!("{error:?}")}));
                 WorkerProtocolError::AppServerUnavailable
             })?;
-            if manifest.schema_version == 3
-                && session.safety_policy == SessionSafetyPolicy::CallerWorkspace
-            {
+            if caller_workspace_session(manifest.schema_version, session) {
                 startup_phase = "runtime_qualification";
                 let owned = dedicated_server
                     .as_ref()
@@ -5752,15 +6042,72 @@ impl WorkerSession {
                 }
             };
             startup_phase = "connection_startup";
-            coordinator
-                .complete_connection_startup(replayed.lifecycle)
-                .map_err(|error| {
+            let successor_history_recovery = manifest.schema_version == 4
+                && manifest
+                    .aggregate_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.member_kind == AggregateMemberKind::Specialist);
+            coordinator.set_successor_history_recovery(successor_history_recovery);
+            if successor_history_recovery && coordinator.checked_history_task().is_some() {
+                // Startup has not published its projection yet. Derive task
+                // bindings from the actor's own durable prefix.
+                let executions = {
+                    let ledger = coordinator
+                        .journal()
+                        .ledger()
+                        .lock()
+                        .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                    crate::semantic::reconciliation_executions_from_records(
+                        state_root,
+                        facts.run_id,
+                        ledger
+                            .durable_records()
+                            .map_err(|_| WorkerProtocolError::LedgerReplay)?,
+                    )
+                    .map_err(|_| WorkerProtocolError::LedgerReplay)?
+                };
+                for execution in executions.into_iter().filter(|execution| execution.checked) {
+                    coordinator
+                        .ensure_observed_checked_history(
+                            execution.task_ref,
+                            &execution.thread_id,
+                            &execution.turn_id,
+                        )
+                        .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                }
+            }
+            if let Err(error) = coordinator.complete_connection_startup(replayed.lifecycle) {
+                if successor_history_recovery
+                    && coordinator.pending_terminal_history().is_some()
+                    && coordinator.candidate_history_failure().is_some_and(|e| {
+                        matches!(
+                            e.code.as_str(),
+                            "REVIEW_TARGET_UNAVAILABLE"
+                                | "REVIEW_TARGET_DRIFTED"
+                                | "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                        )
+                    })
+                {
+                    preserve_actor_terminal(&mut coordinator, state_root, facts.run_id)
+                        .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                } else {
                     startup_details = Some(serde_json::json!({
                         "coordinator_error": error.diagnostic_kind(),
                         "caller_startup_failure": coordinator.caller_startup_failure(),
                     }));
-                    startup_error(coordinator.state())
-                })?;
+                    return Err(startup_error(coordinator.state()));
+                }
+            } else if let Some(history) = coordinator.pending_terminal_history() {
+                crate::semantic::preserve_observed_successor_terminal(
+                    state_root,
+                    facts.run_id,
+                    history,
+                    None,
+                    true,
+                )
+                .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                coordinator.clear_pending_terminal_history();
+            }
             if let Some(operation_id) = session.eager_thread_operation_id
                 && *coordinator.state() != CoordinatorState::OutcomeUnknown
                 && !matches!(
@@ -6733,6 +7080,176 @@ fn read_app_server(wire: &DuplexConnection, mailbox: &SessionMailbox, thread_fai
 }
 
 /// Own the Run: fold in every app-server message and perform every mutation.
+/// Where a successor member's file-change payloads are published (MD1).
+///
+/// A manifest-4 Specialist of either owner publishes them. Legacy members
+/// keep their previous behaviour.
+fn file_change_publication_dir(
+    manifest: &crate::run::RunManifest,
+    state_root: &Path,
+    run_id: Uuid,
+) -> Option<PathBuf> {
+    let successor = manifest.schema_version == 4
+        && manifest.aggregate_binding.as_ref().is_some_and(|binding| {
+            binding.member_kind == crate::run::AggregateMemberKind::Specialist
+                && matches!(
+                    binding.aggregate_kind,
+                    crate::domain::AggregateKind::ExternalSpecialistEngagement
+                        | crate::domain::AggregateKind::OrchestratedSession
+                )
+        });
+    successor.then(|| crate::run::run_root(state_root, run_id).join("file-changes"))
+}
+
+/// The aggregate owner one member Run settles tasks for.
+///
+/// The member Run's own manifest names the aggregate kind, so both the external
+/// engagement and the managed session resolve through exactly this one read.
+///
+/// A managed Run is a successor Specialist only when it is manifest 4: the only
+/// producer of a manifest-4 session aggregate is the delegated start, while the
+/// session's root Primary and every legacy member are manifest 3. Restricting
+/// the managed branch here keeps the successor funnel and both sweeps out of a
+/// legacy Run, which owns no successor task to settle. The member kind is
+/// read as well, so a later manifest-4 Primary is never taken for a member.
+fn member_owner(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Option<crate::delegation_service::SettlementOwner> {
+    crate::run::RunStore::new(SystemWorkspacePlatform, state_root)
+        .load_manifest(run_id)
+        .ok()
+        .and_then(|manifest| member_owner_for(&manifest))
+}
+
+/// The successor owner one published manifest names, if it names one.
+fn member_owner_for(
+    manifest: &crate::run::RunManifest,
+) -> Option<crate::delegation_service::SettlementOwner> {
+    use crate::delegation_service::SettlementOwner;
+    let successor = manifest.schema_version == 4;
+    let binding = manifest.aggregate_binding.as_ref()?;
+    match binding.aggregate_kind {
+        crate::domain::AggregateKind::ExternalSpecialistEngagement => {
+            Some(SettlementOwner::External {
+                engagement_id: binding.aggregate_id,
+            })
+        }
+        crate::domain::AggregateKind::OrchestratedSession => (successor
+            && binding.member_kind == crate::run::AggregateMemberKind::Specialist)
+            .then_some(SettlementOwner::Managed {
+                session_id: binding.aggregate_id,
+            }),
+    }
+}
+
+/// Settle the successor task bound to one completed Turn.
+///
+/// The execution side settles: an R call never observes a terminal it caused. A
+/// failed settlement is retried by the restart sweep, never silently lost.
+fn settle_member_terminal(
+    authority: &RunControllerAuthority,
+    identity: &WorkerIdentity,
+    owner: Option<crate::delegation_service::SettlementOwner>,
+    terminal: &crate::turn::TerminalTurn,
+) {
+    let Some(owner) = owner else {
+        return;
+    };
+    let _ = crate::semantic::settle_bound_successor_task(
+        &authority.state_root,
+        identity.run_id,
+        owner,
+        terminal,
+    );
+}
+
+fn reconcile_successor_member(
+    coordinator: &mut SessionCoordinator,
+    identity: &WorkerIdentity,
+    authority: &RunControllerAuthority,
+    credential: Option<&CredentialCarrier>,
+) -> Result<bool, MachineError> {
+    if !crate::semantic::successor_reconciliation_debt(&authority.state_root, identity.run_id)? {
+        return Ok(false);
+    }
+    let executions = crate::semantic::successor_reconciliation_executions(
+        &authority.state_root,
+        identity.run_id,
+    )?;
+    for execution in executions {
+        if crate::semantic::reuse_successor_reconciliation_resolution(
+            &authority.state_root,
+            &execution,
+        )? {
+            continue;
+        }
+        let history = coordinator
+            .successor_history(&execution.thread_id, &execution.turn_id)
+            .map_err(|error| {
+                error.into_machine_error(&TurnFailureContext {
+                    run_id: identity.run_id,
+                    profile: String::new(),
+                    thread_id: Some(execution.thread_id.clone()),
+                    turn_id: Some(execution.turn_id.clone()),
+                })
+            })?;
+        let (key, epoch) = coordinator.reconciliation_server();
+        authority.authorize_mutation("run.reconcile", credential, None)?;
+        coordinator.journal().with_ledger_authority(|ledger| {
+            let records = ledger.durable_records().map_err(|error| {
+                MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the member ledger cannot be read",
+                    false,
+                    serde_json::json!({"reason":error.to_string()}),
+                )
+            })?;
+            crate::semantic::revalidate_reconciliation_execution(
+                &authority.state_root,
+                &execution,
+                records,
+            )?;
+            crate::semantic::complete_successor_reconciliation(
+                ledger,
+                &execution,
+                &history,
+                key,
+                epoch,
+                identity.run_generation,
+                false,
+            )?;
+            Ok(())
+        })?;
+        coordinator.adopt_reconciled_pause();
+        crate::semantic::converge_successor_history(
+            &authority.state_root,
+            &execution,
+            &history,
+            false,
+        )?;
+    }
+    Ok(true)
+}
+
+fn preserve_actor_terminal(
+    coordinator: &mut SessionCoordinator,
+    state_root: &Path,
+    member: Uuid,
+) -> Result<(), MachineError> {
+    if let Some(history) = coordinator.pending_terminal_history() {
+        crate::semantic::preserve_observed_successor_terminal(
+            state_root,
+            member,
+            history,
+            coordinator.candidate_history_failure(),
+            false,
+        )?;
+        coordinator.clear_pending_terminal_history();
+    }
+    Ok(())
+}
+
 fn drain_run(
     mut coordinator: SessionCoordinator,
     identity: &WorkerIdentity,
@@ -6742,6 +7259,12 @@ fn drain_run(
     authority: &RunControllerAuthority,
     thread_failed: &AtomicBool,
 ) {
+    let engagement = member_owner(&authority.state_root, identity.run_id);
+    if let Some(owner) = engagement {
+        // Settle whatever the K path or the hook could not, by Turn id.
+        let _ =
+            crate::semantic::resettle_member_tasks(&authority.state_root, identity.run_id, owner);
+    }
     let mut in_flight: Option<Arc<MutationOutcome>> = None;
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         publish_state(&coordinator, progress, control);
@@ -6762,7 +7285,10 @@ fn drain_run(
                 }
                 SessionWork::Message(Ok(message)) => {
                     match coordinator.ingest(message) {
-                        Ok(Some(terminal)) => progress.settle(terminal),
+                        Ok(Some(terminal)) => {
+                            progress.settle(terminal.clone());
+                            settle_member_terminal(authority, identity, engagement, &terminal);
+                        }
                         // A terminal this Run already published is noise on a
                         // shared server, not a second outcome.
                         Ok(None) | Err(TurnError::DuplicateTerminal) => {}
@@ -6771,6 +7297,13 @@ fn drain_run(
                         // Otherwise it is noise on a shared server, and reporting
                         // it to every later caller would be the real fault.
                         Err(error) => {
+                            if let Err(storage) = preserve_actor_terminal(
+                                &mut coordinator,
+                                &authority.state_root,
+                                identity.run_id,
+                            ) {
+                                progress.fail(TurnError::Journal(storage.message));
+                            }
                             if *coordinator.state() == CoordinatorState::OutcomeUnknown {
                                 progress.fail(error);
                             }
@@ -6848,6 +7381,275 @@ fn inject_thread_panic(ledger: Option<Arc<Mutex<Ledger>>>) -> ! {
     panic!("injected worker thread failure");
 }
 
+/// Decide one delegated Accept's successor binding for the member generation.
+///
+/// A generation-4 member must present one accepted successor assignment. The
+/// legacy `operations` receipt fallback belongs to generation 3 alone, so an
+/// unaccepted key is refused before any Turn is submitted rather than falling
+/// through to a candidate-tool check the successor lane never enables.
+fn successor_dispatch_decision(schema_version: u32, bound: bool) -> Result<bool, MachineError> {
+    if bound {
+        return Ok(true);
+    }
+    if schema_version == 4 {
+        return Err(accepted_assignment_not_found());
+    }
+    Ok(false)
+}
+
+/// The typed refusal a manifest-4 member answers for a Turn that names no
+/// accepted assignment.
+fn accepted_assignment_not_found() -> MachineError {
+    MachineError::new(
+        "ACCEPTED_ASSIGNMENT_NOT_FOUND",
+        "the successor member received a Turn for a key with no accepted assignment",
+        false,
+        serde_json::json!({
+            "invariant": "successor_dispatch_requires_an_accepted_assignment",
+            "required_action": "use_original_input_or_new_key",
+        }),
+    )
+}
+
+/// The typed refusal a managed member answers when the presented Turn is not the
+/// assignment its Broker acceptance retained.
+///
+/// It is a distinct code from the external binding's review-scoped refusal
+/// because this failure belongs to the Session's own task store, never to a
+/// review candidate.
+fn managed_assignment_mismatch(session_id: Uuid, task_id: Uuid) -> MachineError {
+    MachineError::new(
+        "ACCEPTED_ASSIGNMENT_MISMATCH",
+        "the managed Turn does not carry the accepted assignment",
+        false,
+        serde_json::json!({
+            "session_id": session_id,
+            "task_id": task_id,
+            "invariant": "successor_dispatch_requires_the_accepted_bytes",
+            "required_action": "use_original_input_or_new_key",
+        }),
+    )
+}
+
+/// Bind one successor (generation-4) dispatched Turn to its accepted bytes.
+///
+/// A successor member retains no legacy `operations` receipt: its assign key
+/// maps to the accepted task through the shared intent store, and the Turn must
+/// carry exactly the bytes the acceptance preserved, rendered by the same
+/// complete renderer the acceptance used (MDC:304-306, :355-356). `Ok(false)`
+/// means the key names no accepted successor assignment, so the caller continues
+/// on the legacy path unchanged.
+#[cfg(test)]
+pub(crate) fn fixture_successor_review_sessions(mut check: impl FnMut(&Path, Uuid, bool)) {
+    let external = crate::semantic::successor_fixture::SuccessorMember::reviewer();
+    check(
+        &external.view.canonical_path.to_path_buf().unwrap(),
+        external.manifest.run_id,
+        crate::delegation_service::qualified_successor_review(&external.manifest),
+    );
+    let managed = crate::semantic::successor_fixture::ManagedMember::new();
+    check(
+        &managed.view.canonical_path.to_path_buf().unwrap(),
+        managed.manifest.run_id,
+        crate::delegation_service::qualified_successor_review(&managed.manifest),
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_bind_checked_task(
+    state_root: &Path,
+    manifest: &crate::run::RunManifest,
+    task: Uuid,
+    key: &str,
+    prompt: &str,
+) -> Result<crate::direct_review_target::DirectTargetReader, MachineError> {
+    let bound = match member_owner_for(manifest).ok_or_else(accepted_assignment_not_found)? {
+        crate::delegation_service::SettlementOwner::External { engagement_id } => {
+            let store = crate::engagement::EngagementStore::open(
+                &crate::engagement::EngagementStore::workspace_database_path(state_root),
+            )?;
+            bind_successor_dispatch(
+                &store,
+                engagement_id,
+                manifest.run_id,
+                &manifest.workspace_id,
+                key,
+                false,
+                prompt,
+            )?
+        }
+        crate::delegation_service::SettlementOwner::Managed { session_id } => {
+            bind_managed_successor_dispatch(
+                state_root,
+                session_id,
+                manifest.run_id,
+                &format!("successor-task:{task}"),
+                false,
+                prompt,
+            )?
+        }
+    };
+    if !bound {
+        return Err(accepted_assignment_not_found());
+    }
+    crate::delegation_service::successor_task_reader(state_root, manifest, task, true)?
+        .ok_or_else(|| crate::direct_review_target::provenance_invalid(task))
+}
+
+fn bind_successor_dispatch(
+    store: &crate::engagement::EngagementStore,
+    engagement_id: Uuid,
+    run_id: Uuid,
+    workspace_id: &str,
+    idempotency_key: &str,
+    write: bool,
+    message: &str,
+) -> Result<bool, MachineError> {
+    let Some(task_ref) =
+        store.external_task_for_successor_key(workspace_id, engagement_id, idempotency_key)?
+    else {
+        return Ok(false);
+    };
+    let task = store.external_task(engagement_id, task_ref)?;
+    let refused = || crate::direct_review_target::provenance_invalid(task.task_id);
+    if task.specialist_run_id != run_id || task.state != "dispatching" {
+        return Err(refused());
+    }
+    let accepted = store
+        .external_task_identity(engagement_id, task.task_id)?
+        .ok_or_else(refused)?;
+    let stored = crate::engagement::accepted_task_content(store.connection(), task.task_id)?;
+    let Some((task_body, contexts, target)) = stored else {
+        return Err(refused());
+    };
+    // The retained task must still be the assignment the immutable intent
+    // accepted: the frozen envelope names the canonical acceptance body.
+    let task_request: crate::task_request::SpecialistTaskRequest =
+        serde_json::from_slice(&task_body).map_err(|_| refused())?;
+    let (execution_intent, deadline_seconds) = store
+        .external_task_dispatch_facts(engagement_id, task.task_id)
+        .map_err(|_| refused())?;
+    let recorded = store
+        .accepted_assignment_body_digest(workspace_id, engagement_id, idempotency_key)
+        .map_err(|_| refused())?
+        .ok_or_else(refused)?;
+    if !crate::successor_capture::verify_accepted_assignment(
+        task.specialist_run_id,
+        &task_request,
+        &accepted,
+        deadline_seconds,
+        &recorded,
+    )? {
+        return Err(refused());
+    }
+    let contents = crate::successor_capture::AcceptedTaskContents {
+        task_body,
+        contexts,
+        target,
+    };
+    // The Turn is rendered with the task's own execution intent and deadline,
+    // exactly as the dispatch that sends it does.
+    let rendered = contents
+        .prompt(&accepted, &execution_intent, deadline_seconds)
+        .map_err(|_| refused())?;
+    if write || message != rendered {
+        return Err(refused());
+    }
+    Ok(true)
+}
+
+/// The Submit key of one dispatched managed successor task.
+const MANAGED_DISPATCH_KEY_PREFIX: &str = "successor-task:";
+
+/// Bind one successor (manifest-4, managed) dispatched Turn to its accepted bytes.
+///
+/// A managed member retains no legacy `operations` receipt either: the Broker
+/// carrier Submit names the accepted assignment by task reference, and the member
+/// Run's own worker proves the Turn against the Broker acceptance and the
+/// preserved bytes before it is admitted, exactly as the external binding proves
+/// it against the engagement acceptance. `Ok(false)` means the key
+/// names no accepted managed assignment; a key that names one and does not match
+/// it is a typed refusal.
+fn bind_managed_successor_dispatch(
+    state_root: &Path,
+    session_id: Uuid,
+    run_id: Uuid,
+    idempotency_key: &str,
+    write: bool,
+    message: &str,
+) -> Result<bool, MachineError> {
+    let Some(task_ref) = idempotency_key
+        .strip_prefix(MANAGED_DISPATCH_KEY_PREFIX)
+        .and_then(|reference| Uuid::parse_str(reference).ok())
+    else {
+        return Ok(false);
+    };
+    let store = crate::engagement::EngagementStore::open(
+        &crate::engagement::EngagementStore::workspace_database_path(state_root),
+    )?;
+    let Some(facts) =
+        crate::orchestration::successor_task(store.connection(), session_id, task_ref)?
+    else {
+        return Ok(false);
+    };
+    let refused = || managed_assignment_mismatch(session_id, task_ref);
+    // The reservation is the dispatch boundary: a Turn presented for any other
+    // state or for another member is not this task's Turn.
+    if facts.state != "dispatching" || facts.member_ref != run_id.to_string() {
+        return Err(refused());
+    }
+    let accepted = crate::successor_capture::retained_accepted_task(&facts.accepted_request_json)
+        .map_err(|_| refused())?;
+    let deadline_seconds = managed_dispatch_deadline(&facts.request_json).ok_or_else(refused)?;
+    let Some((task_body, contexts, target)) =
+        crate::engagement::accepted_task_content(store.connection(), task_ref)?
+    else {
+        return Err(refused());
+    };
+    let task_request: crate::task_request::SpecialistTaskRequest =
+        serde_json::from_slice(&task_body).map_err(|_| refused())?;
+    // The acceptance froze the canonical assignment body in its own column, so
+    // the retained task, the accepted identity and this deadline must re-derive
+    // exactly that digest.
+    let recorded = format!("sha256:{}", facts.source_request_sha256);
+    if !crate::successor_capture::verify_accepted_assignment(
+        run_id,
+        &task_request,
+        &accepted,
+        deadline_seconds,
+        &recorded,
+    )? {
+        return Err(refused());
+    }
+    let contents = crate::successor_capture::AcceptedTaskContents {
+        task_body,
+        contexts,
+        target,
+    };
+    // The Turn is rendered from the preserved bytes by the same complete renderer
+    // the acceptance used, with the intent the accepted identity carries.
+    let rendered = contents
+        .prompt(&accepted, &accepted.execution_intent, deadline_seconds)
+        .map_err(|_| refused())?;
+    if write || message != rendered {
+        return Err(refused());
+    }
+    Ok(true)
+}
+
+/// The requested deadline one accepted managed assignment retained.
+///
+/// The Broker marker carries the deadline the caller asked for; the accepted
+/// identity carries no deadline of its own, and the assignment digest above is
+/// what binds this value to the acceptance.
+fn managed_dispatch_deadline(marker_json: &str) -> Option<u64> {
+    let marker: serde_json::Value = serde_json::from_str(marker_json).ok()?;
+    if marker["schema"] != crate::orchestration::SUCCESSOR_TASK_MARKER_SCHEMA {
+        return None;
+    }
+    marker["deadline_seconds"].as_u64()
+}
+
 fn perform(
     coordinator: &mut SessionCoordinator,
     identity: &WorkerIdentity,
@@ -6855,6 +7657,14 @@ fn perform(
     authority: &RunControllerAuthority,
     mutation: SessionMutation,
 ) -> ControlResponseV1 {
+    let owner = member_owner(&authority.state_root, identity.run_id);
+    if let Some(owner) = owner {
+        // Settle any completed Turn of this member before the next Turn is
+        // accepted, so a failed hook settlement is retried rather than lost. The
+        // owner comes from the member Run's manifest, never from the request.
+        let _ =
+            crate::semantic::resettle_member_tasks(&authority.state_root, identity.run_id, owner);
+    }
     #[cfg(test)]
     if let SessionCommand::Panic { ledger, accept } = &mutation.command {
         if *accept {
@@ -7100,7 +7910,119 @@ fn perform(
     {
         return refusal_from(error);
     }
-    if coordinator.uses_candidate_tools()
+    // A generation-4 member binds every dispatched Turn to its accepted task
+    // identity and preserved bytes, never a legacy operations key, and
+    // independently of the generation-3 candidate-tool mechanism.
+    let successor_bound = match &mutation.command {
+        SessionCommand::Accept { request, .. } => {
+            if let Some(engagement_id) = mutation.external_engagement {
+                let bound = (|| {
+                    let store = crate::engagement::EngagementStore::open(
+                        &crate::engagement::EngagementStore::workspace_database_path(
+                            &authority.state_root,
+                        ),
+                    )?;
+                    bind_successor_dispatch(
+                        &store,
+                        engagement_id,
+                        identity.run_id,
+                        &identity.workspace_id,
+                        &request.idempotency_key,
+                        request.write,
+                        &request.message,
+                    )
+                })();
+                match bound {
+                    Ok(bound) => {
+                        let schema_version = match crate::run::RunStore::new(
+                            SystemWorkspacePlatform,
+                            &authority.state_root,
+                        )
+                        .load_manifest(identity.run_id)
+                        {
+                            Ok(manifest) => manifest.schema_version,
+                            Err(error) => return refusal_from(error),
+                        };
+                        match successor_dispatch_decision(schema_version, bound) {
+                            Ok(bound) => bound,
+                            Err(error) => return refusal_from(error),
+                        }
+                    }
+                    Err(error) => return refusal_from(error),
+                }
+            } else if let Some(crate::delegation_service::SettlementOwner::Managed { session_id }) =
+                owner
+            {
+                // A manifest-4 managed member proves the Broker-carrier Submit
+                // against its accepted assignment before admitting the Turn.
+                // `member_owner` never names a managed owner for a legacy member,
+                // so this branch is the successor lane alone.
+                match bind_managed_successor_dispatch(
+                    &authority.state_root,
+                    session_id,
+                    identity.run_id,
+                    &request.idempotency_key,
+                    request.write,
+                    &request.message,
+                ) {
+                    Ok(true) => true,
+                    Ok(false) => return refusal_from(accepted_assignment_not_found()),
+                    Err(error) => return refusal_from(error),
+                }
+            } else {
+                false
+            }
+        }
+        _ => false,
+    };
+    if successor_bound && let SessionCommand::Accept { request, .. } = &mutation.command {
+        let bound = (|| {
+            let manifest = RunStore::new(SystemWorkspacePlatform, &authority.state_root)
+                .load_manifest(identity.run_id)?;
+            let task = match owner {
+                Some(crate::delegation_service::SettlementOwner::External { engagement_id }) => {
+                    let store = crate::engagement::EngagementStore::open(
+                        &crate::engagement::EngagementStore::workspace_database_path(
+                            &authority.state_root,
+                        ),
+                    )?;
+                    store
+                        .external_task_for_successor_key(
+                            &identity.workspace_id,
+                            engagement_id,
+                            &request.idempotency_key,
+                        )?
+                        .ok_or_else(accepted_assignment_not_found)?
+                }
+                Some(crate::delegation_service::SettlementOwner::Managed { .. }) => request
+                    .idempotency_key
+                    .strip_prefix(MANAGED_DISPATCH_KEY_PREFIX)
+                    .and_then(|key| Uuid::parse_str(key).ok())
+                    .ok_or_else(accepted_assignment_not_found)?,
+                None => return Err(accepted_assignment_not_found()),
+            };
+            if let Some(reader) = crate::delegation_service::successor_task_reader(
+                &authority.state_root,
+                &manifest,
+                task,
+                true,
+            )? {
+                coordinator
+                    .bind_candidate_reader(reader)
+                    .map_err(|_| crate::direct_review_target::provenance_invalid(task))?;
+            } else if coordinator.uses_candidate_tools() {
+                coordinator
+                    .bind_generic_successor_task()
+                    .map_err(|_| crate::direct_review_target::provenance_invalid(task))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = bound {
+            return refusal_from(error);
+        }
+    }
+    if !successor_bound
+        && coordinator.uses_candidate_tools()
         && let SessionCommand::Accept { request, .. } = &mutation.command
         && let Some(engagement_id) = mutation.external_engagement
     {
@@ -7308,15 +8230,37 @@ fn perform(
         }
     }
     let policy_verification = matches!(mutation.command, SessionCommand::VerifyCallerPolicy { .. });
-    let response = perform_command(
-        coordinator,
-        identity,
-        progress,
-        operation,
-        context,
-        mutation.command,
-        typed_receipt,
-    );
+    let reconciled = if matches!(mutation.command, SessionCommand::Reconcile) {
+        match reconcile_successor_member(
+            coordinator,
+            identity,
+            authority,
+            mutation.credential.as_ref(),
+        ) {
+            Ok(handled) => handled,
+            Err(error) => return refusal_from(error),
+        }
+    } else {
+        false
+    };
+    let response = if reconciled {
+        ControlResponseV1::Status {
+            identity: identity.clone(),
+            lifecycle: coordinator_control_state(coordinator, false).lifecycle,
+            active_turn: None,
+            last_terminal: progress.last_terminal(),
+        }
+    } else {
+        perform_command(
+            coordinator,
+            identity,
+            progress,
+            operation,
+            context,
+            mutation.command,
+            typed_receipt,
+        )
+    };
     if policy_verification && let ControlResponseV1::Failed { code, .. } = &response {
         let log = authority
             .state_root
@@ -9390,6 +10334,11 @@ pub fn remove_verified_absent_runtime(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(WorkerProtocolError::SocketIdentityMismatch),
     }
+    // The verified-absence marker is durably recorded for exactly this
+    // generation BEFORE the locator is removed: the locator's
+    // only remover is this function, so a missing locator is proven absent
+    // only through this marker (or the absence of any generation evidence).
+    record_verified_absence_marker(runtime_record, &record)?;
     fs::remove_file(runtime_record).map_err(|_| WorkerProtocolError::Io)?;
     File::open(
         runtime_record
@@ -9398,6 +10347,170 @@ pub fn remove_verified_absent_runtime(
     )
     .and_then(|directory| directory.sync_all())
     .map_err(|_| WorkerProtocolError::Io)
+}
+
+/// The durable proof that one Run's exact worker generation was verified
+/// absent.
+///
+/// `remove_verified_absent_runtime` writes it after the whole-generation
+/// proof and the registration retirement, immediately before it removes the
+/// runtime locator — the locator's only remover — so a locator that has gone
+/// missing can be explained by this cleanup only through the marker.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifiedAbsenceMarker {
+    pub schema_version: u32,
+    pub run_id: Uuid,
+    pub run_generation: u64,
+    /// SHA-256 over the JCS of the verified generation's `WorkerIdentity`.
+    pub worker_identity_sha256: String,
+}
+
+impl VerifiedAbsenceMarker {
+    fn validate(&self) -> bool {
+        self.schema_version == 1
+            && self.run_id.get_version_num() == 7
+            && self.run_generation >= 1
+            && decode_sha256(&self.worker_identity_sha256).is_some()
+    }
+}
+
+/// The marker file of one Run's latest verified-absent generation.
+#[must_use]
+pub fn verified_absence_marker_path(runtime_root: &Path, run_id: Uuid) -> PathBuf {
+    runtime_root
+        .join("verified-absence")
+        .join(format!("{run_id}.json"))
+}
+
+/// The JCS SHA-256 digest of one worker generation identity.
+pub fn worker_identity_digest(identity: &WorkerIdentity) -> Option<String> {
+    let text = serde_json::to_string(identity).ok()?;
+    let parsed = crate::jcs::parse(&text).ok()?;
+    let canonical = crate::jcs::canonicalize(&parsed).ok()?;
+    Some(crate::jcs::sha256_hex(&canonical))
+}
+
+fn marker_directory(runtime_record: &Path) -> Result<PathBuf, WorkerProtocolError> {
+    let runs = runtime_record
+        .parent()
+        .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+    let runtime = runs
+        .parent()
+        .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+    let directory = runtime.join("verified-absence");
+    let uid = DarwinSystem.current_uid();
+    match fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(WorkerProtocolError::Io),
+    }
+    let metadata = fs::symlink_metadata(&directory).map_err(|_| WorkerProtocolError::Io)?;
+    if !metadata.file_type().is_dir() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
+        return Err(WorkerProtocolError::InvalidRuntimeRecord);
+    }
+    Ok(directory)
+}
+
+/// Record the verified-absence marker for exactly the verified record's
+/// generation, before the locator is removed.
+///
+/// Write-once per `(run_id, run_generation)`: an existing marker for the same
+/// generation may be rewritten only with identical content (a crash after the
+/// marker but before the locator's removal leaves the locator, so the present
+/// path re-verifies); a marker for an older generation is replaced; a newer
+/// marker refuses.
+pub(crate) fn record_verified_absence_marker(
+    runtime_record: &Path,
+    record: &WorkerRuntimeRecord,
+) -> Result<(), WorkerProtocolError> {
+    let Some(digest) = worker_identity_digest(&record.identity) else {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    };
+    let marker = VerifiedAbsenceMarker {
+        schema_version: 1,
+        run_id: record.identity.run_id,
+        run_generation: record.identity.run_generation,
+        worker_identity_sha256: digest,
+    };
+    let directory = marker_directory(runtime_record)?;
+    let path = directory.join(format!("{}.json", marker.run_id));
+    let bytes = serde_json::to_vec(&marker).map_err(|_| WorkerProtocolError::Io)?;
+    if let Some(existing) = verified_absence_marker_at(&path)? {
+        if existing.run_generation == marker.run_generation {
+            if existing == marker {
+                return Ok(());
+            }
+            return Err(WorkerProtocolError::InvalidOwnerRecord);
+        }
+        if existing.run_generation > marker.run_generation {
+            return Err(WorkerProtocolError::InvalidOwnerRecord);
+        }
+    }
+    let temporary = directory.join(format!("{}.{}.tmp", marker.run_id, Uuid::now_v7()));
+    let written = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&temporary)
+            .map_err(|_| WorkerProtocolError::Io)?;
+        file.write_all(&bytes)
+            .and_then(|()| file.write_all(b"\n"))
+            .and_then(|()| file.sync_all())
+            .map_err(|_| WorkerProtocolError::Io)?;
+        fs::rename(&temporary, &path).map_err(|_| WorkerProtocolError::Io)?;
+        File::open(&directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| WorkerProtocolError::Io)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
+/// The Run's verified-absence marker, if one exists.
+pub fn verified_absence_marker(
+    runtime_root: &Path,
+    run_id: Uuid,
+) -> Result<Option<VerifiedAbsenceMarker>, WorkerProtocolError> {
+    let path = verified_absence_marker_path(runtime_root, run_id);
+    verified_absence_marker_at(&path)
+}
+
+fn verified_absence_marker_at(
+    path: &Path,
+) -> Result<Option<VerifiedAbsenceMarker>, WorkerProtocolError> {
+    let uid = DarwinSystem.current_uid();
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(WorkerProtocolError::Io),
+    };
+    if !metadata.file_type().is_file()
+        || metadata.uid() != uid
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.len() > 4096
+    {
+        return Err(WorkerProtocolError::InvalidOwnerRecord);
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| WorkerProtocolError::Io)?;
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| WorkerProtocolError::Io)?;
+    let marker: VerifiedAbsenceMarker =
+        serde_json::from_slice(&bytes).map_err(|_| WorkerProtocolError::InvalidOwnerRecord)?;
+    if !marker.validate() {
+        return Err(WorkerProtocolError::InvalidOwnerRecord);
+    }
+    Ok(Some(marker))
 }
 
 /// Retire a Dedicated Run Server that survived its owning worker. The worker
@@ -9592,7 +10705,7 @@ fn startup_range_offset() -> Result<i64, WorkerProtocolError> {
     i64::try_from(slot_offset(0)?).map_err(|_| WorkerProtocolError::InvalidOwnerRecord)
 }
 
-fn slot_offset(slot: u8) -> Result<u64, WorkerProtocolError> {
+pub(crate) fn slot_offset(slot: u8) -> Result<u64, WorkerProtocolError> {
     match slot {
         0 => Ok(0),
         1 => Ok(STARTUP_SLOT_BYTES as u64),
@@ -10227,6 +11340,66 @@ mod tests {
     #[cfg(target_os = "macos")]
     use std::time::Instant;
 
+    /// The release owner's verdict separates a free lease, a verified
+    /// witness and a confessed uncertainty — and never reports a held lease as
+    /// free.
+    #[test]
+    fn the_lifecycle_owner_verdict_separates_free_verified_and_unprovable() {
+        let root = std::env::temp_dir().join(format!("dolgorae-lifecycle-{}", Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let workspace_id = "11".repeat(32);
+        let run_id = Uuid::now_v7();
+        // No lease was ever taken: the lock inode does not exist yet, and an
+        // observation that cannot open it is never a free owner.
+        assert_eq!(
+            lifecycle_owner_verdict(&root, &workspace_id, run_id),
+            LifecycleOwnerVerdict::HeldUnverifiable
+        );
+        // A witness that existed and was released makes the lease free.
+        drop(
+            RunLifecycleLease::acquire(&root, &workspace_id, run_id, 1)
+                .expect("the lifecycle lease is acquirable"),
+        );
+        assert_eq!(
+            lifecycle_owner_verdict(&root, &workspace_id, run_id),
+            LifecycleOwnerVerdict::Free
+        );
+        // A held lease with this process's own witness is verified, and the
+        // digest is exactly the one a release row records as `owner_ref`.
+        let lease = RunLifecycleLease::acquire(&root, &workspace_id, run_id, 1).unwrap();
+        let witness = lease
+            .lock
+            .read_owner(0)
+            .unwrap()
+            .expect("the witness is written");
+        assert_eq!(
+            lifecycle_owner_verdict(&root, &workspace_id, run_id),
+            LifecycleOwnerVerdict::HeldVerified(owner_witness_digest(&witness).unwrap())
+        );
+        // The unchanged observer keeps answering `true` for the same lease.
+        assert!(lifecycle_owner_active(&root, &workspace_id, run_id));
+        // A held lease whose witness is gone is unprovable, never a takeover.
+        lease.lock.clear_owner(0).unwrap();
+        assert_eq!(
+            lifecycle_owner_verdict(&root, &workspace_id, run_id),
+            LifecycleOwnerVerdict::HeldUnverifiable
+        );
+        // A held lease whose witness names another Run is unprovable as well.
+        lease.lock.write_owner(&witness).unwrap();
+        let other = Uuid::now_v7();
+        assert_eq!(
+            lifecycle_owner_verdict(&root, &workspace_id, other),
+            LifecycleOwnerVerdict::HeldUnverifiable
+        );
+        drop(lease);
+        assert_eq!(
+            lifecycle_owner_verdict(&root, &workspace_id, run_id),
+            LifecycleOwnerVerdict::Free
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn response_artifact_quota_refuses_limit_plus_one_before_creating_a_body() {
         let root = std::env::temp_dir().join(format!("dolgorae-response-quota-{}", Uuid::now_v7()));
@@ -10483,6 +11656,7 @@ mod tests {
                     primary_tool: None,
                     candidate_tools: false,
                     candidate_reader: None,
+                    file_change_publication_dir: None,
                 },
                 "/tmp/codex-home",
             )
@@ -13684,6 +14858,3544 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// An independent scripted server with the real worker binding, authority,
+    /// ledger replay and Turn actor. Assignment admission alone cannot prove
+    /// that the actor will dispatch or recover a Turn.
+    struct ReviewDispatchFixture {
+        root: PathBuf,
+        state_root: PathBuf,
+        fake: Child,
+        session: Option<WorkerSession>,
+        coordinator: Option<SessionCoordinator>,
+        bootstrap: WorkerSessionBootstrap,
+        identity: WorkerIdentity,
+    }
+
+    impl ReviewDispatchFixture {
+        fn new(
+            scene: &crate::semantic::successor_review_tests::Scene,
+            history_items: Vec<serde_json::Value>,
+        ) -> Self {
+            Self::with_history(
+                scene,
+                serde_json::json!({"result":{"thread":{"id":"thread-1","parentThreadId":null,"turns":[{"id":"turn-1","status":"completed","itemsView":"full","items":history_items}]}}}),
+            )
+        }
+
+        fn with_history(
+            scene: &crate::semantic::successor_review_tests::Scene,
+            history: serde_json::Value,
+        ) -> Self {
+            use std::io::Read as _;
+            let raw = history.is_string();
+            let history = if raw {
+                serde_json::json!({"result":{"__raw_history_result":history}})
+            } else {
+                history
+            };
+            let root = std::env::temp_dir().join(format!("drd-{}", Uuid::now_v7().simple()));
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let scenario = root.join("scenario.json");
+            let manifest = scene.manifest();
+            let codex_home = manifest
+                .global_profile_binding
+                .as_ref()
+                .unwrap()
+                .launch_snapshot
+                .canonical_codex_home
+                .clone();
+            let thread = serde_json::json!({"id":"thread-1","parentThreadId":null,"turns":[]});
+            let history_sequence = history.as_array().cloned().unwrap_or_default();
+            let default_history = history_sequence.last().unwrap_or(&history);
+            let attached = serde_json::json!({"cwd":manifest.canonical_workspace.to_path_buf().unwrap(),"approvalPolicy":"never","sandbox":{"type":"readOnly"},"model":manifest.model,"thread":thread});
+            let mut steps = vec![
+                serde_json::json!({"method":"initialize","respond":{"result":{"codexHome":codex_home}}}),
+                serde_json::json!({"method":"thread/start","respond":{"result":attached}}),
+                serde_json::json!({"method":"thread/resume","respond":{"result":attached}}),
+                serde_json::json!({"method":"thread/name/set","respond":{"result":{}}}),
+                serde_json::json!({"method":"thread/read","respond":default_history}),
+            ];
+            if crate::delegation_service::qualified_successor_review(manifest) {
+                steps.push(serde_json::json!({"method":"thread/read","occurrence":1,"respond":{"result":{"thread":thread}}}));
+            }
+            let offset = usize::from(crate::delegation_service::qualified_successor_review(
+                manifest,
+            )) + 1;
+            for (index, history) in history_sequence.into_iter().enumerate() {
+                steps.push(serde_json::json!({"method":"thread/read","occurrence":index+offset,"respond":history}));
+            }
+            for occurrence in 1..=2 {
+                steps.push(serde_json::json!({"method":"turn/start","occurrence":occurrence,"respond":{"result":{"turn":{"id":format!("turn-{occurrence}")}}}}));
+            }
+            fs::write(&scenario, serde_json::to_vec(&serde_json::json!({
+                "schema_version":1,"name":"review_dispatch","description":"Task-scoped worker dispatch and recovery.",
+                "codex_home":codex_home,"steps":steps
+            })).unwrap()).unwrap();
+            let socket = root.join("s.sock");
+            let transcript = root.join("requests.jsonl");
+            fs::write(&transcript, b"").unwrap();
+            let (mut ready, ready_sink) = UnixStream::pair().unwrap();
+            ready
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let mut command = Command::new(repository.join(".venv/bin/python"));
+            command.env_clear();
+            if raw {
+                // Only the transport bytes differ; the independent fake server
+                // still parses and correlates every client request.
+                command
+                    .args([
+                        "-c",
+                        r#"import sys,runpy
+directory=sys.argv.pop(1)
+sys.path.insert(0,directory)
+import server,wsframe,jsonlite
+send=server.FakeAppServer.send
+def raw_send(self,connection,body):
+    result=body.get('result')
+    if isinstance(result,dict) and '__raw_history_result' in result:
+        wire='{"id":'+jsonlite.dumps(body['id'])+',"result":'+result['__raw_history_result']+'}'
+        wsframe.send_text(connection,wire,fragment_bytes=1)
+    else:
+        send(self,connection,body)
+server.FakeAppServer.send=raw_send
+runpy.run_path(directory+'/__main__.py',run_name='__main__')
+"#,
+                    ])
+                    .arg(repository.join("tools/fake_app_server"));
+            } else {
+                command.arg(repository.join("tools/fake_app_server"));
+            }
+            let fake = command
+                .arg("--socket")
+                .arg(&socket)
+                .arg("--scenario")
+                .arg(&scenario)
+                .arg("--transcript")
+                .arg(&transcript)
+                .args(["--ready-fd", "1"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                    ready_sink,
+                )))
+                .stderr(std::process::Stdio::from(
+                    fs::File::create(root.join("server.log")).unwrap(),
+                ))
+                .spawn()
+                .unwrap();
+            let mut fixture = Self {
+                root,
+                state_root: scene.state_root().to_owned(),
+                fake,
+                session: None,
+                coordinator: None,
+                bootstrap: reviewer_bootstrap(),
+                identity: identity(),
+            };
+            let mut readiness = [0; 6];
+            ready.read_exact(&mut readiness).unwrap();
+            assert_eq!(&readiness, b"ready\n");
+            fixture.identity.run_id = manifest.run_id;
+            fixture.identity.workspace_id = manifest.workspace_id.clone();
+            fixture.identity.run_generation = 1;
+            fixture.identity.uid = DarwinSystem.current_uid();
+            fixture.bootstrap.app_server_socket = socket;
+            fixture.bootstrap.canonical_codex_home = codex_home;
+            fixture.bootstrap.cwd = manifest.canonical_workspace.to_path_buf().unwrap();
+            fixture.bootstrap.fixed_model = manifest.model.clone();
+            fixture.bootstrap.default_effort = manifest.default_reasoning_effort.clone();
+            fixture.bootstrap.supported_efforts = vec![manifest.default_reasoning_effort.clone()];
+            fixture.bootstrap.controller_id = manifest.controller.identity.controller_id;
+            fixture.bootstrap.eager_thread_operation_id = scene
+                .worker_bootstrap(4, false, false)
+                .eager_thread_operation_id;
+            fixture.bootstrap.server_key = manifest.profile_capability_snapshot.server_key.clone();
+            fixture.bootstrap.server_epoch = manifest.profile_capability_snapshot.server_epoch;
+            fixture.bootstrap.artifact_root =
+                crate::run::run_root(scene.state_root(), manifest.run_id).join("artifacts");
+            crate::writer::WriterStore::initialize_layout(
+                scene.state_root(),
+                &manifest.workspace_id,
+                fixture.identity.uid,
+            )
+            .unwrap();
+            fixture.connect(scene);
+            fixture
+        }
+
+        fn connect(&mut self, scene: &crate::semantic::successor_review_tests::Scene) {
+            let ledger = Arc::new(Mutex::new(
+                Ledger::open(
+                    crate::run::run_root(scene.state_root(), self.identity.run_id),
+                    self.identity.run_id,
+                )
+                .unwrap(),
+            ));
+            let session = WorkerSession::connect(
+                &self.bootstrap,
+                RunFacts {
+                    run_id: self.identity.run_id,
+                    profile: scene.manifest().profile.profile_name.clone(),
+                },
+                ledger,
+                self.identity.run_generation,
+                self.identity.uid,
+                scene.state_root(),
+                &self.identity.workspace_id,
+            )
+            .unwrap();
+            self.coordinator = session.coordinator.lock().unwrap().take();
+            self.session = Some(session);
+        }
+
+        fn restart(&mut self, scene: &crate::semantic::successor_review_tests::Scene) {
+            self.coordinator.take();
+            self.session.take();
+            self.identity.run_generation += 1;
+            self.connect(scene);
+        }
+
+        fn lose_transport(&mut self) {
+            self.session.as_ref().unwrap().wire.shutdown();
+            assert!(self.coordinator.as_mut().unwrap().next_event().is_err());
+            assert_eq!(
+                self.coordinator.as_ref().unwrap().state(),
+                &CoordinatorState::OutcomeUnknown
+            );
+        }
+
+        fn publish_retained_profile(
+            &self,
+            scene: &crate::semantic::successor_review_tests::Scene,
+        ) -> PathBuf {
+            use std::os::unix::fs::MetadataExt as _;
+            let home = scene.state_root().parent().unwrap().parent().unwrap();
+            let binding = scene.manifest().global_profile_binding.as_ref().unwrap();
+            let profile = home.join("profiles").join(&binding.server_key);
+            let mut hash = Sha256::new();
+            hash.update(b"dolgorae-home-v1\0");
+            hash.update(binding.launch_snapshot.canonical_codex_home.as_bytes());
+            let account = home.join("homes").join(format!("{:x}", hash.finalize()));
+            for directory in [
+                home.join("profiles"),
+                profile.clone(),
+                home.join("homes"),
+                account.clone(),
+            ] {
+                fs::create_dir_all(&directory).unwrap();
+                fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let process = DarwinSystem.live_process_identity(self.fake.id()).unwrap();
+            let socket = fs::symlink_metadata(&self.bootstrap.app_server_socket).unwrap();
+            let state = crate::profile::ServerState {
+                schema_version: 2,
+                server_key: binding.server_key.clone(),
+                lifecycle: "ready".to_owned(),
+                server_epoch: self.bootstrap.server_epoch,
+                epoch_id: Uuid::now_v7(),
+                boot_session_uuid: boot_session_uuid(process.uid).unwrap(),
+                pid: self.fake.id(),
+                pgid: process.process_group_id,
+                uid: process.uid,
+                process_fingerprint: process.fingerprint.clone(),
+                drainer_pid: self.fake.id(),
+                drainer_pgid: process.process_group_id,
+                drainer_uid: process.uid,
+                drainer_fingerprint: process.fingerprint,
+                socket_path: self
+                    .bootstrap
+                    .app_server_socket
+                    .to_string_lossy()
+                    .to_string(),
+                socket_device: socket.dev(),
+                socket_inode: socket.ino(),
+                membership_revision: crate::global_runtime::GlobalMembershipStore::from_root(
+                    home,
+                    &binding.selected_name,
+                    &binding.server_key,
+                )
+                .unwrap()
+                .load()
+                .unwrap()
+                .revision,
+                default_model: scene.manifest().model.clone(),
+                models: vec![scene.manifest().model.clone()],
+                capabilities: Default::default(),
+                snapshot: binding.launch_snapshot.clone(),
+            };
+            let path = profile.join("state.json");
+            fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let active = account.join("active.json");
+            fs::write(&active,serde_json::to_vec(&serde_json::json!({"schema_version":1,
+                "canonical_codex_home":binding.launch_snapshot.canonical_codex_home,"server_key":state.server_key,
+                "server_epoch":state.server_epoch,"lifecycle":"ready","pid":state.pid,"transition_token":null})).unwrap()).unwrap();
+            fs::set_permissions(active, fs::Permissions::from_mode(0o600)).unwrap();
+            crate::profile::observe_history_server(home, binding).unwrap();
+            path
+        }
+
+        fn reconcile(
+            &mut self,
+            scene: &crate::semantic::successor_review_tests::Scene,
+        ) -> ControlResponseV1 {
+            let authority =
+                RunControllerAuthority::new(scene.state_root().to_owned(), self.identity.run_id);
+            let revision = self
+                .coordinator
+                .as_ref()
+                .unwrap()
+                .journal()
+                .ledger()
+                .lock()
+                .unwrap()
+                .head()
+                .unwrap()
+                .sequence;
+            perform(
+                self.coordinator.as_mut().unwrap(),
+                &self.identity,
+                &self.session.as_ref().unwrap().progress,
+                &authority,
+                SessionMutation {
+                    preconditions: MutationPreconditions {
+                        expected_state_revision: Some(revision),
+                        ..Default::default()
+                    },
+                    operation: "run.reconcile",
+                    credential: Some(scene.dispatch_credential()),
+                    external_engagement: None,
+                    command: SessionCommand::Reconcile,
+                    outcome: Arc::new(MutationOutcome::default()),
+                },
+            )
+        }
+
+        fn dispatch(
+            &mut self,
+            scene: &crate::semantic::successor_review_tests::Scene,
+            task: &crate::semantic::successor_fixture::AcceptedSuccessorTask,
+            key: &str,
+        ) -> ControlResponseV1 {
+            let external = scene.external_owner();
+            perform(
+                self.coordinator.as_mut().unwrap(),
+                &self.identity,
+                &self.session.as_ref().unwrap().progress,
+                &RunControllerAuthority::new(scene.state_root().to_owned(), self.identity.run_id),
+                SessionMutation {
+                    preconditions: MutationPreconditions::default(),
+                    operation: if external.is_some() {
+                        "engagement.assign"
+                    } else {
+                        "submit"
+                    },
+                    credential: Some(scene.dispatch_credential()),
+                    external_engagement: external,
+                    command: SessionCommand::Accept {
+                        request: TurnControlRequest {
+                            write: false,
+                            normalized_request_sha256: None,
+                            message: task.prompt.clone(),
+                            idempotency_key: if external.is_some() {
+                                key.to_owned()
+                            } else {
+                                format!("successor-task:{}", task.task_ref)
+                            },
+                            effort: None,
+                            images: Vec::new(),
+                        },
+                        delivery: DeliveryMode::Submit,
+                    },
+                    outcome: Arc::new(MutationOutcome::default()),
+                },
+            )
+        }
+
+        fn complete(
+            &mut self,
+            turn: &str,
+            items: Vec<serde_json::Value>,
+        ) -> Result<Option<TerminalTurn>, TurnError> {
+            self.complete_with_usage(turn, items, None)
+        }
+
+        fn complete_with_usage(
+            &mut self,
+            turn: &str,
+            items: Vec<serde_json::Value>,
+            usage: Option<serde_json::Value>,
+        ) -> Result<Option<TerminalTurn>, TurnError> {
+            let mut observed = serde_json::json!({"id":turn,"status":"completed","items":items});
+            if let Some(usage) = usage {
+                observed["usage"] = usage;
+            }
+            let result = self
+                .coordinator
+                .as_mut()
+                .unwrap()
+                .ingest(serde_json::json!({
+                    "method":"turn/completed","params":{"threadId":"thread-1","turn":observed}
+                }));
+            if result.is_err() {
+                preserve_actor_terminal(
+                    self.coordinator.as_mut().unwrap(),
+                    &self.state_root,
+                    self.identity.run_id,
+                )
+                .unwrap();
+            }
+            let result = result?;
+            if let Some(terminal) = &result {
+                let authority =
+                    RunControllerAuthority::new(self.state_root.clone(), self.identity.run_id);
+                settle_member_terminal(
+                    &authority,
+                    &self.identity,
+                    member_owner(&authority.state_root, self.identity.run_id),
+                    terminal,
+                );
+            }
+            Ok(result)
+        }
+
+        fn requests(&self) -> Vec<serde_json::Value> {
+            fs::read_to_string(self.root.join("requests.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        }
+    }
+
+    impl Drop for ReviewDispatchFixture {
+        fn drop(&mut self) {
+            self.coordinator.take();
+            self.session.take();
+            let _ = self.fake.kill();
+            let _ = self.fake.wait();
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn review_agent_item(text: &str) -> serde_json::Value {
+        serde_json::json!({"type":"agentMessage","id":"answer","phase":"final_answer","text":text})
+    }
+
+    fn context_only_review() -> serde_json::Value {
+        let mut verdict = crate::semantic::successor_review_tests::verdict(&serde_json::json!({}));
+        for assessment in verdict["criterion_assessments"].as_array_mut().unwrap() {
+            assessment["evidence"] = serde_json::json!([{
+                "basis":"context", "description":"Captured caller evidence.",
+                "context_id":format!("ctx-{}", assessment["criterion_id"].as_str().unwrap()),
+                "path":null,"line_start":null,"line_end":null,"read_receipt_id":null,
+            }]);
+        }
+        verdict
+    }
+
+    #[test]
+    fn checked_history_rpc_failure_never_pins_notification_fallback() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+            scene.prepare_worker_ledger();
+            let (task, reader) = scene.assign("history-rpc", "head", None);
+            let text = context_only_review().to_string();
+            let mut fixture = ReviewDispatchFixture::with_history(
+                &scene,
+                serde_json::json!([
+                    {"error":{"code":-32000,"message":"history temporarily unavailable"}},
+                    recovery_history(vec![review_agent_item(&text)], "completed", Some("full"))
+                ]),
+            );
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, "history-rpc"),
+                ControlResponseV1::Accepted { .. }
+            ));
+            scene.mark_running(task.task_ref, "turn-1");
+            let usage = serde_json::json!({"inputTokens":7,"outputTokens":5});
+            let fallback =
+                "notification fallback".repeat(crate::turn::MAX_INLINE_FINAL_RESPONSE_BYTES / 10);
+            assert!(
+                fixture
+                    .complete_with_usage(
+                        "turn-1",
+                        vec![review_agent_item(&fallback)],
+                        Some(usage.clone())
+                    )
+                    .is_err()
+            );
+            assert_eq!(scene.state(task.task_ref), "running");
+            let observed = scene.observed_terminal("turn-1");
+            assert_eq!(observed.status, "completed");
+            assert_eq!(observed.usage, Some(usage));
+            assert!(observed.final_response.is_none());
+            assert!(
+                crate::semantic::resolved_terminal(
+                    scene.state_root(),
+                    scene.manifest().run_id,
+                    "turn-1"
+                )
+                .unwrap()
+                .is_none()
+            );
+            let artifacts =
+                crate::run::run_root(scene.state_root(), scene.manifest().run_id).join("artifacts");
+            assert_eq!(
+                crate::artifact::logical_artifact_bytes(&artifacts).unwrap(),
+                0
+            );
+            assert_eq!(reader.pending_histories().unwrap().len(), 1);
+            fixture.restart(&scene);
+            scene.settle(task.task_ref).unwrap();
+            assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+            assert_eq!(scene.observed_terminal("turn-1"), observed);
+            assert_eq!(
+                scene.recorded_terminal("turn-1").final_response,
+                Some(crate::turn::FinalResponse::Inline { text })
+            );
+            let stable = scene.stability_facts();
+            scene.settle(task.task_ref).unwrap();
+            assert_eq!(scene.stability_facts(), stable);
+            assert_eq!(
+                fixture
+                    .requests()
+                    .iter()
+                    .filter(|r| r["method"] == "turn/start")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn raw_parent_tokens_reject_recovery_without_publication() {
+        for managed in [false, true] {
+            for token in [
+                "nope",
+                "nul",
+                "nullx",
+                "\"null\"",
+                "null x",
+                "null\u{000b}",
+                "null,\"parentThreadId\":null",
+                "null,\"parentThread\\u0049d\":null",
+                "null,\"extra\":0,\"extra\":0",
+                "null,\"id\":\"thread-1\"",
+                "null",
+            ] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let task = scene.accept_generic_task("raw-parent");
+                let bytes = format!(
+                    "{{\"thread\":{{\"id\":\"thread-1\",\"parentThreadId\":{token},\"turns\":[{{\"id\":\"turn-1\",\"status\":\"completed\",\"itemsView\":\"full\",\"items\":[]}}]}}}}"
+                );
+                let mut fixture =
+                    ReviewDispatchFixture::with_history(&scene, serde_json::json!(bytes));
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "raw-parent"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                fixture.lose_transport();
+                fixture.restart(&scene);
+                let response = fixture.reconcile(&scene);
+                if token == "null" {
+                    assert!(
+                        matches!(response, ControlResponseV1::Status { .. }),
+                        "{response:?}"
+                    );
+                    assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                    assert_converged_journal(&fixture, 1, 1);
+                } else {
+                    assert!(
+                        matches!(response, ControlResponseV1::Failed { .. }),
+                        "{token:?}: {response:?}"
+                    );
+                    assert_eq!(scene.state(task.task_ref), "running");
+                    assert_converged_journal(&fixture, 0, 0);
+                    assert!(
+                        crate::semantic::resolved_terminal(
+                            scene.state_root(),
+                            scene.manifest().run_id,
+                            "turn-1"
+                        )
+                        .unwrap()
+                        .is_none()
+                    );
+                    assert_eq!(
+                        crate::artifact::logical_artifact_bytes(
+                            &crate::run::run_root(scene.state_root(), scene.manifest().run_id)
+                                .join("artifacts")
+                        )
+                        .unwrap(),
+                        0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn split_history_roots_cannot_publish_a_recovered_task() {
+        let bytes = "{\"thread\":{\"id\":\"thread-1\",\"parentThreadId\":null}}\n\
+            {\"thread\":{\"turns\":[{\"id\":\"turn-1\",\"status\":\"completed\",\"itemsView\":\"full\",\"items\":[]}]}}";
+        assert_rejected_recovery_history(bytes);
+    }
+
+    #[test]
+    fn invalid_history_grammar_cannot_publish_a_recovered_task() {
+        for bytes in [
+            r#"{"thread":{"id":"thread-1","parentThreadId":null,"turns":[{"id":"turn-1","status":"completed","itemsView":"full","items":[]}]},}"#,
+            r#"{"thread":{"id":"thread-1","parentThreadId":null,"turns":[{"id":"turn-1","status":"completed","itemsView":"full","items":[]}]} true}"#,
+        ] {
+            assert_rejected_recovery_history(bytes);
+        }
+    }
+
+    fn assert_rejected_recovery_history(bytes: &str) {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+            scene.prepare_worker_ledger();
+            let task = scene.accept_generic_task("split-history");
+            let mut fixture = ReviewDispatchFixture::with_history(&scene, serde_json::json!(bytes));
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, "split-history"),
+                ControlResponseV1::Accepted { .. }
+            ));
+            scene.mark_running(task.task_ref, "turn-1");
+            fixture.lose_transport();
+            fixture.restart(&scene);
+            let stable = scene.stability_facts();
+            for _ in 0..2 {
+                let response = fixture.reconcile(&scene);
+                assert!(
+                    matches!(response, ControlResponseV1::Failed { .. }),
+                    "{response:?}"
+                );
+                assert_eq!(scene.state(task.task_ref), "running");
+                let current = scene.stability_facts();
+                assert_eq!((current.0, current.1), (stable.0, stable.1));
+                assert_converged_journal(&fixture, 0, 0);
+                assert!(
+                    crate::semantic::resolved_terminal(
+                        scene.state_root(),
+                        scene.manifest().run_id,
+                        "turn-1"
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                let root = crate::run::run_root(scene.state_root(), scene.manifest().run_id);
+                assert!(!root.join("terminal-resolution-preparations").exists());
+                assert_eq!(
+                    crate::artifact::logical_artifact_bytes(&root.join("artifacts")).unwrap(),
+                    0
+                );
+                let store = scene.store();
+                let artifacts: i64 = store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM artifacts WHERE task_id=?1",
+                        [task.task_ref.to_string()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(artifacts, 0);
+                let no_result = match scene.owner() {
+                    crate::delegation_service::SettlementOwner::External { engagement_id } => store
+                        .task_complete_result(engagement_id, task.task_ref)
+                        .unwrap()
+                        .is_none(),
+                    crate::delegation_service::SettlementOwner::Managed { .. } => {
+                        crate::orchestration::successor_task_result(
+                            store.connection(),
+                            task.task_ref,
+                        )
+                        .unwrap()
+                        .is_none()
+                    }
+                };
+                assert!(no_result);
+            }
+        }
+    }
+
+    fn failed_candidate_item(code: &str) -> serde_json::Value {
+        let error = MachineError::new(
+            code,
+            "Recorded host read failure",
+            false,
+            serde_json::json!({"required_action":"inspect_state"}),
+        );
+        serde_json::json!({"type":"dynamicToolCall","id":"failed-read","tool":"dolgorae_candidate_read",
+            "status":"failed","success":false,
+            "arguments":{"side":"metadata","path":"target.json","byte_offset":0,"byte_length":1},
+            "contentItems":[{"type":"inputText","text":serde_json::json!({"error":error}).to_string()}]})
+    }
+
+    #[test]
+    fn recorded_host_faults_retry_the_original_checked_terminal() {
+        for managed in [false, true] {
+            for code in [
+                "RUNTIME_STATE_INVALID",
+                "REVIEW_TARGET_GIT_FAILED",
+                "REVIEW_TARGET_IO_FAILURE",
+                "INTERNAL_ERROR",
+                "REVIEW_TARGET_TIMEOUT",
+                "REVIEW_TARGET_LIMIT_EXCEEDED",
+            ] {
+                for fault in 0..8 {
+                    if (code == "REVIEW_TARGET_LIMIT_EXCEEDED") != (fault == 7) {
+                        continue;
+                    }
+                    let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                    scene.prepare_worker_ledger();
+                    let (task, reader) = scene.assign("host-fault", "head", None);
+                    scene.evidence(&reader, "turn-1");
+                    let items = vec![
+                        failed_candidate_item(code),
+                        review_agent_item(&context_only_review().to_string()),
+                    ];
+                    let mut fixture = ReviewDispatchFixture::new(&scene, items.clone());
+                    assert!(matches!(
+                        fixture.dispatch(&scene, &task, "host-fault"),
+                        ControlResponseV1::Accepted { .. }
+                    ));
+                    scene.mark_running(task.task_ref, "turn-1");
+                    let root = scene
+                        .state_root()
+                        .join("direct-reviews")
+                        .join(task.task_ref.to_string());
+                    let receipt = fs::read_dir(root.join("reads"))
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .unwrap()
+                        .path();
+                    let path = match fault {
+                        0 => root.join("reader.lock"),
+                        1 => root.join("binding.json"),
+                        2 | 5 | 6 => root.join("reads"),
+                        _ => receipt,
+                    };
+                    let bytes = (!matches!(fault, 2 | 5 | 6)).then(|| fs::read(&path).unwrap());
+                    let source_fault = (fault == 5).then(|| {
+                        crate::direct_review_target::tests::SourceReadFault::at(
+                            &scene.manifest().canonical_workspace.to_path_buf().unwrap(),
+                        )
+                    });
+                    match fault {
+                        0 => fs::remove_file(&path).unwrap(),
+                        1 | 3 => fs::write(&path, b"invalid control JSON").unwrap(),
+                        2 | 6 => {
+                            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap()
+                        }
+                        4 => fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap(),
+                        5 => {
+                            let entry = reader
+                                .target()
+                                .entries
+                                .iter()
+                                .find(|entry| entry.path == "README.md" && entry.side != "before")
+                                .unwrap();
+                            assert_eq!(
+                                reader
+                                    .read(
+                                        "thread-1",
+                                        "turn-1",
+                                        "probe",
+                                        &crate::direct_review_target::CandidateReadRequest {
+                                            side: entry.side.clone(),
+                                            path: entry.path.clone(),
+                                            byte_offset: 0,
+                                            byte_length: 1,
+                                        }
+                                    )
+                                    .unwrap_err()
+                                    .code,
+                                "REVIEW_TARGET_IO_FAILURE"
+                            );
+                        }
+                        7 => crate::direct_review_target::tests::oversize_control_file(&path),
+                        _ => unreachable!(),
+                    }
+                    let usage = serde_json::json!({"inputTokens":3,"outputTokens":2});
+                    assert_eq!(
+                        reader
+                            .observe_item("thread-1", "turn-1", &items[0], true)
+                            .unwrap_err()
+                            .code,
+                        code
+                    );
+                    assert!(
+                        fixture
+                            .complete_with_usage("turn-1", items, Some(usage.clone()))
+                            .is_err()
+                    );
+                    assert_eq!(
+                        scene.state(task.task_ref),
+                        "running",
+                        "{code}, fault={fault}"
+                    );
+                    assert!(!root.join("provenance-violation.json").exists());
+                    let observed = scene.observed_terminal("turn-1");
+                    assert_eq!(observed.status, "completed");
+                    assert_eq!(observed.usage, Some(usage));
+                    let retained = crate::semantic::resolved_terminal(
+                        scene.state_root(),
+                        scene.manifest().run_id,
+                        "turn-1",
+                    )
+                    .unwrap();
+                    assert_eq!(retained.is_some(), fault != 0);
+                    let stable = scene.stability_facts();
+                    let _ = scene.settle(task.task_ref);
+                    assert_eq!(scene.state(task.task_ref), "running");
+                    assert_eq!(scene.stability_facts(), stable);
+                    if let Some(bytes) = bytes {
+                        fs::write(&path, bytes).unwrap();
+                    }
+                    fs::set_permissions(
+                        &path,
+                        fs::Permissions::from_mode(if matches!(fault, 2 | 5 | 6) {
+                            0o700
+                        } else {
+                            0o600
+                        }),
+                    )
+                    .unwrap();
+                    drop(source_fault);
+                    if fault == 6 {
+                        let entry = reader
+                            .target()
+                            .entries
+                            .iter()
+                            .find(|entry| entry.path == "README.md" && entry.blob_oid.is_some())
+                            .unwrap();
+                        let oid = entry.blob_oid.as_ref().unwrap();
+                        fs::remove_file(
+                            scene
+                                .manifest()
+                                .canonical_workspace
+                                .to_path_buf()
+                                .unwrap()
+                                .join(".git/objects")
+                                .join(&oid[..2])
+                                .join(&oid[2..]),
+                        )
+                        .unwrap();
+                    }
+                    fixture.restart(&scene);
+                    let settlement = scene.settle(task.task_ref);
+                    if fault == 6 {
+                        assert_eq!(scene.state(task.task_ref), "failed");
+                        assert_eq!(
+                            scene.result(task.task_ref)["safe_failure_code"],
+                            "REVIEW_TARGET_UNAVAILABLE"
+                        );
+                        assert!(scene.result(task.task_ref)["structured_output"].is_null());
+                    } else {
+                        settlement.unwrap();
+                        assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                        assert_eq!(
+                            scene.result(task.task_ref)["structured_output_schema"],
+                            "structured_review_v4"
+                        );
+                    }
+                    assert_eq!(scene.observed_terminal("turn-1"), observed);
+                    if let Some(retained) = retained {
+                        assert_eq!(scene.recorded_terminal("turn-1"), retained);
+                    }
+                    let stable = scene.stability_facts();
+                    let result = scene.result(task.task_ref);
+                    let _ = scene.settle(task.task_ref);
+                    assert_eq!(scene.stability_facts(), stable);
+                    assert_eq!(scene.result(task.task_ref), result);
+                    assert!(!root.join("provenance-violation.json").exists());
+                    assert_eq!(
+                        fixture
+                            .requests()
+                            .iter()
+                            .filter(|r| r["method"] == "turn/start")
+                            .count(),
+                        1
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deterministic_failed_candidate_reads_settle_normally() {
+        for managed in [false, true] {
+            for code in [
+                "INVALID_ARGUMENT",
+                "REVIEW_TARGET_UNSAFE_PATH",
+                "REVIEW_TARGET_UNSAFE_FILE",
+                "REVIEW_TARGET_LIMIT_EXCEEDED",
+                "REVIEW_TARGET_SECRET_DETECTED",
+            ] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let (task, reader) = scene.assign("deterministic-read", "workspace", None);
+                let mut item = failed_candidate_item(code);
+                if code == "REVIEW_TARGET_LIMIT_EXCEEDED" {
+                    crate::direct_review_target::tests::fill_receipt_directory(&reader);
+                }
+                let source = scene
+                    .manifest()
+                    .canonical_workspace
+                    .to_path_buf()
+                    .unwrap()
+                    .join("README.md");
+                let before = fs::read(&source).unwrap();
+                let mut arguments = item["arguments"].clone();
+                if code == "INVALID_ARGUMENT" {
+                    arguments["path"] = serde_json::json!("wrong.json");
+                }
+                if matches!(
+                    code,
+                    "REVIEW_TARGET_UNSAFE_FILE" | "REVIEW_TARGET_SECRET_DETECTED"
+                ) {
+                    arguments = serde_json::json!({"side":"current","path":"README.md","byte_offset":0,"byte_length":1});
+                    if code == "REVIEW_TARGET_UNSAFE_FILE" {
+                        fs::remove_file(&source).unwrap();
+                        std::os::unix::fs::symlink("missing-source", &source).unwrap();
+                    } else {
+                        fs::write(&source, b"authorization: bearer test-only-sentinel").unwrap();
+                    }
+                }
+                if code != "REVIEW_TARGET_UNSAFE_PATH" {
+                    let error = reader
+                        .read(
+                            "thread-1",
+                            "turn-1",
+                            "failed-read",
+                            &serde_json::from_value(arguments.clone()).unwrap(),
+                        )
+                        .unwrap_err();
+                    assert_eq!(error.code, code);
+                    item["arguments"] = arguments;
+                    item["contentItems"][0]["text"] =
+                        serde_json::json!(serde_json::json!({"error":error}).to_string());
+                }
+                if code == "REVIEW_TARGET_UNSAFE_FILE" {
+                    fs::remove_file(&source).unwrap();
+                }
+                fs::write(&source, &before).unwrap();
+                let items = vec![
+                    item.clone(),
+                    review_agent_item(&context_only_review().to_string()),
+                ];
+                let mut fixture = ReviewDispatchFixture::new(&scene, items);
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "deterministic-read"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                // History contains the same recorded host code; current source
+                // and storage are healthy, so the read failure is ordinary.
+                fixture
+                    .complete(
+                        "turn-1",
+                        vec![item, review_agent_item(&context_only_review().to_string())],
+                    )
+                    .unwrap()
+                    .unwrap();
+                scene.settle(task.task_ref).unwrap();
+                assert_eq!(
+                    scene.state(task.task_ref),
+                    "completed_not_delivered",
+                    "{code}"
+                );
+                assert_eq!(
+                    scene.result(task.task_ref)["structured_output_schema"],
+                    "structured_review_v4"
+                );
+                let root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(task.task_ref.to_string());
+                assert!(!root.join("provenance-violation.json").exists());
+                let stable = scene.stability_facts();
+                scene.settle(task.task_ref).unwrap();
+                assert_eq!(scene.stability_facts(), stable);
+            }
+        }
+    }
+
+    fn recovery_history(
+        items: Vec<serde_json::Value>,
+        status: &str,
+        view: Option<&str>,
+    ) -> serde_json::Value {
+        let mut turn = serde_json::json!({"id":"turn-1","status":status,"items":items});
+        if let Some(view) = view {
+            turn["itemsView"] = serde_json::json!(view);
+        }
+        serde_json::json!({"result":{"thread":{"id":"thread-1","parentThreadId":null,"turns":[turn]}}})
+    }
+
+    fn assert_converged_journal(
+        fixture: &ReviewDispatchFixture,
+        reconciliations: usize,
+        pauses: usize,
+    ) {
+        let ledger = fixture
+            .coordinator
+            .as_ref()
+            .unwrap()
+            .journal()
+            .ledger()
+            .lock()
+            .unwrap();
+        let records = ledger.durable_records().unwrap();
+        crate::conformance::verify_ledger_records(fixture.identity.run_id, records).unwrap();
+        assert_recovery_pause_stamps(records);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.kind() == crate::audit::AuditKind::Reconciliation)
+                .count(),
+            reconciliations
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(
+                    |record| record.kind() == crate::audit::AuditKind::LifecycleTransition
+                        && crate::semantic::audit_value(record).unwrap()["previous"]
+                            == "reconciliation_required"
+                        && crate::semantic::audit_value(record).unwrap()["current"] == "paused"
+                )
+                .count(),
+            pauses
+        );
+        assert!(
+            records
+                .iter()
+                .all(|record| record.kind() != crate::audit::AuditKind::TurnTerminal)
+        );
+    }
+
+    fn assert_recovery_pause_stamps(records: &[crate::audit::AuditRecord]) {
+        for record in records
+            .iter()
+            .filter(|record| record.kind() == crate::audit::AuditKind::LifecycleTransition)
+        {
+            let value = crate::semantic::audit_value(record).unwrap();
+            if value["previous"] == "reconciliation_required" && value["current"] == "paused" {
+                assert!(
+                    record.client_projection().is_some(),
+                    "recovered Paused must retain its append-time client stamp"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lost_read_only_turn_reconciles_after_restart_exactly_once() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+            scene.prepare_worker_ledger();
+            let task = scene.accept_generic_task("lost-read");
+            let text = "the exact recovered answer";
+            let mut fixture = ReviewDispatchFixture::with_history(
+                &scene,
+                recovery_history(vec![review_agent_item(text)], "completed", Some("full")),
+            );
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, "lost-read"),
+                ControlResponseV1::Accepted { .. }
+            ));
+            scene.mark_running(task.task_ref, "turn-1");
+            let before = scene.stability_facts();
+            scene.observe(task.task_ref, false).unwrap();
+            assert!(scene.observe(task.task_ref, true).is_err());
+            assert_eq!(scene.stability_facts(), before);
+            fixture.lose_transport();
+            fixture.restart(&scene);
+            let reconciled = fixture.reconcile(&scene);
+            assert!(
+                matches!(&reconciled,ControlResponseV1::Status { lifecycle,.. } if lifecycle=="paused"),
+                "{reconciled:?}"
+            );
+            assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+            assert_eq!(
+                scene.recorded_terminal("turn-1").final_response,
+                Some(crate::turn::FinalResponse::Inline {
+                    text: text.to_owned()
+                })
+            );
+            let result = scene.result(task.task_ref);
+            assert_eq!(result["terminal_outcome"], "completed");
+            assert_eq!(
+                result["final_response"]["sha256"],
+                format!("sha256:{}", crate::jcs::sha256_hex(text.as_bytes()))
+            );
+            assert_eq!(scene.stability_facts().0, before.0 + 1);
+            let stable = scene.stability_facts();
+            assert!(matches!(
+                fixture.reconcile(&scene),
+                ControlResponseV1::Status { .. }
+            ));
+            scene.settle(task.task_ref).unwrap();
+            assert_eq!(scene.result(task.task_ref), result);
+            assert_eq!(scene.stability_facts(), stable);
+            scene.observe(task.task_ref, false).unwrap();
+            let _identity = scene.observe(task.task_ref, true);
+            assert_eq!(scene.stability_facts(), stable);
+            assert_converged_journal(&fixture, 1, 1);
+            assert_eq!(
+                fixture
+                    .requests()
+                    .iter()
+                    .filter(|r| r["method"] == "turn/start")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                fixture
+                    .requests()
+                    .iter()
+                    .filter(|r| r["method"] == "thread/start")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn lost_failed_turn_preserves_its_safe_cause() {
+        for managed in [false, true] {
+            for (status, state, cause) in [
+                ("failed", "failed", "TURN_FAILED"),
+                ("interrupted", "cancelled", "TURN_INTERRUPTED"),
+            ] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let task = scene.accept_generic_task("lost-failed");
+                let mut fixture = ReviewDispatchFixture::with_history(
+                    &scene,
+                    recovery_history(vec![], status, Some("full")),
+                );
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "lost-failed"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                fixture.lose_transport();
+                fixture.restart(&scene);
+                assert!(matches!(
+                    fixture.reconcile(&scene),
+                    ControlResponseV1::Status { .. }
+                ));
+                assert_eq!(scene.state(task.task_ref), state);
+                let result = scene.result(task.task_ref);
+                assert_eq!(result["safe_failure_code"], cause);
+                assert!(result["final_response"].is_null());
+                assert!(result["structured_output"].is_null());
+                assert_converged_journal(&fixture, 1, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn reconciliation_resumes_each_durable_journal_prefix() {
+        for managed in [false, true] {
+            for prefix in 0..4 {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let task = scene.accept_generic_task("prefix");
+                let mut fixture = ReviewDispatchFixture::with_history(
+                    &scene,
+                    recovery_history(
+                        vec![review_agent_item("retained answer")],
+                        "completed",
+                        Some("full"),
+                    ),
+                );
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "prefix"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                if prefix > 0 {
+                    fixture.lose_transport();
+                }
+                if prefix > 1 {
+                    fixture.restart(&scene);
+                    let coordinator = fixture.coordinator.as_mut().unwrap();
+                    let history = coordinator.successor_history("thread-1", "turn-1").unwrap();
+                    let (key, epoch) = coordinator.reconciliation_server();
+                    coordinator.journal().with_ledger_authority(|ledger| {
+                    ledger.append_required_payload(crate::audit::AuditKind::Reconciliation,
+                        &serde_json::json!({"thread_id":history.thread_id,"turn_id":history.turn_id,
+                        "observed_status":history.status,"server_key":key,"server_epoch":epoch,"read_only":true}),fixture.identity.run_generation).unwrap();
+                    if prefix > 2 {
+                        ledger.append_conformance_payload(crate::audit::AuditKind::LifecycleTransition,
+                            &serde_json::json!({"previous":"reconciliation_required","current":"paused","terminal_seal":false}),fixture.identity.run_generation).unwrap();
+                    }
+                    Ok(())
+                    }).unwrap();
+                }
+                fixture.restart(&scene);
+                let response = fixture.reconcile(&scene);
+                assert!(
+                    matches!(response, ControlResponseV1::Status { .. }),
+                    "prefix={prefix}: {response:?}"
+                );
+                assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                assert_converged_journal(&fixture, 1, 1);
+                let records = fixture
+                    .coordinator
+                    .as_ref()
+                    .unwrap()
+                    .journal()
+                    .ledger()
+                    .lock()
+                    .unwrap()
+                    .durable_records()
+                    .unwrap()
+                    .to_vec();
+                assert_eq!(
+                    records
+                        .iter()
+                        .filter(|r| r.kind() == crate::audit::AuditKind::OutcomeUnknown)
+                        .count(),
+                    usize::from(prefix > 0)
+                );
+                assert_eq!(
+                    fixture
+                        .requests()
+                        .iter()
+                        .filter(|r| r["method"] == "turn/start")
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reconciliation_rejects_conflicting_status_and_another_paused_execution() {
+        for managed in [false, true] {
+            for unrelated in [false, true] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let task = scene.accept_generic_task("conflicting-prefix");
+                let mut fixture = ReviewDispatchFixture::with_history(
+                    &scene,
+                    recovery_history(
+                        vec![review_agent_item("original")],
+                        "completed",
+                        Some("full"),
+                    ),
+                );
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "conflicting-prefix"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                fixture.lose_transport();
+                fixture.restart(&scene);
+                let failure = crate::semantic::RecoveryTestFailure::at("after_pause");
+                assert!(matches!(
+                    fixture.reconcile(&scene),
+                    ControlResponseV1::Failed { .. }
+                ));
+                drop(failure);
+                fixture.restart(&scene);
+                let execution = crate::semantic::successor_reconciliation_executions(
+                    scene.state_root(),
+                    scene.manifest().run_id,
+                )
+                .unwrap()
+                .pop()
+                .unwrap();
+                let coordinator = fixture.coordinator.as_mut().unwrap();
+                let (key, epoch) = coordinator.reconciliation_server();
+                let key = key.to_owned();
+                if unrelated {
+                    coordinator.resume().unwrap();
+                    // Seed a different generic read to test journal ownership;
+                    // no second semantic task dispatch or result is claimed.
+                    coordinator.bind_generic_successor_task().unwrap();
+                    let accepted = coordinator
+                        .start_turn(crate::turn::TurnRequest {
+                            write: false,
+                            idempotency_key: "unrelated-read".to_owned(),
+                            message: "A different execution".to_owned(),
+                            images: Vec::new(),
+                            model: scene.manifest().model.clone(),
+                            effort: None,
+                            delivery: DeliveryMode::Submit,
+                        })
+                        .unwrap();
+                    assert_eq!(accepted.turn_id, "turn-2");
+                    coordinator.abandon().unwrap();
+                    coordinator.journal().with_ledger_authority(|ledger| {
+                        ledger.append_required_payload(crate::audit::AuditKind::Reconciliation,
+                            &serde_json::json!({"thread_id":"thread-1","turn_id":"turn-2",
+                            "observed_status":"completed","server_key":key,"server_epoch":epoch,"read_only":true}),
+                            fixture.identity.run_generation).unwrap();
+                        ledger.append_conformance_payload(crate::audit::AuditKind::LifecycleTransition,
+                            &serde_json::json!({"previous":"reconciliation_required","current":"paused","terminal_seal":false}),
+                            fixture.identity.run_generation).unwrap();
+                        Ok(())
+                    }).unwrap();
+                }
+                let mut history = coordinator.successor_history("thread-1", "turn-1").unwrap();
+                if !unrelated {
+                    history.status = "failed".to_owned();
+                }
+                let audit = crate::run::run_root(scene.state_root(), scene.manifest().run_id)
+                    .join("audit.jsonl");
+                let before = fs::read(&audit).unwrap();
+                let error = coordinator
+                    .journal()
+                    .with_ledger_authority(|ledger| {
+                        let records = ledger.durable_records().unwrap();
+                        assert_eq!(
+                            crate::conformance::verify_ledger_records(
+                                scene.manifest().run_id,
+                                records
+                            )
+                            .unwrap()
+                            .lifecycle,
+                            crate::projection::RunLifecycle::Paused
+                        );
+                        crate::semantic::complete_successor_reconciliation(
+                            ledger,
+                            &execution,
+                            &history,
+                            &key,
+                            epoch,
+                            fixture.identity.run_generation,
+                            false,
+                        )
+                    })
+                    .unwrap_err();
+                assert_eq!(error.code, "RECOVERY_REQUIRED");
+                assert_eq!(
+                    error.details["reason"],
+                    if unrelated {
+                        "later_lifecycle"
+                    } else {
+                        "reconciliation_conflict"
+                    }
+                );
+                assert_eq!(fs::read(audit).unwrap(), before);
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert!(
+                    crate::semantic::resolved_terminal(
+                        scene.state_root(),
+                        scene.manifest().run_id,
+                        "turn-1"
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                let records = coordinator
+                    .journal()
+                    .ledger()
+                    .lock()
+                    .unwrap()
+                    .durable_records()
+                    .unwrap()
+                    .to_vec();
+                crate::conformance::verify_ledger_records(scene.manifest().run_id, &records)
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_artifact_keeps_its_reference_after_resolution_failure() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+            scene.prepare_worker_ledger();
+            let task = scene.accept_generic_task("artifact-retry");
+            let text = "x".repeat(crate::turn::MAX_INLINE_FINAL_RESPONSE_BYTES + 65537);
+            let mut fixture = ReviewDispatchFixture::with_history(
+                &scene,
+                recovery_history(vec![review_agent_item(&text)], "completed", Some("full")),
+            );
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, "artifact-retry"),
+                ControlResponseV1::Accepted { .. }
+            ));
+            scene.mark_running(task.task_ref, "turn-1");
+            fixture.lose_transport();
+            fixture.restart(&scene);
+            let root = crate::run::run_root(scene.state_root(), scene.manifest().run_id);
+            let failure = crate::semantic::RecoveryTestFailure::at("after_body");
+            assert!(matches!(
+                fixture.reconcile(&scene),
+                ControlResponseV1::Failed { .. }
+            ));
+            assert_eq!(scene.state(task.task_ref), "running");
+            assert_converged_journal(&fixture, 1, 1);
+            let preparation = fs::read_dir(root.join("terminal-resolution-preparations"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let prepared = fs::read(&preparation).unwrap();
+            let terminal: TerminalTurn = serde_json::from_slice(&prepared).unwrap();
+            let crate::turn::FinalResponse::Artifact {
+                artifact_id,
+                byte_length,
+                sha256,
+                ..
+            } = terminal.final_response.clone().unwrap()
+            else {
+                panic!("artifact expected")
+            };
+            assert_eq!(
+                fs::read(root.join("artifacts").join(format!("{artifact_id}.bin"))).unwrap(),
+                text.as_bytes()
+            );
+            assert_eq!(byte_length, text.len() as u64);
+            assert_eq!(sha256, crate::jcs::sha256_hex(text.as_bytes()));
+            drop(failure);
+            fixture.restart(&scene);
+            let response = fixture.reconcile(&scene);
+            assert!(
+                matches!(response, ControlResponseV1::Status { .. }),
+                "{response:?}"
+            );
+            assert_eq!(scene.recorded_terminal("turn-1"), terminal);
+            assert_eq!(fs::read(preparation).unwrap(), prepared);
+            assert_eq!(
+                fs::read_dir(root.join("artifacts"))
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|e| e.path().extension().is_some_and(|s| s == "bin"))
+                    .count(),
+                1
+            );
+            assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+            assert_converged_journal(&fixture, 1, 1);
+        }
+    }
+
+    #[test]
+    fn history_only_recovery_preserves_the_complete_absence_evidence() {
+        if let Ok(directory) = std::env::var("DOLGORAE_HISTORY_RANGE_CHILD") {
+            let root = PathBuf::from(directory);
+            let owner: StartupOwnerRecord =
+                serde_json::from_slice(&fs::read(root.join("owner.json")).unwrap()).unwrap();
+            let path = PathBuf::from(fs::read_to_string(root.join("lock-path")).unwrap());
+            let lock = StartupLockFile::open(&path, DarwinSystem.current_uid()).unwrap();
+            let _guard = lock.claim(&owner, Duration::from_secs(1)).unwrap();
+            fs::write(root.join("range-ready"), b"ready").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !root.join("range-release").exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return;
+        }
+        struct RangeChild {
+            child: Child,
+            release: PathBuf,
+        }
+        impl Drop for RangeChild {
+            fn drop(&mut self) {
+                let _ = fs::write(&self.release, b"release");
+                let _ = self.child.wait();
+            }
+        }
+        for managed in [false, true] {
+            for case in 0..7 {
+                let scene = crate::semantic::successor_review_tests::Scene::in_home(managed);
+                scene.prepare_worker_ledger();
+                let (task, reader) = scene.assign("absence-evidence", "head", None);
+                let mut fixture = ReviewDispatchFixture::with_history(
+                    &scene,
+                    recovery_history(
+                        vec![review_agent_item("unavailable review")],
+                        "completed",
+                        Some("full"),
+                    ),
+                );
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "absence-evidence"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                fixture.publish_retained_profile(&scene);
+                fixture.coordinator.take();
+                fixture.session.take();
+                prepare_runtime_root(
+                    &runtime_root(scene.state_root()),
+                    DarwinSystem.current_uid(),
+                )
+                .unwrap();
+                let (runtime, record) =
+                    crate::semantic::release_fixture::write_absent_worker_locator(
+                        scene.state_root(),
+                        &scene.manifest().workspace_id,
+                        scene.manifest().run_id,
+                    );
+                remove_verified_absent_runtime(&runtime, DarwinSystem.current_uid()).unwrap();
+                let reader_root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(reader.review_id().to_string());
+                fs::rename(&reader_root, reader_root.with_extension("saved")).unwrap();
+                let lock_path =
+                    startup_lock_path(&runtime_root(scene.state_root()), scene.manifest().run_id);
+                let lock = StartupLockFile::open(&lock_path, DarwinSystem.current_uid()).unwrap();
+                if case == 0 || case == 1 || case == 6 {
+                    let mut identity = record.identity.clone();
+                    if case != 6 {
+                        identity.run_generation += 1;
+                    }
+                    lock.write_owner(&StartupOwnerRecord {
+                        schema_version: 1,
+                        slot: if case == 1 { 1 } else { 0 },
+                        executable_path_sha256: identity.executable_sha256.clone(),
+                        identity,
+                    })
+                    .unwrap();
+                }
+                drop(lock);
+                if case == 2 || case == 3 {
+                    use std::os::unix::fs::FileExt as _;
+                    let file = fs::OpenOptions::new().write(true).open(&lock_path).unwrap();
+                    file.write_all_at(
+                        &[0xff; STARTUP_SLOT_BYTES],
+                        slot_offset(if case == 2 { 0 } else { 1 }).unwrap(),
+                    )
+                    .unwrap();
+                }
+                let _child = if case == 4 {
+                    let mut owner = current_startup_owner(
+                        &scene.manifest().workspace_id,
+                        scene.manifest().run_id,
+                        record.identity.run_generation,
+                    )
+                    .unwrap();
+                    owner.slot = 1;
+                    fs::write(
+                        fixture.root.join("owner.json"),
+                        serde_json::to_vec(&owner).unwrap(),
+                    )
+                    .unwrap();
+                    fs::write(fixture.root.join("lock-path"), lock_path.to_str().unwrap()).unwrap();
+                    let child = Command::new(std::env::current_exe().unwrap()).args([
+                        "--exact","worker::tests::history_only_recovery_preserves_the_complete_absence_evidence","--test-threads=1"])
+                        .env("DOLGORAE_HISTORY_RANGE_CHILD",&fixture.root)
+                        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+                    let guard = RangeChild {
+                        child,
+                        release: fixture.root.join("range-release"),
+                    };
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !fixture.root.join("range-ready").exists() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    assert!(fixture.root.join("range-ready").exists());
+                    Some(guard)
+                } else {
+                    None
+                };
+                let _registration = (case == 5).then(|| {
+                    crate::process_inventory::Registration::prepare(
+                        "worker",
+                        &scene.state_root().canonicalize().unwrap(),
+                        Path::new("/bin/sleep"),
+                        "retained-registration".to_owned(),
+                        None,
+                        None,
+                        Some(scene.manifest().run_id),
+                    )
+                    .unwrap()
+                });
+                let bytes = fs::read(&lock_path).unwrap();
+                let stable = scene.stability_facts();
+                for _ in 0..2 {
+                    let response = scene.service_reconcile(task.task_ref);
+                    assert_eq!(fs::read(&lock_path).unwrap(), bytes, "case={case}");
+                    if case == 6 {
+                        assert!(response.is_ok(), "{response:?}");
+                        assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                    } else {
+                        assert!(response.is_err(), "case={case}: {response:?}");
+                        assert_eq!(scene.state(task.task_ref), "running");
+                        let current = scene.stability_facts();
+                        assert_eq!((current.0, current.1), (stable.0, stable.1));
+                        assert!(
+                            crate::semantic::resolved_terminal(
+                                scene.state_root(),
+                                scene.manifest().run_id,
+                                "turn-1"
+                            )
+                            .unwrap()
+                            .is_none()
+                        );
+                        let root =
+                            crate::run::run_root(scene.state_root(), scene.manifest().run_id);
+                        assert!(!root.join("terminal-resolution-preparations").exists());
+                        assert_eq!(
+                            crate::artifact::logical_artifact_bytes(&root.join("artifacts"))
+                                .unwrap(),
+                            0
+                        );
+                        let count: i64 = scene
+                            .store()
+                            .connection()
+                            .query_row(
+                                "SELECT COUNT(*) FROM artifacts WHERE task_id=?1",
+                                [task.task_ref.to_string()],
+                                |row| row.get(0),
+                            )
+                            .unwrap();
+                        assert_eq!(count, 0);
+                        let ledger = Ledger::open(root, scene.manifest().run_id).unwrap();
+                        let records = ledger.durable_records().unwrap();
+                        crate::conformance::verify_ledger_records(scene.manifest().run_id, records)
+                            .unwrap();
+                        assert!(
+                            !records
+                                .iter()
+                                .any(|r| r.kind() == crate::audit::AuditKind::Reconciliation)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_reader_reconciles_through_the_owner_service_without_a_worker() {
+        for managed in [false, true] {
+            for remove_binding_only in [false, true] {
+                let scene = crate::semantic::successor_review_tests::Scene::in_home(managed);
+                scene.prepare_worker_ledger();
+                let (task, reader) = scene.assign("reader-lost", "head", None);
+                let mut fixture = ReviewDispatchFixture::with_history(
+                    &scene,
+                    recovery_history(
+                        vec![review_agent_item("unverified review")],
+                        "completed",
+                        Some("full"),
+                    ),
+                );
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "reader-lost"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                fixture.publish_retained_profile(&scene);
+                fixture.coordinator.take();
+                fixture.session.take();
+                prepare_runtime_root(
+                    &runtime_root(scene.state_root()),
+                    DarwinSystem.current_uid(),
+                )
+                .unwrap();
+                let (runtime, _) = crate::semantic::release_fixture::write_absent_worker_locator(
+                    scene.state_root(),
+                    &scene.manifest().workspace_id,
+                    scene.manifest().run_id,
+                );
+                let before_runtime = fs::read(&runtime).unwrap();
+                let root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(reader.review_id().to_string());
+                let missing = if remove_binding_only {
+                    root.join("binding.json")
+                } else {
+                    root.clone()
+                };
+                fs::rename(&missing, missing.with_extension("saved")).unwrap();
+                let before = fixture.requests().len();
+                let failure = remove_binding_only
+                    .then(|| crate::semantic::RecoveryTestFailure::at("after_settlement"));
+                let mut response = scene.service_reconcile(task.task_ref);
+                if remove_binding_only {
+                    assert!(response.is_err());
+                    assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                    drop(failure);
+                    response = scene.service_reconcile(task.task_ref);
+                }
+                assert!(
+                    matches!(
+                        response,
+                        Ok(crate::delegation_service::MemberSettlement::Terminal)
+                    ),
+                    "{response:?}"
+                );
+                assert!(!missing.exists());
+                assert_eq!(
+                    scene.result(task.task_ref)["schema"],
+                    "dolgorae.complete-result-unavailable/v1"
+                );
+                assert_eq!(fs::read(&runtime).unwrap(), before_runtime);
+                let requests = fixture.requests();
+                let requests = &requests[before..];
+                assert!(
+                    requests
+                        .iter()
+                        .filter_map(|r| r["method"].as_str())
+                        .all(|m| matches!(m, "initialize" | "initialized" | "thread/read"))
+                );
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r["method"] == "thread/read")
+                        .count(),
+                    1
+                );
+                let ledger = Ledger::open(
+                    crate::run::run_root(scene.state_root(), scene.manifest().run_id),
+                    scene.manifest().run_id,
+                )
+                .unwrap();
+                let records = ledger.durable_records().unwrap();
+                assert_recovery_pause_stamps(records);
+                assert_eq!(
+                    crate::conformance::verify_ledger_records(scene.manifest().run_id, records)
+                        .unwrap()
+                        .lifecycle,
+                    crate::projection::RunLifecycle::Paused
+                );
+                assert_eq!(
+                    records
+                        .iter()
+                        .filter(|r| r.kind() == crate::audit::AuditKind::Reconciliation)
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    records
+                        .iter()
+                        .filter(|r| r.kind() == crate::audit::AuditKind::OutcomeUnknown)
+                        .count(),
+                    0
+                );
+                drop(ledger);
+                let stable = scene.stability_facts();
+                assert!(scene.service_reconcile(task.task_ref).is_ok());
+                assert_eq!(scene.stability_facts(), stable);
+            }
+        }
+    }
+
+    #[test]
+    fn lost_write_history_never_reconstructs_a_change_set() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::writable(managed);
+            scene.prepare_worker_ledger();
+            let task = scene.accept_write_task("lost-write");
+            scene.record_running_execution(&task, "lost-write", true);
+            assert!(
+                scene
+                    .store()
+                    .dispatch_index_object(task.task_ref)
+                    .unwrap()
+                    .is_some()
+            );
+            fs::write(
+                scene
+                    .manifest()
+                    .canonical_workspace
+                    .to_path_buf()
+                    .unwrap()
+                    .join("README.md"),
+                "changed after the captured index\n",
+            )
+            .unwrap();
+            let items = vec![
+                serde_json::json!({"type":"fileChange","id":"large-diff","status":"completed",
+                "changes":[{"path":"README.md","kind":{"type":"update"},"diff":"x".repeat(65537)}]}),
+                review_agent_item("history cannot reconstruct the write baseline"),
+            ];
+            let mut fixture = ReviewDispatchFixture::with_history(
+                &scene,
+                recovery_history(items, "completed", Some("full")),
+            );
+            fixture.identity.run_generation = 2;
+            let before = scene.stability_facts();
+            let response = fixture.reconcile(&scene);
+            assert!(
+                matches!(response, ControlResponseV1::Status { .. }),
+                "{response:?}"
+            );
+            assert_eq!(
+                scene.result(task.task_ref)["schema"],
+                "dolgorae.complete-result-unavailable/v1"
+            );
+            assert_eq!(scene.stability_facts().0, before.0 + 1);
+            assert_converged_journal(&fixture, 1, 1);
+            assert!(
+                crate::semantic::resolved_terminal(
+                    scene.state_root(),
+                    scene.manifest().run_id,
+                    "turn-1"
+                )
+                .unwrap()
+                .is_none()
+            );
+            assert!(!fixture.requests().iter().any(|r| matches!(
+                r["method"].as_str(),
+                Some("turn/start" | "thread/resume" | "thread/start" | "thread/fork")
+            )));
+            let stable = scene.stability_facts();
+            assert!(scene.service_reconcile(task.task_ref).is_ok());
+            assert_eq!(scene.stability_facts(), stable);
+        }
+    }
+
+    #[test]
+    fn history_only_recovery_rejects_foreign_authority_and_unverified_evidence() {
+        for managed in [false, true] {
+            for case in 0..8 {
+                let scene = crate::semantic::successor_review_tests::Scene::in_home(managed);
+                scene.prepare_worker_ledger();
+                let (task, reader) = scene.assign("history-refusal", "head", None);
+                let mut history = recovery_history(
+                    vec![review_agent_item("unverified")],
+                    "completed",
+                    Some("full"),
+                );
+                if case == 0 {
+                    history = serde_json::json!({"error":{"code":-32000,"message":"history unavailable"}});
+                }
+                if case == 1 {
+                    history["result"]["thread"]["id"] = serde_json::json!("foreign");
+                }
+                if case == 2 {
+                    history["result"]["thread"]["parentThreadId"] = serde_json::json!("ancestor");
+                }
+                let mut fixture = ReviewDispatchFixture::with_history(&scene, history);
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "history-refusal"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                let profile = fixture.publish_retained_profile(&scene);
+                fixture.coordinator.take();
+                fixture.session.take();
+                prepare_runtime_root(
+                    &runtime_root(scene.state_root()),
+                    DarwinSystem.current_uid(),
+                )
+                .unwrap();
+                let (runtime, _) = crate::semantic::release_fixture::write_absent_worker_locator(
+                    scene.state_root(),
+                    &scene.manifest().workspace_id,
+                    scene.manifest().run_id,
+                );
+                let root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(reader.review_id().to_string());
+                fs::rename(&root, root.with_extension("saved")).unwrap();
+                let original_profile = fs::read(&profile).unwrap();
+                if (3..6).contains(&case) {
+                    let mut state: serde_json::Value =
+                        serde_json::from_slice(&original_profile).unwrap();
+                    match case {
+                        3 => state["server_epoch"] = serde_json::json!(999),
+                        4 => state["process_fingerprint"] = serde_json::json!("foreign"),
+                        _ => state["socket_inode"] = serde_json::json!(0),
+                    }
+                    fs::write(&profile, serde_json::to_vec(&state).unwrap()).unwrap();
+                }
+                if case == 6 {
+                    fs::write(&runtime, b"unreadable runtime").unwrap();
+                }
+                let before = scene.stability_facts();
+                let response = if case == 7 {
+                    let foreign = crate::semantic::successor_review_tests::Scene::new(false);
+                    scene.service_reconcile_with(task.task_ref, &foreign.dispatch_credential())
+                } else {
+                    scene.service_reconcile(task.task_ref)
+                };
+                assert!(response.is_err(), "case {case}: {response:?}");
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert_eq!(scene.stability_facts().0, before.0);
+                assert!(!root.exists());
+                let requests = fixture.requests();
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r["method"] == "turn/start")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r["method"] == "thread/start")
+                        .count(),
+                    1
+                );
+                assert!(!requests.iter().any(|r| r["method"] == "thread/resume"));
+                let ledger = Ledger::open(
+                    crate::run::run_root(scene.state_root(), scene.manifest().run_id),
+                    scene.manifest().run_id,
+                )
+                .unwrap();
+                let records = ledger.durable_records().unwrap();
+                crate::conformance::verify_ledger_records(scene.manifest().run_id, records)
+                    .unwrap();
+                assert!(
+                    !records
+                        .iter()
+                        .any(|r| r.kind() == crate::audit::AuditKind::Reconciliation)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn paused_control_recovery_completes_in_one_call_under_the_existing_lease() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::in_home(managed);
+            scene.prepare_worker_ledger();
+            let (task, reader) = scene.assign("paused-control", "head", None);
+            let mut fixture = ReviewDispatchFixture::with_history(
+                &scene,
+                recovery_history(
+                    vec![review_agent_item("unverified")],
+                    "completed",
+                    Some("full"),
+                ),
+            );
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, "paused-control"),
+                ControlResponseV1::Accepted { .. }
+            ));
+            scene.mark_running(task.task_ref, "turn-1");
+            fixture.publish_retained_profile(&scene);
+            fixture.coordinator.take();
+            fixture.session.take();
+            prepare_runtime_root(
+                &runtime_root(scene.state_root()),
+                DarwinSystem.current_uid(),
+            )
+            .unwrap();
+            let (runtime, mut record) =
+                crate::semantic::release_fixture::write_absent_worker_locator(
+                    scene.state_root(),
+                    &scene.manifest().workspace_id,
+                    scene.manifest().run_id,
+                );
+            let root = scene
+                .state_root()
+                .join("direct-reviews")
+                .join(reader.review_id().to_string());
+            fs::rename(&root, root.with_extension("saved")).unwrap();
+            let lease = RunLifecycleLease::acquire(
+                scene.state_root(),
+                &scene.manifest().workspace_id,
+                scene.manifest().run_id,
+                1,
+            )
+            .unwrap();
+            let foreign = RunLifecycleLease::acquire(
+                scene.state_root(),
+                &scene.manifest().workspace_id,
+                Uuid::now_v7(),
+                1,
+            )
+            .unwrap();
+            assert!(scene.recover_under_lease(&foreign).is_err());
+            drop(foreign);
+            let failure = crate::semantic::RecoveryTestFailure::at("after_pause");
+            assert!(scene.recover_under_lease(&lease).is_err());
+            assert_eq!(scene.state(task.task_ref), "running");
+            drop(failure);
+            record.control_recovery_required = true;
+            write_runtime_record(&runtime, &record).unwrap();
+            let recovered = scene.recover_under_lease(&lease);
+            assert!(recovered.is_ok(), "{recovered:?}");
+            assert!(!runtime.exists());
+            assert_eq!(
+                scene.result(task.task_ref)["schema"],
+                "dolgorae.complete-result-unavailable/v1"
+            );
+            let ledger = Ledger::open(
+                crate::run::run_root(scene.state_root(), scene.manifest().run_id),
+                scene.manifest().run_id,
+            )
+            .unwrap();
+            let records = ledger.durable_records().unwrap();
+            assert_recovery_pause_stamps(records);
+            assert_eq!(
+                crate::conformance::verify_ledger_records(scene.manifest().run_id, records)
+                    .unwrap()
+                    .lifecycle,
+                crate::projection::RunLifecycle::Paused
+            );
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|r| r.kind() == crate::audit::AuditKind::Reconciliation)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|r| r.kind() == crate::audit::AuditKind::MutationAdmitted)
+                    .count(),
+                records
+                    .iter()
+                    .filter(|r| r.kind() == crate::audit::AuditKind::MutationCompleted)
+                    .count()
+            );
+            assert!(!root.exists());
+            assert_eq!(
+                fixture
+                    .requests()
+                    .iter()
+                    .filter(|r| r["method"] == "thread/read")
+                    .count(),
+                3
+            );
+        }
+    }
+
+    #[test]
+    fn release_fences_work_then_resumes_after_separate_history_recovery() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::in_home(managed);
+            scene.prepare_worker_ledger();
+            let (task, reader) = scene.assign("release-recovery", "head", None);
+            let binding = scene.manifest().global_profile_binding.as_ref().unwrap();
+            let membership = crate::global_runtime::GlobalMembershipStore::from_root(
+                scene.state_root().parent().unwrap().parent().unwrap(),
+                &binding.selected_name,
+                &binding.server_key,
+            )
+            .unwrap();
+            membership
+                .record(
+                    &scene.manifest().workspace_id,
+                    scene.manifest().run_id,
+                    crate::global_runtime::MembershipDisposition::Active,
+                )
+                .unwrap();
+            let mut fixture = ReviewDispatchFixture::with_history(
+                &scene,
+                recovery_history(
+                    vec![review_agent_item("unverified review")],
+                    "completed",
+                    Some("full"),
+                ),
+            );
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, "release-recovery"),
+                ControlResponseV1::Accepted { .. }
+            ));
+            scene.mark_running(task.task_ref, "turn-1");
+            fixture.publish_retained_profile(&scene);
+            fixture.coordinator.take();
+            fixture.session.take();
+            prepare_runtime_root(
+                &runtime_root(scene.state_root()),
+                DarwinSystem.current_uid(),
+            )
+            .unwrap();
+            let (runtime, mut record) =
+                crate::semantic::release_fixture::write_absent_worker_locator(
+                    scene.state_root(),
+                    &scene.manifest().workspace_id,
+                    scene.manifest().run_id,
+                );
+            record.control_recovery_required = true;
+            write_runtime_record(&runtime, &record).unwrap();
+            let root = scene
+                .state_root()
+                .join("direct-reviews")
+                .join(reader.review_id().to_string());
+            fs::rename(&root, root.with_extension("saved")).unwrap();
+            let before = fixture.requests().len();
+            let blocked = scene.release_for_recovery();
+            let operation = match blocked {
+                Ok(crate::delegation_service::MemberReleaseOutcome::Operation(operation)) => {
+                    operation.operation_ref
+                }
+                Err(crate::delegation_service::MemberReleaseFailure::AfterAdmission {
+                    operation_ref,
+                    ..
+                }) => operation_ref.to_string(),
+                other => panic!("unexpected blocked release: {other:?}"),
+            };
+            assert_eq!(fixture.requests().len(), before);
+            assert_eq!(scene.state(task.task_ref), "running");
+            let lease = RunLifecycleLease::acquire(
+                scene.state_root(),
+                &scene.manifest().workspace_id,
+                scene.manifest().run_id,
+                1,
+            )
+            .unwrap();
+            assert!(scene.recover_under_lease(&lease).is_ok());
+            assert_eq!(
+                scene.result(task.task_ref)["schema"],
+                "dolgorae.complete-result-unavailable/v1"
+            );
+            assert!(
+                membership
+                    .load()
+                    .unwrap()
+                    .members
+                    .values()
+                    .any(|m| m.run_id == scene.manifest().run_id
+                        && m.disposition == crate::global_runtime::MembershipDisposition::Active)
+            );
+            drop(lease);
+            let released = scene.release_for_recovery();
+            let released = match released {
+                Ok(crate::delegation_service::MemberReleaseOutcome::Operation(operation)) => {
+                    operation
+                }
+                other => panic!("release after recovery: {other:?}"),
+            };
+            assert_eq!(released.operation_ref, operation);
+            assert_eq!(released.progress, "terminal");
+            assert!(
+                membership
+                    .load()
+                    .unwrap()
+                    .members
+                    .values()
+                    .any(|m| m.run_id == scene.manifest().run_id
+                        && m.disposition == crate::global_runtime::MembershipDisposition::Released)
+            );
+        }
+    }
+
+    #[test]
+    fn raw_oversized_diff_converges_only_after_verified_original_history() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::writable(managed);
+            scene.prepare_worker_ledger();
+            let task = scene.accept_write_task("raw-diff");
+            let mut fixture = ReviewDispatchFixture::with_history(
+                &scene,
+                recovery_history(
+                    vec![review_agent_item("response after stream loss")],
+                    "completed",
+                    Some("full"),
+                ),
+            );
+            let journal = Arc::clone(fixture.coordinator.as_ref().unwrap().journal().ledger());
+            let retained = fixture
+                .coordinator
+                .as_ref()
+                .unwrap()
+                .thread_id()
+                .map(str::to_owned);
+            fixture.coordinator.take();
+            // Exercise the protocol actor directly. Native caller policy
+            // qualification belongs to WorkerSession's separate runtime tests.
+            let session = fixture.session.as_ref().unwrap();
+            let bootstrap = &fixture.bootstrap;
+            let mut coordinator = TurnCoordinator::initialize(
+                SessionServer::new(
+                    Arc::clone(&session.wire),
+                    Arc::clone(&session.mailbox),
+                    Duration::from_secs(5),
+                ),
+                SharedLedgerJournal::new(journal, 1),
+                FileArtifactStore::open(&bootstrap.artifact_root, fixture.identity.uid).unwrap(),
+                CoordinatorConfig {
+                    attach: retained.map_or(crate::turn::ThreadAttach::Start, |thread_id| {
+                        crate::turn::ThreadAttach::Resume { thread_id }
+                    }),
+                    foreign_diagnostics: Box::new(ProfileForeignDiagnostics {
+                        profile_root: fixture.root.clone(),
+                    }),
+                    fixed_model: bootstrap.fixed_model.clone(),
+                    default_effort: bootstrap.default_effort.clone(),
+                    supported_efforts: bootstrap.supported_efforts.iter().cloned().collect(),
+                    cwd: bootstrap.cwd.clone(),
+                    developer_instructions: bootstrap.developer_instructions.clone(),
+                    sandbox: "workspace-write".to_owned(),
+                    approval_policy: "never".to_owned(),
+                    safety_policy: SessionSafetyPolicy::Standard,
+                    run_generation: 1,
+                    server_key: bootstrap.server_key.clone(),
+                    server_epoch: bootstrap.server_epoch,
+                    run_id: fixture.identity.run_id,
+                    controller_id: bootstrap.controller_id,
+                    control_mode: bootstrap.control_mode.clone(),
+                    record_accepted_user_input: false,
+                    primary_tool: None,
+                    candidate_tools: false,
+                    candidate_reader: None,
+                    file_change_publication_dir: Some(
+                        crate::run::run_root(scene.state_root(), scene.manifest().run_id)
+                            .join("file-changes"),
+                    ),
+                },
+                &bootstrap.canonical_codex_home,
+            )
+            .unwrap();
+            coordinator
+                .start_turn(crate::turn::TurnRequest {
+                    write: true,
+                    idempotency_key: "raw-diff".to_owned(),
+                    message: task.prompt.clone(),
+                    images: Vec::new(),
+                    model: bootstrap.fixed_model.clone(),
+                    effort: None,
+                    delivery: DeliveryMode::Submit,
+                })
+                .unwrap();
+            scene.mark_running(task.task_ref, "turn-1");
+            let event = |id: &str, length: usize| {
+                serde_json::json!({"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1",
+                "item":{"type":"fileChange","id":id,"status":"completed","changes":[{"path":"README.md","kind":{"type":"update"},"diff":"x".repeat(length)}]}}})
+            };
+            coordinator.ingest(event("small", 32)).unwrap();
+            assert!(
+                scene
+                    .store()
+                    .dispatch_index_object(task.task_ref)
+                    .unwrap()
+                    .is_some()
+            );
+            fs::write(
+                scene
+                    .manifest()
+                    .canonical_workspace
+                    .to_path_buf()
+                    .unwrap()
+                    .join("README.md"),
+                "changed while the stream was observable\n",
+            )
+            .unwrap();
+            let rejected = coordinator.ingest(event("oversized", 65537));
+            assert!(
+                matches!(rejected, Err(TurnError::CorrelationMismatch)),
+                "{rejected:?}"
+            );
+            assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+            let records = coordinator
+                .journal()
+                .ledger()
+                .lock()
+                .unwrap()
+                .durable_records()
+                .unwrap()
+                .to_vec();
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(
+                        |r| r.kind() == crate::audit::AuditKind::AppServerNotification
+                            && crate::semantic::audit_value(r).unwrap()["method"]
+                                == "item/fileChange/patchUpdated"
+                    )
+                    .count(),
+                1
+            );
+            assert_eq!(scene.state(task.task_ref), "running");
+            fixture.coordinator = Some(coordinator);
+            fixture.restart(&scene);
+            assert_eq!(scene.state(task.task_ref), "running");
+            let response = fixture.reconcile(&scene);
+            assert!(
+                matches!(response, ControlResponseV1::Status { .. }),
+                "{response:?}"
+            );
+            assert_eq!(
+                scene.result(task.task_ref)["schema"],
+                "dolgorae.complete-result-unavailable/v1"
+            );
+            assert_converged_journal(&fixture, 1, 1);
+            let stable = scene.stability_facts();
+            assert!(matches!(
+                fixture.reconcile(&scene),
+                ControlResponseV1::Status { .. }
+            ));
+            assert_eq!(scene.stability_facts(), stable);
+            assert_eq!(
+                fixture
+                    .requests()
+                    .iter()
+                    .filter(|r| r["method"] == "turn/start")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn reconciliation_crash_windows_keep_one_journal_and_one_response() {
+        for managed in [false, true] {
+            for barrier in [
+                "after_reconciliation",
+                "after_pause",
+                "after_preparation",
+                "after_body",
+                "after_resolution",
+            ] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let task = scene.accept_generic_task("crash-window");
+                let text = "c".repeat(crate::turn::MAX_INLINE_FINAL_RESPONSE_BYTES + 1);
+                let mut fixture = ReviewDispatchFixture::with_history(
+                    &scene,
+                    recovery_history(vec![review_agent_item(&text)], "completed", Some("full")),
+                );
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "crash-window"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                fixture.lose_transport();
+                fixture.restart(&scene);
+                let failure = crate::semantic::RecoveryTestFailure::at(barrier);
+                assert!(
+                    matches!(fixture.reconcile(&scene), ControlResponseV1::Failed { .. }),
+                    "{barrier}"
+                );
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert_converged_journal(
+                    &fixture,
+                    1,
+                    usize::from(barrier != "after_reconciliation"),
+                );
+                drop(failure);
+                let reads = fixture
+                    .requests()
+                    .iter()
+                    .filter(|r| r["method"] == "thread/read")
+                    .count();
+                fixture.restart(&scene);
+                let response = fixture.reconcile(&scene);
+                assert!(
+                    matches!(response, ControlResponseV1::Status { .. }),
+                    "{barrier}: {response:?}"
+                );
+                assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                assert_converged_journal(&fixture, 1, 1);
+                assert_eq!(
+                    fixture
+                        .requests()
+                        .iter()
+                        .filter(|r| r["method"] == "thread/read")
+                        .count()
+                        - reads,
+                    usize::from(barrier != "after_resolution")
+                );
+                assert_eq!(
+                    fixture
+                        .requests()
+                        .iter()
+                        .filter(|r| r["method"] == "turn/start")
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn old_reconciliation_without_fresh_root_proof_never_settles() {
+        for managed in [false, true] {
+            for write in [false, true] {
+                let scene = if write {
+                    crate::semantic::successor_review_tests::Scene::writable(managed)
+                } else {
+                    crate::semantic::successor_review_tests::Scene::new(managed)
+                };
+                scene.prepare_worker_ledger();
+                let task = if write {
+                    scene.accept_write_task("fresh-proof")
+                } else {
+                    scene.accept_generic_task("fresh-proof")
+                };
+                if write {
+                    scene.record_running_execution(&task, "fresh-proof", true);
+                }
+                let initial = recovery_history(
+                    vec![review_agent_item("original answer")],
+                    "completed",
+                    Some("full"),
+                );
+                let mut foreign = initial.clone();
+                foreign["result"]["thread"]["id"] = serde_json::json!("foreign-thread");
+                let mut fixture = ReviewDispatchFixture::with_history(
+                    &scene,
+                    serde_json::json!([initial, foreign]),
+                );
+                if write {
+                    fixture.identity.run_generation = 2;
+                } else {
+                    assert!(matches!(
+                        fixture.dispatch(&scene, &task, "fresh-proof"),
+                        ControlResponseV1::Accepted { .. }
+                    ));
+                    scene.mark_running(task.task_ref, "turn-1");
+                    fixture.lose_transport();
+                    fixture.restart(&scene);
+                }
+                let failure = crate::semantic::RecoveryTestFailure::at("after_pause");
+                assert!(matches!(
+                    fixture.reconcile(&scene),
+                    ControlResponseV1::Failed { .. }
+                ));
+                drop(failure);
+                assert_converged_journal(&fixture, 1, 1);
+                let stable = scene.stability_facts();
+                let response = fixture.reconcile(&scene);
+                assert!(
+                    matches!(response, ControlResponseV1::Failed { .. }),
+                    "{response:?}"
+                );
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert_eq!(scene.stability_facts(), stable);
+                assert!(
+                    crate::semantic::resolved_terminal(
+                        scene.state_root(),
+                        scene.manifest().run_id,
+                        "turn-1"
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                assert_converged_journal(&fixture, 1, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn simultaneous_recovery_publishers_share_the_quota_and_result_identity() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+            scene.prepare_worker_ledger();
+            let task = scene.accept_generic_task("publish-race");
+            let text = "p".repeat(crate::turn::MAX_INLINE_FINAL_RESPONSE_BYTES + 1);
+            let mut fixture = ReviewDispatchFixture::with_history(
+                &scene,
+                recovery_history(vec![review_agent_item(&text)], "completed", Some("full")),
+            );
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, "publish-race"),
+                ControlResponseV1::Accepted { .. }
+            ));
+            scene.mark_running(task.task_ref, "turn-1");
+            fixture.lose_transport();
+            fixture.restart(&scene);
+            let failure = crate::semantic::RecoveryTestFailure::at("after_pause");
+            assert!(matches!(
+                fixture.reconcile(&scene),
+                ControlResponseV1::Failed { .. }
+            ));
+            drop(failure);
+            let execution = crate::semantic::successor_reconciliation_executions(
+                scene.state_root(),
+                scene.manifest().run_id,
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+            let history = fixture
+                .coordinator
+                .as_mut()
+                .unwrap()
+                .successor_history("thread-1", "turn-1")
+                .unwrap();
+            let before = scene.stability_facts();
+            let gate = std::sync::Barrier::new(3);
+            std::thread::scope(|scope| {
+                let a = scope.spawn(|| {
+                    gate.wait();
+                    crate::semantic::converge_successor_history(
+                        scene.state_root(),
+                        &execution,
+                        &history,
+                        false,
+                    )
+                });
+                let b = scope.spawn(|| {
+                    gate.wait();
+                    crate::semantic::converge_successor_history(
+                        scene.state_root(),
+                        &execution,
+                        &history,
+                        false,
+                    )
+                });
+                gate.wait();
+                a.join().unwrap().unwrap();
+                b.join().unwrap().unwrap();
+            });
+            assert_eq!(scene.stability_facts().0, before.0 + 1);
+            let artifacts =
+                crate::run::run_root(scene.state_root(), scene.manifest().run_id).join("artifacts");
+            assert_eq!(
+                crate::artifact::logical_artifact_bytes(&artifacts).unwrap(),
+                text.len() as u64
+            );
+            assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+            assert_converged_journal(&fixture, 1, 1);
+        }
+    }
+
+    #[test]
+    fn artifact_quota_and_reference_conflicts_stay_recoverable() {
+        for managed in [false, true] {
+            for case in 0..3 {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let task = scene.accept_generic_task("artifact-fault");
+                let text = "q".repeat(crate::turn::MAX_INLINE_FINAL_RESPONSE_BYTES + 1);
+                let mut fixture = ReviewDispatchFixture::with_history(
+                    &scene,
+                    recovery_history(vec![review_agent_item(&text)], "completed", Some("full")),
+                );
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "artifact-fault"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                fixture.lose_transport();
+                fixture.restart(&scene);
+                let root = crate::run::run_root(scene.state_root(), scene.manifest().run_id);
+                let failure = crate::semantic::RecoveryTestFailure::at("after_preparation");
+                assert!(matches!(
+                    fixture.reconcile(&scene),
+                    ControlResponseV1::Failed { .. }
+                ));
+                drop(failure);
+                let preparation = fs::read_dir(root.join("terminal-resolution-preparations"))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                let original = fs::read(&preparation).unwrap();
+                let terminal: TerminalTurn = serde_json::from_slice(&original).unwrap();
+                let crate::turn::FinalResponse::Artifact { artifact_id, .. } =
+                    terminal.final_response.unwrap()
+                else {
+                    panic!("artifact expected")
+                };
+                let body = root.join("artifacts").join(format!("{artifact_id}.bin"));
+                let filler = root
+                    .join("artifacts")
+                    .join(format!("{}.bin", Uuid::now_v7()));
+                if case == 0 {
+                    let file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&filler)
+                        .unwrap();
+                    file.set_len(crate::artifact::MAX_RUN_ARTIFACT_BYTES)
+                        .unwrap();
+                } else if case == 1 {
+                    fs::write(&body, b"corrupted body").unwrap();
+                    fs::set_permissions(&body, fs::Permissions::from_mode(0o600)).unwrap();
+                } else {
+                    let mut wrong: serde_json::Value = serde_json::from_slice(&original).unwrap();
+                    wrong["final_response"]["sha256"] = serde_json::json!("a".repeat(64));
+                    fs::write(
+                        &preparation,
+                        crate::jcs::canonicalize(&crate::jcs::parse(&wrong.to_string()).unwrap())
+                            .unwrap(),
+                    )
+                    .unwrap();
+                }
+                let response = fixture.reconcile(&scene);
+                assert!(
+                    matches!(response, ControlResponseV1::Failed { .. }),
+                    "{response:?}"
+                );
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert!(
+                    crate::semantic::resolved_terminal(
+                        scene.state_root(),
+                        scene.manifest().run_id,
+                        "turn-1"
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                match case {
+                    0 => fs::remove_file(filler).unwrap(),
+                    1 => fs::remove_file(&body).unwrap(),
+                    _ => fs::write(&preparation, &original).unwrap(),
+                };
+                let response = fixture.reconcile(&scene);
+                assert!(
+                    matches!(response, ControlResponseV1::Status { .. }),
+                    "{response:?}"
+                );
+                assert_eq!(fs::read(preparation).unwrap(), original);
+                assert_eq!(fs::read(body).unwrap(), text.as_bytes());
+                assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                assert_converged_journal(&fixture, 1, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_reconciliation_propagates_sql_failures_and_retries_once() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+            scene.prepare_worker_ledger();
+            let task = scene.accept_generic_task("sql-failure");
+            let mut fixture = ReviewDispatchFixture::with_history(
+                &scene,
+                recovery_history(
+                    vec![review_agent_item("sql response")],
+                    "completed",
+                    Some("full"),
+                ),
+            );
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, "sql-failure"),
+                ControlResponseV1::Accepted { .. }
+            ));
+            scene.mark_running(task.task_ref, "turn-1");
+            fixture.lose_transport();
+            fixture.restart(&scene);
+            let store = scene.store();
+            let table = if managed { "brokered_tasks" } else { "tasks" };
+            store.connection().execute_batch(&format!("CREATE TRIGGER recovery_storage_fault BEFORE UPDATE OF state ON {table} BEGIN SELECT RAISE(ABORT,'recovery storage failed'); END;")).unwrap();
+            let before = scene.stability_facts();
+            assert!(matches!(
+                fixture.reconcile(&scene),
+                ControlResponseV1::Failed { .. }
+            ));
+            assert_eq!(scene.state(task.task_ref), "running");
+            assert_eq!(scene.stability_facts().0, before.0);
+            assert_converged_journal(&fixture, 1, 1);
+            store
+                .connection()
+                .execute_batch("DROP TRIGGER recovery_storage_fault")
+                .unwrap();
+            assert!(matches!(
+                fixture.reconcile(&scene),
+                ControlResponseV1::Status { .. }
+            ));
+            assert_eq!(scene.stability_facts().0, before.0 + 1);
+            assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+            assert_converged_journal(&fixture, 1, 1);
+        }
+    }
+
+    #[test]
+    fn partial_history_never_proves_an_empty_response() {
+        for managed in [false, true] {
+            for view in [None, Some("partial")] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let task = scene.accept_generic_task("partial");
+                let mut fixture = ReviewDispatchFixture::with_history(
+                    &scene,
+                    recovery_history(
+                        vec![
+                            serde_json::json!({"id":"comment","type":"agentMessage","phase":"commentary","text":"not a final response"}),
+                        ],
+                        "completed",
+                        view,
+                    ),
+                );
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "partial"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                fixture.lose_transport();
+                fixture.restart(&scene);
+                assert!(matches!(
+                    fixture.reconcile(&scene),
+                    ControlResponseV1::Status { .. }
+                ));
+                assert_eq!(
+                    scene.result(task.task_ref)["schema"],
+                    "dolgorae.complete-result-unavailable/v1"
+                );
+                assert!(
+                    crate::semantic::resolved_terminal(
+                        scene.state_root(),
+                        scene.manifest().run_id,
+                        "turn-1"
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                assert_converged_journal(&fixture, 1, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn nonterminal_or_foreign_history_never_settles_the_task() {
+        for managed in [false, true] {
+            for case in 0..6 {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let task = scene.accept_generic_task("bad-history");
+                let mut reply =
+                    recovery_history(vec![review_agent_item("answer")], "completed", Some("full"));
+                match case {
+                    0 => reply["result"]["thread"]["id"] = serde_json::json!("foreign"),
+                    1 => reply["result"]["thread"]["parentThreadId"] = serde_json::json!("parent"),
+                    2 => {
+                        let duplicate = reply["result"]["thread"]["turns"][0].clone();
+                        reply["result"]["thread"]["turns"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(duplicate);
+                    }
+                    3 => {
+                        reply["result"]["thread"]["turns"][0]["status"] =
+                            serde_json::json!("inProgress")
+                    }
+                    4 => {
+                        reply["result"]["thread"]["turns"][0]["id"] =
+                            serde_json::json!("foreign-turn")
+                    }
+                    _ => {
+                        reply = serde_json::json!({"error":{"code":-32000,"message":"history storage failed"}})
+                    }
+                }
+                let mut fixture = ReviewDispatchFixture::with_history(&scene, reply);
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "bad-history"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                fixture.lose_transport();
+                fixture.restart(&scene);
+                assert!(matches!(
+                    fixture.reconcile(&scene),
+                    ControlResponseV1::Failed { .. }
+                ));
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert!(
+                    crate::semantic::resolved_terminal(
+                        scene.state_root(),
+                        scene.manifest().run_id,
+                        "turn-1"
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                assert_converged_journal(&fixture, 0, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn successor_eager_thread_journals_original_operation_on_start_and_threadless_restart() {
+        for managed in [false, true] {
+            for restart in [false, true] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                let root = crate::run::run_root(scene.state_root(), scene.manifest().run_id);
+                if restart {
+                    Ledger::open(&root, scene.manifest().run_id)
+                        .unwrap()
+                        .append_required_payload(
+                            crate::audit::AuditKind::RunGenerationStopped,
+                            &serde_json::json!({}),
+                            1,
+                        )
+                        .unwrap();
+                }
+                let expected = if managed {
+                    scene
+                        .manifest()
+                        .aggregate_binding
+                        .as_ref()
+                        .unwrap()
+                        .operation_id
+                } else {
+                    scene.manifest().run_id
+                };
+                let fixture = ReviewDispatchFixture::new(&scene, vec![]);
+                let coordinator = fixture.coordinator.as_ref().unwrap();
+                let ledger = coordinator.journal().ledger().lock().unwrap();
+                let records = ledger.durable_records().unwrap();
+                let provisional = records
+                    .iter()
+                    .find(|record| {
+                        record.kind() == crate::audit::AuditKind::TurnIntent
+                            && serde_json::from_slice::<serde_json::Value>(
+                                &crate::jcs::canonicalize(record.payload()).unwrap(),
+                            )
+                            .unwrap()
+                            .get("provisional_thread_id")
+                            .is_some()
+                    })
+                    .unwrap();
+                let payload: serde_json::Value = serde_json::from_slice(
+                    &crate::jcs::canonicalize(provisional.payload()).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(payload["operation_id"], expected.to_string());
+                assert_eq!(fixture.bootstrap.eager_thread_operation_id, Some(expected));
+                assert_eq!(
+                    fixture
+                        .requests()
+                        .iter()
+                        .filter(|r| r["method"] == "thread/start")
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qualified_review_worker_dispatches_first_generic_task_and_recovers_it() {
+        for managed in [false, true] {
+            for restart in [false, true] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                let task = scene.accept_generic_task("generic-first");
+                let mut fixture = ReviewDispatchFixture::new(&scene, vec![]);
+                if restart {
+                    fixture.restart(&scene);
+                }
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "generic-first"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                let text = "generic task completed";
+                let terminal = fixture
+                    .complete("turn-1", vec![review_agent_item(text)])
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    terminal.final_response,
+                    Some(crate::turn::FinalResponse::Inline {
+                        text: text.to_owned()
+                    })
+                );
+                scene.settle(task.task_ref).unwrap();
+                assert_eq!(scene.result(task.task_ref)["terminal_outcome"], "completed");
+                assert!(
+                    !scene
+                        .state_root()
+                        .join("direct-reviews")
+                        .join(task.task_ref.to_string())
+                        .exists()
+                );
+                let requests = fixture.requests();
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r["method"] == "turn/start")
+                        .count(),
+                    1
+                );
+                assert!(requests.iter().any(|r| {
+                    r["method"] == "thread/start"
+                        && r.pointer("/params/dynamicTools/0/name")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("dolgorae_candidate_read")
+                }));
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r["method"] == "thread/read")
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qualified_review_worker_clears_checked_reader_before_generic_dispatch() {
+        for managed in [false, true] {
+            for restart in [false, true] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                let (checked, reader) = scene.assign("checked-first", "head", None);
+                let verdict = crate::semantic::successor_review_tests::verdict(
+                    &scene.evidence(&reader, "turn-1"),
+                );
+                let items = vec![review_agent_item(&verdict.to_string())];
+                let mut fixture = ReviewDispatchFixture::new(&scene, items.clone());
+                assert!(matches!(
+                    fixture.dispatch(&scene, &checked, "checked-first"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(checked.task_ref, "turn-1");
+                fixture.complete("turn-1", items).unwrap().unwrap();
+                scene.settle(checked.task_ref).unwrap();
+                let retained = reader
+                    .completed_history_response("thread-1", "turn-1")
+                    .unwrap();
+                if restart {
+                    fixture.restart(&scene);
+                }
+                let generic = scene.accept_generic_task("generic-next");
+                assert!(matches!(
+                    fixture.dispatch(&scene, &generic, "generic-next"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                let turn = "turn-2";
+                scene.mark_running(generic.task_ref, turn);
+                // The initial Thread still advertises the tool. Its later
+                // generic task must receive a refusal without consulting the
+                // earlier task's reader or poisoning its history.
+                assert!(fixture.coordinator.as_mut().unwrap().ingest(serde_json::json!({
+                    "id":99,"method":"item/tool/call","params":{
+                        "threadId":"thread-1","turnId":turn,"callId":"generic-read",
+                        "tool":"dolgorae_candidate_read","arguments":{
+                            "side":"current","path":"README.md","byte_offset":0,"byte_length":9
+                        }
+                    }
+                })).unwrap().is_none());
+                let text = "independent generic response";
+                let terminal = fixture
+                    .complete(turn, vec![review_agent_item(text)])
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    terminal.final_response,
+                    Some(crate::turn::FinalResponse::Inline {
+                        text: text.to_owned()
+                    })
+                );
+                scene.settle(generic.task_ref).unwrap();
+                assert_eq!(
+                    scene.result(generic.task_ref)["terminal_outcome"],
+                    "completed"
+                );
+                assert_eq!(
+                    reader
+                        .completed_history_response("thread-1", "turn-1")
+                        .unwrap(),
+                    retained
+                );
+                assert!(reader.pending_histories().unwrap().is_empty());
+                assert!(reader.completed_history_response("thread-1", turn).is_err());
+                assert!(
+                    !scene
+                        .state_root()
+                        .join("direct-reviews")
+                        .join(checked.task_ref.to_string())
+                        .join("provenance-violation.json")
+                        .exists()
+                );
+                assert_eq!(
+                    fixture
+                        .requests()
+                        .iter()
+                        .filter(|r| r["method"] == "thread/read")
+                        .count(),
+                    2
+                );
+                assert!(fixture.requests().iter().any(|r| r["id"] == 99
+                    && r.pointer("/result/success") == Some(&serde_json::Value::Bool(false))));
+            }
+        }
+    }
+
+    #[test]
+    fn qualified_review_worker_refuses_recorded_checked_task_without_reader() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+            let mut fixture = ReviewDispatchFixture::new(&scene, vec![]);
+            let (task, _) = scene.assign("missing-reader", "head", None);
+            scene.mark_running(task.task_ref, "original-turn");
+            let root = scene
+                .state_root()
+                .join("direct-reviews")
+                .join(task.task_ref.to_string());
+            fs::rename(&root, root.with_extension("saved")).unwrap();
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, "missing-reader"),
+                ControlResponseV1::Failed { .. }
+            ));
+            assert!(!root.exists());
+            assert_eq!(scene.state(task.task_ref), "running");
+            assert!(
+                !fixture
+                    .requests()
+                    .iter()
+                    .any(|r| r["method"] == "turn/start")
+            );
+        }
+    }
+
+    #[test]
+    fn checked_receipt_storage_fault_during_actor_history_retries_original_terminal() {
+        for managed in [false, true] {
+            for case in 0..4 {
+                let fault = case % 3;
+                let large = case == 3;
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let (task, reader) = scene.assign("receipt-storage", "head", None);
+                let receipt = scene.evidence(&reader, "turn-1");
+                let verdict = crate::semantic::successor_review_tests::verdict(&receipt);
+                let text = if large {
+                    format!(
+                        "{}{}",
+                        verdict,
+                        " ".repeat(crate::turn::MAX_INLINE_FINAL_RESPONSE_BYTES)
+                    )
+                } else {
+                    verdict.to_string()
+                };
+                let arguments = serde_json::json!({"side":receipt["side"],"path":"README.md","byte_offset":0,"byte_length":9});
+                let response = reader
+                    .read(
+                        "thread-1",
+                        "turn-1",
+                        "read",
+                        &serde_json::from_value(arguments.clone()).unwrap(),
+                    )
+                    .unwrap();
+                let items = vec![
+                    serde_json::json!({"type":"dynamicToolCall","id":"read","tool":"dolgorae_candidate_read",
+                        "arguments":arguments,"status":"completed","success":true,
+                        "contentItems":[{"type":"inputText","text":response.to_string()}]}),
+                    review_agent_item(&text),
+                ];
+                let mut fixture = ReviewDispatchFixture::new(&scene, items.clone());
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "receipt-storage"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                let root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(task.task_ref.to_string());
+                let receipt_path = fs::read_dir(root.join("reads"))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                let bytes = fs::read(&receipt_path).unwrap();
+                if fault == 2 {
+                    fs::write(&receipt_path, b"broken receipt JSON").unwrap();
+                } else if fault == 1 {
+                    // The secure read refuses this file even when tests run as
+                    // its owner; mode 000 alone is ineffective for root.
+                    fs::set_permissions(&receipt_path, fs::Permissions::from_mode(0o644)).unwrap();
+                } else {
+                    fs::remove_file(&receipt_path).unwrap();
+                }
+                let usage = serde_json::json!({"inputTokens":1,"outputTokens":1});
+                assert!(
+                    fixture
+                        .complete_with_usage("turn-1", items, Some(usage.clone()))
+                        .is_err()
+                );
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert!(!root.join("provenance-violation.json").exists());
+                assert_eq!(
+                    reader.pending_histories().unwrap(),
+                    vec![("thread-1".to_owned(), "turn-1".to_owned())]
+                );
+                let original = scene.recorded_terminal("turn-1");
+                assert_eq!(original.status, "completed");
+                assert_eq!(original.usage, Some(usage));
+                let stable = scene.stability_facts();
+                assert_eq!(
+                    scene.settle(task.task_ref).unwrap_err().code,
+                    "RUNTIME_STATE_INVALID"
+                );
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert_eq!(scene.stability_facts(), stable);
+                assert!(!root.join("provenance-violation.json").exists());
+                fs::write(&receipt_path, &bytes).unwrap();
+                fs::set_permissions(&receipt_path, fs::Permissions::from_mode(0o600)).unwrap();
+                fixture.restart(&scene);
+                assert_eq!(scene.recorded_terminal("turn-1"), original);
+                assert_eq!(reader.review_id(), task.task_ref);
+                assert_eq!(fs::read(&receipt_path).unwrap(), bytes);
+                assert_eq!(
+                    reader
+                        .completed_history_response("thread-1", "turn-1")
+                        .unwrap(),
+                    original.final_response.clone()
+                );
+                reader.check_acceptance().unwrap();
+                scene.settle(task.task_ref).unwrap();
+                assert_eq!(
+                    scene.state(task.task_ref),
+                    if large {
+                        "failed"
+                    } else {
+                        "completed_not_delivered"
+                    }
+                );
+                let result = scene.result(task.task_ref);
+                if large {
+                    assert!(result["structured_output_schema"].is_null());
+                    assert_eq!(result["safe_failure_code"], "FINDINGS_OUTPUT_INVALID");
+                    assert_eq!(
+                        crate::artifact::logical_artifact_bytes(
+                            &crate::run::run_root(scene.state_root(), scene.manifest().run_id)
+                                .join("artifacts")
+                        )
+                        .unwrap(),
+                        text.len() as u64
+                    );
+                } else {
+                    assert_eq!(result["structured_output_schema"], "structured_review_v4");
+                    assert_eq!(result["terminal_outcome"], "completed");
+                }
+                let stable = scene.stability_facts();
+                scene.settle(task.task_ref).unwrap();
+                assert_eq!(scene.result(task.task_ref), result);
+                assert_eq!(scene.stability_facts(), stable);
+                assert_eq!(
+                    fixture
+                        .requests()
+                        .iter()
+                        .filter(|r| r["method"] == "turn/start")
+                        .count(),
+                    1
+                );
+                assert!(!root.join("provenance-violation.json").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn host_failed_candidate_read_keeps_its_original_classification() {
+        for managed in [false, true] {
+            for lost_source in [false, true] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let (task, reader) = scene.assign("failed-host-read", "head", None);
+                let arguments = if lost_source {
+                    serde_json::json!({"side":"current","path":"README.md","byte_offset":0,"byte_length":9})
+                } else {
+                    serde_json::json!({"side":"metadata","path":"wrong.json","byte_offset":0,"byte_length":9})
+                };
+                if lost_source {
+                    let oid = reader
+                        .target()
+                        .entries
+                        .iter()
+                        .find(|e| e.path == "README.md" && e.side != "before")
+                        .unwrap()
+                        .blob_oid
+                        .as_ref()
+                        .unwrap();
+                    let workspace = scene.manifest().canonical_workspace.to_path_buf().unwrap();
+                    fs::remove_file(
+                        workspace
+                            .join(".git/objects")
+                            .join(&oid[..2])
+                            .join(&oid[2..]),
+                    )
+                    .unwrap();
+                }
+                let error = reader
+                    .read(
+                        "thread-1",
+                        "turn-1",
+                        "failed-read",
+                        &serde_json::from_value(arguments.clone()).unwrap(),
+                    )
+                    .unwrap_err();
+                assert_eq!(
+                    error.code,
+                    if lost_source {
+                        "REVIEW_TARGET_UNAVAILABLE"
+                    } else {
+                        "INVALID_ARGUMENT"
+                    }
+                );
+                let body = serde_json::json!({"error":error});
+                let response = serde_json::json!({"success":false,"contentItems":[{"type":"inputText","text":body.to_string()}]});
+                let mut item = response.clone();
+                for (key,value) in serde_json::json!({"id":"failed-read","type":"dynamicToolCall","tool":"dolgorae_candidate_read",
+                    "arguments":arguments,"status":"failed"}).as_object().unwrap() {
+                    item[key]=value.clone();
+                }
+                let items = vec![item, review_agent_item("{\"findings\":[]}")];
+                let mut fixture = ReviewDispatchFixture::new(&scene, items.clone());
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "failed-host-read"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                fixture.coordinator.as_mut().unwrap().ingest(serde_json::json!({"id":199,"method":"item/tool/call",
+                    "params":{"threadId":"thread-1","turnId":"turn-1","callId":"failed-read","tool":"dolgorae_candidate_read","arguments":arguments}})).unwrap();
+                let terminal = fixture.complete("turn-1", items);
+                assert_eq!(terminal.is_err(), lost_source);
+                let actual = fixture
+                    .requests()
+                    .into_iter()
+                    .find(|v| v["id"] == 199 && v.get("result").is_some())
+                    .unwrap();
+                assert_eq!(actual["result"], response);
+                let root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(task.task_ref.to_string());
+                assert!(!root.join("provenance-violation.json").exists());
+                assert_eq!(fs::read_dir(root.join("reads")).unwrap().count(), 0);
+                if lost_source {
+                    assert_eq!(scene.state(task.task_ref), "failed");
+                    assert_eq!(
+                        scene.result(task.task_ref)["safe_failure_code"],
+                        "REVIEW_TARGET_UNAVAILABLE"
+                    );
+                } else {
+                    assert!(reader.pending_histories().unwrap().is_empty());
+                    assert_ne!(
+                        scene.result(task.task_ref)["safe_failure_code"],
+                        "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lost_checked_review_restores_the_original_receipt_after_a_paused_restart() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+            scene.prepare_worker_ledger();
+            let (task, reader) = scene.assign("lost-checked", "head", None);
+            let receipt = scene.evidence(&reader, "turn-1");
+            let verdict = crate::semantic::successor_review_tests::verdict(&receipt);
+            let arguments = serde_json::json!({"side":receipt["side"],"path":"README.md","byte_offset":0,"byte_length":9});
+            let response = reader
+                .read(
+                    "thread-1",
+                    "turn-1",
+                    "read",
+                    &serde_json::from_value(arguments.clone()).unwrap(),
+                )
+                .unwrap();
+            let item = serde_json::json!({"type":"dynamicToolCall","tool":"dolgorae_candidate_read","id":"read","status":"completed",
+                "arguments":arguments,"success":true,"contentItems":[{"type":"inputText","text":response.to_string()}]});
+            let items = vec![item.clone(), review_agent_item(&verdict.to_string())];
+            let mut fixture = ReviewDispatchFixture::new(&scene, items);
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, "lost-checked"),
+                ControlResponseV1::Accepted { .. }
+            ));
+            scene.mark_running(task.task_ref, "turn-1");
+            let root = scene
+                .state_root()
+                .join("direct-reviews")
+                .join(task.task_ref.to_string());
+            let path = fs::read_dir(root.join("reads"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let bytes = fs::read(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+            assert!(matches!(
+                fixture
+                    .coordinator
+                    .as_mut()
+                    .unwrap()
+                    .ingest(serde_json::json!({"method":"item/completed",
+                "params":{"threadId":"thread-1","turnId":"turn-1","item":item}})),
+                Err(TurnError::CorrelationMismatch)
+            ));
+            assert_eq!(
+                fixture.coordinator.as_ref().unwrap().state(),
+                &CoordinatorState::OutcomeUnknown
+            );
+            fixture.restart(&scene);
+            assert!(matches!(
+                fixture.reconcile(&scene),
+                ControlResponseV1::Failed { .. }
+            ));
+            assert_eq!(scene.state(task.task_ref), "running");
+            assert!(!root.join("provenance-violation.json").exists());
+            assert_converged_journal(&fixture, 1, 1);
+            fs::write(&path, &bytes).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            fixture.restart(&scene);
+            assert_eq!(scene.state(task.task_ref), "running");
+            let response = fixture.reconcile(&scene);
+            assert!(
+                matches!(response, ControlResponseV1::Status { .. }),
+                "{response:?}"
+            );
+            assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+            assert_eq!(
+                scene.result(task.task_ref)["structured_output_schema"],
+                "structured_review_v4"
+            );
+            assert_converged_journal(&fixture, 1, 1);
+            assert_eq!(
+                fixture
+                    .requests()
+                    .iter()
+                    .filter(|r| r["method"] == "turn/start")
+                    .count(),
+                1
+            );
+            assert_eq!(fs::read(path).unwrap(), bytes);
+            let stable = scene.stability_facts();
+            scene.settle(task.task_ref).unwrap();
+            assert_eq!(scene.stability_facts(), stable);
+        }
+    }
+
+    #[test]
+    fn forged_and_foreign_completed_candidate_calls_keep_their_provenance_rejection() {
+        for managed in [false, true] {
+            for case in 0..3 {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let (task, reader) = scene.assign("forged-history", "head", None);
+                let receipt = scene.evidence(&reader, "turn-1");
+                let verdict = crate::semantic::successor_review_tests::verdict(&receipt);
+                let arguments = serde_json::json!({"side":receipt["side"],"path":"README.md","byte_offset":0,"byte_length":9});
+                let response = reader
+                    .read(
+                        "thread-1",
+                        "turn-1",
+                        "read",
+                        &serde_json::from_value(arguments.clone()).unwrap(),
+                    )
+                    .unwrap();
+                let valid_item = serde_json::json!({"type":"dynamicToolCall","tool":"dolgorae_candidate_read","id":"read","status":"completed",
+                    "arguments":arguments,"success":true,"contentItems":[{"type":"inputText","text":response.to_string()}]});
+                let mut item = valid_item.clone();
+                if case == 0 {
+                    let mut forged = response;
+                    forged["receipt"]["review_id"] = serde_json::json!(Uuid::now_v7());
+                    item["contentItems"][0]["text"] = serde_json::json!(forged.to_string());
+                }
+                if case == 1 {
+                    item["threadId"] = serde_json::json!("foreign-thread");
+                }
+                if case == 2 {
+                    item["tool"] = serde_json::json!("native_unmediated_read");
+                }
+                let items = vec![item, review_agent_item(&verdict.to_string())];
+                let mut fixture = ReviewDispatchFixture::new(&scene, items.clone());
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "forged-history"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                let root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(task.task_ref.to_string());
+                let path = fs::read_dir(root.join("reads"))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        let record: serde_json::Value =
+                            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                        record["call_id"] == "read"
+                    })
+                    .unwrap();
+                let bytes = fs::read(&path).unwrap();
+                fs::remove_file(&path).unwrap();
+                assert_eq!(
+                    reader
+                        .observe_item("thread-1", "turn-1", &valid_item, true)
+                        .unwrap_err()
+                        .code,
+                    "RUNTIME_STATE_INVALID"
+                );
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert!(!root.join("provenance-violation.json").exists());
+                fs::write(&path, bytes).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                let _terminal = fixture.complete("turn-1", items);
+                assert_eq!(scene.state(task.task_ref), "failed");
+                let result = scene.result(task.task_ref);
+                assert_eq!(
+                    result["safe_failure_code"],
+                    "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+                );
+                assert!(result["structured_output"].is_null());
+                assert!(root.join("provenance-violation.json").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn unrecorded_task_turn_and_terminal_without_resolution_remain_deferred() {
+        for managed in [false, true] {
+            for no_task_turn in [false, true] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                scene.prepare_worker_ledger();
+                let task = scene.accept_generic_task("deferred");
+                let mut fixture = ReviewDispatchFixture::with_history(
+                    &scene,
+                    recovery_history(
+                        vec![review_agent_item("history answer")],
+                        "completed",
+                        Some("full"),
+                    ),
+                );
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "deferred"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                if !no_task_turn {
+                    scene.mark_running(task.task_ref, "turn-1");
+                }
+                let state = scene.state(task.task_ref);
+                if no_task_turn {
+                    fixture.lose_transport();
+                } else {
+                    fixture.coordinator.as_mut().unwrap().ingest(serde_json::json!({"method":"turn/completed",
+                        "params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[review_agent_item("observed but not resolved")]}}})).unwrap().unwrap();
+                }
+                fixture.restart(&scene);
+                scene.settle(task.task_ref).unwrap();
+                let before = scene.stability_facts();
+                scene.observe(task.task_ref, false).unwrap();
+                assert!(scene.observe(task.task_ref, true).is_err());
+                assert_eq!(scene.stability_facts(), before);
+                let response = fixture.reconcile(&scene);
+                assert!(
+                    matches!(response, ControlResponseV1::Status { .. }),
+                    "{response:?}"
+                );
+                assert_eq!(scene.state(task.task_ref), state);
+                assert!(
+                    crate::semantic::resolved_terminal(
+                        scene.state_root(),
+                        scene.manifest().run_id,
+                        "turn-1"
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                assert_eq!(
+                    fixture
+                        .requests()
+                        .iter()
+                        .filter(|r| r["method"] == "turn/start")
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn successor_restart_reader_failure_precedes_server_or_thread_startup() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for managed in [false, true] {
+            for mismatch in [false, true] {
+                let scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                let (task, _) = scene.assign("restart-worker", "workspace", None);
+                scene.mark_running(task.task_ref, "original-turn");
+                let root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(task.task_ref.to_string());
+                let binding = root.join("binding.json");
+                let retained = if mismatch {
+                    let mut value: serde_json::Value =
+                        serde_json::from_slice(&fs::read(&binding).unwrap()).unwrap();
+                    value["target"] = serde_json::to_value(
+                        crate::direct_review_target::DirectTarget::admit(
+                            &scene.manifest().canonical_workspace.to_path_buf().unwrap(),
+                            scene.manifest().workspace_mode,
+                            "head",
+                            None,
+                            task.task_ref,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    let bytes = serde_json::to_vec(&value).unwrap();
+                    fs::write(&binding, &bytes).unwrap();
+                    Some(bytes)
+                } else {
+                    fs::rename(&root, root.with_extension("saved")).unwrap();
+                    None
+                };
+                let ledger_root = scene.state_root().join("restart-test-ledger");
+                fs::create_dir(&ledger_root).unwrap();
+                fs::set_permissions(&ledger_root, fs::Permissions::from_mode(0o700)).unwrap();
+                fs::create_dir(ledger_root.join("recovery")).unwrap();
+                fs::set_permissions(
+                    ledger_root.join("recovery"),
+                    fs::Permissions::from_mode(0o700),
+                )
+                .unwrap();
+                fs::write(ledger_root.join("audit.jsonl"), b"").unwrap();
+                fs::set_permissions(
+                    ledger_root.join("audit.jsonl"),
+                    fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+                let manifest = scene.manifest();
+                let ledger = Arc::new(Mutex::new(
+                    Ledger::open(&ledger_root, manifest.run_id).unwrap(),
+                ));
+                let mut session = reviewer_bootstrap();
+                session.cwd = manifest.canonical_workspace.to_path_buf().unwrap();
+                session.artifact_root = scene.state_root().join("restart-artifacts");
+                session.dedicated_server = Some(DedicatedServerBootstrap {
+                    socket_path: session.app_server_socket.clone(),
+                    argv: vec![
+                        scene
+                            .state_root()
+                            .join("missing-executable")
+                            .display()
+                            .to_string(),
+                    ],
+                    cwd: scene.state_root().to_owned(),
+                    environment: BTreeMap::new(),
+                    log_path: scene.state_root().join("dedicated.log"),
+                    executable_device: 1,
+                    executable_inode: 2,
+                    executable_sha256: "11".repeat(32),
+                    server_epoch: session.server_epoch,
+                });
+                let error = WorkerSession::connect(
+                    &session,
+                    RunFacts {
+                        run_id: manifest.run_id,
+                        profile: manifest.profile.profile_name.clone(),
+                    },
+                    ledger,
+                    1,
+                    DarwinSystem.current_uid(),
+                    scene.state_root(),
+                    &manifest.workspace_id,
+                )
+                .err()
+                .unwrap();
+                assert_eq!(error, WorkerProtocolError::LedgerReplay);
+                assert!(!scene.state_root().join("dedicated.log").exists());
+                assert!(
+                    fs::read(ledger_root.join("audit.jsonl"))
+                        .unwrap()
+                        .is_empty()
+                );
+                assert_eq!(scene.state(task.task_ref), "running");
+                if let Some(bytes) = retained {
+                    assert_eq!(fs::read(&binding).unwrap(), bytes);
+                } else {
+                    assert!(!root.exists());
+                }
+            }
+        }
+    }
+
     #[test]
     fn reviewer_bootstrap_requires_read_only_never_and_accepts_the_exact_pair() {
         let valid = reviewer_bootstrap();
@@ -14487,6 +19199,113 @@ mod tests {
         fs::remove_file(&record.socket_path).unwrap();
         recover_control_runtime(&path, identity.uid).unwrap();
         assert!(!path.exists());
+        // The legacy explicit-recovery caller now also leaves the Run's
+        // verified-absence marker for exactly the recovered generation; nothing
+        // else about its behaviour changed.
+        let marker = verified_absence_marker(&runtime, identity.run_id)
+            .unwrap()
+            .expect("the recovery leaves its marker");
+        assert_eq!(marker.run_id, identity.run_id);
+        assert_eq!(marker.run_generation, identity.run_generation);
+        assert_eq!(
+            marker.worker_identity_sha256,
+            worker_identity_digest(&identity).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The verified-absence marker is write-once per
+    /// generation — the same generation rewrites only identical content, an
+    /// older marker is replaced by a newer verified generation, and a newer
+    /// marker refuses an older generation — with private modes throughout.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn verified_absence_marker_is_write_once_per_generation() {
+        let root = std::env::temp_dir().join(format!("dolgorae-marker-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let runtime = runtime_root(&root);
+        prepare_runtime_root(&runtime, DarwinSystem.current_uid()).unwrap();
+        let mut identity = identity();
+        identity.uid = DarwinSystem.current_uid();
+        let record = |identity: &WorkerIdentity| WorkerRuntimeRecord {
+            schema_version: 1,
+            identity: identity.clone(),
+            socket_path: worker_socket_path(identity.uid, &identity.workspace_id, identity.run_id)
+                .unwrap(),
+            socket_identity: SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            control_socket_epoch: 1,
+            app_server_epoch: None,
+            control_recovery_required: false,
+            startup_scope: None,
+            dedicated_server_identity: None,
+            dolgorae_version: "0.1.0".to_owned(),
+            mutation_protocol_version: 1,
+            binary_sha256: "33".repeat(32),
+        };
+        let locator = runtime_record_path(&runtime, identity.run_id).unwrap();
+        write_runtime_record(&locator, &record(&identity)).unwrap();
+        remove_verified_absent_runtime(&locator, DarwinSystem.current_uid()).unwrap();
+        assert!(!locator.exists());
+        let marker = verified_absence_marker(&runtime, identity.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker.run_generation, identity.run_generation);
+        assert_eq!(
+            marker.worker_identity_sha256,
+            worker_identity_digest(&identity).unwrap()
+        );
+        // Private modes: the marker file and its directory.
+        assert_eq!(
+            fs::symlink_metadata(verified_absence_marker_path(&runtime, identity.run_id))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::symlink_metadata(runtime.join("verified-absence"))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        // Write-once: the same generation may be rewritten only with
+        // identical content (the crash-after-marker retry re-verifies).
+        record_verified_absence_marker(&locator, &record(&identity)).unwrap();
+        let mut other = identity.clone();
+        other.pid += 1;
+        other.process_group_id += 1;
+        other.session_id += 1;
+        other.start_tvsec += 1;
+        assert_eq!(
+            record_verified_absence_marker(&locator, &record(&other)),
+            Err(WorkerProtocolError::InvalidOwnerRecord)
+        );
+        assert_eq!(
+            verified_absence_marker(&runtime, identity.run_id)
+                .unwrap()
+                .unwrap(),
+            marker
+        );
+        // A newer verified generation replaces the older marker; the older
+        // generation's rewrite is then refused.
+        let mut newer = identity.clone();
+        newer.run_generation += 1;
+        record_verified_absence_marker(&locator, &record(&newer)).unwrap();
+        assert_eq!(
+            verified_absence_marker(&runtime, identity.run_id)
+                .unwrap()
+                .unwrap()
+                .run_generation,
+            newer.run_generation
+        );
+        assert_eq!(
+            record_verified_absence_marker(&locator, &record(&identity)),
+            Err(WorkerProtocolError::InvalidOwnerRecord)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -14854,5 +19673,1002 @@ mod tests {
         write_frame(&mut stream, request).unwrap();
         let mut reader = BufReader::new(stream);
         read_frame(&mut reader).unwrap()
+    }
+
+    /// MD1: only a manifest-4 successor member publishes file-change payloads.
+    #[test]
+    fn only_a_manifest_four_successor_member_publishes_file_changes() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let directory = file_change_publication_dir(
+            &fixture.manifest,
+            &fixture.state_root,
+            fixture.manifest.run_id,
+        )
+        .expect("a manifest-4 successor member publishes");
+        assert!(directory.ends_with("file-changes"));
+        let mut managed = fixture.manifest.clone();
+        managed.aggregate_binding.as_mut().unwrap().aggregate_kind =
+            crate::domain::AggregateKind::OrchestratedSession;
+        assert_eq!(
+            file_change_publication_dir(&managed, &fixture.state_root, managed.run_id),
+            Some(directory.clone())
+        );
+        let digest = crate::turn::tests::fixture_file_change_publication(
+            file_change_publication_dir(&managed, &fixture.state_root, managed.run_id),
+        );
+        let bytes = std::fs::read(directory.join(format!("{digest}.json"))).unwrap();
+        assert_eq!(crate::jcs::sha256_hex(&bytes), digest);
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(payload[0]["path"], "ignored.log");
+        assert_eq!(payload[0]["diff"], "@@ -0,0 +1 @@\n+recorded\n");
+        std::fs::remove_dir_all(&directory).unwrap();
+        managed.aggregate_binding.as_mut().unwrap().member_kind =
+            crate::run::AggregateMemberKind::Primary;
+        assert_eq!(
+            file_change_publication_dir(&managed, &fixture.state_root, managed.run_id),
+            None
+        );
+        crate::turn::tests::fixture_file_change_publication(file_change_publication_dir(
+            &managed,
+            &fixture.state_root,
+            managed.run_id,
+        ));
+        assert!(!directory.exists());
+        // The same record as a legacy (manifest-3, facade-v4) external member
+        // publishes nothing.
+        let mut legacy = fixture.manifest.clone();
+        legacy.schema_version = 3;
+        assert_eq!(
+            file_change_publication_dir(&legacy, &fixture.state_root, fixture.manifest.run_id),
+            None
+        );
+        crate::turn::tests::fixture_file_change_publication(file_change_publication_dir(
+            &legacy,
+            &fixture.state_root,
+            fixture.manifest.run_id,
+        ));
+        assert!(!directory.exists());
+        // A non-member Run has no aggregate binding at all.
+        let mut plain = fixture.manifest.clone();
+        plain.aggregate_binding = None;
+        assert_eq!(
+            file_change_publication_dir(&plain, &fixture.state_root, fixture.manifest.run_id),
+            None
+        );
+    }
+
+    /// The drain's engagement detection and terminal funnel settle the
+    /// member's task through the hook, and stay inert for a Run that is no
+    /// external member.
+    #[test]
+    fn a_member_worker_terminal_funnel_settles_its_bound_task() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let accepted = fixture.accept_and_dispatch_task("worker-funnel", "read_only", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        // Only the pre-resolution ledger record exists; the funnel publishes the
+        // resolved terminal itself.
+        fixture.publish_terminal_turn_without_resolution("turn-1", "completed");
+        let resolved = crate::turn::TerminalTurn {
+            thread_id: "thread-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            status: "completed".to_owned(),
+            effort: "high".to_owned(),
+            final_response: Some(crate::turn::FinalResponse::Inline {
+                text: "resolved by the coordinator".to_owned(),
+            }),
+            usage: None,
+        };
+        // The drain detects the engagement from the member Run's own manifest.
+        let engagement = member_owner(&fixture.state_root, fixture.manifest.run_id);
+        assert_eq!(engagement, Some(fixture.owner()));
+        let authority =
+            RunControllerAuthority::new(fixture.state_root.clone(), fixture.manifest.run_id);
+        let identity = WorkerIdentity {
+            workspace_id: fixture.manifest.workspace_id.clone(),
+            run_id: fixture.manifest.run_id,
+            run_generation: 1,
+            boot_uuid: Uuid::now_v7(),
+            pid: 42,
+            process_group_id: 42,
+            session_id: 42,
+            uid: 501,
+            start_tvsec: 1,
+            start_tvusec: 2,
+            executable_path: PathBuf::from("/example/dolgorae"),
+            executable_device: 1,
+            executable_inode: 2,
+            executable_sha256: "22".repeat(32),
+        };
+        // The funnel settles the task bound to that Turn.
+        settle_member_terminal(&authority, &identity, engagement, &resolved);
+        let settled = fixture
+            .store()
+            .external_task(fixture.engagement_id, accepted.task_ref)
+            .unwrap();
+        assert_eq!(settled.state, "completed_not_delivered");
+        assert_eq!(settled.turn_id.as_deref(), Some("turn-1"));
+        // A Run that is no external member has no engagement and the funnel is
+        // inert, so an ordinary Run never touches an engagement store.
+        assert_eq!(member_owner(&fixture.state_root, Uuid::now_v7()), None);
+        settle_member_terminal(&authority, &identity, None, &resolved);
+    }
+
+    /// The same drain funnel and hook settle a managed session member,
+    /// detected from its own manifest's aggregate kind.
+    #[test]
+    fn a_managed_member_worker_terminal_funnel_settles_its_bound_task() {
+        let fixture = crate::semantic::successor_fixture::ManagedMember::new();
+        let accepted = fixture.accept_and_dispatch_task("worker-managed", 600);
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        // Only the pre-resolution ledger record exists; the funnel publishes the
+        // resolved terminal itself.
+        fixture.publish_terminal_turn_without_resolution("turn-1", "completed");
+        let resolved = crate::turn::TerminalTurn {
+            thread_id: "thread-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            status: "completed".to_owned(),
+            effort: "high".to_owned(),
+            final_response: Some(crate::turn::FinalResponse::Inline {
+                text: "resolved by the coordinator".to_owned(),
+            }),
+            usage: None,
+        };
+        // The drain detects the managed owner from the member Run's own manifest.
+        let owner = member_owner(&fixture.state_root, fixture.manifest.run_id);
+        assert_eq!(owner, Some(fixture.owner()));
+        let authority =
+            RunControllerAuthority::new(fixture.state_root.clone(), fixture.manifest.run_id);
+        let identity = WorkerIdentity {
+            workspace_id: fixture.manifest.workspace_id.clone(),
+            run_id: fixture.manifest.run_id,
+            run_generation: 1,
+            boot_uuid: Uuid::now_v7(),
+            pid: 42,
+            process_group_id: 42,
+            session_id: 42,
+            uid: 501,
+            start_tvsec: 1,
+            start_tvusec: 2,
+            executable_path: PathBuf::from("/example/dolgorae"),
+            executable_device: 1,
+            executable_inode: 2,
+            executable_sha256: "22".repeat(32),
+        };
+        // The funnel settles the managed task bound to that Turn, with no collect.
+        settle_member_terminal(&authority, &identity, owner, &resolved);
+        assert_eq!(
+            fixture.task_state(accepted.task_ref),
+            "completed_not_delivered"
+        );
+        let bytes = fixture
+            .complete_result_bytes(accepted.task_ref)
+            .expect("the hook published the managed complete result");
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["terminal_outcome"], "completed");
+        assert_eq!(result["source"]["scope_kind"], "orchestrated_session");
+        assert_eq!(
+            result["final_response"]["byte_length"],
+            u64::try_from("resolved by the coordinator".len()).unwrap()
+        );
+        // The settlement advanced the managed member's workload revision.
+        assert_eq!(fixture.workload_revision(), 1);
+    }
+
+    /// A managed owner belongs to successor Specialists alone, so the
+    /// terminal hook and both sweeps stay inert for the session's legacy Primary
+    /// and for a legacy member.
+    ///
+    /// The drain-start sweep, the pre-Turn sweep and the terminal funnel all read
+    /// exactly this one `member_owner`, and `settle_member_terminal` with no owner
+    /// writes nothing.
+    #[test]
+    fn a_legacy_session_run_never_enters_the_successor_funnel() {
+        let fixture = crate::semantic::successor_fixture::ManagedMember::new();
+        assert_eq!(fixture.manifest.schema_version, 4);
+        assert_eq!(
+            member_owner(&fixture.state_root, fixture.manifest.run_id),
+            Some(fixture.owner())
+        );
+        // The member kind is part of the decision, so a manifest-4 session
+        // Primary is never taken for a successor member.
+        let mut primary_shaped = fixture.manifest.clone();
+        primary_shaped
+            .aggregate_binding
+            .as_mut()
+            .unwrap()
+            .member_kind = crate::run::AggregateMemberKind::Primary;
+        assert_eq!(member_owner_for(&primary_shaped), None);
+        // A published generation-3 member and a published generation-3 Primary of
+        // a Session own no successor task, so neither sweeps nor the funnel runs.
+        let legacy_member = fixture.legacy_session_run(crate::run::AggregateMemberKind::Specialist);
+        let legacy_primary = fixture.legacy_session_run(crate::run::AggregateMemberKind::Primary);
+        for legacy in [&legacy_member, &legacy_primary] {
+            assert_eq!(legacy.schema_version, 3);
+            assert_eq!(
+                legacy
+                    .aggregate_binding
+                    .as_ref()
+                    .map(|binding| binding.aggregate_kind),
+                Some(crate::domain::AggregateKind::OrchestratedSession)
+            );
+            assert_eq!(member_owner(&fixture.state_root, legacy.run_id), None);
+        }
+        // The funnel therefore settles nothing and publishes no resolution record,
+        // which is exactly the behaviour both sweeps depend on.
+        let resolved = crate::turn::TerminalTurn {
+            thread_id: "thread-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            status: "completed".to_owned(),
+            effort: "high".to_owned(),
+            final_response: Some(crate::turn::FinalResponse::Inline {
+                text: "resolved by the coordinator".to_owned(),
+            }),
+            usage: None,
+        };
+        for legacy in [&legacy_member, &legacy_primary] {
+            let authority = RunControllerAuthority::new(fixture.state_root.clone(), legacy.run_id);
+            let identity = WorkerIdentity {
+                workspace_id: legacy.workspace_id.clone(),
+                run_id: legacy.run_id,
+                run_generation: 1,
+                boot_uuid: Uuid::now_v7(),
+                pid: 42,
+                process_group_id: 42,
+                session_id: 42,
+                uid: 501,
+                start_tvsec: 1,
+                start_tvusec: 2,
+                executable_path: PathBuf::from("/example/dolgorae"),
+                executable_device: 1,
+                executable_inode: 2,
+                executable_sha256: "22".repeat(32),
+            };
+            let owner = member_owner(&fixture.state_root, legacy.run_id);
+            settle_member_terminal(&authority, &identity, owner, &resolved);
+            assert!(
+                crate::semantic::resolved_terminal(&fixture.state_root, legacy.run_id, "turn-1")
+                    .unwrap()
+                    .is_none(),
+                "a legacy session Run must not write a resolution record"
+            );
+        }
+    }
+
+    /// The owner binding an engagement recorded at open authorizes
+    /// its member Run's carrier, and only that owner.
+    #[test]
+    fn a_successor_member_owner_binding_authorizes_its_carrier() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        assert_eq!(fixture.manifest.schema_version, 4);
+        let authority =
+            RunControllerAuthority::new(fixture.state_root.clone(), fixture.manifest.run_id);
+        authority
+            .authorize_external(fixture.engagement_id, "external_submit", &fixture.owner)
+            .unwrap();
+        // Another Controller's carrier is refused: the successor branch compares
+        // it with the binding the engagement recorded, never with a legacy open
+        // receipt.
+        let refused = authority
+            .authorize_external(fixture.engagement_id, "external_submit", &fixture.stranger)
+            .unwrap_err();
+        assert_eq!(refused.code, "CONTROLLER_MISMATCH");
+        // The legacy generation-3 authority is unchanged for the same record.
+        let store = fixture.store();
+        store
+            .authorize_external_owner(
+                &fixture.view.workspace_id,
+                fixture.engagement_id,
+                "external_submit",
+                &fixture.owner,
+            )
+            .unwrap();
+        assert!(
+            store
+                .authorize_external_owner(
+                    &fixture.view.workspace_id,
+                    fixture.engagement_id,
+                    "external_submit",
+                    &fixture.stranger,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn releasing_external_member_requires_its_verified_release_owner_for_cleanup() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let authority =
+            RunControllerAuthority::new(fixture.state_root.clone(), fixture.manifest.run_id);
+        let mut store = fixture.store();
+        let operation = Uuid::now_v7();
+        let principal = format!(
+            "controller:{}",
+            fixture.manifest.controller.identity.controller_id
+        );
+        store
+            .transact(|tx| {
+                crate::engagement::admit_member_release(
+                    tx,
+                    crate::engagement::MemberReleaseAdmission {
+                        operation_ref: operation,
+                        workspace_ref: &fixture.view.workspace_id,
+                        scope_kind: "external_engagement",
+                        scope_ref: &fixture.engagement_id.to_string(),
+                        member_ref: fixture.manifest.run_id,
+                        run_ref: fixture.manifest.run_id,
+                        controller_principal: &principal,
+                        controller_generation: fixture.manifest.controller.identity.generation,
+                        admitted_membership_revision: 0,
+                        now_ms: 1,
+                    },
+                )?;
+                crate::engagement::mark_external_member_releasing(
+                    tx,
+                    fixture.engagement_id,
+                    fixture.manifest.run_id,
+                    1,
+                )
+            })
+            .unwrap();
+        let refused = |operation| {
+            assert_eq!(
+                authority
+                    .authorize_external(fixture.engagement_id, operation, &fixture.owner)
+                    .unwrap_err()
+                    .code,
+                "ENGAGEMENT_STATE_CONFLICT"
+            )
+        };
+        refused("engagement.release");
+        let lease = RunLifecycleLease::acquire(
+            &fixture.state_root,
+            &fixture.view.workspace_id,
+            fixture.manifest.run_id,
+            1,
+        )
+        .unwrap();
+        let digest = lease.owner_ref().unwrap();
+        let record = |store: &mut EngagementStore, digest: &str| {
+            store
+                .transact(|tx| {
+                    crate::engagement::record_member_release_progress(
+                        tx,
+                        operation,
+                        crate::engagement::MemberReleaseProgress::Owned { owner_ref: digest },
+                        1,
+                    )
+                    .map(|_| ())
+                })
+                .unwrap()
+        };
+        record(&mut store, &"ab".repeat(32));
+        refused("engagement.release");
+        record(&mut store, &digest);
+        for command in ["engagement.release", "engagement.release_write"] {
+            authority
+                .authorize_external(fixture.engagement_id, command, &fixture.owner)
+                .unwrap();
+            assert_eq!(
+                authority
+                    .authorize_external(fixture.engagement_id, command, &fixture.stranger)
+                    .unwrap_err()
+                    .code,
+                "CONTROLLER_MISMATCH"
+            );
+        }
+        for command in [
+            "external_submit",
+            "engagement.acquire_write",
+            "engagement.interrupt",
+            "run.close",
+        ] {
+            refused(command);
+        }
+        store
+            .transact(|tx| {
+                crate::engagement::record_member_release_progress(
+                    tx,
+                    operation,
+                    crate::engagement::MemberReleaseProgress::Failed {
+                        progress: "recovery_needed",
+                        safe_failure_code: "MEMBER_RUN_CLOSE_UNVERIFIED",
+                        required_action: "recover_run",
+                    },
+                    2,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        refused("engagement.release");
+        record(&mut store, &digest);
+        drop(lease);
+        refused("engagement.release_write");
+    }
+
+    /// Refusal case: a member Run whose Controller is not the owner
+    /// the engagement recorded at open is refused before any member effect.
+    #[test]
+    fn a_successor_member_run_owned_by_another_controller_is_refused() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let mut foreign = fixture.manifest.clone();
+        foreign.run_id = Uuid::now_v7();
+        foreign.controller = crate::controller::binding_from_carrier(&fixture.stranger, 1).unwrap();
+        foreign.aggregate_binding.as_mut().unwrap().operation_id = Uuid::now_v7();
+        crate::run::RunStore::new(
+            crate::workspace::SystemWorkspacePlatform,
+            &fixture.state_root,
+        )
+        .publish(&foreign)
+        .unwrap();
+        let authority = RunControllerAuthority::new(fixture.state_root.clone(), foreign.run_id);
+        // The owner's own carrier cannot authorize a Run another Controller owns.
+        let owned_by_another = authority
+            .authorize_external(fixture.engagement_id, "external_submit", &fixture.owner)
+            .unwrap_err();
+        assert_eq!(owned_by_another.code, "CONTROLLER_MISMATCH");
+    }
+
+    /// The caller-policy proof accepts both caller generations and
+    /// refuses every other one.
+    #[test]
+    fn a_caller_policy_proof_binds_both_caller_generations() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let (runtime, socket, proof, policy) = caller_policy_fixture(&fixture.manifest);
+        let operation_id = proof.operation_id;
+        let generation = |manifest: &crate::run::RunManifest| {
+            let expected = CallerPolicyExpectation {
+                phase: CallerPolicyPhase::Prepared,
+                operation_id,
+                manifest,
+                runtime: &runtime,
+                app_server_socket_identity: &socket,
+                original_thread_id: "original-thread",
+                durable_policy: &policy,
+                controller: &manifest.controller,
+                access: crate::domain::Access::Read,
+                writer: None,
+            };
+            proof.validate_binding(&expected)
+        };
+        assert_eq!(generation(&fixture.manifest), Ok(()));
+        let mut legacy = fixture.manifest.clone();
+        legacy.schema_version = 3;
+        assert_eq!(generation(&legacy), Ok(()));
+        for refused in [2, 5] {
+            let mut other = fixture.manifest.clone();
+            other.schema_version = refused;
+            assert_eq!(
+                generation(&other),
+                Err(WorkerProtocolError::InvalidRuntimeRecord),
+                "generation {refused}"
+            );
+        }
+    }
+
+    fn caller_policy_fixture(
+        manifest: &crate::run::RunManifest,
+    ) -> (
+        WorkerRuntimeRecord,
+        SocketIdentity,
+        CallerPolicyProof,
+        crate::domain::EffectivePolicy,
+    ) {
+        let binding = manifest.global_profile_binding.as_ref().unwrap();
+        let executable = &binding.launch_snapshot.executable_identity;
+        let operation_id = Uuid::now_v7();
+        let identity = WorkerIdentity {
+            workspace_id: manifest.workspace_id.clone(),
+            run_id: manifest.run_id,
+            run_generation: 3,
+            boot_uuid: Uuid::now_v7(),
+            pid: 42,
+            process_group_id: 42,
+            session_id: 42,
+            uid: 501,
+            start_tvsec: 1,
+            start_tvusec: 2,
+            executable_path: PathBuf::from("/example/dolgorae"),
+            executable_device: 1,
+            executable_inode: 2,
+            executable_sha256: "22".repeat(32),
+        };
+        let dedicated = DedicatedServerIdentity {
+            pid: 43,
+            process_group_id: 43,
+            session_id: 43,
+            uid: 501,
+            start_tvsec: 1,
+            start_tvusec: 3,
+            executable_path: PathBuf::from(&executable.resolved_path),
+            executable_device: executable.device,
+            executable_inode: executable.inode,
+            executable_sha256: executable.sha256.clone(),
+        };
+        let runtime = WorkerRuntimeRecord {
+            schema_version: 1,
+            socket_path: worker_socket_path(501, &manifest.workspace_id, manifest.run_id).unwrap(),
+            identity: identity.clone(),
+            socket_identity: SocketIdentity {
+                device: 5,
+                inode: 6,
+            },
+            control_socket_epoch: 2,
+            app_server_epoch: Some(7),
+            control_recovery_required: false,
+            startup_scope: None,
+            dedicated_server_identity: Some(dedicated.clone()),
+            dolgorae_version: "0.1.3".to_owned(),
+            mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+            binary_sha256: "22".repeat(32),
+        };
+        let socket = SocketIdentity {
+            device: 8,
+            inode: 9,
+        };
+        let policy = crate::domain::EffectivePolicy {
+            access: crate::domain::Access::Read,
+            verification: crate::domain::PolicyVerification::Verified,
+            policy_epoch: crate::domain::PolicyEpoch(4),
+            thread_generation: Some(2),
+            server_epoch: Some(7),
+            writer_generation: None,
+        };
+        let proof = CallerPolicyProof {
+            schema: "dolgorae.caller-policy-proof/v1".to_owned(),
+            operation_id,
+            identity,
+            control_socket_epoch: 2,
+            dedicated_server_identity: dedicated,
+            app_server_socket_identity: socket.clone(),
+            server_key: binding.server_key.clone(),
+            server_epoch: 7,
+            global_profile_binding_sha256: binding.digest().unwrap(),
+            thread_id: "original-thread".to_owned(),
+            effective_policy: policy.clone(),
+        };
+        (runtime, socket, proof, policy)
+    }
+
+    /// A successor dispatched Turn resolves its task from the
+    /// accepted intent receipt without any legacy operations row, and is bound to
+    /// the task's own execution intent, deadline and preserved bytes.
+    #[test]
+    fn a_successor_dispatch_binds_the_accepted_receipt_and_its_bytes() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let store = fixture.store();
+        let manifest = &fixture.manifest;
+        // The successor assignment has no legacy operations receipt at all.
+        let legacy: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM operations
+                  WHERE operation='assign_external_specialist_task'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy, 0);
+
+        // A read-only task with the deadline the caller requested: the binding
+        // accepts the Turn the dispatch really sends.
+        let read_only_member = crate::semantic::successor_fixture::SuccessorMember::new();
+        let read_only_store = read_only_member.store();
+        let read_only =
+            read_only_member.accept_and_dispatch_task("successor-read-only", "read_only", 600);
+        assert!(read_only.prompt.contains("Execution intent: read_only"));
+        assert!(read_only.prompt.contains("600 seconds"));
+        assert!(
+            bind_successor_dispatch(
+                &read_only_store,
+                read_only_member.engagement_id,
+                read_only_member.manifest.run_id,
+                &read_only_member.manifest.workspace_id,
+                "successor-read-only",
+                false,
+                &read_only.prompt,
+            )
+            .unwrap()
+        );
+        // An altered Turn is refused.
+        assert_eq!(
+            bind_successor_dispatch(
+                &read_only_store,
+                read_only_member.engagement_id,
+                read_only_member.manifest.run_id,
+                &read_only_member.manifest.workspace_id,
+                "successor-read-only",
+                false,
+                &format!("{} ", read_only.prompt),
+            )
+            .unwrap_err()
+            .code,
+            "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+        );
+        // A write Turn never carries a delegated task: the member dispatch holds
+        // the writer authority and submits a read-only Turn.
+        assert_eq!(
+            bind_successor_dispatch(
+                &read_only_store,
+                read_only_member.engagement_id,
+                read_only_member.manifest.run_id,
+                &read_only_member.manifest.workspace_id,
+                "successor-read-only",
+                true,
+                &read_only.prompt,
+            )
+            .unwrap_err()
+            .code,
+            "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+        );
+        // A generation-4 member has no legacy receipt to fall back on, so an
+        // unaccepted key is refused before any Turn is submitted.
+        assert!(
+            !bind_successor_dispatch(
+                &read_only_store,
+                read_only_member.engagement_id,
+                read_only_member.manifest.run_id,
+                &read_only_member.manifest.workspace_id,
+                "unaccepted-key",
+                false,
+                "an arbitrary prompt",
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            successor_dispatch_decision(read_only_member.manifest.schema_version, false)
+                .unwrap_err()
+                .code,
+            "ACCEPTED_ASSIGNMENT_NOT_FOUND"
+        );
+
+        // A canonical-workspace-write task with another deadline: a different
+        // real Turn, so a hard-coded intent or deadline cannot pass the binding.
+        let write_member = crate::semantic::successor_fixture::SuccessorMember::new();
+        let write_store = write_member.store();
+        let write = write_member.accept_and_dispatch_task(
+            "successor-write",
+            "canonical_workspace_write",
+            1200,
+        );
+        assert_ne!(write.prompt, read_only.prompt);
+        assert!(
+            write
+                .prompt
+                .contains("Execution intent: canonical_workspace_write")
+        );
+        assert!(write.prompt.contains("1200 seconds"));
+        assert!(
+            bind_successor_dispatch(
+                &write_store,
+                write_member.engagement_id,
+                write_member.manifest.run_id,
+                &write_member.manifest.workspace_id,
+                "successor-write",
+                false,
+                &write.prompt,
+            )
+            .unwrap()
+        );
+        // The read-only Turn is not the write task's Turn.
+        assert_eq!(
+            bind_successor_dispatch(
+                &write_store,
+                write_member.engagement_id,
+                write_member.manifest.run_id,
+                &write_member.manifest.workspace_id,
+                "successor-write",
+                false,
+                &read_only.prompt,
+            )
+            .unwrap_err()
+            .code,
+            "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+        );
+        // A key with no accepted successor assignment stays on the legacy path.
+        assert!(
+            !bind_successor_dispatch(
+                &store,
+                fixture.engagement_id,
+                manifest.run_id,
+                &manifest.workspace_id,
+                "legacy-key",
+                false,
+                &read_only.prompt,
+            )
+            .unwrap()
+        );
+    }
+
+    /// A managed successor member binds its Broker-carrier Submit to the
+    /// assignment the Broker acceptance retained, before the Turn is admitted.
+    #[test]
+    fn a_managed_successor_dispatch_binds_the_broker_acceptance_and_its_bytes() {
+        let fixture = crate::semantic::successor_fixture::ManagedMember::new();
+        let accepted = fixture.accept_and_dispatch_task("worker-managed-bind", 600);
+        let key = format!("successor-task:{}", accepted.task_ref);
+        let bind = |run_id: Uuid, key: &str, write: bool, message: &str| {
+            bind_managed_successor_dispatch(
+                &fixture.state_root,
+                fixture.session_id,
+                run_id,
+                key,
+                write,
+                message,
+            )
+        };
+        // The Turn the real managed dispatch sends is admitted.
+        assert!(bind(fixture.member_ref, &key, false, &accepted.prompt).unwrap());
+        // An altered Turn is refused.
+        assert_eq!(
+            bind(
+                fixture.member_ref,
+                &key,
+                false,
+                &format!("{} ", accepted.prompt)
+            )
+            .unwrap_err()
+            .code,
+            "ACCEPTED_ASSIGNMENT_MISMATCH"
+        );
+        // Managed tasks are read-only in v0.1.4, so a write Turn carries none.
+        assert_eq!(
+            bind(fixture.member_ref, &key, true, &accepted.prompt)
+                .unwrap_err()
+                .code,
+            "ACCEPTED_ASSIGNMENT_MISMATCH"
+        );
+        // Another Run cannot adopt this member's accepted task.
+        assert_eq!(
+            bind(Uuid::now_v7(), &key, false, &accepted.prompt)
+                .unwrap_err()
+                .code,
+            "ACCEPTED_ASSIGNMENT_MISMATCH"
+        );
+        // A key that names no accepted managed assignment is never claimed, so a
+        // manifest-4 member refuses it before any Turn is submitted.
+        for unknown in [
+            "not-a-managed-key".to_owned(),
+            "successor-task:not-a-uuid".to_owned(),
+            format!("successor-task:{}", Uuid::now_v7()),
+        ] {
+            assert!(
+                !bind(fixture.member_ref, &unknown, false, &accepted.prompt).unwrap(),
+                "{unknown}"
+            );
+        }
+        assert_eq!(
+            successor_dispatch_decision(4, false).unwrap_err().code,
+            "ACCEPTED_ASSIGNMENT_NOT_FOUND"
+        );
+
+        // The acceptance's frozen assignment digest is the binding: rewriting it
+        // refuses the same Turn whose bytes still match the retained content.
+        let frozen = crate::semantic::successor_fixture::ManagedMember::new();
+        let frozen_task = frozen.accept_and_dispatch_task("worker-managed-frozen", 600);
+        frozen
+            .store()
+            .connection()
+            .execute(
+                "UPDATE brokered_task_acceptances SET source_request_sha256=?2
+                  WHERE task_id=?1",
+                rusqlite::params![frozen_task.task_ref.to_string(), "e".repeat(64)],
+            )
+            .unwrap();
+        assert_eq!(
+            bind_managed_successor_dispatch(
+                &frozen.state_root,
+                frozen.session_id,
+                frozen.member_ref,
+                &format!("successor-task:{}", frozen_task.task_ref),
+                false,
+                &frozen_task.prompt,
+            )
+            .unwrap_err()
+            .code,
+            "ACCEPTED_ASSIGNMENT_MISMATCH"
+        );
+
+        // Once the Turn is running, the reservation is gone: a repeat of the same
+        // key no longer presents a dispatchable Turn.
+        fixture.mark_task_running(accepted.task_ref, "turn-1");
+        assert_eq!(
+            bind(fixture.member_ref, &key, false, &accepted.prompt)
+                .unwrap_err()
+                .code,
+            "ACCEPTED_ASSIGNMENT_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn dispatch_rejects_substituted_target_manifest_for_both_owners() {
+        fn substitute(store: &crate::engagement::EngagementStore, task: Uuid) {
+            let (_, _, bytes) = crate::engagement::accepted_task_content(store.connection(), task)
+                .unwrap()
+                .unwrap();
+            let mut manifest: serde_json::Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
+            manifest["kind"] = serde_json::json!("dirty");
+            let changed = serde_json::to_vec(&manifest).unwrap();
+            assert_eq!(store.connection().execute(
+                "UPDATE result_content SET bytes=?2 WHERE sha256=(SELECT sha256 FROM result_content_refs WHERE owner_kind='accepted_task' AND owner_id=?1 AND representation='target')",
+                rusqlite::params![task.to_string(), changed],
+            ).unwrap(), 1);
+        }
+        let external = crate::semantic::successor_fixture::SuccessorMember::new();
+        let task = external.accept_target_task("target-bind");
+        let bind = || {
+            bind_successor_dispatch(
+                &external.store(),
+                external.engagement_id,
+                external.member_ref,
+                &external.manifest.workspace_id,
+                "target-bind",
+                false,
+                &task.prompt,
+            )
+        };
+        // Reopening the store binds the original retained manifest without admission.
+        assert!(bind().unwrap());
+        substitute(&external.store(), task.task_ref);
+        let error = bind().unwrap_err();
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(
+            error.details["invariant"],
+            "published result content failed integrity validation"
+        );
+
+        let managed = crate::semantic::successor_fixture::ManagedMember::new();
+        let task = managed.accept_target_task("target-bind");
+        let bind = || {
+            bind_managed_successor_dispatch(
+                &managed.state_root,
+                managed.session_id,
+                managed.member_ref,
+                &format!("successor-task:{}", task.task_ref),
+                false,
+                &task.prompt,
+            )
+        };
+        assert!(bind().unwrap());
+        substitute(&managed.store(), task.task_ref);
+        let error = bind().unwrap_err();
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(
+            error.details["invariant"],
+            "published result content failed integrity validation"
+        );
+    }
+
+    /// The retained task is bound to the acceptance the immutable intent
+    /// froze, so rewriting the task row and its bytes together is refused.
+    #[test]
+    fn a_rewritten_successor_task_is_refused_against_its_recorded_acceptance() {
+        // The row and the retained bytes move together, but the digest the
+        // acceptance recorded still names the original identity.
+        let partial_member = crate::semantic::successor_fixture::SuccessorMember::new();
+        let partial =
+            partial_member.accept_and_dispatch_task("successor-partial", "read_only", 600);
+        let body = partial_member.altered_task_body(partial.task_ref);
+        partial_member.rewrite_retained_task(partial.task_ref, &body, false);
+        assert!(
+            partial_member
+                .store()
+                .external_task_identity(partial_member.engagement_id, partial.task_ref)
+                .is_err()
+        );
+        // A rewrite that also moves every digest in the row is still refused:
+        // only the frozen intent envelope can tell it from the acceptance.
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let full = fixture.accept_and_dispatch_task("successor-full", "read_only", 600);
+        let body = fixture.altered_task_body(full.task_ref);
+        fixture.rewrite_retained_task(full.task_ref, &body, true);
+        let store = fixture.store();
+        assert!(
+            store
+                .external_task_identity(fixture.engagement_id, full.task_ref)
+                .is_ok()
+        );
+        // Even the Turn rendered from the rewritten bytes is refused.
+        let rewritten = fixture.render_retained(full.task_ref, "read_only", 600);
+        assert_ne!(rewritten, full.prompt);
+        assert_eq!(
+            bind_successor_dispatch(
+                &store,
+                fixture.engagement_id,
+                fixture.manifest.run_id,
+                &fixture.manifest.workspace_id,
+                "successor-full",
+                false,
+                &rewritten,
+            )
+            .unwrap_err()
+            .code,
+            "REVIEW_CANDIDATE_PROVENANCE_INVALID"
+        );
+    }
+
+    /// A manifest-3 legacy member keeps the legacy receipt path that a
+    /// generation-4 member must not take.
+    #[test]
+    fn a_legacy_generation_member_keeps_the_legacy_receipt_path() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let legacy = fixture.legacy_member("legacy-assign");
+        assert_eq!(legacy.manifest.schema_version, 3);
+        let store = fixture.store();
+        // The successor binding does not claim a key that exists only in the
+        // legacy operations table.
+        assert!(
+            !bind_successor_dispatch(
+                &store,
+                fixture.engagement_id,
+                legacy.run_id,
+                &legacy.manifest.workspace_id,
+                &legacy.idempotency_key,
+                false,
+                "legacy prompt",
+            )
+            .unwrap()
+        );
+        // Generation 3 therefore continues on the legacy receipt path.
+        assert_eq!(
+            successor_dispatch_decision(legacy.manifest.schema_version, false),
+            Ok(false)
+        );
+        // The accepted successor assignment of the same engagement still binds,
+        // so the generation decision is the only difference.
+        let accepted = fixture.accept_and_dispatch_task("successor-assign", "read_only", 600);
+        assert!(
+            bind_successor_dispatch(
+                &store,
+                fixture.engagement_id,
+                fixture.manifest.run_id,
+                &fixture.manifest.workspace_id,
+                "successor-assign",
+                false,
+                &accepted.prompt,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            successor_dispatch_decision(fixture.manifest.schema_version, true),
+            Ok(true)
+        );
+    }
+
+    /// Gates (b) and (c): the owned-runtime qualification and the qualified
+    /// caller runtime cover generation 4 exactly like generation 3, and the
+    /// dedicated Server argv is the one that qualification compares against.
+    #[test]
+    fn caller_workspace_qualification_covers_both_caller_generations() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let mut session = reviewer_bootstrap();
+        session.safety_policy = SessionSafetyPolicy::CallerWorkspace;
+        assert!(caller_workspace_session(3, &session));
+        assert!(caller_workspace_session(4, &session));
+        for refused in [1, 2, 5] {
+            assert!(!caller_workspace_session(refused, &session), "{refused}");
+        }
+        let mut legacy_policy = session.clone();
+        legacy_policy.safety_policy = SessionSafetyPolicy::Standard;
+        assert!(!caller_workspace_session(4, &legacy_policy));
+        // The restart and start path composes the argv this qualification
+        // demands for a generation-4 member.
+        let expected = caller_workspace_argv(&fixture.manifest);
+        assert_eq!(
+            expected,
+            fixture
+                .manifest
+                .profile
+                .normalized_argv
+                .iter()
+                .cloned()
+                .chain(["-c".to_owned(), "project_doc_max_bytes=0".to_owned()])
+                .collect::<Vec<_>>()
+        );
+        let mut legacy = fixture.manifest.clone();
+        legacy.schema_version = 2;
+        assert_eq!(
+            caller_workspace_argv(&legacy),
+            legacy.profile.normalized_argv.clone()
+        );
     }
 }

@@ -815,6 +815,41 @@ impl<C: LedgerClock, F: FaultInjector> SharedLedgerJournal<C, F> {
     }
 }
 
+impl<C: LedgerClock + 'static, F: FaultInjector + 'static> SharedLedgerJournal<C, F> {
+    /// Borrow the actor's ledger with the same writer observation and event
+    /// authority as an ordinary journal append. No remote or quota wait belongs
+    /// inside this boundary.
+    pub(crate) fn with_ledger_authority<T>(
+        &self,
+        append: impl FnOnce(&mut Ledger<C, F>) -> Result<T, MachineError>,
+    ) -> Result<T, MachineError> {
+        let poisoned = || {
+            MachineError::new(
+                "INTERNAL_ERROR",
+                "shared ledger lock is poisoned",
+                false,
+                serde_json::json!({}),
+            )
+        };
+        if let Some(authority) = &self.event_authority {
+            return authority.writer.observe_locked(|writer| {
+                let mut ledger = self.ledger.lock().map_err(|_| poisoned())?;
+                ledger.with_event_context(
+                    crate::ledger::EventAppendContext {
+                        workspace_id: authority.workspace_id.clone(),
+                        server_key: authority.server_key.clone(),
+                        server_epoch: authority.server_epoch,
+                        writer_state_revision: writer.authority_revision,
+                    },
+                    append,
+                )
+            })?;
+        }
+        let mut ledger = self.ledger.lock().map_err(|_| poisoned())?;
+        append(&mut ledger)
+    }
+}
+
 impl<C: LedgerClock + 'static, F: FaultInjector + 'static> DurableTurnJournal
     for SharedLedgerJournal<C, F>
 {
@@ -861,7 +896,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> DurableTurnJournal
     }
 }
 
-fn journal_ledger_error(error: crate::ledger::LedgerError) -> TurnError {
+pub(crate) fn journal_ledger_error(error: crate::ledger::LedgerError) -> TurnError {
     match error {
         crate::ledger::LedgerError::Capacity(reason) => TurnError::Capacity(reason),
         other => TurnError::Journal(other.to_string()),
@@ -1323,6 +1358,362 @@ pub trait ForeignDiagnostics: Send {
     ) -> Result<(), TurnError>;
 }
 
+/// Validates one JSON value without retaining its keys, strings or numbers.
+/// Proof extraction has separate identity, duplicate-key and Turn bounds.
+#[derive(Debug, Default)]
+struct JsonGrammar {
+    stack: Vec<JsonFrame>,
+    token: JsonToken,
+    complete: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum JsonFrame {
+    Object(JsonObject),
+    Array(JsonArray),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum JsonObject {
+    KeyOrEnd,
+    Key,
+    Colon,
+    Value,
+    CommaOrEnd,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum JsonArray {
+    ValueOrEnd,
+    Value,
+    CommaOrEnd,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum JsonToken {
+    #[default]
+    None,
+    String(JsonString),
+    Literal {
+        bytes: &'static [u8],
+        next: usize,
+    },
+    Number(JsonNumber),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum JsonNumber {
+    Sign,
+    Zero,
+    Integer,
+    Dot,
+    Fraction,
+    Exponent,
+    ExponentSign,
+    ExponentDigits,
+}
+
+impl JsonNumber {
+    fn can_end(self) -> bool {
+        matches!(
+            self,
+            Self::Zero | Self::Integer | Self::Fraction | Self::ExponentDigits
+        )
+    }
+
+    fn push(self, byte: u8) -> Result<Option<Self>, TurnError> {
+        if matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b',' | b']' | b'}') {
+            return self
+                .can_end()
+                .then_some(None)
+                .ok_or(TurnError::CorrelationMismatch);
+        }
+        let next = match (self, byte) {
+            (Self::Sign, b'0') => Self::Zero,
+            (Self::Sign, b'1'..=b'9') => Self::Integer,
+            (Self::Integer, b'0'..=b'9') => Self::Integer,
+            (Self::Zero | Self::Integer, b'.') => Self::Dot,
+            (Self::Zero | Self::Integer | Self::Fraction, b'e' | b'E') => Self::Exponent,
+            (Self::Dot | Self::Fraction, b'0'..=b'9') => Self::Fraction,
+            (Self::Exponent, b'+' | b'-') => Self::ExponentSign,
+            (Self::Exponent | Self::ExponentSign | Self::ExponentDigits, b'0'..=b'9') => {
+                Self::ExponentDigits
+            }
+            _ => return Err(TurnError::CorrelationMismatch),
+        };
+        Ok(Some(next))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum JsonEscape {
+    #[default]
+    None,
+    Slash,
+    Hex {
+        digits: u8,
+        value: u16,
+        low: bool,
+    },
+    LowSlash,
+    LowU,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct JsonString {
+    key: bool,
+    escape: JsonEscape,
+    continuation: u8,
+    lower: u8,
+    upper: u8,
+}
+
+impl JsonString {
+    fn push(&mut self, byte: u8) -> Result<bool, TurnError> {
+        match self.escape {
+            JsonEscape::Slash => {
+                self.escape = match byte {
+                    b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => JsonEscape::None,
+                    b'u' => JsonEscape::Hex {
+                        digits: 0,
+                        value: 0,
+                        low: false,
+                    },
+                    _ => return Err(TurnError::CorrelationMismatch),
+                };
+            }
+            JsonEscape::Hex { digits, value, low } => {
+                let digit = match byte {
+                    b'0'..=b'9' => byte - b'0',
+                    b'a'..=b'f' => byte - b'a' + 10,
+                    b'A'..=b'F' => byte - b'A' + 10,
+                    _ => return Err(TurnError::CorrelationMismatch),
+                };
+                let value = (value << 4) | u16::from(digit);
+                self.escape = if digits < 3 {
+                    JsonEscape::Hex {
+                        digits: digits + 1,
+                        value,
+                        low,
+                    }
+                } else if low {
+                    if !(0xdc00..=0xdfff).contains(&value) {
+                        return Err(TurnError::CorrelationMismatch);
+                    }
+                    JsonEscape::None
+                } else if (0xd800..=0xdbff).contains(&value) {
+                    JsonEscape::LowSlash
+                } else if (0xdc00..=0xdfff).contains(&value) {
+                    return Err(TurnError::CorrelationMismatch);
+                } else {
+                    JsonEscape::None
+                };
+            }
+            JsonEscape::LowSlash => {
+                if byte != b'\\' {
+                    return Err(TurnError::CorrelationMismatch);
+                }
+                self.escape = JsonEscape::LowU;
+            }
+            JsonEscape::LowU => {
+                if byte != b'u' {
+                    return Err(TurnError::CorrelationMismatch);
+                }
+                self.escape = JsonEscape::Hex {
+                    digits: 0,
+                    value: 0,
+                    low: true,
+                };
+            }
+            JsonEscape::None => {
+                if self.continuation > 0 {
+                    if !(self.lower..=self.upper).contains(&byte) {
+                        return Err(TurnError::CorrelationMismatch);
+                    }
+                    self.continuation -= 1;
+                    self.lower = 0x80;
+                    self.upper = 0xbf;
+                    return Ok(false);
+                }
+                let (remaining, lower, upper) = match byte {
+                    0..=0x1f => return Err(TurnError::CorrelationMismatch),
+                    b'"' => return Ok(true),
+                    b'\\' => {
+                        self.escape = JsonEscape::Slash;
+                        return Ok(false);
+                    }
+                    0x20..=0x7f => return Ok(false),
+                    0xc2..=0xdf => (1, 0x80, 0xbf),
+                    0xe0 => (2, 0xa0, 0xbf),
+                    0xe1..=0xec | 0xee..=0xef => (2, 0x80, 0xbf),
+                    0xed => (2, 0x80, 0x9f),
+                    0xf0 => (3, 0x90, 0xbf),
+                    0xf1..=0xf3 => (3, 0x80, 0xbf),
+                    0xf4 => (3, 0x80, 0x8f),
+                    _ => return Err(TurnError::CorrelationMismatch),
+                };
+                self.continuation = remaining;
+                self.lower = lower;
+                self.upper = upper;
+            }
+        }
+        Ok(false)
+    }
+}
+
+impl JsonGrammar {
+    fn value_complete(&mut self) {
+        if self.stack.is_empty() {
+            self.complete = true;
+        }
+    }
+
+    fn close(&mut self) {
+        self.stack.pop();
+        self.value_complete();
+    }
+
+    fn start_value(&mut self, byte: u8) -> Result<(), TurnError> {
+        if let Some(frame) = self.stack.last_mut() {
+            *frame = match *frame {
+                JsonFrame::Object(JsonObject::Value) => JsonFrame::Object(JsonObject::CommaOrEnd),
+                JsonFrame::Array(JsonArray::ValueOrEnd | JsonArray::Value) => {
+                    JsonFrame::Array(JsonArray::CommaOrEnd)
+                }
+                _ => return Err(TurnError::CorrelationMismatch),
+            };
+        }
+        match byte {
+            b'{' | b'[' => {
+                if self.stack.len() >= 256 {
+                    return Err(TurnError::CorrelationMismatch);
+                }
+                self.stack.push(if byte == b'{' {
+                    JsonFrame::Object(JsonObject::KeyOrEnd)
+                } else {
+                    JsonFrame::Array(JsonArray::ValueOrEnd)
+                });
+            }
+            b'"' => self.token = JsonToken::String(JsonString::default()),
+            b't' => {
+                self.token = JsonToken::Literal {
+                    bytes: b"true",
+                    next: 1,
+                }
+            }
+            b'f' => {
+                self.token = JsonToken::Literal {
+                    bytes: b"false",
+                    next: 1,
+                }
+            }
+            b'n' => {
+                self.token = JsonToken::Literal {
+                    bytes: b"null",
+                    next: 1,
+                }
+            }
+            b'-' => self.token = JsonToken::Number(JsonNumber::Sign),
+            b'0' => self.token = JsonToken::Number(JsonNumber::Zero),
+            b'1'..=b'9' => self.token = JsonToken::Number(JsonNumber::Integer),
+            _ => return Err(TurnError::CorrelationMismatch),
+        }
+        Ok(())
+    }
+
+    fn push(&mut self, byte: u8) -> Result<(), TurnError> {
+        match self.token {
+            JsonToken::String(mut string) => {
+                if string.push(byte)? {
+                    self.token = JsonToken::None;
+                    if string.key {
+                        *self
+                            .stack
+                            .last_mut()
+                            .ok_or(TurnError::CorrelationMismatch)? =
+                            JsonFrame::Object(JsonObject::Colon);
+                    } else {
+                        self.value_complete();
+                    }
+                } else {
+                    self.token = JsonToken::String(string);
+                }
+                return Ok(());
+            }
+            JsonToken::Literal { bytes, next } => {
+                if byte != bytes[next] {
+                    return Err(TurnError::CorrelationMismatch);
+                }
+                if next + 1 == bytes.len() {
+                    self.token = JsonToken::None;
+                    self.value_complete();
+                } else {
+                    self.token = JsonToken::Literal {
+                        bytes,
+                        next: next + 1,
+                    };
+                }
+                return Ok(());
+            }
+            JsonToken::Number(number) => {
+                if let Some(next) = number.push(byte)? {
+                    self.token = JsonToken::Number(next);
+                    return Ok(());
+                }
+                self.token = JsonToken::None;
+                self.value_complete();
+            }
+            JsonToken::None => {}
+        }
+        if matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
+            return Ok(());
+        }
+        if self.complete {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        match (self.stack.last().copied(), byte) {
+            (Some(JsonFrame::Object(JsonObject::KeyOrEnd | JsonObject::CommaOrEnd)), b'}')
+            | (Some(JsonFrame::Array(JsonArray::ValueOrEnd | JsonArray::CommaOrEnd)), b']') => {
+                self.close()
+            }
+            (Some(JsonFrame::Object(JsonObject::KeyOrEnd | JsonObject::Key)), b'"') => {
+                self.token = JsonToken::String(JsonString {
+                    key: true,
+                    ..JsonString::default()
+                });
+            }
+            (Some(JsonFrame::Object(JsonObject::Colon)), b':') => {
+                *self.stack.last_mut().unwrap() = JsonFrame::Object(JsonObject::Value);
+            }
+            (Some(JsonFrame::Object(JsonObject::CommaOrEnd)), b',') => {
+                *self.stack.last_mut().unwrap() = JsonFrame::Object(JsonObject::Key);
+            }
+            (Some(JsonFrame::Array(JsonArray::CommaOrEnd)), b',') => {
+                *self.stack.last_mut().unwrap() = JsonFrame::Array(JsonArray::Value);
+            }
+            (Some(JsonFrame::Object(JsonObject::Value)), _)
+            | (Some(JsonFrame::Array(JsonArray::ValueOrEnd | JsonArray::Value)), _)
+            | (None, _) => self.start_value(byte)?,
+            _ => return Err(TurnError::CorrelationMismatch),
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), TurnError> {
+        if let JsonToken::Number(number) = self.token
+            && number.can_end()
+        {
+            self.token = JsonToken::None;
+            self.value_complete();
+        }
+        if self.complete && self.stack.is_empty() && matches!(self.token, JsonToken::None) {
+            Ok(())
+        } else {
+            Err(TurnError::CorrelationMismatch)
+        }
+    }
+}
+
 /// Streams one `thread/read(includeTurns:true)` reply, retaining only the Turn
 /// being completed.
 ///
@@ -1338,6 +1729,7 @@ pub struct ThreadTurnSink {
     reading_thread_id: bool,
     thread_id_bytes: Vec<u8>,
     stack: Vec<Frame>,
+    grammar: JsonGrammar,
     in_string: bool,
     escaped: bool,
     last_significant: u8,
@@ -1350,6 +1742,11 @@ pub struct ThreadTurnSink {
     reading_element_id: bool,
     element_id: Vec<u8>,
     items: Option<Vec<Value>>,
+    recovery: bool,
+    root_parent_null: Option<bool>,
+    parent_null_bytes: Option<usize>,
+    active_name_bytes: usize,
+    recovered_turn: Option<Value>,
     seen: u64,
 }
 
@@ -1357,6 +1754,7 @@ pub struct ThreadTurnSink {
 struct Frame {
     array: bool,
     name: Option<Vec<u8>>,
+    names: BTreeSet<Vec<u8>>,
 }
 
 impl ThreadTurnSink {
@@ -1369,6 +1767,7 @@ impl ThreadTurnSink {
             reading_thread_id: false,
             thread_id_bytes: Vec::new(),
             stack: Vec::new(),
+            grammar: JsonGrammar::default(),
             in_string: false,
             escaped: false,
             last_significant: 0,
@@ -1381,12 +1780,18 @@ impl ThreadTurnSink {
             reading_element_id: false,
             element_id: Vec::new(),
             items: None,
+            recovery: false,
+            root_parent_null: None,
+            parent_null_bytes: None,
+            active_name_bytes: 0,
+            recovered_turn: None,
             seen: 0,
         }
     }
 
     /// The wanted Turn's items, once the reply has been fully streamed.
     pub fn into_items(self) -> Result<Vec<Value>, TurnError> {
+        self.grammar.finish()?;
         if !self.stack.is_empty() || self.in_string {
             return Err(TurnError::CorrelationMismatch);
         }
@@ -1402,15 +1807,57 @@ impl ThreadTurnSink {
         sink
     }
 
+    pub(crate) fn for_recovery(thread_id: &str, turn_id: &str) -> Self {
+        let mut sink = Self::new_bound(thread_id, turn_id);
+        sink.recovery = true;
+        sink
+    }
+
+    pub(crate) fn into_recovery(self) -> Result<RecoveredHistory, TurnError> {
+        self.grammar.finish()?;
+        if !self.stack.is_empty()
+            || self.in_string
+            || self.expected_thread_id != self.observed_thread_id
+            || self.root_parent_null != Some(true)
+        {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        let turn = self.recovered_turn.ok_or(TurnError::CorrelationMismatch)?;
+        let status = turn
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|s| matches!(*s, "completed" | "failed" | "interrupted"))
+            .ok_or(TurnError::CorrelationMismatch)?
+            .to_owned();
+        Ok(RecoveredHistory {
+            thread_id: self
+                .expected_thread_id
+                .ok_or(TurnError::CorrelationMismatch)?,
+            turn_id: self.turn_id,
+            status,
+            full: turn.get("itemsView").and_then(Value::as_str) == Some("full")
+                && self.items.is_some(),
+            items: self.items.unwrap_or_default(),
+            usage: turn.get("usage").cloned(),
+        })
+    }
+
     #[must_use]
     pub const fn streamed_bytes(&self) -> u64 {
         self.seen
     }
 
     fn inside_turns_array(&self) -> bool {
-        self.stack
-            .last()
-            .is_some_and(|frame| frame.array && frame.name.as_deref() == Some(b"turns"))
+        (!self.recovery
+            || (self.stack.len() == 3
+                && self
+                    .stack
+                    .get(1)
+                    .is_some_and(|frame| !frame.array && frame.name.as_deref() == Some(b"thread"))))
+            && self
+                .stack
+                .last()
+                .is_some_and(|frame| frame.array && frame.name.as_deref() == Some(b"turns"))
     }
 
     /// The wanted Turn is the only one this reader ever ingests.  A Turn whose
@@ -1438,23 +1885,27 @@ impl ThreadTurnSink {
         if turn.get("id").and_then(Value::as_str) != Some(self.turn_id.as_str()) {
             return Ok(());
         }
-        if self.items.is_some() {
+        if self.items.is_some() || self.recovered_turn.is_some() {
             return Err(TurnError::CorrelationMismatch);
         }
-        let items = turn
-            .get("items")
-            .and_then(Value::as_array)
-            .cloned()
-            .ok_or(TurnError::CorrelationMismatch)?;
-        if items.len() > MAX_TURN_ITEMS {
+        let items = turn.get("items").and_then(Value::as_array).cloned();
+        if items
+            .as_ref()
+            .is_some_and(|items| items.len() > MAX_TURN_ITEMS)
+            || (!self.recovery && items.is_none())
+        {
             return Err(TurnError::CorrelationMismatch);
         }
-        self.items = Some(items);
+        self.items = items;
+        if self.recovery {
+            self.recovered_turn = Some(turn);
+        }
         Ok(())
     }
 
     fn step(&mut self, byte: u8) -> Result<(), TurnError> {
         self.seen = self.seen.saturating_add(1);
+        self.grammar.push(byte)?;
         if let Some(element) = self.element.as_mut() {
             if element.len() >= MAX_SOLICITED_TURN_BYTES {
                 return Err(TurnError::CorrelationMismatch);
@@ -1464,17 +1915,46 @@ impl ThreadTurnSink {
         if self.in_string {
             if self.escaped {
                 self.escaped = false;
+                if self.reading_name {
+                    self.push_name_byte(byte)?;
+                }
             } else if byte == b'\\' {
                 if self.reading_thread_id {
                     return Err(TurnError::CorrelationMismatch);
                 }
                 self.escaped = true;
+                if self.reading_name {
+                    self.push_name_byte(byte)?;
+                }
             } else if byte == b'"' {
                 self.in_string = false;
                 self.last_significant = b'"';
                 if self.reading_name {
                     self.reading_name = false;
-                    self.pending_name = Some(std::mem::take(&mut self.name));
+                    let mut encoded = vec![b'"'];
+                    encoded.extend(std::mem::take(&mut self.name));
+                    encoded.push(b'"');
+                    let name = serde_json::from_slice::<String>(&encoded)
+                        .map_err(|_| TurnError::CorrelationMismatch)?
+                        .into_bytes();
+                    if self.recovery {
+                        let size = self
+                            .active_name_bytes
+                            .checked_add(name.len())
+                            .filter(|size| *size <= MAX_SOLICITED_TURN_BYTES)
+                            .ok_or(TurnError::CorrelationMismatch)?;
+                        if !self
+                            .stack
+                            .last_mut()
+                            .ok_or(TurnError::CorrelationMismatch)?
+                            .names
+                            .insert(name.clone())
+                        {
+                            return Err(TurnError::CorrelationMismatch);
+                        }
+                        self.active_name_bytes = size;
+                    }
+                    self.pending_name = Some(name);
                 } else if self.reading_thread_id {
                     self.reading_thread_id = false;
                     if self.observed_thread_id.is_some() {
@@ -1489,10 +1969,7 @@ impl ThreadTurnSink {
                     self.discard_unless_wanted();
                 }
             } else if self.reading_name {
-                if self.name.len() >= 256 {
-                    return Err(TurnError::CorrelationMismatch);
-                }
-                self.name.push(byte);
+                self.push_name_byte(byte)?;
             } else if self.reading_thread_id {
                 if self.thread_id_bytes.len() >= 256 {
                     return Err(TurnError::CorrelationMismatch);
@@ -1504,6 +1981,45 @@ impl ThreadTurnSink {
                 }
                 self.element_id.push(byte);
             }
+            return Ok(());
+        }
+        if let Some(position) = self.parent_null_bytes {
+            if position < 4 {
+                if byte != b"null"[position] {
+                    return Err(TurnError::CorrelationMismatch);
+                }
+                self.parent_null_bytes = Some(position + 1);
+                self.last_significant = byte;
+                return Ok(());
+            }
+            if matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
+                return Ok(());
+            }
+            if !matches!(byte, b',' | b'}') {
+                return Err(TurnError::CorrelationMismatch);
+            }
+            self.parent_null_bytes = None;
+            self.root_parent_null = Some(true);
+        }
+        if self.recovery
+            && !byte.is_ascii_whitespace()
+            && self.stack.len() == 2
+            && self
+                .stack
+                .last()
+                .is_some_and(|frame| !frame.array && frame.name.as_deref() == Some(b"thread"))
+            && self.last_significant == b':'
+            && self.pending_name.as_deref() == Some(b"parentThreadId")
+        {
+            if self.root_parent_null.is_some() {
+                return Err(TurnError::CorrelationMismatch);
+            }
+            if byte != b'n' {
+                return Err(TurnError::CorrelationMismatch);
+            }
+            self.root_parent_null = Some(false);
+            self.parent_null_bytes = Some(1);
+            self.last_significant = byte;
             return Ok(());
         }
         match byte {
@@ -1548,10 +2064,14 @@ impl ThreadTurnSink {
                 self.stack.push(Frame {
                     array,
                     name: self.pending_name.take(),
+                    names: BTreeSet::new(),
                 });
             }
             b'}' | b']' => {
                 let frame = self.stack.pop().ok_or(TurnError::CorrelationMismatch)?;
+                for name in &frame.names {
+                    self.active_name_bytes -= name.len();
+                }
                 if frame.array != (byte == b']') {
                     return Err(TurnError::CorrelationMismatch);
                 }
@@ -1567,6 +2087,62 @@ impl ThreadTurnSink {
         }
         self.last_significant = byte;
         Ok(())
+    }
+
+    fn push_name_byte(&mut self, byte: u8) -> Result<(), TurnError> {
+        if self.name.len() >= 256 {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        self.name.push(byte);
+        Ok(())
+    }
+}
+
+/// Fresh, solicited terminal evidence. Full response evidence is a separate bit.
+#[derive(Clone)]
+pub(crate) struct RecoveredHistory {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub status: String,
+    pub full: bool,
+    pub items: Vec<Value>,
+    pub usage: Option<Value>,
+}
+
+impl RecoveredHistory {
+    pub(crate) fn response_text(&self) -> Option<String> {
+        let mut fallback = None;
+        let mut answer = None;
+        for item in &self.items {
+            if item.get("type").and_then(Value::as_str) != Some("agentMessage")
+                || item
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| v != self.thread_id)
+                || item
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| v != self.turn_id)
+                || item.get("parentThreadId").is_some_and(|v| !v.is_null())
+                || item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| v != "completed")
+            {
+                continue;
+            }
+            let Some(text) = item.get("text").and_then(Value::as_str) else {
+                continue;
+            };
+            match item.get("phase") {
+                Some(Value::String(phase)) if phase == "final_answer" => {
+                    answer = Some(text.to_owned())
+                }
+                None | Some(Value::Null) => fallback = Some(text.to_owned()),
+                _ => {}
+            }
+        }
+        answer.or(fallback)
     }
 }
 
@@ -1676,7 +2252,13 @@ pub struct TurnCoordinator<S, J, A> {
     foreign_diagnostics: Box<dyn ForeignDiagnostics>,
     primary_tool: Option<PrimaryToolConfig>,
     candidate_tools: bool,
+    candidate_reader_required: bool,
     candidate_reader: Option<crate::direct_review_target::DirectTargetReader>,
+    pending_terminal_history: Option<RecoveredHistory>,
+    candidate_history_failure: Option<crate::machine::MachineError>,
+    defer_checked_history_publication: bool,
+    /// Where a successor-bound Turn publishes its file-change payloads (MD1).
+    file_change_publication_dir: Option<PathBuf>,
     pending_primary_tools: BTreeMap<String, PendingPrimaryToolCall>,
     caller_runtime: Option<crate::worker::QualifiedCallerRuntime>,
     last_effective_policy: Option<crate::domain::EffectivePolicy>,
@@ -1706,6 +2288,11 @@ pub struct CoordinatorConfig {
     pub primary_tool: Option<PrimaryToolConfig>,
     pub candidate_tools: bool,
     pub candidate_reader: Option<crate::direct_review_target::DirectTargetReader>,
+    /// Where a successor-bound Turn publishes its normalized file-change payloads.
+    ///
+    /// Only an External Specialist member Run sets this; a legacy Turn leaves it
+    /// `None` and publishes nothing (MD1).
+    pub file_change_publication_dir: Option<PathBuf>,
 }
 
 impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordinator<S, J, A> {
@@ -1824,7 +2411,12 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             foreign_diagnostics: config.foreign_diagnostics,
             primary_tool: config.primary_tool,
             candidate_tools: config.candidate_tools,
+            candidate_reader_required: config.candidate_tools,
             candidate_reader: config.candidate_reader,
+            pending_terminal_history: None,
+            candidate_history_failure: None,
+            defer_checked_history_publication: false,
+            file_change_publication_dir: config.file_change_publication_dir,
             pending_primary_tools: BTreeMap::new(),
             caller_runtime: None,
             last_effective_policy: None,
@@ -1836,6 +2428,23 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     #[must_use]
     pub const fn state(&self) -> &CoordinatorState {
         &self.state
+    }
+
+    pub(crate) fn pending_terminal_history(&self) -> Option<&RecoveredHistory> {
+        self.pending_terminal_history.as_ref()
+    }
+
+    pub(crate) fn set_successor_history_recovery(&mut self, enabled: bool) {
+        self.defer_checked_history_publication = enabled;
+    }
+
+    pub(crate) fn candidate_history_failure(&self) -> Option<&MachineError> {
+        self.candidate_history_failure.as_ref()
+    }
+
+    pub(crate) fn clear_pending_terminal_history(&mut self) {
+        self.pending_terminal_history = None;
+        self.candidate_history_failure = None;
     }
     #[must_use]
     pub fn thread_id(&self) -> Option<&str> {
@@ -2360,7 +2969,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                         TurnError::Journal("invalid retained Submit identity".to_owned())
                     })?;
                 identity.validate()?;
-                if identity.mutation_envelope.namespace.scope_ref != self.run_id.to_string() {
+                if identity.mutation_envelope.namespace.scope_ref.as_deref()
+                    != Some(self.run_id.to_string().as_str())
+                {
                     return Err(TurnError::Journal(
                         "retained Submit identity crossed its Run".to_owned(),
                     ));
@@ -2636,6 +3247,35 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
     }
 
+    pub(crate) fn successor_history(
+        &mut self,
+        thread: &str,
+        turn: &str,
+    ) -> Result<RecoveredHistory, TurnError> {
+        if self.thread_id.as_deref() != Some(thread) {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        let mut sink = ThreadTurnSink::for_recovery(thread, turn);
+        self.server.request_streamed(
+            "thread/read",
+            serde_json::json!({"threadId":thread,"includeTurns":true}),
+            &mut sink,
+        )?;
+        sink.into_recovery()
+    }
+
+    pub(crate) fn reconciliation_server(&self) -> (&str, u64) {
+        (&self.server_key, self.server_epoch)
+    }
+
+    pub(crate) fn adopt_reconciled_pause(&mut self) {
+        self.state = CoordinatorState::Paused;
+        self.active_turn_id = None;
+        self.active_turn_effort = None;
+        self.active_operation_id = None;
+        self.recovery_turn_id = None;
+    }
+
     pub fn pause(&mut self, interrupt_terminal_confirmed: bool) -> Result<(), TurnError> {
         let previous = match self.state {
             CoordinatorState::Threadless | CoordinatorState::Idle => RunLifecycle::Idle,
@@ -2669,6 +3309,35 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     /// Complete a new physical connection after handshake and durable replay.
     /// Idle retained threads must be attached to this connection before it
     /// accepts input, while initial readiness belongs in the durable ledger.
+    pub(crate) fn ensure_observed_checked_history(
+        &self,
+        task: Uuid,
+        thread: &str,
+        turn: &str,
+    ) -> Result<(), TurnError> {
+        if let Some(reader) = self
+            .candidate_reader
+            .as_ref()
+            .filter(|r| r.review_id() == task)
+            && self
+                .idempotency
+                .values()
+                .filter_map(|r| r.terminal.as_ref())
+                .any(|t| t.thread_id == thread && t.turn_id == turn)
+        {
+            reader
+                .begin_history(thread, turn)
+                .map_err(|_| TurnError::CorrelationMismatch)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn checked_history_task(&self) -> Option<Uuid> {
+        self.candidate_reader
+            .as_ref()
+            .map(|reader| reader.review_id())
+    }
+
     pub(crate) fn complete_connection_startup(
         &mut self,
         lifecycle: RunLifecycle,
@@ -2683,13 +3352,69 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                     if self.thread_id.as_deref() != Some(&thread) {
                         return Err(TurnError::CorrelationMismatch);
                     }
+                    if self.defer_checked_history_publication {
+                        let terminal = self
+                            .idempotency
+                            .values()
+                            .filter_map(|r| r.terminal.as_ref())
+                            .find(|t| t.thread_id == thread && t.turn_id == turn);
+                        let Some(terminal) = terminal else {
+                            // A reconciliation attempt can leave pending
+                            // history before it publishes a resolution. It
+                            // must resume through explicit fresh-proof recovery.
+                            continue;
+                        };
+                        let status = terminal.status.clone();
+                        let usage = terminal.usage.clone();
+                        let mut history = self.successor_history(&thread, &turn)?;
+                        if !history.full || history.status != status {
+                            return Err(TurnError::CorrelationMismatch);
+                        }
+                        history.usage = usage;
+                        self.pending_terminal_history = Some(history);
+                        for item in &self
+                            .pending_terminal_history
+                            .as_ref()
+                            .expect("retained history")
+                            .items
+                        {
+                            if let Err(error) = self
+                                .candidate_reader
+                                .as_ref()
+                                .expect("checked reader")
+                                .observe_item(&thread, &turn, item, true)
+                            {
+                                self.candidate_history_failure = Some(error);
+                                return Err(TurnError::CorrelationMismatch);
+                            }
+                        }
+                        // The worker publishes under the common quota lease,
+                        // after rereading the retained response reference.
+                        return Ok(());
+                    }
                     let items = self.streamed_items(&thread, &turn)?;
+                    if let Some(terminal) = self
+                        .idempotency
+                        .values()
+                        .filter_map(|r| r.terminal.as_ref())
+                        .find(|t| t.turn_id == turn && t.thread_id == thread)
+                    {
+                        self.pending_terminal_history = Some(RecoveredHistory {
+                            thread_id: thread.clone(),
+                            turn_id: turn.clone(),
+                            status: terminal.status.clone(),
+                            full: true,
+                            items: items.clone(),
+                            usage: terminal.usage.clone(),
+                        });
+                    }
                     let response = self.extract_final_response(&thread, &turn, &items)?;
                     self.candidate_reader
                         .as_ref()
                         .expect("checked reader")
                         .finish_history_response(&thread, &turn, &items, response)
                         .map_err(|_| TurnError::CorrelationMismatch)?;
+                    self.clear_pending_terminal_history();
                 }
                 return Ok(());
             }
@@ -2969,6 +3694,21 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             return Err(TurnError::CorrelationMismatch);
         }
         self.candidate_reader = Some(reader);
+        self.candidate_reader_required = true;
+        Ok(())
+    }
+
+    /// Only authenticated successor dispatch may select the generic task contract.
+    pub(crate) fn bind_generic_successor_task(&mut self) -> Result<(), TurnError> {
+        if !self.candidate_tools
+            || self.state != CoordinatorState::Idle
+            || self.active_turn_id.is_some()
+            || !self.pending.is_empty()
+        {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        self.candidate_reader = None;
+        self.candidate_reader_required = false;
         Ok(())
     }
 
@@ -2979,7 +3719,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         if let Some(accepted) = self.replay_accepted(&request)? {
             return Ok(accepted);
         }
-        if self.candidate_tools && (self.candidate_reader.is_none() || request.write) {
+        if (self.candidate_reader_required && self.candidate_reader.is_none())
+            || (self.candidate_tools && request.write)
+        {
             return Err(TurnError::InvalidInput(
                 "Reviewer requires a bound read-only target",
             ));
@@ -3726,6 +4468,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             0
         };
         let snapshot_sha256 = sha256_hex(&bytes);
+        // A successor-bound Turn publishes the normalized payload durably before
+        // any terminal resolution, so settlement can read exactly these bytes.
+        if let Some(directory) = self.file_change_publication_dir.as_deref() {
+            publish_file_change_payload(directory, &snapshot_sha256, &bytes)?;
+        }
         self.journal
             .append_and_sync(JournalEntry::FileChangeSnapshot {
                 thread_id: thread_id.to_owned(),
@@ -3953,10 +4700,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     }
 
     fn open_candidate_tool(&mut self, request_id: u64, params: &Value) -> Result<(), TurnError> {
-        let reader = self
-            .candidate_reader
-            .as_ref()
-            .ok_or(TurnError::CorrelationMismatch)?;
         let thread_id = params
             .get("threadId")
             .and_then(Value::as_str)
@@ -3970,6 +4713,18 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         {
             return Err(TurnError::CorrelationMismatch);
         }
+        let Some(reader) = self.candidate_reader.as_ref() else {
+            let body = serde_json::json!({"error":MachineError::invalid_argument(
+                "candidate_read", "current task has no checked review target"
+            )});
+            let text = serde_json::to_string(&body).map_err(|_| TurnError::CorrelationMismatch)?;
+            return self.server.respond_result(
+                request_id,
+                serde_json::json!({
+                    "success":false,"contentItems":[{"type":"inputText","text":text}]
+                }),
+            );
+        };
         let result = if params.get("tool").and_then(Value::as_str)
             != Some(crate::direct_review::CANDIDATE_TOOL_NAME)
         {
@@ -4624,14 +5379,20 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         // at the same point either way, and the degraded path records the
         // terminal without a response rather than risking losing both.
         let inline_items = turn.get("items").and_then(Value::as_array).cloned();
-        if let Some(reader) = &self.candidate_reader {
+        let successor_checked =
+            self.defer_checked_history_publication && self.candidate_reader.is_some();
+        if !successor_checked && let Some(reader) = &self.candidate_reader {
             reader
                 .begin_history(&thread_id, &turn_id)
                 .map_err(|_| TurnError::CorrelationMismatch)?;
         }
-        let inline_response = inline_items
-            .as_ref()
-            .map(|items| self.extract_final_response(&thread_id, &turn_id, items));
+        let inline_response = if successor_checked {
+            None
+        } else {
+            inline_items
+                .as_ref()
+                .map(|items| self.extract_final_response(&thread_id, &turn_id, items))
+        };
         for request_id in self.pending.keys().copied().collect::<Vec<_>>() {
             self.journal
                 .append_and_sync(JournalEntry::ApprovalDecided {
@@ -4672,8 +5433,41 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.active_operation_id = None;
         self.pending.clear();
         self.state = CoordinatorState::Idle;
-        let final_response = if self.candidate_tools {
+        // Successor status and usage are durable before reader storage is
+        // touched; their response waits for verified history. Other callers
+        // retain their existing notification receipt and history ordering.
+        self.pending_terminal_history = if successor_checked {
+            None
+        } else {
+            inline_items
+                .as_ref()
+                .filter(|_| self.candidate_reader.is_some())
+                .map(|items| RecoveredHistory {
+                    thread_id: thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    status: status.clone(),
+                    full: true,
+                    items: items.clone(),
+                    usage: usage.clone(),
+                })
+        };
+        let final_response = if self.candidate_reader.is_some() {
+            if successor_checked {
+                self.candidate_reader
+                    .as_ref()
+                    .expect("checked reader")
+                    .begin_history(&thread_id, &turn_id)
+                    .map_err(|_| TurnError::CorrelationMismatch)?;
+            }
             let items = self.streamed_items(&thread_id, &turn_id)?;
+            self.pending_terminal_history = Some(RecoveredHistory {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                status: status.clone(),
+                full: true,
+                items: items.clone(),
+                usage: usage.clone(),
+            });
             let response = self.extract_final_response(&thread_id, &turn_id, &items)?;
             self.candidate_reader
                 .as_ref()
@@ -4703,6 +5497,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 record.terminal = Some(terminal.clone());
             }
         }
+        self.clear_pending_terminal_history();
         Ok(terminal)
     }
 
@@ -4734,9 +5529,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     ) -> Result<Option<FinalResponse>, TurnError> {
         if let Some(reader) = &self.candidate_reader {
             for item in authoritative_items {
-                reader
-                    .observe_item(thread_id, turn_id, item, true)
-                    .map_err(|_| TurnError::CorrelationMismatch)?;
+                if let Err(error) = reader.observe_item(thread_id, turn_id, item, true) {
+                    self.candidate_history_failure = Some(error);
+                    return Err(TurnError::CorrelationMismatch);
+                }
             }
         }
         let mut fallback = None;
@@ -5348,6 +6144,56 @@ fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, TurnError> {
     canonicalize(&parsed).map_err(|_| TurnError::CorrelationMismatch)
 }
 
+/// Publish one normalized file-change payload atomically and write-once (MD1).
+///
+/// The bytes are content-addressed by their digest: an identical republication is
+/// a no-op, and a different payload under the same digest is an integrity failure,
+/// never a replacement.
+fn publish_file_change_payload(
+    directory: &Path,
+    snapshot_sha256: &str,
+    bytes: &[u8],
+) -> Result<(), TurnError> {
+    std::fs::create_dir_all(directory).map_err(|error| TurnError::Journal(error.to_string()))?;
+    std::fs::set_permissions(
+        directory,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .map_err(|error| TurnError::Journal(error.to_string()))?;
+    let path = directory.join(format!("{snapshot_sha256}.json"));
+    match std::fs::read(&path) {
+        Ok(existing) if existing == bytes => return Ok(()),
+        Ok(_) => {
+            return Err(TurnError::Journal(
+                "the published file-change payload is another one".to_owned(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(TurnError::Journal(
+                "the published file-change payload is unreadable".to_owned(),
+            ));
+        }
+    }
+    match crate::workspace::atomic_create(
+        &crate::workspace::SystemWorkspacePlatform,
+        &path,
+        bytes,
+        0o600,
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match std::fs::read(&path) {
+                Ok(existing) if existing == bytes => Ok(()),
+                _ => Err(TurnError::Journal(
+                    "the published file-change payload is another one".to_owned(),
+                )),
+            }
+        }
+        Err(error) => Err(TurnError::Journal(error.to_string())),
+    }
+}
+
 fn normalize_file_changes(
     changes: &[Value],
     workspace: &Path,
@@ -5504,7 +6350,59 @@ fn event_turn_id(params: &Value) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    /// Exercise the normal notification ingest with the worker-selected path.
+    pub(crate) fn fixture_file_change_publication(directory: Option<PathBuf>) -> String {
+        let mut coordinator = running_turn_with(
+            &RecordingDiagnostics::default(),
+            vec![
+                serde_json::json!({"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1",
+                "item":{"id":"change-1","type":"fileChange","changes":[{"path":"ignored.log","kind":{"type":"add"},"diff":"@@ -0,0 +1 @@\n+recorded\n"}]}}}),
+            ],
+        );
+        coordinator.file_change_publication_dir = directory;
+        coordinator.next_event().unwrap();
+        coordinator
+            .journal
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                JournalEntry::FileChangeSnapshot {
+                    snapshot_sha256, ..
+                } => Some(snapshot_sha256.clone()),
+                _ => None,
+            })
+            .expect("ingest journals the normalized item")
+    }
+    #[test]
+    fn a_successor_bound_turn_publishes_its_file_change_payload_once() {
+        let root =
+            std::env::temp_dir().join(format!("d74-file-changes-{}", Uuid::now_v7().simple()));
+        let directory = root.join("file-changes");
+        let bytes = br#"[{"path":"ignored.log","kind":"update"}]"#;
+        let digest = sha256_hex(bytes);
+        publish_file_change_payload(&directory, &digest, bytes).unwrap();
+        let path = directory.join(format!("{digest}.json"));
+        assert!(path.exists());
+        // The directory and the payload are private.
+        assert_eq!(std::fs::metadata(&directory).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        // An identical republication is a no-op.
+        publish_file_change_payload(&directory, &digest, bytes).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // A different payload under the same digest is an integrity failure, never a
+        // replacement.
+        assert!(matches!(
+            publish_file_change_payload(&directory, &digest, b"[]"),
+            Err(TurnError::Journal(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // A legacy Turn (no publication directory configured) publishes nothing.
+        let legacy = root.join("legacy");
+        assert!(!legacy.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
     use crate::primary_tool::PRIMARY_TOOL_NAME;
     use std::collections::VecDeque;
@@ -5721,6 +6619,7 @@ mod tests {
                 primary_tool,
                 candidate_tools: false,
                 candidate_reader: None,
+                file_change_publication_dir: None,
             },
             "/tmp/codex-home",
         )
@@ -5742,10 +6641,24 @@ mod tests {
     fn direct_coordinator(
         reader: crate::direct_review_target::DirectTargetReader,
     ) -> TurnCoordinator<FakeServer, MemoryJournal, MemoryArtifactStore> {
+        candidate_coordinator(
+            reader.workspace().unwrap(),
+            reader.run_id(),
+            true,
+            Some(reader),
+        )
+    }
+
+    fn candidate_coordinator(
+        workspace: PathBuf,
+        run_id: Uuid,
+        candidate_tools: bool,
+        reader: Option<crate::direct_review_target::DirectTargetReader>,
+    ) -> TurnCoordinator<FakeServer, MemoryJournal, MemoryArtifactStore> {
         let mut server = FakeServer::default();
         for reply in [
             serde_json::json!({"codexHome":"/tmp/codex-home"}),
-            serde_json::json!({"cwd":reader.workspace().unwrap(),"approvalPolicy":"never","sandbox":{"type":"readOnly"},"model":"gpt-5","thread":{"id":"thread-1","parentThreadId":null,"turns":[]}}),
+            serde_json::json!({"cwd":workspace.clone(),"approvalPolicy":"never","sandbox":{"type":"readOnly"},"model":"gpt-5","thread":{"id":"thread-1","parentThreadId":null,"turns":[]}}),
             serde_json::json!({}),
             serde_json::json!({"thread":{"id":"thread-1","parentThreadId":null,"turns":[]}}),
             serde_json::json!({"turn":{"id":"turn-1"}}),
@@ -5762,7 +6675,7 @@ mod tests {
                 fixed_model: "gpt-5".to_owned(),
                 default_effort: "medium".to_owned(),
                 supported_efforts: ["medium".to_owned()].into_iter().collect(),
-                cwd: reader.workspace().unwrap(),
+                cwd: workspace.clone(),
                 developer_instructions: "checked reviewer".to_owned(),
                 sandbox: "read-only".to_owned(),
                 approval_policy: "never".to_owned(),
@@ -5770,17 +6683,54 @@ mod tests {
                 run_generation: 1,
                 server_key: "a".repeat(64),
                 server_epoch: 7,
-                run_id: reader.run_id(),
+                run_id,
                 controller_id: Uuid::now_v7(),
                 control_mode: "direct_interactive".to_owned(),
                 record_accepted_user_input: false,
                 primary_tool: None,
-                candidate_tools: true,
-                candidate_reader: Some(reader),
+                candidate_tools,
+                candidate_reader: reader,
+                file_change_publication_dir: None,
             },
             "/tmp/codex-home",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn successor_candidate_tools_exist_at_initial_thread_creation() {
+        crate::worker::fixture_successor_review_sessions(|workspace, run_id, candidate_tools| {
+            assert!(candidate_tools);
+            let mut coordinator =
+                candidate_coordinator(workspace.to_owned(), run_id, candidate_tools, None);
+            coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+            let params = &coordinator
+                .server
+                .calls
+                .iter()
+                .find(|(method, _)| method == "thread/start")
+                .unwrap()
+                .1;
+            assert_eq!(
+                params["dynamicTools"][0]["name"],
+                crate::direct_review::CANDIDATE_TOOL_NAME
+            );
+            assert_eq!(params["approvalPolicy"], "never");
+            assert_eq!(params["sandbox"], "read-only");
+            assert!(coordinator.candidate_reader.is_none());
+            assert!(
+                coordinator
+                    .start_turn(request("unbound-successor", DeliveryMode::Submit))
+                    .is_err()
+            );
+            assert!(
+                !coordinator
+                    .server
+                    .calls
+                    .iter()
+                    .any(|(method, _)| method == "turn/start")
+            );
+        });
     }
 
     #[test]
@@ -6088,6 +7038,8 @@ mod tests {
                 .iter()
                 .any(|entry| matches!(entry, JournalEntry::Terminal { .. }))
         );
+        assert!(coordinator.journal().entries.iter().any(|entry|matches!(entry,
+            JournalEntry::Terminal{final_response:Some(FinalResponse::Inline{text}),..} if text=="clean")));
         let reopened =
             crate::direct_review_target::DirectTargetReader::for_run(&fixture.state, run)
                 .unwrap()
@@ -9651,6 +10603,247 @@ mod tests {
                 .unwrap(),
             DeliveryResult::Accepted(_)
         ));
+    }
+
+    #[test]
+    fn recovery_parent_requires_exact_null_across_every_split() {
+        let prefix = br#"{"thread":{"id":"thread-1","parentThreadId":"#;
+        let suffix =
+            br#", "turns":[{"id":"turn-1","status":"completed","itemsView":"full","items":[]}]}}"#;
+        for split in 0..=4 {
+            let mut sink = ThreadTurnSink::for_recovery("thread-1", "turn-1");
+            sink.accept(prefix).unwrap();
+            sink.accept(&b"null"[..split]).unwrap();
+            sink.accept(&b"null"[split..]).unwrap();
+            sink.accept(suffix).unwrap();
+            assert!(sink.into_recovery().unwrap().full);
+        }
+        for token in [
+            "nope",
+            "nul",
+            "nullx",
+            "\"null\"",
+            "null x",
+            "null\u{000b}",
+            "null,\"parentThreadId\":null",
+            "null,\"parentThread\\u0049d\":null",
+            "null,\"extra\":0,\"extra\":0",
+            "null,\"id\":\"thread-1\"",
+        ] {
+            let mut sink = ThreadTurnSink::for_recovery("thread-1", "turn-1");
+            let bytes = [prefix, token.as_bytes(), suffix].concat();
+            let received = bytes.chunks(1).try_for_each(|chunk| sink.accept(chunk));
+            assert!(
+                received.is_err() || sink.into_recovery().is_err(),
+                "token={token:?}"
+            );
+        }
+        let duplicate = br#"{"thread":{"id":"thread-1","parentThreadId":null},"thread":{"turns":[{"id":"turn-1","status":"completed","itemsView":"full","items":[]}]}}"#;
+        let mut sink = ThreadTurnSink::for_recovery("thread-1", "turn-1");
+        assert!(
+            duplicate
+                .chunks(1)
+                .try_for_each(|chunk| sink.accept(chunk))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn streamed_history_requires_one_complete_root_in_every_mode() {
+        let valid = br#"{"thread":{"id":"thread-1","parentThreadId":null,"turns":[{"id":"turn-1","status":"completed","itemsView":"full","items":[]}]}}"#;
+        let split_roots = br#"{"thread":{"id":"thread-1","parentThreadId":null}}
+{"thread":{"turns":[{"id":"turn-1","status":"completed","itemsView":"full","items":[]}]}}"#;
+        let cases = [
+            ("split proof", split_roots.to_vec(), false),
+            (
+                "second root",
+                [valid.as_slice(), b" \r\n\t {}"].concat(),
+                false,
+            ),
+            ("scalar", [valid.as_slice(), b" true"].concat(), false),
+            ("closer", [valid.as_slice(), b"}"].concat(), false),
+            ("unclosed", valid[..valid.len() - 1].to_vec(), false),
+            ("single root", valid.to_vec(), true),
+            (
+                "JSON whitespace",
+                [b" \r\n\t ".as_slice(), valid, b" \t\r\n"].concat(),
+                true,
+            ),
+            (
+                "non-JSON whitespace",
+                [valid.as_slice(), b"\x0b"].concat(),
+                false,
+            ),
+            ("leading scalar", [b"0".as_slice(), valid].concat(), false),
+            ("empty", Vec::new(), false),
+        ];
+        assert_history_partitions(&cases);
+    }
+
+    fn assert_history_partitions(cases: &[(&str, Vec<u8>, bool)]) {
+        for mode in ["unbound", "bound", "recovery"] {
+            for (case, bytes, expected) in cases {
+                let partitions = (0..=bytes.len())
+                    .map(|split| vec![&bytes[..split], &bytes[split..]])
+                    .chain(std::iter::once(bytes.chunks(1).collect()));
+                for chunks in partitions {
+                    let chunk_count = chunks.len();
+                    let mut sink = match mode {
+                        "unbound" => ThreadTurnSink::new("turn-1"),
+                        "bound" => ThreadTurnSink::new_bound("thread-1", "turn-1"),
+                        _ => ThreadTurnSink::for_recovery("thread-1", "turn-1"),
+                    };
+                    let received = chunks.into_iter().try_for_each(|chunk| sink.accept(chunk));
+                    let accepted = received.is_ok()
+                        && if mode == "recovery" {
+                            sink.into_recovery().is_ok_and(|history| history.full)
+                        } else {
+                            sink.into_items().is_ok_and(|items| items.is_empty())
+                        };
+                    assert_eq!(accepted, *expected, "{mode}: {case}; chunks={chunk_count}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_history_rejects_invalid_grammar_in_every_mode() {
+        let valid = br#"{"thread":{"id":"thread-1","parentThreadId":null,"turns":[{"id":"turn-1","status":"completed","itemsView":"full","items":[]}]}}"#;
+        let trailing = br#"{"thread":{"id":"thread-1","parentThreadId":null,"turns":[{"id":"turn-1","status":"completed","itemsView":"full","items":[]}]},}"#;
+        let unexpected = br#"{"thread":{"id":"thread-1","parentThreadId":null,"turns":[{"id":"turn-1","status":"completed","itemsView":"full","items":[]}]} true}"#;
+        let control = [
+            br#"{"extra":"a"#.as_slice(),
+            b"\n",
+            br#"b","#.as_slice(),
+            &valid[1..],
+        ]
+        .concat();
+        let unicode = [
+            br#"{"extra":["\uD834\uDD1E",true,false,null,-12.5e+2],"#.as_slice(),
+            &valid[1..],
+        ]
+        .concat();
+        assert_history_partitions(&[
+            ("trailing comma", trailing.to_vec(), false),
+            ("unexpected literal", unexpected.to_vec(), false),
+            ("raw control", control, false),
+            ("complete grammar", unicode, true),
+        ]);
+    }
+
+    #[test]
+    fn streamed_history_grammar_matches_serde_json() {
+        let seed = br#"{"thread":{"id":"thread-1","parentThreadId":null,"turns":[{"id":"turn-1","status":"completed","itemsView":"full","items":[{"type":"agentMessage","text":"answer"}]}]},"extra":{"flags":[true,false,null],"count":-12.5e+2,"label":"read"}}"#;
+        let mut corpus = BTreeSet::new();
+        corpus.insert(seed.to_vec());
+        for index in 0..seed.len() {
+            let mut deleted = seed.to_vec();
+            deleted.remove(index);
+            corpus.insert(deleted);
+            for byte in 0..=u8::MAX {
+                let mut replaced = seed.to_vec();
+                replaced[index] = byte;
+                corpus.insert(replaced);
+            }
+        }
+        for index in 0..=seed.len() {
+            for byte in 0..=u8::MAX {
+                let mut inserted = seed.to_vec();
+                inserted.insert(index, byte);
+                corpus.insert(inserted);
+            }
+        }
+        for extra in [
+            r#"{"empty":[],"nested":[{},[0,-0,1,1.25,1e2,1E-2]],"literals":[true,false,null]}"#,
+            r#"{"escapes":"\"\\\/\b\f\n\r\t\u0000\u00e9\uD834\uDD1E"}"#,
+            "{\"utf8\":\"é한🦀\"}",
+            r#"{"same":1,"same":2}"#,
+            r#"{"trailing": [1,]}"#,
+            r#"{"missing":}"#,
+            r#"{"key" 1}"#,
+            r#"{"unexpected":true false}"#,
+            r#"{"escape":"\x"}"#,
+            r#"{"escape":"\u12g4"}"#,
+            r#"{"escape":"\uD800"}"#,
+            r#"{"escape":"\uDC00"}"#,
+            r#"{"escape":"\uD800\u0000"}"#,
+        ] {
+            corpus.insert(extra.as_bytes().to_vec());
+            corpus.insert(
+                [
+                    &seed[..seed.len() - 1],
+                    b",\"metadata\":",
+                    extra.as_bytes(),
+                    b"}",
+                ]
+                .concat(),
+            );
+        }
+        for scalar in [
+            "null", "true", "false", "-0", "123", "1.25e+2", "01", "1.", "-.1", "1e", "1e+", "1e-",
+            "--1", "+1", "NaN", "Infinity", "True", "nul", "falsex",
+        ] {
+            corpus.insert(scalar.as_bytes().to_vec());
+            corpus.insert(
+                [
+                    &seed[..seed.len() - 1],
+                    b",\"scalar\":",
+                    scalar.as_bytes(),
+                    b"}",
+                ]
+                .concat(),
+            );
+        }
+        for control in 0..=0x1f {
+            corpus.insert([br#"{"text":"before"#.as_slice(), &[control], br#"after"}"#].concat());
+        }
+        for utf8 in [
+            b"\xc0\xaf".as_slice(),
+            b"\xe0\x80\x80",
+            b"\xed\xa0\x80",
+            b"\xf0\x80\x80\x80",
+            b"\xf4\x90\x80\x80",
+            b"\xf5\x80\x80\x80",
+            b"\xc2",
+            b"\xe2\x82",
+        ] {
+            corpus.insert([br#"{"text":""#.as_slice(), utf8, br#""}"#].concat());
+        }
+        for bytes in [
+            b"".as_slice(),
+            b" \t\r\n",
+            b"{}{}",
+            b"{} true",
+            b"{}\x0b",
+            b"[",
+            b"{",
+            b"[1,]",
+            b"[1 2]",
+        ] {
+            corpus.insert(bytes.to_vec());
+        }
+        let mut mismatches = 0;
+        let mut examples = Vec::new();
+        for bytes in &corpus {
+            let expected = serde_json::from_slice::<Value>(bytes).is_ok();
+            // This is the sink's grammar layer; identity and duplicate-key
+            // policy deliberately reject some otherwise valid JSON values.
+            let mut grammar = JsonGrammar::default();
+            let accepted = bytes.iter().try_for_each(|byte| grammar.push(*byte));
+            let actual = accepted.is_ok() && grammar.finish().is_ok();
+            if actual != expected {
+                mismatches += 1;
+                if examples.len() < 5 {
+                    examples.push((bytes.clone(), expected, actual));
+                }
+            }
+        }
+        println!(
+            "differential corpus={} seed_bytes={} mismatches={mismatches}",
+            corpus.len(),
+            seed.len()
+        );
+        assert_eq!(mismatches, 0, "{examples:?}");
     }
 
     #[test]

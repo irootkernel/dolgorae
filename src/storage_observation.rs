@@ -845,6 +845,18 @@ pub(crate) struct ChunkBinding {
     pub response_sha256: String,
 }
 pub(crate) fn chunk_bindings(connection: &Connection) -> Result<Vec<ChunkBinding>, MachineError> {
+    // A base-only generation-6 database has no orchestration extension, so it
+    // retains no chunk receipts; that is nothing to verify, not a fault.
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='brokered_chunk_bindings')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| failure("chunk receipt namespace unavailable"))?;
+    if !exists {
+        return Ok(Vec::new());
+    }
     let mut statement=connection.prepare("SELECT reference_id,session_id,source_tool_call_id,task_id,offset,byte_length,response_sha256 FROM brokered_chunk_bindings ORDER BY reference_id LIMIT 4097")
         .map_err(|_|failure("chunk receipt bindings unavailable"))?;
     let rows = statement
@@ -960,6 +972,17 @@ mod tests {
         drop(connection);
         path
     }
+    #[test]
+    fn chunk_bindings_treats_a_missing_extension_table_as_nothing_to_verify() {
+        let path = fixture();
+        let connection = CheckedConnection::open(&path, true).unwrap();
+        // A base-only database has no orchestration extension, so it retains no
+        // chunk receipt bindings; that is not a fault.
+        assert!(chunk_bindings(&connection).unwrap().is_empty());
+        drop(connection);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn sqlite_callback_counts_executed_queries_and_ddl_without_retaining_canary_text() {
         let connection = Connection::open_in_memory().unwrap();

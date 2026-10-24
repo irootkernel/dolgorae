@@ -172,6 +172,7 @@ impl ReviewerRuntimePlan {
         };
         let agent_configuration = AgentConfigurationSnapshot {
             schema_version: 1,
+            admitted_configuration: None,
             runtime_profile: profile.profile_name.clone(),
             runtime_profile_snapshot_sha256: runtime_profile_snapshot_digest(profile)
                 .map_err(internal)?,
@@ -379,6 +380,51 @@ pub(crate) fn parse_reviewer_output_v3(
     let value = serde_json::from_str(text)
         .map_err(|_| invalid_output(Some(text), None, "invalid_json", ""))?;
     validate_output_bytes(text, value, task)
+}
+
+/// Validate the closed v4 shape and task semantics without owning a reader.
+pub(crate) fn parse_reviewer_output_v4(
+    text: Option<&str>,
+    task: &SpecialistTaskRequest,
+) -> Result<Value, MachineError> {
+    use crate::review_output::{MAX_OUTPUT_BYTES, invalid_output};
+    let text = text.ok_or_else(|| invalid_output(None, None, "output_unavailable", ""))?;
+    if text.len() > MAX_OUTPUT_BYTES {
+        return Err(invalid_output(Some(text), None, "output_too_large", ""));
+    }
+    crate::jcs::parse(text).map_err(|_| invalid_output(Some(text), None, "invalid_json", ""))?;
+    let value: Value = serde_json::from_str(text)
+        .map_err(|_| invalid_output(Some(text), None, "invalid_json", ""))?;
+    crate::review_output::check_structure_v4(&value)
+        .map_err(|(category, path)| invalid_output(Some(text), Some(&value), category, &path))?;
+    let mut projection = value.clone();
+    for finding in projection["findings"]
+        .as_array_mut()
+        .expect("checked findings")
+    {
+        finding
+            .as_object_mut()
+            .expect("checked finding")
+            .remove("read_receipt_id");
+    }
+    for assessment in projection["criterion_assessments"]
+        .as_array_mut()
+        .expect("checked assessments")
+    {
+        for evidence in assessment["evidence"]
+            .as_array_mut()
+            .expect("checked evidence")
+        {
+            evidence
+                .as_object_mut()
+                .expect("checked evidence")
+                .remove("read_receipt_id");
+        }
+    }
+    let mut projected_task = task.clone();
+    projected_task.expected_output = "structured_review_v3".to_owned();
+    validate_output_bytes(text, projection, &projected_task)?;
+    Ok(value)
 }
 
 fn validate_output_bytes(
@@ -881,6 +927,34 @@ mod tests {
                 "findings":[{"severity":"P1","title":"bad","description":"bad path","path":path,"line_start":1,"line_end":1,"recommendation":"fix","confidence":"high"}]
             })).unwrap_err();
             assert_eq!(error.code, "REVIEW_OUTPUT_INVALID");
+        }
+    }
+
+    #[test]
+    fn v4_parser_enforces_strict_json_shape_and_output_bound() {
+        let task = SpecialistTaskRequest {
+            purpose: "change".to_owned(),
+            brief: "Review the admitted candidate.".to_owned(),
+            contexts: Vec::new(),
+            criteria: Vec::new(),
+            expected_output: "structured_review_v4".to_owned(),
+        };
+        let value = serde_json::json!({"summary":"Reviewed.","findings":[],"criterion_assessments":[],"evidence_limits":[],"overall_assessment":"requirements_met"});
+        assert_eq!(
+            parse_reviewer_output_v4(Some(&value.to_string()), &task).unwrap(),
+            value
+        );
+        for text in [
+            "{\"summary\":\"one\",\"summary\":\"two\"}".to_owned(),
+            format!("```json\n{value}\n```"),
+            " ".repeat(crate::review_output::MAX_OUTPUT_BYTES + 1),
+        ] {
+            assert_eq!(
+                parse_reviewer_output_v4(Some(&text), &task)
+                    .unwrap_err()
+                    .code,
+                "REVIEW_OUTPUT_INVALID"
+            );
         }
     }
 

@@ -14,8 +14,12 @@ pub struct Namespace {
     pub controller_principal: String,
     pub controller_generation: u64,
     pub workspace_ref: String,
-    pub scope_kind: String,
-    pub scope_ref: String,
+    // Nullable for pre-allocation scope (MDC:385). `SubmitTurn` requires both
+    // (MDC:416); see `require_scope`.
+    #[serde(deserialize_with = "required_nullable")]
+    pub scope_kind: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub scope_ref: Option<String>,
     pub operation_kind: String,
     pub idempotency_key: String,
 }
@@ -27,28 +31,91 @@ impl Namespace {
         run: Uuid,
         key: &str,
     ) -> Result<Self, TurnError> {
-        if key.is_empty()
-            || key.len() > 256
+        let scope = run.to_string();
+        Self::delegation(
+            controller,
+            workspace,
+            Some(("run", scope.as_str())),
+            "submit_turn",
+            key,
+        )
+        .map_err(|_| TurnError::InvalidInput("operation namespace is invalid"))
+    }
+
+    /// One successor operation namespace over the canonical Controller
+    /// principal (MDC:378-391).
+    ///
+    /// Pre-allocation operations carry a null scope (MDC:385); the harness
+    /// passes the exact accepted scope otherwise. The principal derivation is
+    /// the single producer every operation envelope and receipt shares.
+    pub(crate) fn delegation(
+        controller: &ControllerIdentity,
+        workspace_ref: &str,
+        scope: Option<(&str, &str)>,
+        operation_kind: &str,
+        idempotency_key: &str,
+    ) -> Result<Self, &'static str> {
+        if idempotency_key.is_empty()
+            || idempotency_key.len() > 256
             || controller.generation == 0
             || controller.generation > 9_007_199_254_740_991
-            || !valid_opaque_ref(workspace)
+            || !valid_opaque_ref(workspace_ref)
+            || operation_kind.is_empty()
+            || operation_kind.len() > 128
+            || !operation_kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         {
-            return Err(TurnError::InvalidInput("operation namespace is invalid"));
+            return Err("operation namespace is invalid");
         }
+        let (scope_kind, scope_ref) = match scope {
+            Some((kind, reference)) if valid_opaque_ref(kind) && valid_opaque_ref(reference) => {
+                (Some(kind.to_owned()), Some(reference.to_owned()))
+            }
+            Some(_) => return Err("operation namespace scope is invalid"),
+            None => (None, None),
+        };
         let public = json!({"controller_id":controller.controller_id,"kind":controller.kind,
             "instance_id":controller.instance_id,"subject_id":controller.subject_id});
+        let principal = canonical(&public).map_err(|_| "operation namespace is invalid")?;
         Ok(Self {
-            controller_principal: format!(
-                "sha256:{}",
-                crate::jcs::sha256_hex(&canonical(&public)?)
-            ),
+            controller_principal: format!("sha256:{}", crate::jcs::sha256_hex(&principal)),
             controller_generation: controller.generation,
-            workspace_ref: workspace.to_owned(),
-            scope_kind: "run".to_owned(),
-            scope_ref: run.to_string(),
-            operation_kind: "submit_turn".to_owned(),
-            idempotency_key: key.to_owned(),
+            workspace_ref: workspace_ref.to_owned(),
+            scope_kind,
+            scope_ref,
+            operation_kind: operation_kind.to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
         })
+    }
+
+    /// The non-null scope an existing-Run mutation requires (MDC:416).
+    /// Pre-allocation operations legitimately carry `null` here (MDC:385).
+    pub(crate) fn require_scope(&self) -> Result<(&str, &str), TurnError> {
+        match (self.scope_kind.as_deref(), self.scope_ref.as_deref()) {
+            (Some(kind), Some(reference))
+                if valid_opaque_ref(kind) && valid_opaque_ref(reference) =>
+            {
+                Ok((kind, reference))
+            }
+            _ => Err(TurnError::InvalidInput(
+                "operation namespace requires a non-null scope",
+            )),
+        }
+    }
+}
+
+impl From<&Namespace> for crate::delegation_identity::LookupNamespace {
+    fn from(value: &Namespace) -> Self {
+        Self {
+            controller_principal: value.controller_principal.clone(),
+            controller_generation: value.controller_generation,
+            workspace_ref: value.workspace_ref.clone(),
+            scope_kind: value.scope_kind.clone(),
+            scope_ref: value.scope_ref.clone(),
+            operation_kind: value.operation_kind.clone(),
+            idempotency_key: value.idempotency_key.clone(),
+        }
     }
 }
 
@@ -99,32 +166,10 @@ pub struct Envelope {
     pub request_body: BytesRef,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Subjects {
-    #[serde(deserialize_with = "required_nullable")]
-    pub run_ref: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
-    pub member_ref: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
-    pub task_ref: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
-    pub group_ref: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
-    pub result_ref: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
-    pub merge_ref: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
-    pub engagement_ref: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
-    pub maintenance_ref: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
-    pub provisioning_ref: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
-    pub turn_ref: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
-    pub interaction_ref: Option<String>,
-}
+pub use crate::delegation_identity::AcceptedSubjects as Subjects;
+
+/// The frozen mutation-envelope domain, owned beside its only producer.
+pub const ENVELOPE_SCHEMA: &str = "dolgorae.mutation-envelope/v1";
 
 fn required_nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
@@ -155,12 +200,12 @@ impl SubmitIdentity {
                 "content":{"byte_length":image.byte_length,"sha256":format!("sha256:{}",image.sha256)},
                 "media_type":crate::turn::image_media_type(&image.canonical_path)?}))
         }).collect::<Result<Vec<_>, TurnError>>()?;
-        let body = json!({"run_ref":namespace.scope_ref,
+        let body = json!({"run_ref":namespace.require_scope()?.1,
             "write_intent":if request.write {"canonical_workspace_write"} else {"read_only"},
             "message":BytesRef::of(request.message.as_bytes()),"images":images,
             "model":request.model,"effort":effort});
         let envelope = Envelope {
-            schema: "dolgorae.mutation-envelope/v1".to_owned(),
+            schema: ENVELOPE_SCHEMA.to_owned(),
             request_schema:
                 "https://dolgorae.local/schema/machine-output/v5#/$defs/submit_turn_normalized_body"
                     .to_owned(),
@@ -196,22 +241,24 @@ impl SubmitIdentity {
                 .is_some_and(|revision| revision > 9_007_199_254_740_991)
             || self.trusted_invocation.is_some()
             || self.accepted_subjects != Subjects::default()
-            || envelope.schema != "dolgorae.mutation-envelope/v1"
+            || envelope.schema != ENVELOPE_SCHEMA
             || envelope.request_schema
                 != "https://dolgorae.local/schema/machine-output/v5#/$defs/submit_turn_normalized_body"
             || envelope.trusted_invocation_ref.is_some()
-            || namespace.scope_kind != "run"
+            || namespace.require_scope().is_err()
+            || namespace.scope_kind.as_deref() != Some("run")
             || namespace.operation_kind != "submit_turn"
             || namespace.controller_generation == 0
             || namespace.controller_generation > 9_007_199_254_740_991
             || namespace.idempotency_key.is_empty()
             || namespace.idempotency_key.len() > 256
             || [
-                namespace.controller_principal.as_str(),
-                namespace.workspace_ref.as_str(),
-                namespace.scope_ref.as_str(),
+                Some(namespace.controller_principal.as_str()),
+                Some(namespace.workspace_ref.as_str()),
+                namespace.scope_ref.as_deref(),
             ]
             .iter()
+            .flatten()
             .any(|value| !valid_opaque_ref(value))
             || !valid_digest(&envelope.request_body.sha256)
             || envelope.request_body.byte_length > 9_007_199_254_740_991
@@ -265,7 +312,7 @@ pub(crate) fn canonical(value: &Value) -> Result<Vec<u8>, TurnError> {
     .map_err(|_| invalid("invalid operation JSON"))
 }
 
-fn envelope_digest(envelope: &Envelope) -> Result<String, TurnError> {
+pub(crate) fn envelope_digest(envelope: &Envelope) -> Result<String, TurnError> {
     let mut bytes = b"dolgorae.mutation-envelope/v1\n".to_vec();
     bytes.extend(canonical(
         &serde_json::to_value(envelope).map_err(|_| invalid("invalid envelope"))?,
@@ -333,7 +380,9 @@ pub(crate) fn lookup(records: &[AuditRecord], namespace: &Namespace) -> Result<V
                 let identity: SubmitIdentity = serde_json::from_value(payload)
                     .map_err(|_| invalid("invalid retained Submit identity"))?;
                 identity.validate()?;
-                if identity.mutation_envelope.namespace.scope_ref != record.run_id().to_string() {
+                if identity.mutation_envelope.namespace.scope_ref.as_deref()
+                    != Some(record.run_id().to_string().as_str())
+                {
                     return Err(invalid("Submit identity crossed its Run"));
                 }
                 let intent = intents
@@ -501,7 +550,7 @@ pub(crate) fn lookup(records: &[AuditRecord], namespace: &Namespace) -> Result<V
     let identity = &identities[&operation];
     if let Some((turn, revision, hash, _)) = acceptance {
         let subjects = Subjects {
-            run_ref: Some(namespace.scope_ref.clone()),
+            run_ref: namespace.scope_ref.clone(),
             turn_ref: Some(turn),
             ..Subjects::default()
         };
@@ -523,7 +572,7 @@ pub(crate) fn lookup(records: &[AuditRecord], namespace: &Namespace) -> Result<V
     }
     Ok(
         json!({"schema":"dolgorae.operation-lookup/v1","namespace":namespace,"state":"unresolved",
-        "operation_ref":operation,"known_subjects":Subjects{run_ref:Some(namespace.scope_ref.clone()),..Subjects::default()},
+        "operation_ref":operation,"known_subjects":Subjects{run_ref:namespace.scope_ref.clone(),..Subjects::default()},
         "effect":"unresolved","required_action":"reconcile_operation"}),
     )
 }
@@ -841,7 +890,7 @@ mod tests {
         let mut records = vec![];
         reserve(&mut records, run, &identity, &request);
         let mut corrupted = identity.clone();
-        corrupted.mutation_envelope.namespace.scope_ref = Uuid::now_v7().to_string();
+        corrupted.mutation_envelope.namespace.scope_ref = Some(Uuid::now_v7().to_string());
         let last = records.pop().unwrap();
         record(
             &mut records,
@@ -930,5 +979,60 @@ mod tests {
         let mut invalid = identity;
         invalid.schema_version = 3;
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn frozen_mutation_vectors_and_relations_keep_the_shared_producer() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../docs/protocol/dolgorae-v014-digest-vectors-v1.json"
+        ))
+        .unwrap();
+        let digest = |vector: &Value| -> String {
+            let envelope: Envelope = serde_json::from_value(vector["input"].clone()).unwrap();
+            envelope_digest(&envelope).unwrap()
+        };
+        let by_id = |id: &str| {
+            vectors["vectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|vector| vector["id"] == id)
+                .unwrap_or_else(|| panic!("missing vector {id}"))
+        };
+        let mut positive = 0;
+        for vector in vectors["vectors"].as_array().unwrap() {
+            if vector["domain"] != "dolgorae.mutation-envelope/v1" {
+                continue;
+            }
+            assert_eq!(digest(vector), vector["expected_digest"]);
+            positive += 1;
+        }
+        assert_eq!(positive, 7);
+        // Every mutation-envelope relation is a distinct digest.
+        let mut relations = 0;
+        for relation in vectors["relations"].as_array().unwrap() {
+            let left = relation["left"].as_str().unwrap();
+            if !left.starts_with("mutation-") {
+                continue;
+            }
+            assert_ne!(
+                digest(by_id(left)),
+                digest(by_id(relation["right"].as_str().unwrap())),
+                "relation {left}"
+            );
+            relations += 1;
+        }
+        assert_eq!(relations, 4);
+        // Pre-allocation scope is nullable (MDC:385); an existing-Run mutation is
+        // not (MDC:416), so the frozen null-scope Submit envelope stays invalid.
+        let invalid = vectors["invalid"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|vector| vector["domain"] == "dolgorae.mutation-envelope/v1")
+            .unwrap();
+        let envelope: Envelope = serde_json::from_str(invalid["raw_json"].as_str().unwrap())
+            .expect("nullable scope parses");
+        assert!(envelope.namespace.require_scope().is_err());
     }
 }

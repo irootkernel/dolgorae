@@ -926,6 +926,267 @@ fn caller_manifest_recovery_retains_exact_captures_and_startup_selection() {
     }
 }
 
+fn sample_delegation_manifest(access: dolgorae::domain::CallerWorkspaceAccess) -> RunManifest {
+    use dolgorae::delegation_identity::{InstructionSnapshot, NamedSourceCapture};
+    let mut manifest = sample_caller_manifest(access);
+    let old = manifest.instructions.caller().unwrap();
+    let capture = InstructionSnapshot::compose(
+        old.common.clone(),
+        old.role.clone(),
+        vec![NamedSourceCapture::new("contract".to_owned(), "Contract bytes\r\n").unwrap()],
+        vec![NamedSourceCapture::new("project".to_owned(), "Explicit guidance\n").unwrap()],
+    )
+    .unwrap();
+    let mut capabilities = manifest.agent_configuration.required_capabilities.clone();
+    capabilities.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    let admitted = dolgorae::delegation_identity::AdmittedConfiguration {
+        schema: dolgorae::delegation_identity::CONFIGURATION_SCHEMA.to_owned(),
+        profile_binding_schema: dolgorae::run::ADMITTED_PROFILE_BINDING_SCHEMA.to_owned(),
+        profile_binding_digest: format!(
+            "sha256:{}",
+            manifest
+                .global_profile_binding
+                .as_ref()
+                .unwrap()
+                .digest()
+                .unwrap()
+        ),
+        model: manifest.agent_configuration.model.clone(),
+        effort: manifest.agent_configuration.default_effort.clone(),
+        purpose_kind: manifest
+            .agent_configuration
+            .purpose
+            .kind
+            .as_str()
+            .to_owned(),
+        purpose_label: manifest.agent_configuration.purpose.external_label.clone(),
+        required_capabilities: capabilities,
+        execution_lane: manifest
+            .agent_configuration
+            .execution_lane
+            .as_str()
+            .to_owned(),
+        requested_access: match access {
+            dolgorae::domain::CallerWorkspaceAccess::ReadOnly => "read_only",
+            dolgorae::domain::CallerWorkspaceAccess::Writable => "canonical_workspace_write",
+        }
+        .to_owned(),
+        required_assurance: manifest
+            .agent_configuration
+            .required_assurance
+            .as_str()
+            .to_owned(),
+        native_subagent_policy: manifest.agent_configuration.native_subagent_policy.clone(),
+        instruction_identity_digest: capture.instruction_identity_digest.clone(),
+    };
+    let profile = manifest.agent_configuration.runtime_profile.clone();
+    let binding = manifest.global_profile_binding.clone().unwrap();
+    assert_eq!(binding.selected_name, profile);
+    manifest.agent_configuration = dolgorae::run::AgentConfigurationSnapshot::from_admitted(
+        dolgorae::run::AdmittedConfigurationInput {
+            admitted,
+            instructions: capture.clone(),
+            profile: &profile,
+            profile_binding: &binding,
+            role_reference: manifest.agent_configuration.role_reference.as_deref(),
+        },
+    )
+    .unwrap();
+    manifest.schema_version = 4;
+    manifest.instructions = dolgorae::run::RunInstructionSnapshot::Delegation(Box::new(capture));
+    manifest.creation_mode = Some(
+        if access == dolgorae::domain::CallerWorkspaceAccess::Writable {
+            "writable"
+        } else {
+            "read_only"
+        }
+        .to_owned(),
+    );
+    manifest.admitted_configuration_digest = Some(
+        manifest
+            .agent_configuration
+            .admitted_configuration
+            .as_ref()
+            .unwrap()
+            .digest()
+            .unwrap(),
+    );
+    manifest.start_operation_receipt = Some(None);
+    manifest
+}
+
+fn start_receipt(manifest: &RunManifest, scope: Option<(&str, &str)>) -> Value {
+    let namespace = serde_json::json!({
+        "controller_principal": "principal:fixture",
+        "controller_generation": 1,
+        "workspace_ref": manifest.workspace_id,
+        "scope_kind": scope.map(|pair| pair.0),
+        "scope_ref": scope.map(|pair| pair.1),
+        "operation_kind": "start_run",
+        "idempotency_key": "start-original-key",
+    });
+    let subjects = serde_json::json!({
+        "run_ref": manifest.run_id.to_string(),
+        "member_ref": null,
+        "task_ref": null,
+        "group_ref": null,
+        "result_ref": null,
+        "merge_ref": null,
+        "engagement_ref": null,
+        "maintenance_ref": null,
+        "provisioning_ref": null,
+        "turn_ref": null,
+        "interaction_ref": null,
+    });
+    serde_json::json!({
+        "schema": "dolgorae.operation-receipt/v1",
+        "operation_ref": Uuid::now_v7(),
+        "namespace": namespace,
+        "accepted_input_digest": format!("sha256:{}", "a".repeat(64)),
+        "accepted_subjects": subjects,
+        "receipt_digest": format!("sha256:{}", "b".repeat(64)),
+        "accepted_revision": 1,
+        "result_digest": null,
+    })
+}
+
+#[test]
+fn delegation_manifest_accepts_one_explicit_preallocation_start_receipt() {
+    let tree = TestTree::new();
+    let state_root = tree.path("state");
+    make_dir(&state_root);
+    make_dir(&state_root.join("runs"));
+    let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    let manifest = sample_delegation_manifest(dolgorae::domain::CallerWorkspaceAccess::ReadOnly);
+    // `Some(None)` states that no public receipt was accepted yet.
+    assert!(manifest.start_operation_receipt.is_some());
+    assert!(manifest.start_operation_receipt.clone().unwrap().is_none());
+    store.publish(&manifest).unwrap();
+
+    let mut accepted = manifest.clone();
+    accepted.run_id = Uuid::now_v7();
+    accepted.start_operation_receipt = Some(Some(
+        serde_json::from_value(start_receipt(&accepted, None)).unwrap(),
+    ));
+    let directory = store.publish(&accepted).unwrap();
+    assert_eq!(store.load_manifest(accepted.run_id).unwrap(), accepted);
+    let wire: Value = serde_json::from_slice(&fs::read(&directory.manifest).unwrap()).unwrap();
+    assert!(wire["start_operation_receipt"].is_object());
+
+    // A pre-allocation start receipt must not claim an aggregate scope.
+    let mut scoped = manifest.clone();
+    scoped.run_id = Uuid::now_v7();
+    scoped.start_operation_receipt = Some(Some(
+        serde_json::from_value(start_receipt(&scoped, Some(("run", "run:fixture")))).unwrap(),
+    ));
+    assert_eq!(
+        store.publish(&scoped).unwrap_err().code,
+        "RUN_STATE_INVARIANT_VIOLATION"
+    );
+
+    // A receipt for another Run, workspace or operation is refused.
+    for (field, value) in [
+        (
+            "run",
+            serde_json::json!({"run_ref": Uuid::now_v7().to_string()}),
+        ),
+        (
+            "workspace",
+            serde_json::json!({"workspace_ref": "workspace:other"}),
+        ),
+        ("kind", serde_json::json!({"operation_kind": "submit_turn"})),
+    ] {
+        let mut changed = manifest.clone();
+        changed.run_id = Uuid::now_v7();
+        let mut receipt = start_receipt(&changed, None);
+        match field {
+            "run" => receipt["accepted_subjects"]["run_ref"] = value["run_ref"].clone(),
+            _ => {
+                for (key, item) in value.as_object().unwrap() {
+                    receipt["namespace"][key] = item.clone();
+                }
+            }
+        }
+        changed.start_operation_receipt = Some(Some(serde_json::from_value(receipt).unwrap()));
+        assert!(store.publish(&changed).is_err(), "accepted changed {field}");
+    }
+
+    // The receipt field itself must be explicit in a generation-4 manifest: an
+    // omitted key deserializes to the absent state and is refused on publish.
+    let mut missing = serde_json::to_value(&manifest).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("start_operation_receipt");
+    let omitted: RunManifest = serde_json::from_value(missing).unwrap();
+    assert!(omitted.start_operation_receipt.is_none());
+    assert!(store.publish(&omitted).is_err());
+}
+
+#[test]
+fn delegation_manifest_retains_exact_sources_and_explicit_creation_identity() {
+    use dolgorae::domain::CallerWorkspaceAccess;
+    for access in [
+        CallerWorkspaceAccess::ReadOnly,
+        CallerWorkspaceAccess::Writable,
+    ] {
+        let tree = TestTree::new();
+        let state_root = tree.path("state");
+        make_dir(&state_root);
+        make_dir(&state_root.join("runs"));
+        let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+        let manifest = sample_delegation_manifest(access);
+        assert!(manifest.uses_caller_workspace_lane());
+        let directory = store.publish(&manifest).unwrap();
+        assert_eq!(store.load_manifest(manifest.run_id).unwrap(), manifest);
+        let wire: Value = serde_json::from_slice(&fs::read(&directory.manifest).unwrap()).unwrap();
+        assert!(wire.get("start_operation_receipt").unwrap().is_null());
+        assert_eq!(
+            wire["instructions"],
+            wire["agent_configuration"]["instructions"]
+        );
+        assert_eq!(
+            manifest.instructions.delegation().unwrap().dependencies[0]
+                .source
+                .body,
+            "Contract bytes\r\n"
+        );
+        for pointer in [
+            "/creation_mode",
+            "/admitted_configuration_digest",
+            "/instructions/dependencies/0/source/body",
+            "/agent_configuration/admitted_configuration/model",
+        ] {
+            let mut changed = wire.clone();
+            *changed.pointer_mut(pointer).unwrap() = serde_json::json!("changed");
+            fs::write(&directory.manifest, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(
+                store.load_manifest(manifest.run_id).is_err(),
+                "accepted altered {pointer}"
+            );
+        }
+        for field in [
+            "creation_mode",
+            "admitted_configuration_digest",
+            "start_operation_receipt",
+            "parent_ref",
+            "thread_id",
+        ] {
+            let mut changed = wire.clone();
+            changed.as_object_mut().unwrap().remove(field);
+            fs::write(&directory.manifest, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(
+                store.load_manifest(manifest.run_id).is_err(),
+                "accepted absent {field}"
+            );
+        }
+        let mut changed = wire.clone();
+        changed["schema_version"] = serde_json::json!(3);
+        fs::write(&directory.manifest, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(store.load_manifest(manifest.run_id).is_err());
+    }
+}
+
 #[test]
 fn caller_manifest_rejects_changed_capture_generation_and_startup_identity() {
     use dolgorae::domain::CallerWorkspaceAccess;
@@ -1482,6 +1743,7 @@ fn sample_manifest() -> RunManifest {
         execution_lane: ExecutionLane::SharedReadonly,
         required_assurance: Assurance::BestEffortPersonalAlpha,
         native_subagent_policy: "enabled".to_owned(),
+        admitted_configuration: None,
     };
     RunManifest {
         schema_version: 1,
@@ -1500,6 +1762,9 @@ fn sample_manifest() -> RunManifest {
         requested_access: None,
         selected_role: None,
         start_contract: None,
+        creation_mode: None,
+        admitted_configuration_digest: None,
+        start_operation_receipt: None,
         control_mode: ControlMode::DirectInteractive,
         execution_lane: ExecutionLane::SharedReadonly,
         requested_assurance: Assurance::BestEffortPersonalAlpha,
@@ -1605,6 +1870,7 @@ fn sample_caller_intent() -> CallerStartIntent {
         unreachable!();
     };
     CallerStartIntent {
+        admitted_configuration: None,
         orchestration: None,
         readiness: dolgorae::run::CallerProfileReadiness {
             model: manifest.model.clone(),

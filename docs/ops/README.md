@@ -114,11 +114,14 @@ unexpected mutation to the repository maintainers before retrying.
 campaign. Set `DOLGORAE_RUN_NATIVE_INTEGRATED_ACCEPTANCE=1` and point
 `DOLGORAE_CODEX_BIN` to the pinned Codex executable. It exercises the production
 CLI with isolated homes, Profiles, credentials, and caller workspaces, using
-at most 17 Turns and 34 loopback Responses requests. It never loads a real
+at most 17 Turns and 34 loopback Responses requests, plus a separate successor
+campaign with two Turns and four requests. It never loads a real
 account or sends requests to an external provider. Its isolated Profile disables
 optional Codex plugins and verifies the captured setting so background plugin
 downloads cannot determine startup readiness. Plugin-enabled startup is outside
-this campaign's qualification. The campaign checks startup defaults,
+this campaign's qualification. Startup with the default shell snapshot is also
+outside this native campaign's qualification; the roadmap assigns
+default-feature Profile qualification to TASK-077. The campaign checks startup defaults,
 read-only enforcement, same-thread access changes, captured instruction replay,
 all direct review scopes, reusable Reviewer tasks, and accepted Primary/child
 policy configurations, including the Primary's actual `request_specialist`
@@ -128,6 +131,21 @@ repeat close and recovery must retain its close operation and interrupt choice.
 An idle writable Primary must also complete checked interruption and recovery
 with its retained abort operation. This does not qualify a live active Turn abort.
 A nested turnless campaign checks writer exclusion and recovery.
+The successor fixture also disables the optional native shell snapshot; the
+existing campaign retains its original configuration. This bounds startup
+background work without relaxing process-quiescence or policy proof checks.
+The successor campaign builds an opt-in example driver from the production
+modules with test-only caller provenance. It uses the production settlement
+port, qualified native runtime and real Broker carrier for managed dispatch;
+external members use their authenticated owner carrier. Both manifest-4 members
+publish a native write result and close normally. Assertions bind index
+publication to the first loopback request and check verified Reader journal,
+seal, writer release, owned cleanup and Profile retirement order. Five managed
+preparation and recording failures check zero Submit calls, content rollback,
+unchanged receipts, returned rounds and the preserved uncertain guard. Test
+hooks inject owned filesystem or SQL faults after qualified acquisition.
+Acquisition, dispatch and close use production code, including native
+qualification.
 Cleanup uses the fixture's Operator to interrupt only its confirmed Profile,
 then requires process-inventory absence before removing the fixture. It does
 not project modern Runs through the frozen public-v1 adapter.

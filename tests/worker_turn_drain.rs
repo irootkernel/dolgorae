@@ -2786,6 +2786,7 @@ fn manifest(run_id: Uuid, controller: ControllerBinding) -> RunManifest {
         execution_lane: ExecutionLane::SharedReadonly,
         required_assurance: Assurance::BestEffortPersonalAlpha,
         native_subagent_policy: "enabled".to_owned(),
+        admitted_configuration: None,
     };
     RunManifest {
         schema_version: 1,
@@ -2799,6 +2800,9 @@ fn manifest(run_id: Uuid, controller: ControllerBinding) -> RunManifest {
         requested_access: None,
         selected_role: None,
         start_contract: None,
+        creation_mode: None,
+        admitted_configuration_digest: None,
+        start_operation_receipt: None,
         control_mode: ControlMode::DirectInteractive,
         execution_lane: ExecutionLane::SharedReadonly,
         requested_assurance: Assurance::BestEffortPersonalAlpha,

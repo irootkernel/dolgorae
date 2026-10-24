@@ -105,6 +105,7 @@ pub struct AgentConfigurationSnapshot {
     pub execution_lane: ExecutionLane,
     pub required_assurance: Assurance,
     pub native_subagent_policy: String,
+    pub admitted_configuration: Option<crate::delegation_identity::AdmittedConfiguration>,
 }
 
 /// Successor configuration; legacy v1/v2 records retain their original reader.
@@ -218,7 +219,7 @@ struct AgentConfigurationWire {
     global_profile_binding_sha256: Option<String>,
     model: String,
     default_effort: String,
-    purpose: Purpose,
+    purpose: ConfigurationPurposeWire,
     required_capabilities: Vec<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     role_reference: Option<String>,
@@ -228,6 +229,28 @@ struct AgentConfigurationWire {
     execution_lane: ExecutionLane,
     required_assurance: Assurance,
     native_subagent_policy: String,
+    #[serde(default, deserialize_with = "deserialize_profile_field")]
+    requested_access: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_admitted_configuration")]
+    admitted_configuration: Option<crate::delegation_identity::AdmittedConfiguration>,
+    #[serde(default, deserialize_with = "deserialize_profile_field")]
+    agent_configuration_digest: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ConfigurationPurposeWire {
+    kind: PurposeKind,
+    #[serde(default, deserialize_with = "deserialize_present_label")]
+    external_label: Option<Option<String>>,
+    #[serde(flatten)]
+    extra: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+fn deserialize_present_label<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_profile_field<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -236,6 +259,15 @@ where
 {
     // Only an absent key receives the default None; a present key must be a string.
     String::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_admitted_configuration<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::delegation_identity::AdmittedConfiguration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    crate::delegation_identity::AdmittedConfiguration::deserialize(deserializer).map(Some)
 }
 
 impl<'de> Deserialize<'de> for AgentConfigurationSnapshot {
@@ -256,7 +288,7 @@ impl<'de> Deserialize<'de> for AgentConfigurationSnapshot {
                     })?,
                 )
             }
-            2 | 3
+            2..=4
                 if wire.runtime_profile.is_none()
                     && wire.runtime_profile_snapshot_sha256.is_none() =>
             {
@@ -285,19 +317,57 @@ impl<'de> Deserialize<'de> for AgentConfigurationSnapshot {
                     serde::de::Error::custom("captured instruction integrity failed")
                 })?
             }
+            (RunInstructionSnapshot::Delegation(capture), 4)
+                if wire.normalized_instructions.is_none() =>
+            {
+                capture
+                    .developer_prefix()
+                    .map_err(|_| serde::de::Error::custom("captured delegation integrity failed"))?
+            }
             _ => {
                 return Err(serde::de::Error::custom(
                     "instruction generation does not match Agent Configuration",
                 ));
             }
         };
-        Ok(Self {
+        if wire.schema_version == 4 {
+            if wire.purpose.external_label.is_none() || !wire.purpose.extra.is_empty() {
+                return Err(serde::de::Error::custom(
+                    "successor purpose requires its exact closed fields",
+                ));
+            }
+            let admitted = wire
+                .admitted_configuration
+                .as_ref()
+                .ok_or_else(|| serde::de::Error::missing_field("admitted_configuration"))?;
+            let digest = admitted
+                .digest()
+                .map_err(|_| serde::de::Error::custom("invalid admitted configuration"))?;
+            if wire.requested_access.as_deref() != Some(admitted.requested_access.as_str())
+                || wire.agent_configuration_digest.as_deref() != Some(digest.as_str())
+            {
+                return Err(serde::de::Error::custom(
+                    "admitted configuration identity mismatch",
+                ));
+            }
+        } else if wire.admitted_configuration.is_some()
+            || wire.requested_access.is_some()
+            || wire.agent_configuration_digest.is_some()
+        {
+            return Err(serde::de::Error::custom(
+                "successor fields in an older Agent Configuration",
+            ));
+        }
+        let configuration = Self {
             schema_version: wire.schema_version,
             runtime_profile,
             runtime_profile_snapshot_sha256,
             model: wire.model,
             default_effort: wire.default_effort,
-            purpose: wire.purpose,
+            purpose: Purpose {
+                kind: wire.purpose.kind,
+                external_label: wire.purpose.external_label.flatten(),
+            },
             required_capabilities: wire.required_capabilities,
             role_reference: wire.role_reference,
             normalized_instructions,
@@ -305,7 +375,14 @@ impl<'de> Deserialize<'de> for AgentConfigurationSnapshot {
             execution_lane: wire.execution_lane,
             required_assurance: wire.required_assurance,
             native_subagent_policy: wire.native_subagent_policy,
-        })
+            admitted_configuration: wire.admitted_configuration,
+        };
+        if configuration.schema_version == 4 {
+            configuration
+                .validate_delegation()
+                .map_err(serde::de::Error::custom)?;
+        }
+        Ok(configuration)
     }
 }
 
@@ -314,7 +391,23 @@ impl Serialize for AgentConfigurationSnapshot {
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("AgentConfigurationSnapshot", 14)?;
+        if self.schema_version == 4 {
+            self.validate_delegation()
+                .map_err(serde::ser::Error::custom)?;
+        }
+        // Generation 1|2 emit 13 fields; 3 emits 12 (it drops
+        // `normalized_instructions`); 4 emits 15: schema_version,
+        // selected_profile, global_profile_binding_sha256, model,
+        // default_effort, purpose, required_capabilities, role_reference,
+        // instructions, execution_lane, required_assurance,
+        // native_subagent_policy, requested_access, admitted_configuration,
+        // agent_configuration_digest.
+        let fields = match self.schema_version {
+            3 => 12,
+            4 => 15,
+            _ => 13,
+        };
+        let mut state = serializer.serialize_struct("AgentConfigurationSnapshot", fields)?;
         state.serialize_field("schema_version", &self.schema_version)?;
         if self.schema_version == 1 {
             state.serialize_field("runtime_profile", &self.runtime_profile)?;
@@ -334,13 +427,31 @@ impl Serialize for AgentConfigurationSnapshot {
         state.serialize_field("purpose", &self.purpose)?;
         state.serialize_field("required_capabilities", &self.required_capabilities)?;
         state.serialize_field("role_reference", &self.role_reference)?;
-        if self.schema_version != 3 {
+        if !matches!(self.schema_version, 3 | 4) {
             state.serialize_field("normalized_instructions", &self.normalized_instructions)?;
         }
         state.serialize_field("instructions", &self.instructions)?;
         state.serialize_field("execution_lane", &self.execution_lane)?;
         state.serialize_field("required_assurance", &self.required_assurance)?;
         state.serialize_field("native_subagent_policy", &self.native_subagent_policy)?;
+        if self.schema_version == 4 {
+            let admitted = self
+                .admitted_configuration
+                .as_ref()
+                .ok_or_else(|| serde::ser::Error::custom("missing admitted configuration"))?;
+            state.serialize_field("requested_access", &admitted.requested_access)?;
+            state.serialize_field("admitted_configuration", admitted)?;
+            state.serialize_field(
+                "agent_configuration_digest",
+                &admitted
+                    .digest()
+                    .map_err(|_| serde::ser::Error::custom("invalid admitted configuration"))?,
+            )?;
+        } else if self.admitted_configuration.is_some() {
+            return Err(serde::ser::Error::custom(
+                "successor identity in an older configuration",
+            ));
+        }
         state.end()
     }
 }
@@ -377,6 +488,7 @@ pub struct InstructionSnapshot {
 pub enum RunInstructionSnapshot {
     Legacy(InstructionSnapshot),
     Caller(crate::instructions::InstructionSnapshot),
+    Delegation(Box<crate::delegation_identity::InstructionSnapshot>),
 }
 
 impl From<InstructionSnapshot> for RunInstructionSnapshot {
@@ -393,10 +505,17 @@ impl From<crate::instructions::InstructionSnapshot> for RunInstructionSnapshot {
 
 impl RunInstructionSnapshot {
     #[must_use]
+    pub fn delegation(&self) -> Option<&crate::delegation_identity::InstructionSnapshot> {
+        match self {
+            Self::Delegation(value) => Some(value),
+            Self::Legacy(_) | Self::Caller(_) => None,
+        }
+    }
+    #[must_use]
     pub fn legacy(&self) -> Option<&InstructionSnapshot> {
         match self {
             Self::Legacy(value) => Some(value),
-            Self::Caller(_) => None,
+            Self::Caller(_) | Self::Delegation(_) => None,
         }
     }
 
@@ -404,7 +523,7 @@ impl RunInstructionSnapshot {
     pub fn caller(&self) -> Option<&crate::instructions::InstructionSnapshot> {
         match self {
             Self::Caller(value) => Some(value),
-            Self::Legacy(_) => None,
+            Self::Legacy(_) | Self::Delegation(_) => None,
         }
     }
 
@@ -413,6 +532,7 @@ impl RunInstructionSnapshot {
         match self {
             Self::Legacy(value) => &value.normalized_sha256,
             Self::Caller(value) => &value.composition_sha256,
+            Self::Delegation(value) => &value.composition_sha256,
         }
     }
 
@@ -427,7 +547,180 @@ impl RunInstructionSnapshot {
                 "schema": value.schema, "core_prefix_version": value.core_prefix_version,
                 "core_prefix_sha256": value.core_prefix_sha256, "composition_sha256": value.composition_sha256,
             }),
+            Self::Delegation(value) => serde_json::json!({
+                "schema": value.schema, "core_prefix_version": value.core_prefix_version,
+                "core_prefix_sha256": value.core_prefix_sha256, "composition_sha256": value.composition_sha256,
+                "role_snapshot_digest": value.role_snapshot_digest,
+                "instruction_identity_digest": value.instruction_identity_digest,
+            }),
         }
+    }
+}
+
+/// The accepted authority a successor Agent Configuration is built from: the
+/// admitted configuration, its exact captured instructions, the selected
+/// Profile name and binding, and the nullable Role attribution.
+pub struct AdmittedConfigurationInput<'a> {
+    pub admitted: crate::delegation_identity::AdmittedConfiguration,
+    pub instructions: crate::delegation_identity::InstructionSnapshot,
+    pub profile: &'a str,
+    pub profile_binding: &'a GlobalProfileBinding,
+    pub role_reference: Option<&'a str>,
+}
+
+/// The exact accepted immutable Profile binding schema for admitted
+/// configurations (MDC:318).
+pub const ADMITTED_PROFILE_BINDING_SCHEMA: &str =
+    "https://dolgorae.local/schema/global-profile-binding/v2";
+
+impl AgentConfigurationSnapshot {
+    /// Build one successor Agent Configuration (generation 4) from an admitted
+    /// configuration. No legacy v3 configuration is consulted: provisioned
+    /// delegation carries its whole admission, so this is the single
+    /// constructor an installed `provisioning_ref` start uses (MDC:310-337).
+    pub fn from_admitted(input: AdmittedConfigurationInput<'_>) -> Result<Self, MachineError> {
+        let AdmittedConfigurationInput {
+            admitted,
+            instructions,
+            profile,
+            profile_binding,
+            role_reference,
+        } = input;
+        // The closed admitted object owns the MDC:335-337 branches: `enabled`
+        // requires a dedicated configuration, a shared read-only lane requires
+        // `read_only` access and `disabled` native subagents.
+        admitted.digest()?;
+        // The binding is authority, not a hash carrier: `digest` only hashes
+        // persisted bytes, so the full recovery validator establishes that the
+        // selected Profile, its launch snapshot and their recorded digests agree
+        // before any of it is admitted into an Agent Configuration.
+        profile_binding.validate_for_recovery().map_err(|_| {
+            MachineError::invalid_argument(
+                "agent_configuration",
+                "the selected Profile binding is incomplete or internally inconsistent",
+            )
+        })?;
+        let binding_digest = format!("sha256:{}", profile_binding.digest()?);
+        if admitted.profile_binding_schema != ADMITTED_PROFILE_BINDING_SCHEMA
+            || admitted.profile_binding_digest != binding_digest
+            || profile_binding.selected_name != profile
+            || admitted.instruction_identity_digest != instructions.instruction_identity_digest
+            || role_reference.is_some_and(str::is_empty)
+        {
+            return Err(MachineError::invalid_argument(
+                "agent_configuration",
+                "admitted configuration differs from its selected Profile or instructions",
+            ));
+        }
+        let execution_lane = match admitted.execution_lane.as_str() {
+            "dedicated" => ExecutionLane::Dedicated,
+            "shared_readonly" => ExecutionLane::SharedReadonly,
+            _ => {
+                return Err(MachineError::invalid_argument(
+                    "agent_configuration",
+                    "admitted execution lane is unknown",
+                ));
+            }
+        };
+        let required_assurance = match admitted.required_assurance.as_str() {
+            "best_effort_personal_alpha" => Assurance::BestEffortPersonalAlpha,
+            "verified_thread_scoped_control" => Assurance::VerifiedThreadScopedControl,
+            "strong_process_containment" => Assurance::StrongProcessContainment,
+            _ => {
+                return Err(MachineError::invalid_argument(
+                    "agent_configuration",
+                    "admitted assurance is unknown",
+                ));
+            }
+        };
+        let purpose_kind = match admitted.purpose_kind.as_str() {
+            "interactive" => PurposeKind::Interactive,
+            "planning" => PurposeKind::Planning,
+            "implementation" => PurposeKind::Implementation,
+            "review" => PurposeKind::Review,
+            "research" => PurposeKind::Research,
+            "discussion" => PurposeKind::Discussion,
+            "workflow_stage" => PurposeKind::WorkflowStage,
+            "other" => PurposeKind::Other,
+            _ => {
+                return Err(MachineError::invalid_argument(
+                    "agent_configuration",
+                    "admitted purpose kind is unknown",
+                ));
+            }
+        };
+        // Capability IDs are compared as the admitted sorted set.
+        let mut required_capabilities = admitted.required_capabilities.clone();
+        required_capabilities.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        let configuration = Self {
+            schema_version: 4,
+            runtime_profile: profile.to_owned(),
+            runtime_profile_snapshot_sha256: profile_binding.digest()?,
+            model: admitted.model.clone(),
+            default_effort: admitted.effort.clone(),
+            purpose: Purpose {
+                kind: purpose_kind,
+                external_label: admitted.purpose_label.clone(),
+            },
+            required_capabilities,
+            role_reference: role_reference.map(str::to_owned),
+            normalized_instructions: instructions.developer_prefix()?,
+            instructions: RunInstructionSnapshot::Delegation(Box::new(instructions)),
+            execution_lane,
+            required_assurance,
+            native_subagent_policy: admitted.native_subagent_policy.clone(),
+            admitted_configuration: Some(admitted),
+        };
+        configuration
+            .validate_delegation()
+            .map_err(|reason| MachineError::invalid_argument("agent_configuration", reason))?;
+        Ok(configuration)
+    }
+
+    pub(crate) fn validate_delegation(&self) -> Result<(), &'static str> {
+        let capture = self
+            .instructions
+            .delegation()
+            .ok_or("missing delegation instruction capture")?;
+        let admitted = self
+            .admitted_configuration
+            .as_ref()
+            .ok_or("missing admitted configuration")?;
+        admitted
+            .digest()
+            .map_err(|_| "invalid admitted configuration")?;
+        if self.schema_version != 4
+            || !bounded_identity(&self.runtime_profile, 128)
+            || !self
+                .runtime_profile
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+                })
+            || self.role_reference.as_ref().is_some_and(String::is_empty)
+            || capture
+                .developer_prefix()
+                .map_err(|_| "invalid delegation capture")?
+                != self.normalized_instructions
+            || admitted.profile_binding_schema != ADMITTED_PROFILE_BINDING_SCHEMA
+            || admitted.profile_binding_digest
+                != format!("sha256:{}", self.runtime_profile_snapshot_sha256)
+            || admitted.model != self.model
+            || admitted.effort != self.default_effort
+            || admitted.purpose_kind != self.purpose.kind.as_str()
+            || admitted.purpose_label != self.purpose.external_label
+            || admitted.required_capabilities != self.required_capabilities
+            || admitted.execution_lane != self.execution_lane.as_str()
+            || admitted.required_assurance != self.required_assurance.as_str()
+            || admitted.native_subagent_policy != self.native_subagent_policy
+            || admitted.instruction_identity_digest != capture.instruction_identity_digest
+        {
+            return Err("admitted configuration differs from retained execution inputs");
+        }
+        Ok(())
     }
 }
 
@@ -450,6 +743,7 @@ impl TryFrom<CallerAgentConfigurationSnapshot> for AgentConfigurationSnapshot {
             execution_lane: value.execution_lane,
             required_assurance: value.required_assurance,
             native_subagent_policy: value.native_subagent_policy,
+            admitted_configuration: None,
         })
     }
 }
@@ -589,6 +883,33 @@ pub struct RunManifest {
         deserialize_with = "deserialize_profile_field"
     )]
     pub start_contract: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_profile_field"
+    )]
+    pub creation_mode: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_profile_field"
+    )]
+    pub admitted_configuration_digest: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_start_operation_receipt"
+    )]
+    pub start_operation_receipt: Option<Option<crate::delegation_identity::OperationReceipt>>,
+}
+
+fn deserialize_start_operation_receipt<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<crate::delegation_identity::OperationReceipt>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<crate::delegation_identity::OperationReceipt>::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_startup_access<'de, D>(
@@ -600,9 +921,32 @@ where
     crate::domain::CallerWorkspaceAccess::deserialize(deserializer).map(Some)
 }
 
+/// The Run manifest generations that share the caller-workspace lane.
+///
+/// Generation 4 (delegated) runs the same qualified caller runtime machinery as
+/// generation 3; only its instruction and Agent Configuration generations
+/// differ. Every gate that a generation-3 Run must pass — owned-runtime
+/// qualification, the caller-policy proof, the restart session policy and the
+/// release proof — decides on this one predicate.
+#[must_use]
+pub(crate) const fn is_caller_workspace_generation(schema_version: u32) -> bool {
+    matches!(schema_version, 3 | 4)
+}
+
 impl RunManifest {
+    /// The qualified caller-workspace mechanism, never a pooled or legacy lane.
+    #[must_use]
+    pub fn uses_caller_workspace_lane(&self) -> bool {
+        self.execution_lane == ExecutionLane::Dedicated
+            && self.start_contract.as_deref() == Some("caller_workspace/v1")
+            && matches!(
+                (&self.instructions, self.schema_version),
+                (RunInstructionSnapshot::Caller(_), 3) | (RunInstructionSnapshot::Delegation(_), 4)
+            )
+    }
+
     pub(crate) fn require_legacy_adapter(&self) -> Result<(), MachineError> {
-        if self.schema_version != 3 {
+        if matches!(self.schema_version, 1 | 2) {
             return Ok(());
         }
         Err(MachineError::new(
@@ -851,7 +1195,7 @@ where
 /// No ready server epoch or advertised default is fabricated during admission.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CallerStartIntent {
+pub struct CallerStartIntent<I = crate::instructions::InstructionSnapshot> {
     pub run_id: Uuid,
     pub created_at: String,
     pub workspace_id: String,
@@ -862,10 +1206,88 @@ pub struct CallerStartIntent {
     pub request: CallerRunStartRequest,
     pub controller: ControllerBinding,
     pub global_profile_binding: GlobalProfileBinding,
-    pub instructions: crate::instructions::InstructionSnapshot,
+    pub instructions: I,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_start_configuration"
+    )]
+    pub admitted_configuration: Option<AgentConfigurationSnapshot>,
     pub readiness: CallerProfileReadiness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestration: Option<crate::markdown_policy::PreparedPolicySession>,
+}
+
+fn deserialize_start_configuration<'de, D>(
+    deserializer: D,
+) -> Result<Option<AgentConfigurationSnapshot>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    AgentConfigurationSnapshot::deserialize(deserializer).map(Some)
+}
+
+/// Each retained reservation generation has one closed instruction reader.
+pub trait CallerInstructionGeneration:
+    Clone + std::fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned
+{
+    const MANIFEST_VERSION: u32;
+    const RESERVATION_VERSION: u32;
+    fn role_name(&self) -> &str;
+    fn developer_prefix(&self) -> Result<String, MachineError>;
+    fn run_capture(&self) -> RunInstructionSnapshot;
+    fn from_run_capture(capture: &RunInstructionSnapshot) -> Option<Self>;
+    fn capture_source(
+        store: &crate::instructions::InstructionSourceStore,
+        name: &str,
+    ) -> Result<Self, MachineError>;
+}
+
+impl CallerInstructionGeneration for crate::instructions::InstructionSnapshot {
+    const MANIFEST_VERSION: u32 = 3;
+    const RESERVATION_VERSION: u32 = 2;
+    fn role_name(&self) -> &str {
+        &self.role.name
+    }
+    fn developer_prefix(&self) -> Result<String, MachineError> {
+        self.developer_prefix()
+    }
+    fn run_capture(&self) -> RunInstructionSnapshot {
+        self.clone().into()
+    }
+    fn from_run_capture(capture: &RunInstructionSnapshot) -> Option<Self> {
+        capture.caller().cloned()
+    }
+    fn capture_source(
+        store: &crate::instructions::InstructionSourceStore,
+        name: &str,
+    ) -> Result<Self, MachineError> {
+        store.capture(name)
+    }
+}
+
+impl CallerInstructionGeneration for crate::delegation_identity::InstructionSnapshot {
+    const MANIFEST_VERSION: u32 = 4;
+    const RESERVATION_VERSION: u32 = 3;
+    fn role_name(&self) -> &str {
+        &self.role.name
+    }
+    fn developer_prefix(&self) -> Result<String, MachineError> {
+        self.developer_prefix()
+    }
+    fn run_capture(&self) -> RunInstructionSnapshot {
+        RunInstructionSnapshot::Delegation(Box::new(self.clone()))
+    }
+    fn from_run_capture(capture: &RunInstructionSnapshot) -> Option<Self> {
+        capture.delegation().cloned()
+    }
+    fn capture_source(
+        store: &crate::instructions::InstructionSourceStore,
+        name: &str,
+    ) -> Result<Self, MachineError> {
+        let capture = store.capture(name)?;
+        Self::compose(capture.common, capture.role, vec![], vec![])
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -903,7 +1325,7 @@ impl CallerStartReceipt {
             }
         };
         if self.schema != "dolgorae.caller-start-receipt/v1"
-            || manifest.schema_version != 3
+            || !manifest.uses_caller_workspace_lane()
             || self.run_id != manifest.run_id
             || self.accepted_intent_sha256 != intent_sha256
             || !is_sha256(intent_sha256)
@@ -957,7 +1379,7 @@ where
     serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
-impl CallerStartIntent {
+impl<I: CallerInstructionGeneration> CallerStartIntent<I> {
     fn validate(&self) -> Result<(), MachineError> {
         let path = self.canonical_workspace.to_path_buf()?;
         caller_start_request_digest(&self.request, &self.canonical_workspace, &self.controller)?;
@@ -965,7 +1387,7 @@ impl CallerStartIntent {
             || !is_microsecond_utc_timestamp(&self.created_at)
             || crate::workspace::workspace_id(&path) != self.workspace_id
             || self.request.profile != self.global_profile_binding.selected_name
-            || self.request.role != self.instructions.role.name
+            || self.request.role != self.instructions.role_name()
         {
             return Err(reservation_invalid(
                 "caller startup identity is inconsistent",
@@ -973,6 +1395,41 @@ impl CallerStartIntent {
         }
         self.global_profile_binding.validate_for_recovery()?;
         self.instructions.developer_prefix()?;
+        match (I::MANIFEST_VERSION, &self.admitted_configuration) {
+            (3, None) => {}
+            (4, Some(configuration)) => {
+                configuration
+                    .validate_delegation()
+                    .map_err(reservation_invalid)?;
+                let admitted = configuration
+                    .admitted_configuration
+                    .as_ref()
+                    .ok_or_else(|| reservation_invalid("missing successor admission"))?;
+                let requested = match self.request.access {
+                    crate::domain::CallerWorkspaceAccess::ReadOnly => "read_only",
+                    crate::domain::CallerWorkspaceAccess::Writable => "canonical_workspace_write",
+                };
+                if configuration.instructions != self.instructions.run_capture()
+                    || configuration.runtime_profile != self.request.profile
+                    || configuration.runtime_profile_snapshot_sha256
+                        != self.global_profile_binding.digest()?
+                    || configuration.model != self.readiness.model
+                    || configuration.default_effort != self.readiness.default_effort
+                    || configuration.purpose != self.request.purpose
+                    || configuration.required_capabilities != self.request.required_capabilities
+                    || admitted.requested_access != requested
+                {
+                    return Err(reservation_invalid(
+                        "successor startup differs from its accepted configuration",
+                    ));
+                }
+            }
+            _ => {
+                return Err(reservation_invalid(
+                    "startup instruction and admission generations disagree",
+                ));
+            }
+        }
         if let Some(captures) = &self.orchestration {
             captures.validate_for_workspace(&self.workspace_id, &self.canonical_workspace)?;
             if self.request.specialist_policy.as_deref()
@@ -1026,7 +1483,33 @@ impl CallerStartIntent {
     /// every semantic request choice and the authenticated Controller binding.
     pub fn request_digest(&self) -> Result<String, MachineError> {
         self.validate()?;
-        caller_start_request_digest(&self.request, &self.canonical_workspace, &self.controller)
+        caller_start_generation_request_digest(
+            &self.request,
+            &self.canonical_workspace,
+            &self.controller,
+            self.admitted_configuration.as_ref(),
+        )
+    }
+}
+
+pub(crate) fn caller_start_generation_request_digest(
+    request: &CallerRunStartRequest,
+    canonical_workspace: &LosslessPath,
+    controller: &ControllerBinding,
+    configuration: Option<&AgentConfigurationSnapshot>,
+) -> Result<String, MachineError> {
+    let request_digest = caller_start_request_digest(request, canonical_workspace, controller)?;
+    match configuration {
+        None => Ok(request_digest),
+        Some(configuration) => {
+            configuration
+                .validate_delegation()
+                .map_err(reservation_invalid)?;
+            caller_start_digest(&serde_json::json!({
+                "schema": "dolgorae.delegation-start-request/v1", "caller_request_sha256": request_digest,
+                "agent_configuration": configuration,
+            }))
+        }
     }
 }
 
@@ -1073,21 +1556,21 @@ pub fn caller_start_request_digest(
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CallerStartReservation {
+pub struct CallerStartReservation<I = crate::instructions::InstructionSnapshot> {
     pub schema_version: u32,
     pub operation: String,
     pub idempotency_key: String,
     pub normalized_identity_sha256: String,
     pub request_sha256: String,
     pub run_id: Uuid,
-    pub accepted_intent: CallerStartIntent,
+    pub accepted_intent: CallerStartIntent<I>,
 }
 
-impl CallerStartReservation {
-    pub fn new(intent: CallerStartIntent) -> Result<Self, MachineError> {
+impl<I: CallerInstructionGeneration> CallerStartReservation<I> {
+    pub fn new(intent: CallerStartIntent<I>) -> Result<Self, MachineError> {
         let request_sha256 = intent.request_digest()?;
         Ok(Self {
-            schema_version: 2,
+            schema_version: I::RESERVATION_VERSION,
             operation: "start_run".to_owned(),
             idempotency_key: intent.request.idempotency_key.clone(),
             normalized_identity_sha256: caller_start_digest(&intent)?,
@@ -1098,7 +1581,7 @@ impl CallerStartReservation {
     }
 
     fn validate(&self) -> Result<(), MachineError> {
-        if self.schema_version != 2
+        if self.schema_version != I::RESERVATION_VERSION
             || self.operation != "start_run"
             || self.idempotency_key != self.accepted_intent.request.idempotency_key
             || self.run_id != self.accepted_intent.run_id
@@ -1136,6 +1619,7 @@ fn caller_start_digest(value: &impl Serialize) -> Result<String, MachineError> {
 enum AllocationReservation {
     Legacy(StartReservation),
     Caller(Box<CallerStartReservation>),
+    Delegation(Box<CallerStartReservation<crate::delegation_identity::InstructionSnapshot>>),
 }
 
 /// The workspace's durable index of `run start` allocation keys.
@@ -1276,6 +1760,24 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
                         "capability_name": "caller_workspace_start_reservation", "support": "unavailable"}),
                 ));
             }
+            AllocationReservation::Delegation(reservation) => {
+                reservation.validate()?;
+                if directory != "run-start"
+                    || operation != "start_run"
+                    || reservation.idempotency_key != idempotency_key
+                {
+                    return Err(reservation_invalid(
+                        "delegation reservation does not describe this key",
+                    ));
+                }
+                return Err(MachineError::new(
+                    "CAPABILITY_UNSUPPORTED",
+                    "legacy allocation cannot reinterpret a delegation startup reservation",
+                    false,
+                    serde_json::json!({"profile": reservation.accepted_intent.request.profile,
+                        "capability_name": "delegation_start_reservation", "support": "unavailable"}),
+                ));
+            }
         };
         if reservation.schema_version != 1
             || reservation.operation != operation
@@ -1324,11 +1826,18 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
         {
             return Err(reservation_invalid("legacy reservation exceeds its bound"));
         }
-        if let AllocationReservation::Caller(reservation) = &decoded {
+        let retained = match &decoded {
+            AllocationReservation::Caller(reservation) => Some(serde_json::to_value(reservation)),
+            AllocationReservation::Delegation(reservation) => {
+                Some(serde_json::to_value(reservation))
+            }
+            AllocationReservation::Legacy(_) => None,
+        };
+        if let Some(retained) = retained {
             let original: serde_json::Value = serde_json::from_slice(&canonical)
                 .map_err(|_| reservation_invalid("reservation schema is invalid"))?;
-            let retained = serde_json::to_value(reservation)
-                .map_err(|_| reservation_invalid("reservation schema is invalid"))?;
+            let retained =
+                retained.map_err(|_| reservation_invalid("reservation schema is invalid"))?;
             if original != retained {
                 return Err(reservation_invalid(
                     "caller reservation contains omitted or unknown fields",
@@ -1345,13 +1854,21 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
         idempotency_key: &str,
         request_sha256: &str,
     ) -> Result<Option<CallerStartReservation>, MachineError> {
+        self.load_caller_generation(idempotency_key, request_sha256)
+    }
+
+    pub(crate) fn load_caller_generation<I: CallerInstructionGeneration>(
+        &self,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<Option<CallerStartReservation<I>>, MachineError> {
         if !is_sha256(request_sha256) {
             return Err(reservation_invalid("caller request digest is invalid"));
         }
         let Some(decoded) = self.load_record("run-start", idempotency_key)? else {
             return Ok(None);
         };
-        let reservation = match decoded {
+        let encoded = match decoded {
             AllocationReservation::Legacy(legacy) => {
                 if legacy.schema_version != 1
                     || legacy.operation != "start_run"
@@ -1369,8 +1886,33 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
                     request_sha256,
                 ));
             }
-            AllocationReservation::Caller(reservation) => *reservation,
+            AllocationReservation::Caller(reservation) => {
+                reservation.validate()?;
+                if I::RESERVATION_VERSION != 2 {
+                    return Err(idempotency_conflict(
+                        reservation.run_id,
+                        &reservation.request_sha256,
+                        request_sha256,
+                    ));
+                }
+                serde_json::to_value(reservation)
+            }
+            AllocationReservation::Delegation(reservation) => {
+                reservation.validate()?;
+                if I::RESERVATION_VERSION != 3 {
+                    return Err(idempotency_conflict(
+                        reservation.run_id,
+                        &reservation.request_sha256,
+                        request_sha256,
+                    ));
+                }
+                serde_json::to_value(reservation)
+            }
         };
+        let reservation: CallerStartReservation<I> = serde_json::from_value(
+            encoded.map_err(|_| reservation_invalid("caller reservation is unrepresentable"))?,
+        )
+        .map_err(|_| reservation_invalid("caller instruction generation is invalid"))?;
         reservation.validate()?;
         if reservation.idempotency_key != idempotency_key {
             return Err(reservation_invalid(
@@ -1391,6 +1933,13 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
         &self,
         reservation: &CallerStartReservation,
     ) -> Result<CallerStartReservation, MachineError> {
+        self.reserve_caller_generation(reservation)
+    }
+
+    pub(crate) fn reserve_caller_generation<I: CallerInstructionGeneration>(
+        &self,
+        reservation: &CallerStartReservation<I>,
+    ) -> Result<CallerStartReservation<I>, MachineError> {
         reservation.validate()?;
         self.ensure_root("run-start")?;
         let path = self.path("run-start", &reservation.idempotency_key);
@@ -1408,7 +1957,7 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
         match atomic_create(&self.platform, &path, &bytes, 0o600) {
             Ok(()) => Ok(reservation.clone()),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => self
-                .load_caller(&reservation.idempotency_key, &reservation.request_sha256)?
+                .load_caller_generation(&reservation.idempotency_key, &reservation.request_sha256)?
                 .ok_or_else(|| reservation_invalid("reservation vanished")),
             Err(error) => Err(run_path_error(&path, error.to_string())),
         }
@@ -1650,7 +2199,7 @@ impl<P: WorkspacePlatform> RunStore<P> {
                 "run manifest schema is invalid",
             )
         })?;
-        if shape["schema_version"] == 3
+        if matches!(shape["schema_version"].as_u64(), Some(3 | 4))
             && [
                 "/parent_ref",
                 "/thread_id",
@@ -1966,7 +2515,7 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
             reason,
         )
     };
-    if !matches!(manifest.schema_version, 1..=3) || manifest.run_id.get_version_num() != 7 {
+    if !matches!(manifest.schema_version, 1..=4) || manifest.run_id.get_version_num() != 7 {
         return Err(invalid(
             "schema_version and UUIDv7 run identity are required",
         ));
@@ -2016,7 +2565,7 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
     validate_profile_snapshot(&manifest.profile).map_err(invalid)?;
     match (manifest.schema_version, &manifest.global_profile_binding) {
         (1, None) => {}
-        (2 | 3, Some(binding)) => {
+        (2..=4, Some(binding)) => {
             binding.validate_for_recovery().map_err(|_| {
                 invalid("global Profile binding is incomplete or internally inconsistent")
             })?;
@@ -2029,8 +2578,8 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
             }
         }
         _ => {
-            return Err(invalid(if manifest.schema_version == 3 {
-                "schema v3 requires a global Profile binding"
+            return Err(invalid(if matches!(manifest.schema_version, 3 | 4) {
+                "caller generations require a global Profile binding"
             } else {
                 "schema v1 excludes and schema v2 requires a global Profile binding"
             }));
@@ -2120,6 +2669,15 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
             "fixed build, model, or instruction metadata is invalid",
         ));
     }
+    if manifest.schema_version != 4
+        && (manifest.creation_mode.is_some()
+            || manifest.admitted_configuration_digest.is_some()
+            || manifest.start_operation_receipt.is_some())
+    {
+        return Err(invalid(
+            "successor creation metadata cannot appear in older Run generations",
+        ));
+    }
     match (&manifest.instructions, manifest.schema_version) {
         (RunInstructionSnapshot::Legacy(value), 1 | 2)
             if value.schema == "dolgorae.instructions/v1"
@@ -2146,6 +2704,67 @@ fn validate_manifest(manifest: &RunManifest) -> Result<(), MachineError> {
                 return Err(invalid(
                     "modern startup selection disagrees with the captured Run",
                 ));
+            }
+        }
+        (RunInstructionSnapshot::Delegation(value), 4) => {
+            value
+                .developer_prefix()
+                .map_err(|_| invalid("captured delegation integrity failed"))?;
+            let (access, creation, admitted_access) = match manifest.requested_access {
+                Some(crate::domain::CallerWorkspaceAccess::ReadOnly) => {
+                    (Access::Read, "read_only", "read_only")
+                }
+                Some(crate::domain::CallerWorkspaceAccess::Writable) => {
+                    (Access::Write, "writable", "canonical_workspace_write")
+                }
+                None => return Err(invalid("successor creation access is missing")),
+            };
+            let admitted = manifest
+                .agent_configuration
+                .admitted_configuration
+                .as_ref()
+                .ok_or_else(|| invalid("successor admitted configuration is missing"))?;
+            let digest = admitted
+                .digest()
+                .map_err(|_| invalid("successor admitted configuration is invalid"))?;
+            if manifest.initial_access != access
+                || manifest.creation_mode.as_deref() != Some(creation)
+                || manifest.admitted_configuration_digest.as_deref() != Some(digest.as_str())
+                || admitted.requested_access != admitted_access
+                || manifest.selected_role.as_deref() != Some(value.role.name.as_str())
+                || manifest.start_contract.as_deref() != Some("caller_workspace/v1")
+            {
+                return Err(invalid(
+                    "successor creation disagrees with accepted configuration",
+                ));
+            }
+            match &manifest.start_operation_receipt {
+                Some(None) => {}
+                Some(Some(receipt)) => {
+                    receipt
+                        .validate()
+                        .map_err(|_| invalid("successor start receipt is invalid"))?;
+                    if receipt.namespace.operation_kind != "start_run"
+                        || receipt.namespace.workspace_ref != manifest.workspace_id
+                        || receipt.accepted_subjects.run_ref.as_deref()
+                            != Some(manifest.run_id.to_string().as_str())
+                    {
+                        return Err(invalid(
+                            "successor start receipt crossed its Run or workspace",
+                        ));
+                    }
+                    // Run start is a pre-allocation operation: its lookup
+                    // identity carries the fixed `run-start` provisioning scope
+                    // and a null aggregate scope (MDC:169-171, :385).
+                    if receipt.namespace.scope_kind.is_some()
+                        || receipt.namespace.scope_ref.is_some()
+                    {
+                        return Err(invalid(
+                            "pre-allocation start receipt must carry a null scope",
+                        ));
+                    }
+                }
+                None => return Err(invalid("successor start receipt field must be explicit")),
             }
         }
         _ => {
@@ -2237,7 +2856,7 @@ fn validate_agent_configuration(manifest: &RunManifest) -> Result<(), &'static s
     let agent = &manifest.agent_configuration;
     let expected_binding_sha256 = match manifest.schema_version {
         1 => canonical_digest(&manifest.profile)?,
-        2 | 3 => manifest
+        2..=4 => manifest
             .global_profile_binding
             .as_ref()
             .ok_or("global Profile binding is missing")?
@@ -2256,7 +2875,7 @@ fn validate_agent_configuration(manifest: &RunManifest) -> Result<(), &'static s
         || agent.instructions != manifest.instructions
         || agent.execution_lane != manifest.execution_lane
         || agent.required_assurance != manifest.requested_assurance
-        || agent.native_subagent_policy != "enabled"
+        || (manifest.schema_version != 4 && agent.native_subagent_policy != "enabled")
         || agent.normalized_instructions.is_empty()
     {
         return Err("Agent Configuration snapshot disagrees with fixed Run identity");
@@ -2296,6 +2915,7 @@ fn validate_agent_configuration(manifest: &RunManifest) -> Result<(), &'static s
                 return Err("modern developer prefix disagrees with accepted captures");
             }
         }
+        (RunInstructionSnapshot::Delegation(_), 4) => agent.validate_delegation()?,
         _ => return Err("instruction generation disagrees with Agent Configuration"),
     }
     Ok(())
@@ -2664,6 +3284,634 @@ fn cleanup_staging(staging: &Path) {
 mod tests {
     use super::*;
 
+    fn delegation_binding(profile: &str) -> GlobalProfileBinding {
+        use crate::profile::{CompatibilityVerdict, ExecutableIdentity, ProfileSnapshot};
+        use crate::workspace::{NativeSubagents, RuntimeProfile};
+        use std::collections::BTreeMap;
+        let definition = RuntimeProfile {
+            argv: vec!["/isolated/codex".to_owned()],
+            codex_home: "/isolated/profile-home".to_owned(),
+            environment: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+            native_subagents: NativeSubagents::Enabled,
+        };
+        let launch_snapshot = ProfileSnapshot {
+            schema_version: 1,
+            profile_name: profile.to_owned(),
+            canonical_codex_home: definition.codex_home.clone(),
+            normalized_argv: vec!["/isolated/codex".to_owned()],
+            launch_cwd_policy: "profile_state_directory_v1".to_owned(),
+            derived_launch_cwd: "/isolated/server-state".to_owned(),
+            sanitized_environment: definition.environment.clone(),
+            enabled_features: vec!["multi_agent".to_owned()],
+            disabled_features: Vec::new(),
+            process_static_configuration: BTreeMap::new(),
+            initial_configuration_observation: BTreeMap::new(),
+            executable_identity: ExecutableIdentity {
+                resolved_path: "/isolated/codex".to_owned(),
+                device: 1,
+                inode: 1,
+                sha256: "1".repeat(64),
+            },
+            codex_version: "0.160.0".to_owned(),
+            schema_bundle_sha256: "2".repeat(64),
+            compatibility_manifest_sha256: "3".repeat(64),
+            launch_contract_sha256: "4".repeat(64),
+            compatibility_verdict: CompatibilityVerdict::Tested,
+            server_key: "5".repeat(64),
+        };
+        let canonical = |value: &serde_json::Value| {
+            String::from_utf8(
+                crate::jcs::canonicalize(
+                    &crate::jcs::parse(&serde_json::to_string(value).unwrap()).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        GlobalProfileBinding {
+            schema_version: 2,
+            selected_name: profile.to_owned(),
+            definition_sha256: crate::jcs::sha256_hex(
+                &canonical(&serde_json::to_value(&definition).unwrap()).into_bytes(),
+            ),
+            definition,
+            launch_snapshot_sha256: crate::jcs::sha256_hex(
+                &canonical(&serde_json::to_value(&launch_snapshot).unwrap()).into_bytes(),
+            ),
+            server_key: launch_snapshot.server_key.clone(),
+            launch_snapshot,
+        }
+    }
+
+    fn delegation_instructions() -> crate::delegation_identity::InstructionSnapshot {
+        use crate::instructions::{RoleCapture, SourceCapture};
+        let common = SourceCapture::from_body("common\n").unwrap();
+        let body = SourceCapture::from_body("role\n").unwrap();
+        let role = RoleCapture {
+            name: "general".to_owned(),
+            body: body.body,
+            byte_length: body.byte_length,
+            sha256: body.sha256,
+        };
+        crate::delegation_identity::InstructionSnapshot::compose(common, role, vec![], vec![])
+            .unwrap()
+    }
+
+    fn admitted_input<'a>(
+        binding: &'a GlobalProfileBinding,
+        instructions: crate::delegation_identity::InstructionSnapshot,
+        lane: &str,
+        access: &str,
+        policy: &str,
+    ) -> AdmittedConfigurationInput<'a> {
+        AdmittedConfigurationInput {
+            admitted: crate::delegation_identity::AdmittedConfiguration {
+                schema: crate::delegation_identity::CONFIGURATION_SCHEMA.to_owned(),
+                profile_binding_schema: ADMITTED_PROFILE_BINDING_SCHEMA.to_owned(),
+                profile_binding_digest: format!("sha256:{}", binding.digest().unwrap()),
+                model: "checked-model".to_owned(),
+                effort: "medium".to_owned(),
+                purpose_kind: "implementation".to_owned(),
+                purpose_label: None,
+                required_capabilities: vec!["tool.a".to_owned(), "tool.b".to_owned()],
+                execution_lane: lane.to_owned(),
+                requested_access: access.to_owned(),
+                required_assurance: "best_effort_personal_alpha".to_owned(),
+                native_subagent_policy: policy.to_owned(),
+                instruction_identity_digest: instructions.instruction_identity_digest.clone(),
+            },
+            instructions,
+            profile: "default",
+            profile_binding: binding,
+            role_reference: Some("general"),
+        }
+    }
+
+    #[test]
+    fn from_admitted_requires_a_valid_profile_binding() {
+        // A binding whose recorded schema generation is not the accepted one is
+        // refused even when the admitted digest is recomputed to match it.
+        let mut wrong_schema = delegation_binding("default");
+        wrong_schema.schema_version = 1;
+        let mut input = admitted_input(
+            &wrong_schema,
+            delegation_instructions(),
+            "dedicated",
+            "read_only",
+            "disabled",
+        );
+        input.admitted.profile_binding_digest =
+            format!("sha256:{}", wrong_schema.digest().unwrap());
+        assert!(AgentConfigurationSnapshot::from_admitted(input).is_err());
+
+        // A binding with an inconsistent internal digest is refused for the same
+        // reason: `digest` alone hashes persisted bytes without validating them.
+        let mut inconsistent = delegation_binding("default");
+        inconsistent.definition_sha256 = "e".repeat(64);
+        let mut input = admitted_input(
+            &inconsistent,
+            delegation_instructions(),
+            "dedicated",
+            "read_only",
+            "disabled",
+        );
+        input.admitted.profile_binding_digest =
+            format!("sha256:{}", inconsistent.digest().unwrap());
+        assert!(AgentConfigurationSnapshot::from_admitted(input).is_err());
+
+        // A launch snapshot that disagrees with its selected Profile name is
+        // refused by the same validator.
+        let mut mismatched = delegation_binding("default");
+        mismatched.launch_snapshot.profile_name = "other".to_owned();
+        let mut input = admitted_input(
+            &mismatched,
+            delegation_instructions(),
+            "dedicated",
+            "read_only",
+            "disabled",
+        );
+        input.admitted.profile_binding_digest = format!("sha256:{}", mismatched.digest().unwrap());
+        assert!(AgentConfigurationSnapshot::from_admitted(input).is_err());
+    }
+
+    #[test]
+    fn from_admitted_rejects_mismatched_or_unknown_admissions() {
+        let binding = delegation_binding("default");
+        // An admitted digest that does not describe the selected binding.
+        let mut input = admitted_input(
+            &binding,
+            delegation_instructions(),
+            "dedicated",
+            "read_only",
+            "disabled",
+        );
+        input.admitted.profile_binding_digest = format!("sha256:{}", "f".repeat(64));
+        assert!(AgentConfigurationSnapshot::from_admitted(input).is_err());
+
+        // An empty Role attribution.
+        let mut input = admitted_input(
+            &binding,
+            delegation_instructions(),
+            "dedicated",
+            "read_only",
+            "disabled",
+        );
+        input.role_reference = Some("");
+        assert!(AgentConfigurationSnapshot::from_admitted(input).is_err());
+
+        // Unknown admitted enum values.
+        for (field, value) in [
+            ("lane", "shared_write"),
+            ("assurance", "best_effort"),
+            ("purpose", "celebration"),
+        ] {
+            let mut input = admitted_input(
+                &binding,
+                delegation_instructions(),
+                "dedicated",
+                "read_only",
+                "disabled",
+            );
+            match field {
+                "lane" => input.admitted.execution_lane = value.to_owned(),
+                "assurance" => input.admitted.required_assurance = value.to_owned(),
+                _ => input.admitted.purpose_kind = value.to_owned(),
+            }
+            assert!(
+                AgentConfigurationSnapshot::from_admitted(input).is_err(),
+                "accepted unknown {field}"
+            );
+        }
+
+        // Unsorted or duplicated capabilities never reach admission.
+        let mut input = admitted_input(
+            &binding,
+            delegation_instructions(),
+            "dedicated",
+            "read_only",
+            "disabled",
+        );
+        input.admitted.required_capabilities = vec![
+            "tool.b".to_owned(),
+            "tool.a".to_owned(),
+            "tool.a".to_owned(),
+        ];
+        assert!(AgentConfigurationSnapshot::from_admitted(input).is_err());
+    }
+
+    #[test]
+    fn delegation_configuration_enforces_the_native_subagent_and_lane_branch() {
+        let binding = delegation_binding("default");
+        // `disabled` is the successor default and is admitted on both lanes.
+        for lane in ["dedicated", "shared_readonly"] {
+            let configuration = AgentConfigurationSnapshot::from_admitted(admitted_input(
+                &binding,
+                delegation_instructions(),
+                lane,
+                "read_only",
+                "disabled",
+            ))
+            .unwrap();
+            let admitted = configuration.admitted_configuration.clone().unwrap();
+            assert_eq!(admitted.native_subagent_policy, "disabled");
+            assert_eq!(admitted.requested_access, "read_only");
+            assert_eq!(configuration.required_capabilities, ["tool.a", "tool.b"]);
+        }
+        // `enabled` requires a dedicated qualified configuration.
+        assert!(
+            AgentConfigurationSnapshot::from_admitted(admitted_input(
+                &binding,
+                delegation_instructions(),
+                "shared_readonly",
+                "read_only",
+                "enabled",
+            ))
+            .is_err()
+        );
+        // A shared read-only lane cannot select writable access.
+        assert!(
+            AgentConfigurationSnapshot::from_admitted(admitted_input(
+                &binding,
+                delegation_instructions(),
+                "shared_readonly",
+                "canonical_workspace_write",
+                "disabled",
+            ))
+            .is_err()
+        );
+        // A dedicated lane may.
+        AgentConfigurationSnapshot::from_admitted(admitted_input(
+            &binding,
+            delegation_instructions(),
+            "dedicated",
+            "canonical_workspace_write",
+            "disabled",
+        ))
+        .unwrap();
+        // `enabled` is admitted on a dedicated lane and keeps its admitted value.
+        let enabled = AgentConfigurationSnapshot::from_admitted(admitted_input(
+            &binding,
+            delegation_instructions(),
+            "dedicated",
+            "canonical_workspace_write",
+            "enabled",
+        ))
+        .unwrap();
+        assert_eq!(enabled.native_subagent_policy, "enabled");
+        assert_eq!(enabled.execution_lane, ExecutionLane::Dedicated);
+        assert_eq!(
+            enabled
+                .admitted_configuration
+                .as_ref()
+                .unwrap()
+                .native_subagent_policy,
+            "enabled"
+        );
+        // The admitted identity must match the selected Profile and capture.
+        let mut mismatched = admitted_input(
+            &binding,
+            delegation_instructions(),
+            "dedicated",
+            "read_only",
+            "disabled",
+        );
+        mismatched.profile = "other";
+        assert!(AgentConfigurationSnapshot::from_admitted(mismatched).is_err());
+        let mut mismatched = admitted_input(
+            &binding,
+            delegation_instructions(),
+            "dedicated",
+            "read_only",
+            "disabled",
+        );
+        mismatched.admitted.instruction_identity_digest = format!("sha256:{}", "b".repeat(64));
+        assert!(AgentConfigurationSnapshot::from_admitted(mismatched).is_err());
+    }
+
+    #[test]
+    fn delegation_configuration_roundtrips_and_rejects_mixed_generations() {
+        use crate::instructions::{RoleCapture, SourceCapture};
+        let common = SourceCapture::from_body("common\r\n").unwrap();
+        let body = SourceCapture::from_body("role é\n").unwrap();
+        let role = RoleCapture {
+            name: "general".to_owned(),
+            body: body.body,
+            byte_length: body.byte_length,
+            sha256: body.sha256,
+        };
+        let legacy = CallerAgentConfigurationSnapshot {
+            schema_version: 3,
+            selected_profile: "default".to_owned(),
+            global_profile_binding_sha256: "a".repeat(64),
+            model: "checked-model".to_owned(),
+            default_effort: "medium".to_owned(),
+            purpose: Purpose {
+                kind: PurposeKind::Implementation,
+                external_label: None,
+            },
+            required_capabilities: vec![],
+            role_reference: Some("general".to_owned()),
+            instructions: crate::instructions::InstructionSnapshot::compose(
+                common.clone(),
+                role.clone(),
+            )
+            .unwrap(),
+            execution_lane: ExecutionLane::Dedicated,
+            required_assurance: Assurance::BestEffortPersonalAlpha,
+            native_subagent_policy: "enabled".to_owned(),
+        };
+        let base: AgentConfigurationSnapshot = legacy.try_into().unwrap();
+        let legacy_bytes = serde_json::to_vec(&base).unwrap();
+        let capture = crate::delegation_identity::InstructionSnapshot::compose(
+            common,
+            role,
+            vec![
+                crate::delegation_identity::NamedSourceCapture::new(
+                    "dependency".to_owned(),
+                    "captured dependency",
+                )
+                .unwrap(),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let binding = delegation_binding("default");
+        let configuration = AgentConfigurationSnapshot::from_admitted(AdmittedConfigurationInput {
+            admitted: crate::delegation_identity::AdmittedConfiguration {
+                schema: crate::delegation_identity::CONFIGURATION_SCHEMA.to_owned(),
+                profile_binding_schema: ADMITTED_PROFILE_BINDING_SCHEMA.to_owned(),
+                profile_binding_digest: format!("sha256:{}", binding.digest().unwrap()),
+                model: "checked-model".to_owned(),
+                effort: "medium".to_owned(),
+                purpose_kind: "implementation".to_owned(),
+                purpose_label: None,
+                required_capabilities: vec![],
+                execution_lane: "dedicated".to_owned(),
+                requested_access: "read_only".to_owned(),
+                required_assurance: "best_effort_personal_alpha".to_owned(),
+                native_subagent_policy: "enabled".to_owned(),
+                instruction_identity_digest: capture.instruction_identity_digest.clone(),
+            },
+            instructions: capture,
+            profile: "default",
+            profile_binding: &binding,
+            role_reference: Some("general"),
+        })
+        .unwrap();
+        let value = serde_json::to_value(&configuration).unwrap();
+        assert_eq!(value["schema_version"], 4);
+        assert_eq!(value["instructions"]["schema"], "dolgorae.instructions/v3");
+        assert_eq!(value["requested_access"], "read_only");
+        assert!(value.get("normalized_instructions").is_none());
+        let restored: AgentConfigurationSnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(restored, configuration);
+        assert_eq!(serde_json::to_vec(&base).unwrap(), legacy_bytes);
+        for field in [
+            "requested_access",
+            "admitted_configuration",
+            "agent_configuration_digest",
+        ] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<AgentConfigurationSnapshot>(missing).is_err(),
+                "missing {field}"
+            );
+            let mut null = value.clone();
+            null[field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<AgentConfigurationSnapshot>(null).is_err(),
+                "null {field}"
+            );
+            let mut old = serde_json::to_value(&base).unwrap();
+            old[field] = value[field].clone();
+            assert!(
+                serde_json::from_value::<AgentConfigurationSnapshot>(old).is_err(),
+                "old generation accepted {field}"
+            );
+        }
+        for (field, replacement) in [
+            ("model", serde_json::json!("other")),
+            (
+                "requested_access",
+                serde_json::json!("canonical_workspace_write"),
+            ),
+            (
+                "agent_configuration_digest",
+                serde_json::json!(format!("sha256:{}", "0".repeat(64))),
+            ),
+        ] {
+            let mut changed = value.clone();
+            changed[field] = replacement;
+            assert!(
+                serde_json::from_value::<AgentConfigurationSnapshot>(changed).is_err(),
+                "changed {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn delegation_configuration_validates_outer_fields_without_conflating_role_attribution() {
+        use crate::instructions::{RoleCapture, SourceCapture};
+        let common = SourceCapture::from_body("common").unwrap();
+        let body = SourceCapture::from_body("role").unwrap();
+        let role = RoleCapture {
+            name: "general".to_owned(),
+            body: body.body,
+            byte_length: body.byte_length,
+            sha256: body.sha256,
+        };
+        let capture =
+            crate::delegation_identity::InstructionSnapshot::compose(common, role, vec![], vec![])
+                .unwrap();
+        let binding = delegation_binding("default");
+        let configuration = AgentConfigurationSnapshot::from_admitted(AdmittedConfigurationInput {
+            admitted: crate::delegation_identity::AdmittedConfiguration {
+                schema: crate::delegation_identity::CONFIGURATION_SCHEMA.to_owned(),
+                profile_binding_schema: ADMITTED_PROFILE_BINDING_SCHEMA.to_owned(),
+                profile_binding_digest: format!("sha256:{}", binding.digest().unwrap()),
+                model: "checked-model".to_owned(),
+                effort: "medium".to_owned(),
+                purpose_kind: "implementation".to_owned(),
+                purpose_label: None,
+                required_capabilities: vec![],
+                execution_lane: "dedicated".to_owned(),
+                requested_access: "read_only".to_owned(),
+                required_assurance: "best_effort_personal_alpha".to_owned(),
+                native_subagent_policy: "enabled".to_owned(),
+                instruction_identity_digest: capture.instruction_identity_digest.clone(),
+            },
+            instructions: capture,
+            profile: "default",
+            profile_binding: &binding,
+            role_reference: None,
+        })
+        .unwrap();
+        let value = serde_json::to_value(&configuration).unwrap();
+        for profile in [
+            "".to_owned(),
+            "a".repeat(129),
+            "UPPER".to_owned(),
+            "a/b".to_owned(),
+        ] {
+            let mut changed = value.clone();
+            changed["selected_profile"] = serde_json::json!(profile);
+            assert!(serde_json::from_value::<AgentConfigurationSnapshot>(changed).is_err());
+        }
+        let mut changed = value.clone();
+        changed["role_reference"] = serde_json::json!("");
+        assert!(serde_json::from_value::<AgentConfigurationSnapshot>(changed).is_err());
+        for reference in [serde_json::Value::Null, serde_json::json!("business-role")] {
+            let mut changed = value.clone();
+            changed["role_reference"] = reference;
+            assert!(serde_json::from_value::<AgentConfigurationSnapshot>(changed).is_ok());
+        }
+        let mut changed = value.clone();
+        changed["purpose"]
+            .as_object_mut()
+            .unwrap()
+            .remove("external_label");
+        assert!(serde_json::from_value::<AgentConfigurationSnapshot>(changed).is_err());
+        let mut changed = value.clone();
+        changed["purpose"]["unexpected"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<AgentConfigurationSnapshot>(changed).is_err());
+        let mut boundary = configuration.clone();
+        boundary.model = "m".repeat(256);
+        boundary.default_effort = "e".repeat(128);
+        let admitted = boundary.admitted_configuration.as_mut().unwrap();
+        admitted.model = boundary.model.clone();
+        admitted.effort = boundary.default_effort.clone();
+        let encoded = serde_json::to_value(&boundary).unwrap();
+        assert!(serde_json::from_value::<AgentConfigurationSnapshot>(encoded).is_ok());
+    }
+
+    #[test]
+    fn delegation_start_reservation_recovers_original_capture_and_rejects_drift() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let old: CallerStartReservation = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+        ))
+        .unwrap();
+        let old_intent = old.accepted_intent;
+        let capture = crate::delegation_identity::InstructionSnapshot::compose(
+            old_intent.instructions.common.clone(),
+            old_intent.instructions.role.clone(),
+            vec![
+                crate::delegation_identity::NamedSourceCapture::new(
+                    "dependency".to_owned(),
+                    "fixed dependency\r\n",
+                )
+                .unwrap(),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let mut capabilities = old_intent.request.required_capabilities.clone();
+        capabilities.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        let configuration = AgentConfigurationSnapshot::from_admitted(AdmittedConfigurationInput {
+            admitted: crate::delegation_identity::AdmittedConfiguration {
+                schema: crate::delegation_identity::CONFIGURATION_SCHEMA.to_owned(),
+                profile_binding_schema: ADMITTED_PROFILE_BINDING_SCHEMA.to_owned(),
+                profile_binding_digest: format!(
+                    "sha256:{}",
+                    old_intent.global_profile_binding.digest().unwrap()
+                ),
+                model: old_intent.readiness.model.clone(),
+                effort: old_intent.readiness.default_effort.clone(),
+                purpose_kind: old_intent.request.purpose.kind.as_str().to_owned(),
+                purpose_label: old_intent.request.purpose.external_label.clone(),
+                required_capabilities: capabilities,
+                execution_lane: "dedicated".to_owned(),
+                requested_access: match old_intent.request.access {
+                    crate::domain::CallerWorkspaceAccess::ReadOnly => "read_only",
+                    crate::domain::CallerWorkspaceAccess::Writable => "canonical_workspace_write",
+                }
+                .to_owned(),
+                required_assurance: "best_effort_personal_alpha".to_owned(),
+                native_subagent_policy: "enabled".to_owned(),
+                instruction_identity_digest: capture.instruction_identity_digest.clone(),
+            },
+            instructions: capture.clone(),
+            profile: &old_intent.request.profile,
+            profile_binding: &old_intent.global_profile_binding,
+            role_reference: Some("separate-business-role"),
+        })
+        .unwrap();
+        let intent = CallerStartIntent {
+            run_id: old_intent.run_id,
+            created_at: old_intent.created_at,
+            workspace_id: old_intent.workspace_id,
+            canonical_workspace: old_intent.canonical_workspace,
+            workspace_mode: old_intent.workspace_mode,
+            start_baseline: old_intent.start_baseline,
+            request: old_intent.request,
+            controller: old_intent.controller,
+            global_profile_binding: old_intent.global_profile_binding,
+            instructions: capture,
+            admitted_configuration: Some(configuration),
+            readiness: old_intent.readiness,
+            orchestration: old_intent.orchestration,
+        };
+        let reservation = CallerStartReservation::new(intent).unwrap();
+        assert_eq!(reservation.schema_version, 3);
+        let root = std::env::temp_dir().join(format!(
+            "dolgorae-delegation-reservation-{}",
+            Uuid::now_v7()
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let store = StartReservationStore::new(crate::workspace::SystemWorkspacePlatform, &root);
+        store.reserve_caller_generation(&reservation).unwrap();
+        let recovered = store
+            .load_caller_generation::<crate::delegation_identity::InstructionSnapshot>(
+                &reservation.idempotency_key,
+                &reservation.request_sha256,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered, reservation);
+        assert_eq!(
+            recovered.accepted_intent.instructions.dependencies[0]
+                .source
+                .body,
+            "fixed dependency\r\n"
+        );
+        assert_eq!(
+            store
+                .load_caller(&reservation.idempotency_key, &reservation.request_sha256)
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        let mut drift = reservation.accepted_intent.clone();
+        drift
+            .admitted_configuration
+            .as_mut()
+            .unwrap()
+            .role_reference = Some("different-attribution".to_owned());
+        let drift = CallerStartReservation::new(drift).unwrap();
+        assert_eq!(
+            store.reserve_caller_generation(&drift).unwrap_err().code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        let mut damaged = serde_json::to_value(&reservation).unwrap();
+        damaged["accepted_intent"]["instructions"]["dependencies"][0]["source"]["body"] =
+            serde_json::json!("edited after acceptance");
+        fs::write(
+            store.path("run-start", &reservation.idempotency_key),
+            serde_json::to_vec(&damaged).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            store
+                .load_caller_generation::<crate::delegation_identity::InstructionSnapshot>(
+                    &reservation.idempotency_key,
+                    &reservation.request_sha256
+                )
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn controller_digest_is_domain_separated() {
         let capability = [7_u8; 32];
@@ -2701,6 +3949,7 @@ mod tests {
             execution_lane: ExecutionLane::SharedReadonly,
             required_assurance: Assurance::BestEffortPersonalAlpha,
             native_subagent_policy: "enabled".to_owned(),
+            admitted_configuration: None,
         };
 
         let v1 = serde_json::to_value(configuration(1)).unwrap();

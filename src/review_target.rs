@@ -19,9 +19,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const MAX_FILES: usize = 10_000;
-const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_TARGET_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_FILES: usize = 10_000;
+pub(crate) const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_TARGET_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_GIT_IDENTITY_BYTES: u64 = 16 * 1024;
 const MAX_GIT_LIST_BYTES: u64 = 16 * 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -838,16 +838,76 @@ pub(crate) fn worktree_entries(root: &Path) -> Result<Vec<Candidate>, MachineErr
     Ok(result)
 }
 
+/// Why one worktree read could not complete.
+enum WorktreeFailure {
+    /// The path or the content decides the outcome: an unrepresentable path, a
+    /// link, a special file, or a file over the byte bound.
+    Content(MachineError),
+    /// A fault while opening one component of the path.
+    Open(std::io::Error),
+    /// A fault while reading the root, the metadata or the bytes.
+    Io(std::io::Error),
+}
+
+/// Whether one I/O failure is decided by the path itself.
+///
+/// A link, a special file, a non-directory component or a permission refusal is
+/// deterministic for the content: the same observation refuses again. Every other
+/// fault (EIO, EMFILE, ENFILE, ENOMEM, EAGAIN, EINTR, ...) is transient and must
+/// be retried by the settlement instead of being recorded as an immutable result.
+fn settled_content_failure(error: &std::io::Error) -> bool {
+    // The raw errno is the authority: `ErrorKind` leaves several of these
+    // uncategorized on this toolchain.
+    error.kind() == std::io::ErrorKind::PermissionDenied
+        || matches!(
+            error.raw_os_error(),
+            Some(libc::EACCES | libc::EPERM | libc::EISDIR | libc::ENOTDIR | libc::ELOOP)
+        )
+}
+
 pub(crate) fn read_worktree_file(
     root: &Path,
     relative: &str,
 ) -> Result<Option<(fs::Metadata, Vec<u8>)>, MachineError> {
-    let _ = safe_join(root, relative)?;
+    read_worktree(root, relative).map_err(|failure| match failure {
+        // Existing review callers keep the codes they observe today.
+        WorktreeFailure::Content(error) => error,
+        WorktreeFailure::Open(error) => unsafe_worktree_file(error),
+        WorktreeFailure::Io(error) => io_error(error),
+    })
+}
+
+/// One worktree read on the settlement path.
+///
+/// The same bytes as `read_worktree_file`, but a transient I/O fault stays a
+/// propagating `REVIEW_TARGET_IO_FAILURE` so the settlement is retried, while only
+/// a path-decided condition becomes the typed unavailable result.
+pub(crate) fn read_worktree_file_for_settlement(
+    root: &Path,
+    relative: &str,
+) -> Result<Option<(fs::Metadata, Vec<u8>)>, MachineError> {
+    read_worktree(root, relative).map_err(|failure| match failure {
+        WorktreeFailure::Content(error) => error,
+        WorktreeFailure::Open(error) | WorktreeFailure::Io(error) => {
+            if settled_content_failure(&error) {
+                unsafe_worktree_file(error)
+            } else {
+                io_context("read the worktree file", error)
+            }
+        }
+    })
+}
+
+fn read_worktree(
+    root: &Path,
+    relative: &str,
+) -> Result<Option<(fs::Metadata, Vec<u8>)>, WorktreeFailure> {
+    let _ = safe_join(root, relative).map_err(WorktreeFailure::Content)?;
     let root = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(root)
-        .map_err(io_error)?;
+        .map_err(WorktreeFailure::Io)?;
     let components = Path::new(relative)
         .components()
         .filter_map(|component| match component {
@@ -856,32 +916,50 @@ pub(crate) fn read_worktree_file(
         })
         .collect::<Vec<_>>();
     let Some((file_name, parents)) = components.split_last() else {
-        return Err(target_error(
+        return Err(WorktreeFailure::Content(target_error(
             "REVIEW_TARGET_UNSAFE_PATH",
             "empty paths are unsupported",
-        ));
+        )));
     };
     let mut directory = root;
     for component in parents {
         directory = match open_relative_nofollow(&directory, component, true) {
             Ok(value) => value,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(unsafe_worktree_file(error)),
+            Err(error) => return Err(WorktreeFailure::Open(error)),
         };
     }
     let file = match open_relative_nofollow(&directory, file_name, false) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(unsafe_worktree_file(error)),
+        Err(error) => return Err(WorktreeFailure::Open(error)),
     };
-    let metadata = file.metadata().map_err(io_error)?;
+    let metadata = file.metadata().map_err(WorktreeFailure::Io)?;
     if !metadata.is_file() {
-        return Err(target_error(
+        return Err(WorktreeFailure::Content(target_error(
             "REVIEW_TARGET_UNSAFE_FILE",
             "links and special files are unsupported",
-        ));
+        )));
     }
-    Ok(Some((metadata, read_bounded_file(file, MAX_FILE_BYTES)?)))
+    Ok(Some((
+        metadata,
+        read_bounded_file_typed(file, MAX_FILE_BYTES)?,
+    )))
+}
+
+/// The bounded read half of one worktree read, with its failure kind.
+fn read_bounded_file_typed(file: File, limit: u64) -> Result<Vec<u8>, WorktreeFailure> {
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(WorktreeFailure::Io)?;
+    if bytes.len() as u64 > limit {
+        return Err(WorktreeFailure::Content(target_error(
+            "REVIEW_TARGET_LIMIT_EXCEEDED",
+            "file exceeds byte limit",
+        )));
+    }
+    Ok(bytes)
 }
 
 fn unsafe_worktree_file(_error: std::io::Error) -> MachineError {
@@ -1539,6 +1617,44 @@ fn internal(error: impl std::fmt::Display) -> MachineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The settlement separates path-decided failures from transient I/O.
+    #[test]
+    fn settlement_worktree_failures_separate_content_from_transient_io() {
+        for errno in [
+            libc::EACCES,
+            libc::EPERM,
+            libc::EISDIR,
+            libc::ENOTDIR,
+            libc::ELOOP,
+        ] {
+            let error = std::io::Error::from_raw_os_error(errno);
+            assert!(settled_content_failure(&error), "{errno}");
+        }
+        assert!(settled_content_failure(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        for errno in [
+            libc::EIO,
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOMEM,
+            libc::EAGAIN,
+            libc::EINTR,
+        ] {
+            let error = std::io::Error::from_raw_os_error(errno);
+            assert!(!settled_content_failure(&error), "{errno}");
+        }
+        // A transient fault is a propagating code, never one of the content codes
+        // the settlement maps to the typed unavailable result.
+        let transient = io_context(
+            "read the worktree file",
+            std::io::Error::from_raw_os_error(libc::EIO),
+        );
+        assert_eq!(transient.code, "REVIEW_TARGET_IO_FAILURE");
+        let content = unsafe_worktree_file(std::io::Error::from_raw_os_error(libc::ELOOP));
+        assert_eq!(content.code, "REVIEW_TARGET_UNSAFE_FILE");
+    }
 
     #[test]
     fn caller_source_contract_refuses_capture_before_workspace_or_owner_effects() {

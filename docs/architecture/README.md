@@ -1141,6 +1141,13 @@ Broker observes the reserved Run: a ready Run settles without replay, a known
 absence may safely republish, and partial or unreadable state remains
 `recovery_required`.
 
+Caller-workspace worker bootstrap starts with Read access and approval never,
+even when a writer reservation survives a previous generation. A managed
+Specialist's eager initial Thread uses its aggregate spawn operation ID on
+both first start and a restart without a recorded Thread. External members
+and caller-workspace Primaries use their Run ID. A recorded Thread is resumed
+without creating another initial Thread.
+
 Task assignment never auto-hires a missing role. A bounded tool wait may expire
 without cancelling the durable operation or task. Waits run outside the Run
 drain and SQLite mutation transactions, so Controller responses, cancellation,
@@ -3346,6 +3353,11 @@ repository in the workspace Engagement database. Base generation 6 retains
 orchestration extension 3 remains unchanged. Durable release admission and
 assignment use the same serialization boundary. Lock plus synced witness
 establish active ownership; a stored owner reference alone grants no authority.
+For live manifest-4 external cleanup, the worker retains the owner and aggregate
+checks. A releasing member accepts only release and writer-release commands
+under a settling release row whose Controller generation and owner reference
+match the verified lifecycle lease. Reader preparation completes before the
+external close request can seal the Run.
 
 The initiating Controller and original operation remain immutable across
 handoff and recovery. Settlement verifies Run closure, exact owned execution
@@ -3354,5 +3366,145 @@ the workspace commits terminal membership and completion revisions atomically.
 A shared Profile Server remains available to other members. Authorized reads
 project an immutable `dolgorae.member-release-proof/v1` only from that settled
 record, observing current disposition after collection of the committed result.
-TASK-091 publishes checked contracts; TASK-076/077/086 implement these runtime
-owners after TASK-092 accepts the corrected consumer selection.
+TASK-091 publishes checked contracts; TASK-076 implements these runtime owners,
+and TASK-077/086 supply transport and integrated qualification.
+
+## TASK-076 delegation runtime ownership
+
+Five source modules implement the shared delegation services behind the
+[delegation runtime](../specs/dolgorae-v014-delegation-runtime.md).
+`delegation_identity` is pure: it owns the closed identity objects, their
+ordering rules and digests — the captured-source domains, the lookup
+namespace, subjects and receipt, and the derived member release operation and
+proof — with no filesystem, process or clock access. `instructions` owns the
+raw, byte-exact capture (returning an instructions-local capture value, never
+a `delegation_identity` type) and the ambient guidance disclosure states.
+`caller_scope` owns the sealed trusted-caller port and round accounting.
+`provisioning` owns the read-only provisioning validation and the keyed
+content-addressed snapshot installation. `successor_capture` owns the rich
+task capture, the immutable dispatch index and the complete-result changes
+producer. `delegation_service` owns the successor keyed, read and release
+service surface callers will bind to transports — intent-store access, the
+four-state lookup, ambient disclosure and the managed Broker services — and
+declares the `RunSettlementPort` trait. No module here exposes Machine v5,
+MCP, public v2 or capability advertisement; TASK-077/078 own those adapters.
+
+Release orchestration stays with `semantic`: it implements
+`RunSettlementPort` — member task dispatch for both owners, terminal task
+settlement, writer observation and the member release settlement — while
+`delegation_service` supplies the intent, lookup and proof helpers and never
+names `semantic` or `worker`. `worker` reaches `delegation_service` only for
+the settlement owner type a member Run derives from its own manifest, and
+reaches `successor_capture` to bind a dispatched generation-4 Turn to its
+preserved accepted bytes. The full approved edge sets live in
+`tests/architecture_contract.rs`. Managed writable dispatch uses the member's
+Broker carrier through ordinary Controller-authenticated writer transitions.
+Both owners retain change bytes in the terminal transaction and release the
+writer only after its commit. Read-only observations include active write
+counts in the same database snapshot. Normal managed close verifies Reader
+policy before sealing; already-Closed writer cleanup is confined to the
+authenticated release settlement's lifecycle lease and exact generation proof.
+The worker binds each successor assignment's checked reader or clears the
+previous binding for a generic task. The Turn actor keeps initial candidate
+tools separate from that task binding. Receipt storage errors propagate from
+the reader without creating a durable provenance violation, so history can
+be retried against the original terminal after storage recovery.
+Recorded host faults are rechecked against the original reader's lock,
+binding, receipt directory and receipts. The admitted content must verify too.
+Deterministic failed reads keep their ordinary handling. Checked response publication
+uses verified history. A failed history RPC on a successor checked task leaves
+only the received terminal status and usage in the journal. A bound unfinished
+checked task's actual terminal record can restore its existing pending-history
+marker after a reader fault; this does not enable generic terminal-only settlement.
+Notification fallback bytes never choose a final response reference on that
+failure path.
+Legacy direct review retains its notification-receipt and pending-history
+order; its completed history remains the adoption proof.
+The streamed history reader supplies a validated original terminal and a
+separate completeness decision. Semantic recovery binds that observation to
+the accepted task and TurnStarted execution; the worker supplies its existing
+actor serialization, while reader-loss recovery uses the lifecycle lease and
+startup range before worker construction. Both paths share durable journal
+completion and exactly-once task settlement. Fresh proof precedes the journal
+lock; journal completion retains the existing append-time client-event stamps.
+Reconciliation and Paused are completed before stable response
+publication under the artifact quota lease. That lease is released before SQL
+settlement and writer cleanup. Read-only Profile observation never starts a
+replacement server. Collect and identity do not initiate convergence, and
+member release never recursively acquires the recovery lease.
+Missing-locator history recovery borrows the already-held startup range for
+the common complete absence proof, including owner slots, the worker range
+and registrations. That path and offline admission release observer-only
+startup holds without clearing owner records. The streamed root-parent proof
+checks the complete JSON null token and duplicate keys across chunk boundaries.
+All streamed history sinks require one complete JSON root and allow only JSON
+whitespace after it closes, without buffering the complete history.
+The shared sink validates every byte with a push-based JSON grammar machine
+before proof extraction. Object and array expectations and fixed-size scalar
+states cover discarded content too; grammar completion, not balanced frames,
+authorizes the result boundary. Its depth bound remains the sink's existing
+bound, and UTF-8, escapes and surrogate pairs are checked across chunks.
+Duplicate-key bookkeeping is released as objects close and uses the existing
+solicited-Turn byte bound for active member names.
+The worker's recovery tests read the existing global membership store to check
+that release alone retires membership. This adds the test-only dependency
+`worker` → `global_runtime` to the source graph.
+Every production dependency edge TASK-076
+added, exactly as that contract allows it:
+
+- `delegation_identity` → `domain`, `instructions`, `jcs`, `machine`
+- `caller_scope` → `delegation_identity`, `machine`
+- `provisioning` → `delegation_identity`, `global_runtime`,
+  `instructions`, `jcs`, `machine`, `run`, `workspace`
+- `successor_capture` → `delegation_identity`, `jcs`, `machine`,
+  `review_target`, `run`, `task_request`
+- `delegation_service` → `caller_scope`, `delegation_identity`,
+  `direct_review_target` (metadata admission before intent preparation), `domain`,
+  `engagement`, `instructions`, `jcs`, `machine`, `operation`,
+  `orchestration`, `provisioning`, `review`, `run`, `storage_observation`,
+  `successor_capture`, `task_request`, `workspace`, `writer`
+- `operation` → `delegation_identity`
+- `engagement` → `delegation_identity`, `operation` (the retained mutation
+  envelope a lookup verifies is produced by the envelope owner)
+- `run` → `delegation_identity`
+- `semantic` → `caller_scope`, `delegation_identity`, `delegation_service`,
+  `process_inventory` (the locator-missing proof enumerates the Run's
+  retained process-inventory registrations), `review_target` (the changes
+  producer bounds one Turn's snapshots by the existing workspace enumeration
+  bound), `successor_capture`, `task_request`
+- `worker` → `delegation_service`, `successor_capture`
+
+The remaining edges the contract annotates are test-only fixtures:
+`delegation_identity` → `paths`, `caller_scope` → `engagement`,
+`delegation_service` → `paths`, `specialist_policy`, `successor_capture` →
+`instructions`, `review`, `provisioning` → `paths`, `engagement` →
+`ledger_generation`, `orchestration`, `orchestration` → `caller_scope`,
+`run` → `profile` and `semantic` → `provisioning`. The
+`delegation_service → orchestration → semantic → delegation_service`
+transitive cycle remains, as HEAD already tolerates the mutual
+`semantic ↔ orchestration` pair.
+Direct-target admission adds the path
+`delegation_service → direct_review_target → review → semantic → delegation_service`
+inside that existing permitted cyclic region. The service passes admitted
+identity and exact manifest bytes to `successor_capture`; retained-content
+verification needs no target admission or source resolution at dispatch.
+
+For both successor owners, qualified Review members enable candidate tools at
+initial Thread creation. The accepted task selects its own retained reader;
+restart never creates a reader for a recorded Turn. `specialist` checks v4
+structure and reuses the v3 semantic validator after projecting receipt fields.
+`semantic` owns reader/history, source assurance and host-issued receipt checks,
+then commits the checked payload with the task/result/accounting transition.
+Source-assurance refusals retain their review codes; storage faults leave the
+settlement retryable. No new dependency edge is needed for these paths.
+
+The workspace Engagement database owns the six new base generation-6 tables
+(`delegation_operations`, `caller_scope_assignments`,
+`scope_membership_revisions`, `member_workload_revisions`,
+`member_release_operations`, `dispatch_indexes`) beside the unchanged
+orchestration extension 3, which keeps the managed Broker execution rows and
+their successor markers. Accepted task identity reuses the existing task and
+acceptance rows; complete-result and dispatch-index bytes reuse the
+content-addressed result-content store with explicit per-task provenance
+links. The ledger's write-once terminal resolution records remain Run-owned
+private state under each member Run's root.

@@ -219,6 +219,112 @@ from current work. It is not a second roadmap or status authority.
 - Revisit condition: changing final-response artifact classification or the
   timeline item projection.
 
+## DF-021: Fence legacy Broker admission at the close commit boundary
+
+- Owner: Orchestration Broker maintainers
+- Finding: the legacy `request_specialist` and managed assign paths check the
+  session only before their reservation transaction. The legacy session close
+  settles — terminates — the owned work it finds at settle time, so the gap is
+  only a legacy admission that lands after a completed close: it enters with
+  no later fence and its own settle finds no owned work to terminate.
+- Reason for deferral: pre-existing at the TASK-076 baseline and unchanged by
+  it — the successor spawn/assign acceptance transactions fence themselves
+  inside the close commit boundary, but reworking the legacy admission
+  transactions belongs to their owning completed Tasks.
+- Revisit condition: changing legacy Broker admission or the session close
+  protocol.
+
+## DF-022: Reclaim the crash-orphaned successor member credential
+
+- Owner: Orchestration Broker maintainers
+- Finding: a crash between a successor spawn's member-credential mint and its
+  acceptance commit leaves one inert mode-0600 credential file with no member
+  row and no Run, and v0.1.4 does not reclaim it.
+- Reason for deferral: a race-free reclaim needs a durable mint record neither
+  spawn path writes; the workspace-wide sweep that would reclaim it could
+  delete another session's in-flight credential and was removed
+  (design check during TASK-076, 2026-10-23).
+- Revisit condition: adding a durable credential mint record or a credential
+  maintenance owner.
+
+## DF-023: Converge an uncertain successor dispatch with no Turn id
+
+- Owner: Delegation runtime maintainers
+- Finding: a dispatch whose transport effect stayed uncertain and whose Turn id
+  was never recorded ends in the typed recovery row today, yet the durable facts
+  to converge it already exist in the Run ledger — `IdempotencyReserved` maps
+  the Submit key to its operation id and `TurnStarted` maps the operation id
+  to a Turn id.
+- Reason for deferral: converging from the ledger needs a complete-journal
+  non-dispatch proof plus a late-admission block; the weaker
+  "no Turn id plus generation absent means proved non-dispatch" rule was
+  rejected by a design check (2026-10-23) because a
+  worker can die after turn/start and before `TurnAccepted` is journaled.
+- Revisit condition: a complete-journal proof owner or the next delegation
+  recovery revision.
+
+## DF-024: Settle a terminal-without-resolution window with the existing unavailable marker
+
+- Owner: Delegation runtime maintainers
+- Finding: a bound Turn with a durable terminal but no resolution record (the
+  window between the terminal and its resolution) ends in the typed recovery
+  row; once the bound terminal and
+  whole-generation absence are both proved, the existing
+  typed-unavailable marker could settle it with no new unknown outcome and no
+  fabricated response.
+- Reason for deferral: optional extension explicitly deferred by a design
+  check (2026-10-23); the recovery row is correct and a
+  repeat release resumes from it.
+- Scope boundary: authenticated recovery that freshly verifies the original
+  history terminal and its reconciliation prefix is handled by the delegation
+  runtime. This entry retains the ordinary TurnTerminal-only window with no
+  final resolution and no fresh history proof; it does not authorize inferring
+  a task Turn ID or publishing a fabricated response. DF-023 remains separate.
+- Revisit condition: the next revision of member release recovery.
+
+## DF-025: Isolate the load-sensitive fake-app-server timing tests
+
+- Owner: Repository test infrastructure maintainers
+- Finding: three tests failed only under heavy concurrent load (concurrent
+  reviewers plus an e2e clone plus the Writer) and passed three of three when
+  re-run alone during TASK-076 verification —
+  `semantic::tests::model_list_shape_faults_are_compatibility_rejections`,
+  `semantic::tests::model_resolution_walks_every_page_and_keeps_the_advertised_order`
+  and
+  `worker_turn_drain::an_interaction_pauses_a_blocked_caller_and_its_answer_resumes_the_turn`;
+  every failure was the fake app-server never listening or the interaction
+  answer never reaching it.
+- Reason for deferral: environmental timing flakes of one class, not
+  regressions; each passed on isolated re-run.
+- Revisit condition: the next occurrence of the flake or a change to the fake
+  app-server harness.
+
+## DF-026: Promote TASK-076 decisions into the ADR index
+
+- Owner: Architecture decision record maintainers
+- Finding: the accepted TASK-076 decisions — the namespace birth authority and
+  its residual risk, the strict-DDL generation gate, the dispatch-index
+  bounds, the reverse-diff before-image reconstruction, the
+  deterministic-unavailable code set and the two Master bounds — are recorded
+  in the delegation runtime specification because the ADR index is H1-locked.
+- Reason for deferral: the ADR index cannot be regenerated while H1 stays
+  locked.
+- Revisit condition: the next regeneration of the ADR index.
+
+## DF-027: Two optional successor-capture coverage items
+
+- Owner: Successor capture maintainers
+- Finding: the retained-content quota test covers only the pre-insertion
+  refusal, so a settlement rollback after content insertion has no test (an
+  optional review finding during TASK-076 verification);
+  and an optional `run_ref` index over `dispatch_indexes` was noted in review
+  and not built.
+- Reason for deferral: both are independent regression and index coverage; the
+  existing bounds and behaviour are covered by the current tests and the
+  per-Run aggregate check.
+- Revisit condition: changing retained-content quota accounting or
+  dispatch-index access patterns.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical
