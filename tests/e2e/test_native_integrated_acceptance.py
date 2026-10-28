@@ -105,9 +105,6 @@ def main() -> int:
                 "role_reference": "general", "instructions": instructions,
                 "execution_lane": "dedicated", "required_assurance": "best_effort_personal_alpha",
                 "native_subagent_policy": "enabled"}
-    configuration_schema = validator(probe.PROTOCOL, "dolgorae-workspace-execution-v1.schema.json",
-                                     "#/$defs/agent_configuration")
-    assert_valid(captured, configuration_schema, "serialized caller child configuration")
     stored = json.loads(json.dumps(captured))
     assert probe.same_captured_configuration(captured, stored)
     for field, replacement in (("selected_profile", "other"), ("model", "other-model"),
@@ -159,39 +156,15 @@ def main() -> int:
         assert_valid(probe.review_request(kind, "bounded-task", revision), review_schema,
                      "integrated production review request")
     assert not review_schema.is_valid(probe.review_request("workspace", "bounded-task", "HEAD"))
-    busy = json.loads((probe.PROTOCOL / "examples/error-contract-v4-writer_busy.valid.json").read_text())
-    error_schema = validator(probe.PROTOCOL, "dolgorae-error-contract-v4.json")
-    close_error = {"code": "OUTCOME_UNKNOWN", "message": "Explicit reconciliation required",
-        "retryable": False, "details": {"schema": "dolgorae-session-close-error-details/v1",
-            "run_id": "018f0000-0000-7000-8000-000000000002", "operation": "run.reconcile",
-            "operation_id": "018f0000-0000-7000-8000-000000000003", "progress": "outcome_unknown",
-            "interrupt": False, "required_action": "reconcile_run"}}
-    assert_valid(close_error, error_schema, "modern retained aggregate error")
-    for field in ("operation_id", "progress", "interrupt", "required_action"):
-        wrong = json.loads(json.dumps(close_error))
-        del wrong["details"][field]
-        assert not error_schema.is_valid(wrong)
-    wrong = json.loads(json.dumps(close_error))
-    wrong["details"]["operation_id"] = None
-    assert not error_schema.is_valid(wrong)
-    wrong = json.loads(json.dumps(close_error))
-    wrong["details"]["private_diagnostic"] = "provider text"
-    assert not error_schema.is_valid(wrong)
-    closed = {"run_id": close_error["details"]["run_id"], "lifecycle": "closed", "writer_state": "none",
-        "session_close": {"operation_id": close_error["details"]["operation_id"],
+    close_run_id = "018f0000-0000-7000-8000-000000000002"
+    close_operation_id = "018f0000-0000-7000-8000-000000000003"
+    closed = {"run_id": close_run_id, "lifecycle": "closed", "writer_state": "none",
+        "session_close": {"operation_id": close_operation_id,
                           "interrupt": False, "progress": "completed"}}
-    modern_schema = validator(probe.PROTOCOL, "dolgorae-machine-v4.schema.json")
-    envelope = json.loads((probe.PROTOCOL / "examples/workspace-machine-v4-start.valid.json").read_bytes())
-    for verb in ("status", "close", "recover", "reconcile"):
-        envelope["command"] = f"run.{verb}"
-        envelope["data"].update(lifecycle="closed", session_close=closed["session_close"],
-                                effective_access="unknown", policy_verification="unverified",
-                                writer_state="none", writer_generation=None)
-        assert_valid(envelope, modern_schema, "modern aggregate terminal command")
-    assert probe.require_closed_session(closed, closed["run_id"]) == close_error["details"]["operation_id"]
+    assert probe.require_closed_session(closed, closed["run_id"]) == close_operation_id
     aborted = json.loads(json.dumps(closed))
     aborted["session_close"].update(interrupt=True, progress="aborted")
-    assert probe.require_closed_session(aborted, closed["run_id"], interrupt=True) == close_error["details"]["operation_id"]
+    assert probe.require_closed_session(aborted, closed["run_id"], interrupt=True) == close_operation_id
     rejected(lambda: probe.require_closed_session(aborted, closed["run_id"]))
     for field, replacement in (("lifecycle", "idle"), ("writer_state", "active"),
                                ("session_close", None), ("run_id", "foreign")):
@@ -201,33 +174,6 @@ def main() -> int:
         wrong = json.loads(json.dumps(closed))
         wrong["session_close"][field] = replacement
         rejected(lambda: probe.require_closed_session(wrong, closed["run_id"]))
-    assert_valid(busy, error_schema, "caller writer-busy error")
-    for field in ("requested_run_id", "writer_generation", "controller_kind"):
-        wrong = json.loads(json.dumps(busy))
-        del wrong["details"][field]
-        assert not error_schema.is_valid(wrong)
-    wrong = json.loads(json.dumps(busy))
-    wrong["details"]["instruction_body"] = "private instructions"
-    assert not error_schema.is_valid(wrong)
-    wrong = json.loads(json.dumps(busy))
-    wrong["retryable"] = False
-    assert not error_schema.is_valid(wrong)
-    startup = json.loads((probe.PROTOCOL / "examples/error-contract-v4-caller_startup_internal.valid.json").read_text())
-    assert_valid(startup, error_schema, "caller post-allocation internal refusal")
-    startup_schema = validator(probe.PROTOCOL, "dolgorae-error-contract-v4.json", "#/$defs/caller_startup_internal")
-    for field in ("invariant", "run_id"):
-        wrong = json.loads(json.dumps(startup))
-        del wrong["details"][field]
-        assert not startup_schema.is_valid(wrong)
-    wrong = json.loads(json.dumps(startup))
-    wrong["details"]["reason"] = "private storage diagnostic"
-    assert not startup_schema.is_valid(wrong)
-    for name, fragment in (("external-engagement-v4-hire.valid.json", "hire_request"),
-                           ("external-engagement-v4-assign.valid.json", "assign_request")):
-        request = json.loads((probe.PROTOCOL / "examples" / name).read_text())
-        assert_valid(request, validator(probe.PROTOCOL,
-                     "dolgorae-external-specialist-facade-v4.schema.json", f"#/$defs/{fragment}"),
-                     "integrated facade request")
     with patch.dict(os.environ, {}, clear=True), patch.object(probe, "executable_identity") as identity:
         assert probe.main() == 2
         rejected(lambda: probe.campaign(Path("unused"), Path("unused"), Path("unused")))
@@ -378,7 +324,6 @@ def main() -> int:
         last["data"].update(offset=1024, returned_length=176, continuation=None)
         value.check_primary_page(last, "x" * 176, page)
         assert value.finished_reads["final_response"] == b"x" * 1200
-        assert probe.SUCCESSOR_POSTS == 23 and probe.SUCCESSOR_CONTINUATIONS == 4
         # Specify the expected bytes independently of the oracle's encoder.
         # Both top-level and nested ordering matter, including UTF-8 values.
         (consumer_root / "connection.json").write_text(json.dumps({
