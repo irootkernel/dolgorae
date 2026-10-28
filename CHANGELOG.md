@@ -9,8 +9,8 @@ development commits.
 
 ### Added
 
-- Route current permission and protected MCP forms through public-v2 Controller decisions,
-  with immediate policy declines for private ownerless or fixed read-only work.
+- Route current permission and protected MCP forms through public-v2 Controller decisions, preserving each request's allowed decisions
+  and immediate policy declines for private ownerless or fixed read-only work.
 - Preserve protected receipt replay and historical unsupported records, and publish redacted
   command, workspace-change and runtime-error activity from the execution journal.
 - Recover public-v2 resolution acknowledgements through the original scoped operation key.

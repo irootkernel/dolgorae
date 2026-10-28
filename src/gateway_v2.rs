@@ -2694,12 +2694,22 @@ impl pb::interaction_service_server::InteractionService for GatewayTransport {
                             },
                         )
                     };
+                    let decisions = interaction
+                        .available_decisions
+                        .iter()
+                        .map(|decision| match decision.as_str() {
+                            "accept_once" => Ok(pb::InteractionDecision::AcceptOnce as i32),
+                            "decline" => Ok(pb::InteractionDecision::Decline as i32),
+                            "cancel" => Ok(pb::InteractionDecision::Cancel as i32),
+                            _ => Err(invalid("interaction", "closed interaction decision")),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     pb::ControllerInteraction {
                         summary: Some(interaction_summary(summary)),
                         response_schema_id: interaction.response_schema,
                         stamp: Some(project::stamp(&snapshot.stamp)),
                         payload: Some(payload),
-                        decisions: vec![1, 2, 3],
+                        decisions,
                     }
                 };
                 snapshot.authorize_current_controller(&root, &carrier, "run.interaction.get")?;
@@ -3041,6 +3051,210 @@ mod tests {
                 .is_ok()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn controller_detail_preserves_checked_successor_decisions() {
+        use crate::protocol::public_v2::interaction_service_server::InteractionService as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::Arc;
+
+        const CHILD: &str = "DOLGORAE_V2_CONTROLLER_DETAIL_FIXTURE";
+        if let Ok(fixture) = std::env::var(CHILD) {
+            let fixture: serde_json::Value = serde_json::from_str(&fixture).unwrap();
+            let home = crate::paths::DolgoraeHome::system().unwrap();
+            let root = home.workspace_root(fixture["workspace_id"].as_str().unwrap());
+            let manifest =
+                crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, root)
+                    .load_manifest(fixture["run_id"].as_str().unwrap().parse().unwrap())
+                    .unwrap();
+            let (_shutdown, receiver) = tokio::sync::watch::channel(false);
+            let transport = GatewayTransport::new(
+                Arc::new(crate::gateway_service::CoreGatewayBackend::new(
+                    home,
+                    uuid::Uuid::now_v7(),
+                )),
+                receiver,
+            );
+            for case in fixture["cases"].as_array().unwrap() {
+                let request = pb::GetControllerInteractionRequest {
+                    context: Some(pb::RequestContext {
+                        protocol_version: 2,
+                        client_request_id: uuid::Uuid::now_v7().to_string(),
+                        client_instance_id: "controller-detail".into(),
+                    }),
+                    run: Some(pb::RunRef {
+                        workspace: Some(pb::WorkspaceRef {
+                            absolute_path: fixture["workspace"].as_str().unwrap().into(),
+                            expected_workspace_id: manifest.workspace_id.clone(),
+                        }),
+                        run_id: manifest.run_id.to_string(),
+                    }),
+                    controller: Some(pb::ControllerCarrierRef {
+                        absolute_file_path: fixture["controller"].as_str().unwrap().into(),
+                        expected_controller_id: manifest
+                            .controller
+                            .identity
+                            .controller_id
+                            .to_string(),
+                        expected_controller_generation: manifest.controller.identity.generation,
+                    }),
+                    interaction_id: case["id"].as_str().unwrap().into(),
+                };
+                let mut unauthorized = request.clone();
+                unauthorized
+                    .controller
+                    .as_mut()
+                    .unwrap()
+                    .expected_controller_generation += 1;
+                assert!(
+                    transport
+                        .get_controller_interaction(Request::new(unauthorized))
+                        .await
+                        .is_err()
+                );
+                let detail = transport
+                    .get_controller_interaction(Request::new(request))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .interaction
+                    .unwrap();
+                let expected = if case["payload"] == "policy_only" {
+                    vec![
+                        pb::InteractionDecision::Decline,
+                        pb::InteractionDecision::Cancel,
+                    ]
+                } else {
+                    vec![
+                        pb::InteractionDecision::AcceptOnce,
+                        pb::InteractionDecision::Decline,
+                        pb::InteractionDecision::Cancel,
+                    ]
+                };
+                assert_eq!(
+                    detail.decisions,
+                    expected.into_iter().map(|v| v as i32).collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    detail.response_schema_id,
+                    case["response_schema"].as_str().unwrap()
+                );
+                assert_eq!(
+                    detail.summary.unwrap().status,
+                    if case["resolved"] == true {
+                        pb::InteractionStatus::Resolved
+                    } else {
+                        pb::InteractionStatus::Pending
+                    } as i32
+                );
+                assert!(detail.stamp.is_some());
+                match (case["payload"].as_str().unwrap(), detail.payload.unwrap()) {
+                    ("permission", pb::controller_interaction::Payload::Permission(_)) => {}
+                    ("mcp", pb::controller_interaction::Payload::McpElicitation(p)) => {
+                        assert!(!p.questions.is_empty())
+                    }
+                    ("policy_only", pb::controller_interaction::Payload::McpElicitation(p)) => {
+                        assert_eq!(p.title, "MCP input");
+                        assert!(p.server_name.is_empty());
+                        assert!(p.questions.is_empty());
+                    }
+                    _ => panic!("wrong typed payload"),
+                }
+            }
+            return;
+        }
+
+        let mut scene = crate::semantic::successor_review_tests::Scene::new(false);
+        let fixture = scene.administrative_fixture();
+        scene.prepare_worker_ledger();
+        let task = scene.accept_generic_task("controller-detail");
+        scene.record_running_execution(&task, "controller-detail", false);
+        let manifest = scene.manifest();
+        crate::worker::prepare_runtime_root(
+            &crate::worker::runtime_root(scene.state_root()),
+            crate::darwin::DarwinSystem.current_uid(),
+        )
+        .unwrap();
+        crate::semantic::release_fixture::write_absent_worker_locator(
+            scene.state_root(),
+            &manifest.workspace_id,
+            manifest.run_id,
+        );
+        let carrier_dir = fixture
+            .home
+            .root()
+            .join("controller-carriers/client/request");
+        std::fs::create_dir_all(&carrier_dir).unwrap();
+        for path in [
+            fixture.home.root().join("controller-carriers"),
+            fixture.home.root().join("controller-carriers/client"),
+            carrier_dir.clone(),
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let carrier = carrier_dir.join("controller.json");
+        std::fs::copy(&fixture.controller, &carrier).unwrap();
+        let mut ledger = crate::ledger::Ledger::open(
+            crate::run::run_root(scene.state_root(), manifest.run_id),
+            manifest.run_id,
+        )
+        .unwrap();
+        let policy_only = include_str!(
+            "../docs/protocol/examples/interaction-v2/interaction-v2-mcp-policy-only.valid.json"
+        );
+        let mut cases = Vec::new();
+        for (index, (example, payload, resolved)) in [
+            (policy_only, "policy_only", false),
+            (
+                include_str!(
+                    "../docs/protocol/examples/interaction-v2/interaction-v2-permission.valid.json"
+                ),
+                "permission",
+                false,
+            ),
+            (
+                include_str!(
+                    "../docs/protocol/examples/interaction-v2/interaction-v2-mcp.valid.json"
+                ),
+                "mcp",
+                false,
+            ),
+            (policy_only, "policy_only", true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = uuid::Uuid::now_v7();
+            let mut interaction: serde_json::Value = serde_json::from_str(example).unwrap();
+            interaction["request_id"] = serde_json::json!(id);
+            interaction["run_id"] = serde_json::json!(manifest.run_id);
+            interaction["controller_id"] =
+                serde_json::json!(manifest.controller.identity.controller_id);
+            interaction["controller_generation"] =
+                serde_json::json!(manifest.controller.identity.generation);
+            interaction["control_mode"] = serde_json::json!(manifest.control_mode);
+            interaction["thread_id"] = serde_json::json!("thread-1");
+            interaction["turn_id"] = serde_json::json!("turn-1");
+            ledger.append_required_payload(crate::audit::AuditKind::ApprovalRequested, &serde_json::json!({"upstream_request_id":index as u64,"interaction":interaction}), 1).unwrap();
+            if resolved {
+                let receipt = uuid::Uuid::now_v7();
+                ledger.append_required_payload(crate::audit::AuditKind::ApprovalDecided, &serde_json::json!({"request_id":index.to_string(),"idempotency_key":"policy-decline","response_sha256":null,"resolution_receipt_id":receipt,"resolved_at":"2026-10-26T00:00:01.000000Z","resolution":{"outcome":"protected_decision","policy_cause":"RUNTIME_VARIANT_UNSUPPORTED","decision":"decline","contained_secret":true,"answer_count":0,"resolution_receipt_id":receipt}}),1).unwrap();
+            }
+            cases.push(serde_json::json!({"id":id,"response_schema":interaction["response_schema"],"payload":payload,"resolved":resolved}));
+        }
+        drop(ledger);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["gateway_v2::tests::controller_detail_preserves_checked_successor_decisions", "--exact", "--nocapture"])
+            .env("HOME", &fixture.root)
+            .env(CHILD, serde_json::json!({"workspace":fixture.workspace,"workspace_id":manifest.workspace_id,"run_id":manifest.run_id,"controller":carrier,"cases":cases}).to_string())
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
