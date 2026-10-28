@@ -208,6 +208,89 @@ impl ResolvedGlobalProfile {
         self.bind_qualified(snapshot)
     }
 
+    /// A new successor binding, separate from accepted enabled Profile launches.
+    pub fn prepare_specialist(
+        self,
+        home: &DolgoraeHome,
+        native_subagents: bool,
+    ) -> Result<GlobalProfileBinding, MachineError> {
+        let snapshot = crate::profile::specialist_snapshot_for_global(
+            home,
+            &self.selected_name,
+            &self.definition,
+            native_subagents,
+        )?;
+        self.bind_successor(snapshot, native_subagents)
+    }
+
+    fn bind_successor(
+        self,
+        launch_snapshot: ProfileSnapshot,
+        native_subagents: bool,
+    ) -> Result<GlobalProfileBinding, MachineError> {
+        let mut expected = self
+            .definition
+            .argv
+            .iter()
+            .skip(1)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !expected.iter().any(|arg| arg == "--strict-config") {
+            expected.push("--strict-config".to_owned());
+        }
+        expected.extend(
+            [
+                "--enable",
+                "multi_agent",
+                "--disable",
+                "shell_snapshot",
+                "-c",
+                "project_doc_max_bytes=0",
+            ]
+            .map(str::to_owned),
+        );
+        let (enabled, disabled) = if native_subagents {
+            (
+                vec!["multi_agent".to_owned()],
+                vec!["shell_snapshot".to_owned()],
+            )
+        } else {
+            expected.extend(["--disable", "multi_agent"].map(str::to_owned));
+            (
+                vec![],
+                vec!["multi_agent".to_owned(), "shell_snapshot".to_owned()],
+            )
+        };
+        if self.schema_version != 1
+            || launch_snapshot.schema_version != 1
+            || self
+                .definition
+                .environment
+                .iter()
+                .any(|(key, value)| launch_snapshot.sanitized_environment.get(key) != Some(value))
+            || launch_snapshot.normalized_argv.get(1..) != Some(expected.as_slice())
+            || launch_snapshot.enabled_features != enabled
+            || launch_snapshot.disabled_features != disabled
+            || launch_snapshot.profile_name != self.selected_name
+            || launch_snapshot
+                .sanitized_environment
+                .get("DOLGORAE_SUCCESSOR_PROFILE")
+                != Some(&self.selected_name)
+            || self.definition_sha256 != canonical_digest(&self.definition)?
+        {
+            return Err(binding_invalid("successor launch policy disagrees"));
+        }
+        Ok(GlobalProfileBinding {
+            schema_version: 2,
+            selected_name: self.selected_name,
+            definition: self.definition,
+            definition_sha256: self.definition_sha256,
+            server_key: launch_snapshot.server_key.clone(),
+            launch_snapshot_sha256: canonical_digest(&launch_snapshot)?,
+            launch_snapshot,
+        })
+    }
+
     pub(crate) fn bind_qualified(
         self,
         launch_snapshot: ProfileSnapshot,
@@ -295,7 +378,17 @@ impl GlobalProfileBinding {
 
     pub(crate) fn uses_qualified_launch_policy(&self) -> bool {
         ResolvedGlobalProfile::from_definition(&self.selected_name, self.definition.clone())
-            .and_then(|resolved| resolved.bind_qualified(self.launch_snapshot.clone()))
+            .and_then(|resolved| {
+                resolved
+                    .clone()
+                    .bind_qualified(self.launch_snapshot.clone())
+                    .or_else(|_| {
+                        resolved.bind_successor(
+                            self.launch_snapshot.clone(),
+                            self.launch_snapshot.enabled_features == ["multi_agent"],
+                        )
+                    })
+            })
             .is_ok()
     }
 
@@ -328,7 +421,11 @@ impl GlobalProfileBinding {
 
     fn checked_review_configuration_supported(&self) -> bool {
         let snapshot = &self.launch_snapshot;
-        snapshot.enabled_features == ["multi_agent"]
+        (snapshot.enabled_features == ["multi_agent"]
+            || snapshot
+                .disabled_features
+                .iter()
+                .any(|feature| feature == "multi_agent"))
             && [
                 "mcp_servers",
                 "apps",

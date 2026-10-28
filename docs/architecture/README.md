@@ -1983,6 +1983,22 @@ lane-generation startup through the same staged manager logic and owns only
 that generation's exact recorded lifecycle; it never signals an unrelated
 process or the shared server.
 
+### Successor public adapters and bounded execution
+
+Public-v2 decodes checked messages into the shared semantic service. Accepted
+provisioning owns captured Role/configuration bytes; Run startup and mutation
+retain the same reservations, Controller checks, policy proof and lifecycle
+owners as Machine startup. Its observer projection reads modern manifests
+without converting them to public-v1 records.
+
+Successor shared read-only members use the existing Profile Server and global
+membership journal. Their immutable binding includes instruction suppression
+and native-subagent launch policy. Dedicated members retain Run-owned process
+and retirement proofs. Pool admission serializes capacity reservations under a
+home-scoped lock. Accepted startup reservations, Run state and exact generation
+observations supply usage, including accepted work before manifest publication.
+Operator cap changes affect new admissions only.
+
 ### Sticky Execution-Lane Topology
 
 The current architecture has one shared read-only server lane and zero or more

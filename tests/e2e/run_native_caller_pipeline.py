@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in Dolgorae caller pipeline with fixture-owned state and no model Turns."""
+"""Opt-in native caller and read-only pool checks in fixture-owned state."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,7 @@ CODEX_VERSION = "0.164.0"
 CODEX_SHA256 = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
 
 
-def campaign(driver: Path, codex: Path, *, default_variant: str | None = None) -> dict[str, object]:
+def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1) -> dict[str, object]:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit native caller pipeline opt-in required")
     if executable_identity(codex)["sha256"] != CODEX_SHA256:
@@ -34,6 +34,9 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None) -
         (scratch / "home" / "workspace").mkdir(mode=0o700)
         environment = isolated_environment(scratch)
         environment[OPT_IN] = "1"
+        if readonly_pool:
+            environment["DOLGORAE_NATIVE_READONLY_POOL"] = "1"
+            private_file(scratch / "pool-limit", str(pool_limit).encode())
         checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
         fixture = ScriptedResponses()
         if default_variant is not None:
@@ -41,7 +44,10 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None) -
                 raise ValueError("unknown default-feature variant")
             private_file(scratch / "default-feature-variant", default_variant.encode())
         for name in ("fixture-a", "fixture-b"):
-            config=b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n' + fixture_config(fixture.base_url)
+            config=b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n'
+            if readonly_pool and name == "fixture-b":
+                config += b'model_context_window = 65536\n'
+            config += fixture_config(fixture.base_url)
             if default_variant == "config-enable":
                 config += b'\n[features]\nshell_snapshot = true\n'
             elif default_variant is None:
@@ -51,12 +57,24 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None) -
         private_file(scratch / "fixture-owned", b"native-caller-pipeline/v1\n")
         private_file(scratch / "home" / "AGENTS.md", b"Conflicting isolated ancestor instructions.\n")
         private_file(scratch / "home" / "workspace" / "AGENTS.md", b"Conflicting isolated project instructions.\n")
+        if readonly_pool:
+            import shlex
+            command = "printf attempted > " + shlex.quote(str(scratch / "home" / "workspace" / "pool-write-denied"))
+            private_file(scratch / "pool-command", command.encode())
+            fixture.prepare(command)
+            fixture.instruction_markers = {"common": "Follow the current task and the selected Role", "role": "POOL_EXPLICIT_ROLE", "profile": "Permitted isolated native Profile guidance.", "project": "Conflicting isolated project instructions.", "ancestor": "Conflicting isolated ancestor instructions."}
         result = subprocess.run([str(driver), str(scratch), str(codex)], env=environment,
                                 capture_output=True, text=True, timeout=300)
         private_file(scratch / "driver.stdout", result.stdout.encode())
         private_file(scratch / "driver.stderr", result.stderr.encode())
-        if result.returncode or fixture.posts or fixture.failure:
+        if result.returncode or fixture.failure or (not readonly_pool and fixture.posts):
             raise ValueError("native caller pipeline failed; no automatic retry")
+        if readonly_pool:
+            if (fixture.result is None or fixture.result[0] == 0 or fixture.posts != 2
+                    or fixture.instruction_inputs_observed != 1
+                    or fixture.ambient_seen["project"] or fixture.ambient_seen["ancestor"]
+                    or (scratch / "home" / "workspace" / "pool-write-denied").exists()):
+                raise ValueError("native pooled read-only or instruction suppression failed")
         observations = json.loads(result.stdout)
         if observations.get("schema") != "dolgorae.native-caller-pipeline/v1":
             raise ValueError("native caller pipeline observation shape invalid")
@@ -64,6 +82,8 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None) -
             raise ValueError("native caller pipeline cleanup incomplete")
         if default_variant is not None:
             require_default_feature_observation(observations.get("default_feature_startup"), default_variant)
+        if readonly_pool:
+            observations.update(native_write_exit=fixture.result[0], explicit_instruction_inputs=fixture.instruction_inputs_observed, ambient_markers_seen=fixture.ambient_seen)
         observations.update(external_provider_requests=0, loopback_posts=fixture.posts,
                             real_account_or_credentials_used=False, executable_sha256=CODEX_SHA256,
                             codex_version=CODEX_VERSION, profile_capability_mutated=False)
@@ -123,10 +143,13 @@ def main() -> int:
     parser.add_argument("--driver", type=Path, required=True)
     parser.add_argument("--codex", type=Path, required=True)
     parser.add_argument("--default-feature-startup-only", action="store_true")
+    parser.add_argument("--readonly-pool", action="store_true")
+    parser.add_argument("--pool-limit", type=int, choices=(1, 4), default=1)
     args = parser.parse_args()
     try:
         selected=default_feature_campaign if args.default_feature_startup_only else campaign
-        observations = selected(args.driver.resolve(strict=True), args.codex.resolve(strict=True))
+        kwargs = {"readonly_pool": True, "pool_limit": args.pool_limit} if args.readonly_pool else {}
+        observations = selected(args.driver.resolve(strict=True), args.codex.resolve(strict=True), **kwargs)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         print(json.dumps({"schema": "dolgorae.native-caller-pipeline-failure/v1", "passed": False}))
         return 1

@@ -92,7 +92,8 @@ launched before the inventory was introduced. It leaves unverifiable processes
 untouched. Ordinary shared Profile Servers remain alive across CLI invocations.
 
 After initializing the Dolgorae home, a foreground local gateway can serve the
-[public v1 API](docs/protocol/dolgorae/public/v1/dolgorae.proto):
+[public v1 API](docs/protocol/dolgorae/public/v1/dolgorae.proto) and the
+negotiated modern [public v2 API](docs/protocol/dolgorae/public/v2/dolgorae.proto):
 
 ```sh
 dolgorae serve --socket /absolute/private-directory/dolgorae.sock
@@ -194,6 +195,20 @@ Run adapter retains its legacy contract. Compatible repeats and root recovery re
 operation identity across gateway restarts; unknown effects remain visible
 for reconciliation instead of being replayed or hidden. Ordinary low-level Run
 close and Primary-scoped pause/interrupt semantics are unchanged.
+
+Public v2 starts from explicit captured provisioning: workspace, Controller,
+Profile, Markdown Role/configuration, requested access, lane, assurance and key.
+It projects modern Runs directly and retains their original identities during
+replay and lifecycle operations. Negotiate its exact supported method subset;
+activity, interaction and group delivery retain their roadmap owners. Public-v1
+listing returns accepted legacy Runs in mixed workspaces, and its workspace
+Writer status remains readable when a modern Run holds the slot.
+
+Fixed read-only successor members share a compatible Profile Server, with native
+subagents disabled in its immutable launch. They cannot acquire Write. Dedicated
+Runs retain authorized same-Thread access transitions. The
+[pool operations guide](docs/ops/README.md#successor-read-only-pool-and-capacity)
+describes configuration, capacity refusals and isolated native qualification.
 
 The verified v0.1.3 provider profile contains exactly 27 advertised public-v1
 methods. A generated client must negotiate protocol zero, compare the returned

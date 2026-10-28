@@ -1,6 +1,6 @@
 ---
 name: use-dolgorae
-description: "Use Dolgorae safely through its local Machine CLI, public-v1 gateway, or an actually exposed checked tool when asked to inspect, initialize, configure, review, operate an Orchestrated Session or External Specialist Engagement, diagnose, or recover Dolgorae state. Ground every action in the exact binary and advertised runtime capabilities; do not activate it for generic code review or merely because a repository contains Dolgorae files."
+description: "Use Dolgorae safely through its local Machine CLI, negotiated public gateway, or an actually exposed checked tool when asked to inspect, initialize, configure, review, operate an Orchestrated Session or External Specialist Engagement, diagnose, or recover Dolgorae state. Ground every action in the exact binary and advertised runtime capabilities; do not activate it for generic code review or merely because a repository contains Dolgorae files."
 ---
 
 # Use Dolgorae
@@ -68,6 +68,24 @@ represent an expected nonterminal control state. On failure, branch on stable
 `error.code`, `error.retryable`, and checked `details`, not message text. Preserve
 the envelope's invocation ID and every returned workspace, profile, review,
 capture, engagement, Run, revision, and digest identity needed for follow-up.
+
+## Modern public clients and fixed read-only members
+
+Use public v2 only when the selected binary advertises the required protocol,
+descriptor, credential contract, method subset and bounds. Supply explicit
+workspace, Controller, captured provisioning, requested access, lane, assurance
+and idempotency. Preserve the accepted Run and original key after uncertain
+responses. Modern projections keep requested mode separate from effective access.
+Public-v1 listing returns legacy entries in mixed workspaces; shared Writer status
+remains readable for modern holders.
+
+A fixed read-only pooled member cannot acquire Write. Its immutable configuration
+and launch disable native subagents; an explicitly qualified enabled configuration
+requires a dedicated lane. K/cap changes require operator authorization and affect
+new admission only. Capacity refusal does not authorize stopping accepted members
+or changing their Profiles. One member's close never grants shared-generation
+shutdown authority. Follow the repository's pool operations guide for authorized
+configuration and native qualification; this skill grants neither operation.
 
 ## Start a caller Run or migrate instructions
 

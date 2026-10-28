@@ -37,6 +37,9 @@ pub struct EventPage {
 }
 
 pub trait GatewayBackend: Send + Sync + 'static {
+    fn modern(&self) -> Result<&dyn crate::gateway_v2::ModernGatewayBackend, MachineError> {
+        Err(unavailable("public-v2"))
+    }
     fn get_capabilities(
         &self,
         _request: pb::GetCapabilitiesRequest,
@@ -218,13 +221,14 @@ impl GatewayTransport {
         }
     }
 
-    async fn execute<T: Send + 'static>(
+    pub(crate) async fn execute<T: Send + 'static>(
         &self,
         method: &'static str,
         deadline: tokio::time::Instant,
         work: impl FnOnce(Arc<dyn GatewayBackend>) -> Result<T, MachineError> + Send + 'static,
     ) -> Result<T, Status> {
-        self.execute_in(&self.workers, method, deadline, work).await
+        self.execute_in(&self.workers, method, deadline, work, error_status)
+            .await
     }
 
     async fn execute_stream<T: Send + 'static>(
@@ -233,8 +237,24 @@ impl GatewayTransport {
         deadline: tokio::time::Instant,
         work: impl FnOnce(Arc<dyn GatewayBackend>) -> Result<T, MachineError> + Send + 'static,
     ) -> Result<T, Status> {
-        self.execute_in(&self.stream_workers, method, deadline, work)
+        self.execute_in(&self.stream_workers, method, deadline, work, error_status)
             .await
+    }
+
+    pub(crate) async fn execute_v2<T: Send + 'static>(
+        &self,
+        method: &'static str,
+        deadline: tokio::time::Instant,
+        work: impl FnOnce(Arc<dyn GatewayBackend>) -> Result<T, MachineError> + Send + 'static,
+    ) -> Result<T, Status> {
+        self.execute_in(
+            &self.workers,
+            method,
+            deadline,
+            work,
+            crate::gateway_v2::error_status,
+        )
+        .await
     }
 
     async fn execute_in<T: Send + 'static>(
@@ -243,21 +263,22 @@ impl GatewayTransport {
         method: &'static str,
         deadline: tokio::time::Instant,
         work: impl FnOnce(Arc<dyn GatewayBackend>) -> Result<T, MachineError> + Send + 'static,
+        map_error: fn(&MachineError, &str) -> Status,
     ) -> Result<T, Status> {
         if *self.shutdown.borrow() {
-            return Err(error_status(&transport_error("SERVER_SHUTDOWN"), method));
+            return Err(map_error(&transport_error("SERVER_SHUTDOWN"), method));
         }
         let mut shutdown = self.shutdown.clone();
         let permit = tokio::select! {
-            _ = shutdown.changed() => return Err(error_status(&transport_error("SERVER_SHUTDOWN"), method)),
-            _ = tokio::time::sleep_until(deadline) => return Err(error_status(&transport_error("TRANSPORT_FAILURE"), method)),
-            permit = workers.clone().acquire_owned() => permit.map_err(|_| error_status(&transport_error("INTERNAL_ERROR"), method))?,
+            _ = shutdown.changed() => return Err(map_error(&transport_error("SERVER_SHUTDOWN"), method)),
+            _ = tokio::time::sleep_until(deadline) => return Err(map_error(&transport_error("TRANSPORT_FAILURE"), method)),
+            permit = workers.clone().acquire_owned() => permit.map_err(|_| map_error(&transport_error("INTERNAL_ERROR"), method))?,
         };
         if *self.shutdown.borrow() {
-            return Err(error_status(&transport_error("SERVER_SHUTDOWN"), method));
+            return Err(map_error(&transport_error("SERVER_SHUTDOWN"), method));
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(error_status(&transport_error("TRANSPORT_FAILURE"), method));
+            return Err(map_error(&transport_error("TRANSPORT_FAILURE"), method));
         }
         let backend = self.backend.clone();
         let job = tokio::task::spawn_blocking(move || {
@@ -268,9 +289,9 @@ impl GatewayTransport {
         });
         tokio::time::timeout_at(deadline, job)
             .await
-            .map_err(|_| error_status(&transport_error("TRANSPORT_FAILURE"), method))?
-            .map_err(|_| error_status(&transport_error("INTERNAL_ERROR"), method))?
-            .map_err(|error| error_status(&error, method))
+            .map_err(|_| map_error(&transport_error("TRANSPORT_FAILURE"), method))?
+            .map_err(|_| map_error(&transport_error("INTERNAL_ERROR"), method))?
+            .map_err(|error| map_error(&error, method))
     }
 }
 
@@ -843,8 +864,16 @@ impl pb::orchestration_service_server::OrchestrationService for GatewayTransport
 }
 
 fn rpc_deadline<T>(request: &Request<T>, method: &str) -> Result<tokio::time::Instant, Status> {
+    rpc_deadline_with(request, method, error_status)
+}
+
+pub(crate) fn rpc_deadline_with<T>(
+    request: &Request<T>,
+    method: &str,
+    map_error: fn(&MachineError, &str) -> Status,
+) -> Result<tokio::time::Instant, Status> {
     let invalid_timeout = || {
-        error_status(
+        map_error(
             &MachineError::invalid_argument("grpc-timeout", "invalid RPC timeout"),
             method,
         )
@@ -1154,13 +1183,13 @@ fn stream_end(run_id: &str, cursor: &str, reason: pb::StreamEndReason) -> pb::Ru
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
-struct GoogleRpcStatus {
+pub(crate) struct GoogleRpcStatus {
     #[prost(int32, tag = "1")]
-    code: i32,
+    pub(crate) code: i32,
     #[prost(string, tag = "2")]
-    message: String,
+    pub(crate) message: String,
     #[prost(message, repeated, tag = "3")]
-    details: Vec<prost_types::Any>,
+    pub(crate) details: Vec<prost_types::Any>,
 }
 
 /// Checked mapping is the sole source of status, retry and recovery policy.
@@ -1553,6 +1582,14 @@ async fn run_server_with_accept(
                 .max_decoding_message_size(12 * 1024 * 1024)
                 .max_encoding_message_size(12 * 1024 * 1024),
         )
+        .add_service(crate::protocol::public_v2::operation_service_server::OperationServiceServer::new(service.clone()))
+        .add_service(crate::protocol::public_v2::runtime_service_server::RuntimeServiceServer::new(service.clone()))
+        .add_service(crate::protocol::public_v2::run_service_server::RunServiceServer::new(service.clone()))
+        .add_service(crate::protocol::public_v2::writer_service_server::WriterServiceServer::new(service.clone()))
+        .add_service(crate::protocol::public_v2::provisioning_service_server::ProvisioningServiceServer::new(service.clone()))
+        .add_service(crate::protocol::public_v2::orchestration_service_server::OrchestrationServiceServer::new(service.clone()))
+        .add_service(crate::protocol::public_v2::controller_service_server::ControllerServiceServer::new(service.clone()))
+        .add_service(crate::protocol::public_v2::artifact_service_server::ArtifactServiceServer::new(service.clone()))
         .serve_with_incoming_shutdown(
             tokio_stream::wrappers::ReceiverStream::new(receiver),
             async move {

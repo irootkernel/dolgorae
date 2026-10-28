@@ -73,7 +73,7 @@ if __name__ == "__main__":
     run_case("gateway_semantic_native", "native_interrupt_invalidates_interaction")
     run_case("gateway_semantic_native", "native_close_and_pause_interrupt")
     run_case("gateway_semantic_native", "native_writer_release_and_reacquire")
-    run_case("gateway_semantic_native", "legacy_gateway_rejects_caller_manifest_before_effects")
+    run_case("gateway_semantic_native", "mixed_gateway_observes_modern_runs_without_legacy_mutation")
     run_case("gateway_semantic_native", "native_killed_worker_recovery")
     run_case("gateway_semantic_native", "native_watch_input_rejection")
     run_case("gateway_semantic_native", "native_concurrent_identical_admission")

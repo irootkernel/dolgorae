@@ -407,7 +407,21 @@ fn campaign(root: &Path, codex: &Path) -> Value {
             )
             .unwrap();
     }
-    let credential = root.join("controller.json");
+    let credential = if std::env::var("DOLGORAE_NATIVE_READONLY_POOL").as_deref() == Ok("1") {
+        let directory = home.root().join("controller-carriers");
+        fs::create_dir(&directory).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let client = directory.join("native-pool");
+        fs::create_dir(&client).unwrap();
+        fs::set_permissions(&client, fs::Permissions::from_mode(0o700)).unwrap();
+        let installation = client.join("test-installation");
+        fs::create_dir(&installation).unwrap();
+        fs::set_permissions(&installation, fs::Permissions::from_mode(0o700)).unwrap();
+        installation.join("pool.json")
+    } else {
+        root.join("controller.json")
+    };
     create_controller_credential(
         &credential,
         ControllerKind::Automation,
@@ -423,6 +437,9 @@ fn campaign(root: &Path, codex: &Path) -> Value {
     let state_root = home.workspace_root(&view.workspace_id);
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
     let result = std::panic::catch_unwind(|| {
+        if std::env::var("DOLGORAE_NATIVE_READONLY_POOL").as_deref() == Ok("1") {
+            return pool_campaign(root, &home, &view, &credential);
+        }
         let first = start(&view, &credential, "fixture-a", "first", false)
             .unwrap_or_else(|error| fail(root, "caller startup", error));
         let first_id = first.snapshot.manifest.run_id;
@@ -633,6 +650,538 @@ fn campaign(root: &Path, codex: &Path) -> Value {
     .unwrap();
     assert!(clean, "isolated native cleanup incomplete");
     result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn pool_campaign(
+    root: &Path,
+    home: &DolgoraeHome,
+    view: &WorkspaceView,
+    credential: &Path,
+) -> Value {
+    use dolgorae::protocol::public_v2 as pb;
+    use dolgorae::provisioning::{
+        ProvisioningAdmission, ProvisioningSources, capture_provisioning,
+    };
+    let pool_limit = fs::read_to_string(root.join("pool-limit"))
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert!([1, 4].contains(&pool_limit));
+    let config = dolgorae::pool::PoolConfiguration {
+        readonly_server_limit: pool_limit,
+        ..Default::default()
+    };
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(home.root().join("pool-configuration.json"))
+        .unwrap()
+        .write_all(&serde_json::to_vec(&config).unwrap())
+        .unwrap();
+    let instruct = dolgorae::instructions::InstructionSourceStore::new(home);
+    instruct.initialize_templates().unwrap();
+    let carrier = CredentialCarrier::open_path(credential).unwrap();
+    let identity = dolgorae::controller::binding_from_carrier(&carrier, 1)
+        .unwrap()
+        .identity;
+    let controller = Some(pb::ControllerCarrierRef {
+        absolute_file_path: credential.to_str().unwrap().into(),
+        expected_controller_id: identity.controller_id.to_string(),
+        expected_controller_generation: 1,
+    });
+    let workspace = Some(pb::WorkspaceRef {
+        absolute_path: view
+            .canonical_path
+            .to_path_buf()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .into(),
+        expected_workspace_id: view.workspace_id.clone(),
+    });
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let socket_path = root.join("gateway.sock");
+    let mut socket = dolgorae::gateway_socket::GatewaySocket::bind(home, &socket_path).unwrap();
+    let backend = std::sync::Arc::new(dolgorae::gateway_service::CoreGatewayBackend::new(
+        home.clone(),
+        socket.record().server_instance_id,
+    ));
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    struct GatewayGuard {
+        stop: Option<tokio::sync::oneshot::Sender<()>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for GatewayGuard {
+        fn drop(&mut self) {
+            let _ = self.stop.take().unwrap().send(());
+            self.thread.take().unwrap().join().unwrap();
+        }
+    }
+    let _gateway = GatewayGuard {
+        stop: Some(stop),
+        thread: Some(std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime
+                .block_on(dolgorae::gateway::run_server(&mut socket, backend, async {
+                    let _ = stopped.await;
+                }))
+                .unwrap();
+            socket.cleanup().unwrap();
+        })),
+    };
+    let channel = runtime
+        .block_on(
+            tonic::transport::Endpoint::try_from("http://[::]:50051")
+                .unwrap()
+                .connect_with_connector(tower::service_fn(move |_| {
+                    let path = socket_path.clone();
+                    async move {
+                        tokio::net::UnixStream::connect(path)
+                            .await
+                            .map(hyper_util::rt::TokioIo::new)
+                    }
+                })),
+        )
+        .unwrap();
+    let mut transport = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let mut runtime_client = pb::runtime_service_client::RuntimeServiceClient::new(channel.clone());
+    let mut operations = pb::operation_service_client::OperationServiceClient::new(channel.clone());
+    let mut legacy_writers =
+        dolgorae::protocol::public_v1::writer_service_client::WriterServiceClient::new(
+            channel.clone(),
+        );
+    let public = serde_json::json!({"controller_id":identity.controller_id,"kind":identity.kind,"instance_id":identity.instance_id,"subject_id":identity.subject_id});
+    let principal = format!(
+        "sha256:{}",
+        dolgorae::jcs::sha256_hex(
+            &dolgorae::jcs::canonicalize(&dolgorae::jcs::parse(&public.to_string()).unwrap())
+                .unwrap()
+        )
+    );
+    let original_operation =
+        |kind: pb::OperationKind, key: &str, run: Option<String>| pb::OperationRef {
+            caller_scope: Some(pb::CallerScope {
+                controller_kind: pb::ControllerKind::Automation as i32,
+                principal_ref: principal.clone(),
+                controller_generation: 1,
+                workspace_id: view.workspace_id.clone(),
+                aggregate: Some(run.map_or_else(
+                    || pb::caller_scope::Aggregate::ProvisioningScope("run-start".into()),
+                    pb::caller_scope::Aggregate::RunId,
+                )),
+            }),
+            operation_kind: kind as i32,
+            idempotency_key: key.into(),
+        };
+
+    let context = || {
+        Some(pb::RequestContext {
+            protocol_version: 2,
+            client_request_id: Uuid::now_v7().to_string(),
+            client_instance_id: "native-pool".into(),
+        })
+    };
+    let capabilities = runtime
+        .block_on(runtime_client.get_capabilities(pb::GetCapabilitiesRequest {
+            context: context(),
+            minimum_protocol_version: 2,
+            maximum_protocol_version: 2,
+        }))
+        .unwrap()
+        .into_inner();
+    assert_eq!(capabilities.context.unwrap().protocol_version, 2);
+    assert_eq!(
+        capabilities.descriptor_sha256,
+        dolgorae::jcs::sha256_hex(dolgorae::protocol::PUBLIC_V2_DESCRIPTOR)
+    );
+    let mut ids = Vec::new();
+    let mut threads = std::collections::BTreeSet::new();
+    let mut servers = std::collections::BTreeSet::new();
+    let mut compatibility = Vec::new();
+    let mut first_snapshot = None;
+    let mut dedicated_request = None;
+    for (profile, count) in [("fixture-a", 16), ("fixture-b", 1)] {
+        let binding = dolgorae::global_runtime::ResolvedGlobalProfile::resolve(home, profile)
+            .unwrap()
+            .prepare_specialist(home, false)
+            .unwrap();
+        let captured = capture_provisioning(&ProvisioningSources {
+            instruct: &instruct,
+            role_name: "pool-reader",
+            role: dolgorae::instructions::SelectedInstructionSource::Inline(
+                "POOL_EXPLICIT_ROLE: inspect the caller workspace without modifications.\n".into(),
+            ),
+            dependencies: vec![],
+            selected_guidance: vec![],
+            profile_binding: binding.clone(),
+            admission: ProvisioningAdmission {
+                model: "gpt-5.6-luna".into(),
+                effort: "low".into(),
+                purpose_kind: "planning".into(),
+                purpose_label: None,
+                required_capabilities: vec![],
+                execution_lane: "shared_readonly".into(),
+                requested_access: "read_only".into(),
+                required_assurance: "best_effort_personal_alpha".into(),
+                native_subagent_policy: "disabled".into(),
+            },
+        })
+        .unwrap();
+        compatibility.push(json!({"profile":profile,"codex_home":binding.launch_snapshot.canonical_codex_home,"server_key":binding.server_key,"process_static_configuration":binding.launch_snapshot.process_static_configuration,"native_subagent_policy":captured.admitted.native_subagent_policy,"normalized_argv":binding.launch_snapshot.normalized_argv}));
+        let (instructions, _) = captured.admitted_configuration().unwrap();
+        for member in 0..count {
+            let request = pb::StartRunRequest {
+                context: context(),
+                workspace: workspace.clone(),
+                controller: controller.clone(),
+                idempotency_key: format!("{profile}-pool-{member}"),
+                provisioning: Some(pb::ProvisioningSelection {
+                    profile_name: profile.into(),
+                    role_name: "pool-reader".into(),
+                    policy_name: String::new(),
+                    policy_snapshot_digest: String::new(),
+                    configuration: Some(
+                        dolgorae::gateway_projection_v2::admitted_configuration(&captured.admitted)
+                            .unwrap(),
+                    ),
+                    agent_configuration_digest: captured.admitted.digest().unwrap(),
+                }),
+                requested_mode: pb::CreationMode::ReadOnly as i32,
+                execution_lane: pb::ExecutionLane::SharedReadonly as i32,
+                purpose: pb::PurposeKind::Planning as i32,
+                required_assurance: pb::AssuranceLevel::BestEffortPersonalAlpha as i32,
+                instructions: Some(dolgorae::gateway_projection_v2::captured_instructions(
+                    &instructions,
+                )),
+                ..Default::default()
+            };
+            if profile == "fixture-a" && member == 0 {
+                let mut configuration = captured.admitted.clone();
+                configuration.execution_lane = "dedicated".into();
+                let mut dedicated = request.clone();
+                dedicated.execution_lane = pb::ExecutionLane::Dedicated as i32;
+                let selection = dedicated.provisioning.as_mut().unwrap();
+                selection.configuration = Some(
+                    dolgorae::gateway_projection_v2::admitted_configuration(&configuration)
+                        .unwrap(),
+                );
+                selection.agent_configuration_digest = configuration.digest().unwrap();
+                dedicated_request = Some(dedicated);
+            }
+            let original =
+                original_operation(pb::OperationKind::StartRun, &request.idempotency_key, None);
+            let response = runtime
+                .block_on(transport.start_run(tonic::Request::new(request.clone())))
+                .unwrap();
+            let run = if profile == "fixture-a" && member == 0 {
+                drop(response);
+                let recovered = runtime
+                    .block_on(operations.lookup_operation(pb::LookupOperationRequest {
+                        context: context(),
+                        controller: controller.clone(),
+                        operation: Some(original.clone()),
+                    }))
+                    .unwrap()
+                    .into_inner();
+                let Some(pb::lookup_operation_response::Result::Accepted(recovered)) =
+                    recovered.result
+                else {
+                    panic!("lost Start acknowledgement was not found");
+                };
+                let receipt = recovered.receipt.unwrap();
+                assert_eq!(receipt.operation, Some(original));
+                let id = receipt.subjects.unwrap().run_id.unwrap();
+                runtime
+                    .block_on(transport.get_run(pb::GetRunRequest {
+                        context: context(),
+                        run: Some(pb::RunRef {
+                            workspace: workspace.clone(),
+                            run_id: id,
+                        }),
+                    }))
+                    .unwrap()
+                    .into_inner()
+                    .run
+                    .unwrap()
+            } else {
+                response.into_inner().run.unwrap()
+            };
+            let id = Uuid::parse_str(&run.run_id).unwrap();
+            assert_eq!(run.execution_lane, pb::ExecutionLane::SharedReadonly as i32);
+            assert_eq!(run.requested_mode, pb::CreationMode::ReadOnly as i32);
+            assert_eq!(
+                run.effective_policy.as_ref().unwrap().access,
+                pb::EffectiveAccess::Read as i32
+            );
+            assert_eq!(
+                run.effective_policy.as_ref().unwrap().verification,
+                pb::PolicyVerification::Verified as i32
+            );
+            assert!(threads.insert(run.thread.as_ref().unwrap().thread_id.clone()));
+            ids.push(id);
+            let state_root = home.workspace_root(&view.workspace_id);
+            let snapshot = RunSnapshot::load(&state_root, id, 0).unwrap();
+            let bootstrap = dolgorae::worker::read_worker_bootstrap(
+                &dolgorae::worker::bootstrap_path(&dolgorae::worker::runtime_root(&state_root), id),
+                DarwinSystem.current_uid(),
+            )
+            .unwrap();
+            assert!(
+                bootstrap
+                    .session
+                    .as_ref()
+                    .unwrap()
+                    .dedicated_server
+                    .is_none()
+            );
+            let state: Value = serde_json::from_slice(
+                &fs::read(
+                    home.root()
+                        .join("profiles")
+                        .join(&binding.server_key)
+                        .join("state.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            servers.insert((
+                profile.to_owned(),
+                state["pid"].as_u64().unwrap(),
+                binding.server_key.clone(),
+            ));
+            let denial = CoreSemanticService
+                .mutate_caller_run(RunMutationInput {
+                    workspace: view.canonical_path.to_path_buf().unwrap(),
+                    expected_workspace_id: view.workspace_id.clone(),
+                    run_id: id,
+                    expected_state_revision: None,
+                    carrier: CredentialCarrier::open_path(credential).unwrap(),
+                    operation: RunMutationOperation::AcquireWriter,
+                })
+                .err()
+                .unwrap();
+            assert_eq!(denial.code, "SHARED_RUN_WRITE_FORBIDDEN");
+            if first_snapshot.is_none() {
+                first_snapshot = Some(snapshot);
+            }
+            let replay = runtime
+                .block_on(transport.start_run(tonic::Request::new(request)))
+                .unwrap()
+                .into_inner();
+            assert!(replay.exact_replay);
+            assert_eq!(replay.run.unwrap().run_id, id.to_string());
+        }
+    }
+    assert_eq!(
+        servers.iter().filter(|(p, _, _)| p == "fixture-a").count(),
+        1
+    );
+    assert_eq!(servers.len(), 2);
+    let command = fs::read_to_string(root.join("pool-command")).unwrap();
+    let first = first_snapshot.as_ref().unwrap();
+    let accepted = runtime
+        .block_on(transport.submit_turn(pb::SubmitTurnRequest {
+            context: context(),
+            run: Some(pb::RunRef {
+                workspace: workspace.clone(),
+                run_id: ids[0].to_string(),
+            }),
+            controller: controller.clone(),
+            idempotency_key: "native-readonly-command".into(),
+            write_intent: pb::WriteIntent::Read as i32,
+            message: format!("Run exactly this command in the working directory: {command}\n"),
+            images: vec![],
+            effort: None,
+            expected_state_revision: first.stamp.run_state_revision,
+        }))
+        .unwrap()
+        .into_inner();
+    let accepted_turn = accepted.accepted_turn.unwrap();
+    let _result = CoreSemanticService
+        .execute(&SemanticCommand::Run {
+            verb: dolgorae::semantic::RunVerb::Wait,
+            args: vec![
+                ids[0].to_string().into(),
+                accepted_turn.turn_id.into(),
+                "--workspace".into(),
+                view.canonical_path.to_path_buf().unwrap().into_os_string(),
+            ],
+        })
+        .unwrap();
+    assert!(!root.join("home/workspace/pool-write-denied").exists());
+    let original = original_operation(
+        pb::OperationKind::SubmitTurn,
+        "native-readonly-command",
+        Some(ids[0].to_string()),
+    );
+    let collected = runtime
+        .block_on(operations.lookup_operation(pb::LookupOperationRequest {
+            context: context(),
+            controller: controller.clone(),
+            operation: Some(original.clone()),
+        }))
+        .unwrap()
+        .into_inner();
+    let Some(pb::lookup_operation_response::Result::Accepted(collected)) = collected.result else {
+        panic!("Submit lookup was not accepted");
+    };
+    assert_eq!(collected.receipt.unwrap().operation, Some(original));
+    assert_eq!(
+        collected.current_outcome,
+        pb::OperationOutcome::Completed as i32
+    );
+    let unknown = runtime
+        .block_on(operations.lookup_operation(pb::LookupOperationRequest {
+            context: context(),
+            controller: controller.clone(),
+            operation: Some(original_operation(
+                pb::OperationKind::StartRun,
+                "unknown-original-start",
+                None,
+            )),
+        }))
+        .unwrap()
+        .into_inner();
+    assert!(matches!(
+        unknown.result,
+        Some(pb::lookup_operation_response::Result::Unresolved(_))
+    ));
+
+    let mut dedicated = dedicated_request.unwrap();
+    for index in 0..6 {
+        dedicated.idempotency_key = format!("dedicated-{index}");
+        dedicated.context = context();
+        let response = runtime
+            .block_on(transport.start_run(tonic::Request::new(dedicated.clone())))
+            .unwrap()
+            .into_inner();
+        let run = response.run.unwrap();
+        let id = Uuid::parse_str(&run.run_id).unwrap();
+        ids.push(id);
+        if index == 0 {
+            let thread = run.thread.unwrap().thread_id;
+            let writer = mutation(
+                view,
+                credential,
+                id,
+                RunMutationOperation::AcquireWriter,
+                "dedicated acquire",
+            );
+            assert_eq!(
+                writer.projection.thread_id.as_deref(),
+                Some(thread.as_str())
+            );
+            let observed = runtime
+                .block_on(
+                    legacy_writers.get_workspace_writer_status(
+                        dolgorae::protocol::public_v1::GetWorkspaceWriterStatusRequest {
+                            context: Some(dolgorae::protocol::public_v1::RequestContext {
+                                protocol_version: 1,
+                                client_request_id: Uuid::now_v7().to_string(),
+                                client_instance_id: "mixed-native-writer".into(),
+                            }),
+                            workspace: Some(dolgorae::protocol::public_v1::WorkspaceRef {
+                                absolute_path: view
+                                    .canonical_path
+                                    .to_path_buf()
+                                    .unwrap()
+                                    .to_string_lossy()
+                                    .into(),
+                                expected_workspace_id: view.workspace_id.clone(),
+                            }),
+                        },
+                    ),
+                )
+                .unwrap()
+                .into_inner()
+                .writer
+                .unwrap();
+            assert_eq!(observed.owner_run_id, Some(id.to_string()));
+            let reader = mutation(
+                view,
+                credential,
+                id,
+                RunMutationOperation::ReleaseWriter,
+                "dedicated release",
+            );
+            assert_eq!(
+                reader.projection.thread_id.as_deref(),
+                Some(thread.as_str())
+            );
+        }
+    }
+    let config = dolgorae::pool::PoolConfiguration {
+        readonly_server_limit: pool_limit,
+        dedicated_generation_cap: 1,
+        ..Default::default()
+    };
+    fs::write(
+        home.root().join("pool-configuration.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    let replay = runtime
+        .block_on(transport.start_run(tonic::Request::new(dedicated.clone())))
+        .unwrap()
+        .into_inner();
+    assert!(replay.exact_replay);
+    let accepted_request = dedicated.clone();
+    dedicated.idempotency_key = "over-capacity".into();
+    dedicated.context = context();
+    let refused = runtime
+        .block_on(transport.start_run(tonic::Request::new(dedicated)))
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::ResourceExhausted);
+    let diagnostics = runtime
+        .block_on(
+            runtime_client.list_profile_diagnostics(pb::ListProfileDiagnosticsRequest {
+                context: context(),
+                profile_name: "fixture-a".into(),
+                after_cursor: String::new(),
+                limit: 100,
+                projection: pb::ProjectionProfile::Minimal as i32,
+            }),
+        )
+        .unwrap()
+        .into_inner();
+    assert!(
+        diagnostics
+            .items
+            .iter()
+            .any(|item| item.category == "sixth_dedicated_generation")
+    );
+    let config_path = root.join("fixture-a/config.toml");
+    let original_config = fs::read(&config_path).unwrap();
+    let mut upgraded = b"model_context_window = 32768\n".to_vec();
+    upgraded.extend_from_slice(&original_config);
+    fs::write(&config_path, upgraded).unwrap();
+    let replay = runtime.block_on(transport.start_run(tonic::Request::new(accepted_request)));
+    fs::write(&config_path, &original_config).unwrap();
+    assert!(replay.unwrap().into_inner().exact_replay);
+    let first = first_snapshot.unwrap();
+    let closed = mutation(
+        view,
+        credential,
+        ids[0],
+        RunMutationOperation::Close { interrupt: false },
+        "pool member close",
+    );
+    assert_eq!(closed.projection.lifecycle, RunLifecycle::Closed);
+    let sibling = RunSnapshot::load(&home.workspace_root(&view.workspace_id), ids[1], 0).unwrap();
+    let record = sibling.runtime_record.as_ref().unwrap();
+    assert_eq!(
+        classify_worker_identity(record),
+        ProcessIdentityVerdict::Match
+    );
+    assert!(root.join("home/workspace").exists());
+    json!({"schema":"dolgorae.native-caller-pipeline/v1","mode":"readonly_pool","members":16,"configured_k":pool_limit,"fixture_a_servers":1,"independent_account_profile_servers":1,"total_threads":threads.len(),"server_measurement":servers,"compatibility_measurements":compatibility,"same_key_replay":true,"pooled_writer_denials":17,"member_close_preserved_sibling":true,"accepted_native_policy":first.manifest.agent_configuration.native_subagent_policy,"dedicated_generations":6,"sixth_generation_warning":true,"lowered_cap_refusal":true,"same_thread_dedicated_transition":true,"profile_upgrade_original_key_replay":true,"public_v1_writer_observed_modern_holder":true,"public_v2_transport":"private_uds_generated_client","lost_start_ack_lookup_without_resubmit":true,"submit_original_key_lookup":true,"unfenced_start_absence_remains_unresolved":true,"native_model_turns":1})
 }
 
 fn main() {

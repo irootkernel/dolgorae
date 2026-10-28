@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- Serve negotiated public-v2 modern Runs and Session reads with accepted provisioning and safe mixed-manifest observation.
+- Pool fixed read-only members with immutable subagent policy, bounded admission and dedicated-generation capacity diagnostics.
+
 - Reuse checked display observations and database connections, bound RPC and
   stream work, and wake task waits from durable commits. Deduplicate result
   bodies while retaining their identities, with explicit operator-approved

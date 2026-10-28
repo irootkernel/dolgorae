@@ -1081,6 +1081,8 @@ async fn definitive_submit_refusal_survives_gateway_and_worker_restart() {
         }
     }
     steps.push(serde_json::json!({"method":"turn/start","occurrence":3,
+        "respond":{"error":{"code":-32000,"message":"public-v2 test refusal"}}}));
+    steps.push(serde_json::json!({"method":"turn/start","occurrence":4,
         "respond":{"result":{"turn":{"id":"turn-retry"}}},
         "emit":[{"kind":"notification","method":"turn/completed","params":{
             "threadId":"${thread_id}","turn":{"id":"turn-retry","status":"completed","items":[]}}}]}));
@@ -1126,6 +1128,90 @@ async fn definitive_submit_refusal_survives_gateway_and_worker_restart() {
     ];
     let refused = fixture.cli(&args);
     assert_eq!(refused["lookup"]["state"], "not_accepted");
+    // The public-v2 error must retain the same authenticated original lookup
+    // namespace when the Worker returns a transport error after authorization.
+    use dolgorae::protocol::public_v2 as modern;
+    let mut modern_runs =
+        modern::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let current = native_snapshot(&mut runs, &fixture, &id).await;
+    let original = modern::SubmitTurnRequest {
+        context: Some(modern::RequestContext {
+            protocol_version: 2,
+            client_request_id: Uuid::now_v7().to_string(),
+            client_instance_id: "submit-error-association".into(),
+        }),
+        run: Some(modern::RunRef {
+            workspace: Some(modern::WorkspaceRef {
+                absolute_path: fixture.workspace.to_string_lossy().into(),
+                expected_workspace_id: fixture.workspace_id.clone(),
+            }),
+            run_id: id.clone(),
+        }),
+        controller: Some(modern::ControllerCarrierRef {
+            absolute_file_path: fixture.controller.to_string_lossy().into(),
+            expected_controller_id: fixture.controller_id.clone(),
+            expected_controller_generation: 1,
+        }),
+        message: request.message.clone(),
+        write_intent: modern::WriteIntent::Read as i32,
+        idempotency_key: "public-v2-refusal".into(),
+        expected_state_revision: current.state_revision,
+        images: vec![],
+        effort: request.effort.clone(),
+    };
+    let error = modern_runs.submit_turn(original.clone()).await.unwrap_err();
+    let rich = RichStatus::decode(error.details()).unwrap();
+    let detail = modern::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap();
+    assert_eq!(detail.dolgorae_error_code, "TRANSPORT_FAILURE");
+    assert_eq!(detail.effect, modern::EffectState::Unresolved as i32);
+    assert_eq!(
+        detail.classification,
+        modern::FailureClassification::Unknown as i32
+    );
+    assert_eq!(detail.run_id.as_deref(), Some(id.as_str()));
+    let operation = detail.operation.unwrap();
+    assert_eq!(operation.idempotency_key, original.idempotency_key);
+    assert_eq!(
+        operation.operation_kind,
+        modern::OperationKind::SubmitTurn as i32
+    );
+    let scope = operation.caller_scope.unwrap();
+    assert_eq!(scope.workspace_id, fixture.workspace_id);
+    assert_eq!(scope.controller_generation, 1);
+    assert_eq!(
+        scope.principal_ref,
+        refused["lookup"]["namespace"]["controller_principal"]
+    );
+    assert_eq!(
+        scope.aggregate,
+        Some(modern::caller_scope::Aggregate::RunId(id.clone()))
+    );
+
+    let before_v2 = audit(&fixture, &id);
+    let foreign_path = fixture
+        .controller
+        .with_file_name("foreign-error-controller.json");
+    let foreign = dolgorae::controller::create_controller_credential(
+        &foreign_path,
+        dolgorae::domain::ControllerKind::Automation,
+        "foreign-error-controller".into(),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut unauthorized = original;
+    unauthorized.controller = Some(modern::ControllerCarrierRef {
+        absolute_file_path: foreign_path.to_string_lossy().into(),
+        expected_controller_id: foreign.credential.controller_id.to_string(),
+        expected_controller_generation: 1,
+    });
+    let error = modern_runs.submit_turn(unauthorized).await.unwrap_err();
+    let rich = RichStatus::decode(error.details()).unwrap();
+    let denied = modern::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap();
+    assert_eq!(denied.dolgorae_error_code, "CONTROLLER_MISMATCH");
+    assert!(denied.operation.is_none());
+    assert!(denied.idempotency_key.is_none());
+    assert_eq!(audit(&fixture, &id), before_v2);
     let before = audit(&fixture, &id);
     let mut changed = request.clone();
     changed.message.push('!');
@@ -1213,8 +1299,8 @@ async fn definitive_submit_refusal_survives_gateway_and_worker_restart() {
     );
     assert_eq!(
         upstream_turn_starts(&fixture),
-        3,
-        "warmup, correlated refusal and one accepted retry"
+        4,
+        "warmup, v1 and v2 refusals, and one accepted original-key retry"
     );
     gateway.terminate();
 }
@@ -5952,7 +6038,7 @@ async fn native_close_and_pause_interrupt() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_gateway_rejects_caller_manifest_before_effects() {
+async fn mixed_gateway_observes_modern_runs_without_legacy_mutation() {
     let fixture = Fixture::new("run_start_model_list.json");
     let list_args = [
         "run",
@@ -5971,6 +6057,7 @@ async fn legacy_gateway_rejects_caller_manifest_before_effects() {
     let legacy: Value = serde_json::from_slice(&legacy.stdout).unwrap();
     assert_eq!(legacy["schema_version"], 2);
     assert_eq!(legacy["data"]["items"][0]["run_id"], id);
+    let legacy_id = fixture.start_run(&[]);
     let root = fixture.state_root.join("runs").join(&id);
     let path = root.join("manifest.json");
     let original = fs::read(&path).unwrap();
@@ -5988,7 +6075,7 @@ async fn legacy_gateway_rejects_caller_manifest_before_effects() {
     let mut gateway = fixture.start_gateway();
     let channel = gateway.channel().await;
     let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
-    let mut writers = pb::writer_service_client::WriterServiceClient::new(channel);
+    let mut writers = pb::writer_service_client::WriterServiceClient::new(channel.clone());
 
     let error = runs
         .get_run(pb::GetRunRequest {
@@ -6036,18 +6123,57 @@ async fn legacy_gateway_rejects_caller_manifest_before_effects() {
         .unwrap_err();
     semantic_error(&error, "CAPABILITY_UNSUPPORTED");
 
-    let error = runs
+    let listed = runs
         .list_runs(pb::ListRunsRequest {
             context: context(),
             workspace: Some(fixture.workspace()),
             controller_id: None,
         })
         .await
-        .unwrap_err();
-    semantic_error(&error, "CAPABILITY_UNSUPPORTED");
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].run_id, legacy_id);
+    use dolgorae::protocol::public_v2 as modern;
+    let mut modern_runs = modern::run_service_client::RunServiceClient::new(channel);
+    let projected = modern_runs
+        .get_run(modern::GetRunRequest {
+            context: Some(modern::RequestContext {
+                protocol_version: 2,
+                client_request_id: Uuid::now_v7().to_string(),
+                client_instance_id: "mixed-observer".into(),
+            }),
+            run: Some(modern::RunRef {
+                workspace: Some(modern::WorkspaceRef {
+                    absolute_path: fixture.workspace.to_string_lossy().into(),
+                    expected_workspace_id: fixture.workspace_id.clone(),
+                }),
+                run_id: id.clone(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .run
+        .unwrap();
+    assert_eq!(projected.manifest_schema, "dolgorae.run-manifest/v3");
+    assert_eq!(
+        projected.requested_mode,
+        modern::CreationMode::ReadOnly as i32
+    );
+    assert_eq!(
+        projected
+            .configuration
+            .as_ref()
+            .unwrap()
+            .controller_instructions_sha256,
+        manifest.instructions.digest()
+    );
+    let observer = format!("{projected:?}");
+    assert!(!observer.contains("Follow the captured common guidance."));
+    assert!(!observer.contains("Implement the assigned task."));
 
-    // The frozen public adapter refuses the successor shape. The modern CLI
-    // reads it without creating a Worker, taking a writer, or changing history.
+    // Run mutation remains outside v1; both observers preserve accepted history.
     let observed = fixture.cli(&[
         "run",
         "status",
@@ -6065,12 +6191,17 @@ async fn legacy_gateway_rejects_caller_manifest_before_effects() {
     assert_eq!(listed["schema_version"], 4);
     assert_eq!(listed["ok"], true);
     let listed = &listed["data"];
-    assert_eq!(listed["items"].as_array().unwrap().len(), 1);
-    assert_eq!(listed["items"][0]["run_id"], id);
-    assert_eq!(listed["items"][0]["selected_role"], "general");
+    assert_eq!(listed["items"].as_array().unwrap().len(), 2);
+    let selected = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["run_id"] == id)
+        .unwrap();
+    assert_eq!(selected["selected_role"], "general");
     assert_eq!(fs::read(root.join("audit.jsonl")).unwrap(), audit);
     assert_eq!(fs::read(root.join("state.json")).unwrap(), state);
-    assert_eq!(run_count(&fixture), 1);
+    assert_eq!(run_count(&fixture), 2);
     let worker = dolgorae::worker::runtime_record_path(
         &dolgorae::worker::runtime_root(&fixture.state_root),
         Uuid::parse_str(&id).unwrap(),

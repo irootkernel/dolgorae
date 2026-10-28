@@ -5691,6 +5691,41 @@ required for `MILESTONE-BH1-P`, EPIC-008, or v0.1.3 release eligibility. EPIC-00
 may build on the verified provider without claiming Gul acceptance. Publication,
 installation, and final release-candidate QA remain separate authorized actions.
 
+### Modern public Run and fixed read-only admission
+
+The public-v2 adapter MUST use the existing caller startup, accepted provisioning,
+Controller, mutation and Session services. It MUST validate explicit access,
+lane, assurance and captured configuration before effects. Modern Run projection
+MUST read the accepted manifest directly. Public-v1 listing MUST retain readable
+legacy entries in a mixed workspace; its writer-status method MUST also remain
+readable when a modern Run owns the Writer.
+
+Successor fixed read-only members MUST retain their admitted shared lane and
+read-only policy throughout their lifetime. Compatible members share the existing
+Profile Server and its generation-wide membership authority. A member close
+stops only its Worker and Thread participation. Profile lifecycle alone owns
+shared-generation shutdown and complete descendant proof. Pool compatibility
+MUST bind the exact Profile, account home, executable, process-static configuration,
+instruction suppression and native-subagent policy. Disabled native subagents
+MUST be enforced in the immutable launch arguments, with no per-lease elevation.
+Existing Profile definitions and accepted enabled launches retain their meaning.
+
+Public Start response-loss lookup MUST read the original startup reservation and
+receipt without resubmitting, loading current Role sources or preparing a new
+Profile binding. Its normalized input binds the resolved startup request,
+admitted Agent Configuration and accepted policy digest through
+`dolgorae.mutation-envelope/v1`; allocation IDs and timestamps remain outside
+that input identity. A missing startup completion receipt MUST remain unresolved.
+Submit lookup MUST use the existing authoritative operation ledger and retain
+its original Controller scope, key, acceptance and uncertainty.
+
+The operator pool configuration uses `dolgorae.pool-configuration/v1`, K 1..16
+(default 1) and a dedicated live-generation cap 1..32 (default 8). New successor
+admission MUST reserve capacity before allocation or provider effects. It MUST
+return a typed capacity refusal at the bound and warn before the sixth dedicated
+generation. Lowering a cap MUST preserve accepted work, recovery, close and
+finalization. Capacity accounting includes uncertain accepted generations.
+
 ### Planned v0.1.4 host and joint acceptance
 
 These adopted successor requirements retain the complete CD/GI/EN scope and

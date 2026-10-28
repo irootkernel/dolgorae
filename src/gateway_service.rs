@@ -330,14 +330,42 @@ impl CoreGatewayBackend {
             crate::writer::WriterStore::new(&root, &view.workspace_id, DarwinSystem.current_uid())
                 .load()?;
         if let Some(holder) = writer.holder.as_ref() {
-            let (_, snapshot, facts) = self.run_snapshot(&pb::RunRef {
-                workspace: Some(reference.clone()),
-                run_id: holder.run_id.to_string(),
-            })?;
+            let (snapshot, observation) = RunSnapshot::observe_display(&root, holder.run_id, 0)?;
+            if snapshot.manifest.workspace_id != view.workspace_id {
+                return Err(invalid("writer", "Writer belongs to another workspace"));
+            }
+            let facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
             project::writer_state(&snapshot, &facts, self.context())
         } else {
             project::ownerless_writer_state(&writer, self.context())
         }
+    }
+}
+
+impl crate::gateway_v2::ModernGatewayBackend for CoreGatewayBackend {
+    fn home(&self) -> &DolgoraeHome {
+        &self.home
+    }
+    fn instance_id(&self) -> Uuid {
+        self.instance_id
+    }
+    fn workspace(&self, reference: &pb::WorkspaceRef) -> Result<WorkspaceView, MachineError> {
+        CoreGatewayBackend::workspace(self, reference)
+    }
+    fn workspace_observed(
+        &self,
+        reference: &pb::WorkspaceRef,
+    ) -> Result<WorkspaceView, MachineError> {
+        CoreGatewayBackend::workspace_observed(self, reference)
+    }
+    fn controller(
+        &self,
+        reference: &pb::ControllerCarrierRef,
+    ) -> Result<CredentialCarrier, MachineError> {
+        CoreGatewayBackend::controller(self, reference)
+    }
+    fn context(&self) -> pb::ResponseContext {
+        CoreGatewayBackend::context(self)
     }
 }
 
@@ -359,7 +387,7 @@ fn controller_mismatch(run_id: Uuid) -> MachineError {
     )
 }
 
-fn timestamp_ms(value: i64) -> Result<prost_types::Timestamp, MachineError> {
+pub(crate) fn timestamp_ms(value: i64) -> Result<prost_types::Timestamp, MachineError> {
     if value < 0 {
         return Err(MachineError::new(
             "INTERNAL_ERROR",
@@ -376,12 +404,12 @@ fn timestamp_ms(value: i64) -> Result<prost_types::Timestamp, MachineError> {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ResultPageCursor {
-    schema_version: u32,
-    session_id: Uuid,
-    projection_version: u32,
-    captured_publication_head: u64,
-    after_publication_order: u64,
+pub(crate) struct ResultPageCursor {
+    pub(crate) schema_version: u32,
+    pub(crate) session_id: Uuid,
+    pub(crate) projection_version: u32,
+    pub(crate) captured_publication_head: u64,
+    pub(crate) after_publication_order: u64,
 }
 
 fn result_cursor_mac(payload: &[u8], controller_digest: &str) -> String {
@@ -393,7 +421,7 @@ fn result_cursor_mac(payload: &[u8], controller_digest: &str) -> String {
     sha256_hex(&authenticated)
 }
 
-fn encode_result_cursor(
+pub(crate) fn encode_result_cursor(
     cursor: &ResultPageCursor,
     controller_digest: &str,
 ) -> Result<String, MachineError> {
@@ -412,7 +440,7 @@ fn encode_result_cursor(
     ))
 }
 
-fn decode_result_cursor(
+pub(crate) fn decode_result_cursor(
     token: &str,
     session_id: Uuid,
     projection_version: u32,
@@ -736,6 +764,10 @@ fn absolute<'a>(value: &'a str, field: &str) -> Result<&'a Path, MachineError> {
 }
 
 impl GatewayBackend for CoreGatewayBackend {
+    fn modern(&self) -> Result<&dyn crate::gateway_v2::ModernGatewayBackend, MachineError> {
+        Ok(self)
+    }
+
     fn watch_run_events(
         &self,
         request: pb::WatchRunEventsRequest,
@@ -1197,8 +1229,8 @@ impl GatewayBackend for CoreGatewayBackend {
         let items = CoreSemanticService
             .list_runs(&view, controller)?
             .into_iter()
+            .filter(|(snapshot, _)| matches!(snapshot.manifest.schema_version, 1 | 2))
             .map(|(snapshot, observation)| {
-                snapshot.manifest.require_legacy_adapter()?;
                 let mut facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
                 facts.profile_cleanup_required = crate::semantic::profile_cleanup_required(
                     &self.home.workspace_root(&snapshot.manifest.workspace_id),

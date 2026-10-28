@@ -122,23 +122,34 @@ pub fn lookup_submit_operation(args: &[OsString]) -> Result<Value, MachineError>
     let state_root = workspace_state_root(&view)?;
     let run_id = positional_run_id(args)?;
     let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
-    let binding = load_reconciled_controller_binding(&state_root, run_id)?;
-    let controller = authorize_controller(run_id, "run.lookup_operation", &binding, &carrier)?;
-    let runs = RunStore::new(SystemWorkspacePlatform, &state_root);
+    lookup_submit_operation_at(
+        &state_root,
+        &view.workspace_id,
+        run_id,
+        &carrier,
+        &bounded_key(args, "--idempotency-key", 256)?,
+    )
+}
+
+pub(crate) fn lookup_submit_operation_at(
+    state_root: &Path,
+    workspace_id: &str,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    key: &str,
+) -> Result<Value, MachineError> {
+    let binding = load_reconciled_controller_binding(state_root, run_id)?;
+    let controller = authorize_controller(run_id, "run.lookup_operation", &binding, carrier)?;
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
     let manifest = runs.load_manifest(run_id)?;
-    if manifest.workspace_id != view.workspace_id {
+    if manifest.workspace_id != workspace_id {
         return Err(internal("operation lookup crossed its workspace"));
     }
-    let key = bounded_key(args, "--idempotency-key", 256)?;
-    let namespace =
-        crate::operation::Namespace::submit(&controller, &view.workspace_id, run_id, &key)
-            .map_err(|_| {
-                MachineError::invalid_argument(
-                    "--idempotency-key",
-                    "operation namespace is invalid",
-                )
-            })?;
-    let (state, observer) = observe_run_ledger(&state_root, run_id, true)?;
+    let namespace = crate::operation::Namespace::submit(&controller, workspace_id, run_id, key)
+        .map_err(|_| {
+            MachineError::invalid_argument("--idempotency-key", "operation namespace is invalid")
+        })?;
+    let (state, observer) = observe_run_ledger(state_root, run_id, true)?;
     let mut lookup = crate::operation::lookup(observer.records(), &namespace)
         .map_err(|error| match error {
             crate::turn::TurnError::InvalidInput(_) => MachineError::new("RUN_STATE_CONFLICT",
@@ -149,14 +160,14 @@ pub fn lookup_submit_operation(args: &[OsString]) -> Result<Value, MachineError>
         })?;
     if lookup["state"] == "accepted" && lookup["current_outcome"] == "running" {
         let current_worker =
-            crate::worker::runtime_record_path(&crate::worker::runtime_root(&state_root), run_id)
+            crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
                 .ok()
                 .and_then(|path| {
                     crate::worker::read_runtime_record(&path, DarwinSystem.current_uid()).ok()
                 })
                 .filter(|record| {
                     record.identity.run_id == run_id
-                        && record.identity.workspace_id == view.workspace_id
+                        && record.identity.workspace_id == workspace_id
                         && record.identity.run_generation == state.run_generation
                 })
                 .is_some_and(|record| {
@@ -168,6 +179,64 @@ pub fn lookup_submit_operation(args: &[OsString]) -> Result<Value, MachineError>
         }
     }
     Ok(lookup)
+}
+
+pub(crate) fn lookup_start_operation_at(
+    state_root: &Path,
+    workspace_id: &str,
+    controller: &crate::domain::ControllerIdentity,
+    key: &str,
+) -> Result<Value, MachineError> {
+    verify_secure_directory(state_root, DarwinSystem.current_uid())?;
+    let namespace =
+        crate::operation::Namespace::delegation(controller, workspace_id, None, "start_run", key)
+            .map_err(internal)?;
+    let unresolved = |run: Option<Uuid>| {
+        json!({"schema":"dolgorae.operation-lookup/v1","namespace":namespace,"state":"unresolved",
+        "known_subjects":crate::operation::Subjects {run_ref:run.map(|id|id.to_string()),..Default::default()},
+        "effect":"unresolved","required_action":"reconcile_operation"})
+    };
+    let Some(reservation) = StartReservationStore::new(SystemWorkspacePlatform, state_root)
+        .retained_delegation_start(key, controller)?
+    else {
+        // This owner has no retained absence fence. No-file is not nondispatch proof.
+        return Ok(unresolved(None));
+    };
+    if reservation.accepted_intent.workspace_id != workspace_id {
+        return Err(internal("startup lookup crossed its workspace"));
+    }
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
+    let manifest = match runs.load_manifest(reservation.run_id) {
+        Ok(manifest) => manifest,
+        Err(error) if error.code == "RUN_NOT_FOUND" => {
+            return Ok(unresolved(Some(reservation.run_id)));
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(Some(receipt)) = manifest.start_operation_receipt.as_ref() else {
+        return Ok(unresolved(Some(reservation.run_id)));
+    };
+    if runs
+        .load_caller_start_receipt(reservation.run_id, &reservation.normalized_identity_sha256)?
+        .is_none()
+    {
+        return Ok(unresolved(Some(reservation.run_id)));
+    }
+    receipt.validate()?;
+    if receipt.namespace.controller_principal != namespace.controller_principal
+        || receipt.namespace.controller_generation != namespace.controller_generation
+        || receipt.namespace.idempotency_key != namespace.idempotency_key
+        || receipt.namespace.workspace_ref != namespace.workspace_ref
+    {
+        return Err(internal(
+            "startup receipt differs from its original operation namespace",
+        ));
+    }
+    Ok(
+        json!({"schema":"dolgorae.operation-lookup/v1","namespace":namespace,"state":"accepted",
+        "operation_ref":receipt.operation_ref,"accepted_input_digest":receipt.accepted_input_digest,"receipt":receipt,
+        "accepted_subjects":receipt.accepted_subjects,"current_outcome":"completed","result_ref":null,"result_digest":null}),
+    )
 }
 
 pub fn interaction_get(args: &[OsString]) -> Result<Value, MachineError> {
@@ -1086,8 +1155,6 @@ pub(crate) fn start_caller_member_run(
     start_caller_member_run_generation::<crate::instructions::InstructionSnapshot>(input)
 }
 
-// The successor adapters that start a delegated member arrive with TASK-077;
-// the settlement port and its unit test already use this entry point.
 /// Start one delegated member Run from its retained capture.
 ///
 /// The manifest-4 generation reads exactly the accepted bytes the retained
@@ -1250,7 +1317,7 @@ fn start_caller_member_run_generation<I: CallerStartGeneration>(
         &input.idempotency_key,
     )?;
     let carrier = CredentialCarrier::duplicate_fd(input.carrier.raw_fd())?;
-    start_caller_run_generation::<I>(request, carrier, Some(input))
+    start_caller_run_generation::<I>(request, carrier, Some(input), None, None)
 }
 
 #[cfg(test)]
@@ -3052,10 +3119,30 @@ impl CoreSemanticService {
     }
 
     pub fn mutate_run(&self, input: RunMutationInput) -> Result<RunMutationReceipt, MachineError> {
+        self.mutate_run_contract(input, false)
+    }
+
+    pub fn mutate_modern_run(
+        &self,
+        input: RunMutationInput,
+    ) -> Result<RunMutationReceipt, MachineError> {
+        self.mutate_run_contract(input, true)
+    }
+
+    fn mutate_run_contract(
+        &self,
+        input: RunMutationInput,
+        modern: bool,
+    ) -> Result<RunMutationReceipt, MachineError> {
         let view = WorkspaceService::system()?.discover(Some(&input.workspace))?;
         require_workspace_identity(&view, Some(&input.expected_workspace_id))?;
         let state_root = workspace_state_root(&view)?;
         let run_id = input.run_id;
+        if modern {
+            let manifest =
+                RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(run_id)?;
+            require_caller_runtime(&manifest)?;
+        }
         let (verb, prepared, write) = match input.operation {
             RunMutationOperation::Submit { mut request, write } => {
                 request.write = write;
@@ -3115,7 +3202,12 @@ impl CoreSemanticService {
                 });
             }
         };
-        let (_, response) = run_control_typed(
+        let control = if modern {
+            run_control_admitted
+        } else {
+            run_control_typed
+        };
+        let (_, response) = control(
             &view,
             &state_root,
             run_id,
@@ -3155,6 +3247,24 @@ impl CoreSemanticService {
             request.resolve()?,
             carrier,
             None,
+            None,
+            None,
+        )
+    }
+
+    pub fn start_provisioned_run(
+        &self,
+        request: CallerRunStartRequest,
+        carrier: CredentialCarrier,
+        provisioning: &crate::provisioning::RetainedSnapshot,
+        expected_policy_digest: Option<&str>,
+    ) -> Result<RunStartReceipt, MachineError> {
+        start_caller_run_generation::<crate::delegation_identity::InstructionSnapshot>(
+            request.resolve()?,
+            carrier,
+            None,
+            Some(provisioning),
+            expected_policy_digest,
         )
     }
 }
@@ -3273,6 +3383,8 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
     mut request: CallerRunStartRequest,
     carrier: CredentialCarrier,
     member: Option<CallerMemberStart<'_>>,
+    provisioning: Option<&crate::provisioning::RetainedSnapshot>,
+    expected_policy_digest: Option<&str>,
 ) -> Result<RunStartReceipt, MachineError> {
     let view = WorkspaceService::system()?
         .discover_for_run_start(request.workspace.as_deref().map(Path::new))?;
@@ -3286,14 +3398,93 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
     }
     let reservations = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
     let _allocation = reservations.lock_allocation("run-start", &request.idempotency_key)?;
-    let request_digest =
-        crate::run::caller_start_request_digest(&request, &view.canonical_path, &controller)?;
+    let mut provisioned_configuration = provisioning
+        .map(|snapshot| snapshot.admitted_configuration())
+        .transpose()?;
+    if request.specialist_policy.is_some()
+        && let Some((_, configuration)) = &mut provisioned_configuration
+    {
+        configuration.role_reference = None;
+    }
+    let configuration = member
+        .as_ref()
+        .filter(|member| member.configuration.schema_version == 4)
+        .map(|member| member.configuration)
+        .or_else(|| {
+            provisioned_configuration
+                .as_ref()
+                .map(|(_, configuration)| configuration)
+        });
+    let request_digest = crate::run::caller_start_generation_request_digest(
+        &request,
+        &view.canonical_path,
+        &controller,
+        configuration,
+    )?;
     let prior =
         reservations.load_caller_generation::<I>(&request.idempotency_key, &request_digest)?;
     let replay = prior.is_some();
     let home = DolgoraeHome::system()?;
+    if !replay
+        && let Some(member) = &member
+        && member.configuration.schema_version == 4
+    {
+        let disabled = member
+            .global_profile_binding
+            .launch_snapshot
+            .disabled_features
+            .iter()
+            .any(|feature| feature == "multi_agent");
+        if disabled != (member.configuration.native_subagent_policy == "disabled") {
+            return Err(MachineError::new(
+                "SPECIALIST_CONFIGURATION_MISMATCH",
+                "native-subagent launch policy differs from accepted configuration",
+                false,
+                json!({"profile":member.configuration.runtime_profile}),
+            ));
+        }
+    }
+    let lane = member
+        .as_ref()
+        .map(|m| m.configuration.execution_lane)
+        .or_else(|| {
+            provisioned_configuration
+                .as_ref()
+                .map(|(_, c)| c.execution_lane)
+        })
+        .unwrap_or(ExecutionLane::Dedicated);
+    let admission = if !replay {
+        Some(crate::pool::PoolAdmission::acquire(
+            &home,
+            &request.profile,
+            lane,
+        )?)
+    } else {
+        None
+    };
     let (reservation, state) = match prior {
         Some(reservation) => {
+            if let Some(expected) = expected_policy_digest {
+                let actual = reservation
+                    .accepted_intent
+                    .orchestration
+                    .as_ref()
+                    .map(|captures| captures.policy().digest())
+                    .transpose()?;
+                if actual
+                    .as_ref()
+                    .map(|digest| format!("sha256:{digest}"))
+                    .as_deref()
+                    != Some(expected)
+                {
+                    return Err(MachineError::new(
+                        "IDEMPOTENCY_CONFLICT",
+                        "accepted policy differs",
+                        false,
+                        json!({"run_id":reservation.run_id,"idempotency_key":request.idempotency_key}),
+                    ));
+                }
+            }
             if let Some(captures) = &reservation.accepted_intent.orchestration {
                 captures.validate_for_state_root(&state_root)?;
             }
@@ -3344,21 +3535,31 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
             let instructions = match &member {
                 Some(member) => I::from_run_capture(&member.configuration.instructions)
                     .ok_or_else(|| internal("member has no accepted instructions"))?,
-                None => I::capture_source(
-                    &crate::instructions::InstructionSourceStore::new(&home),
-                    &request.role,
-                )?,
+                None => match &provisioned_configuration {
+                    Some((_, configuration)) => I::from_run_capture(&configuration.instructions)
+                        .ok_or_else(|| internal("provisioning instruction generation differs"))?,
+                    None => I::capture_source(
+                        &crate::instructions::InstructionSourceStore::new(&home),
+                        &request.role,
+                    )?,
+                },
             };
             // A generation-4 manifest records its admitted Agent Configuration
             // and the explicit start-receipt slot; generation 3 records neither.
             let admitted_configuration = match I::MANIFEST_VERSION {
-                4 => member.as_ref().map(|member| member.configuration.clone()),
+                4 => member
+                    .as_ref()
+                    .map(|member| member.configuration.clone())
+                    .or_else(|| provisioned_configuration.as_ref().map(|(_, c)| c.clone())),
                 _ => None,
             };
             let binding = match &member {
                 Some(member) => member.global_profile_binding.clone(),
-                None => ResolvedGlobalProfile::resolve(&home, &request.profile)?
-                    .prepare_qualified(&home)?,
+                None => match provisioning {
+                    Some(snapshot) => snapshot.profile_binding().clone(),
+                    None => ResolvedGlobalProfile::resolve(&home, &request.profile)?
+                        .prepare_qualified(&home)?,
+                },
             };
             if !binding.caller_workspace_supported()
                 && !(member.is_some() && binding.accepted_caller_workspace_supported())
@@ -3381,6 +3582,23 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
                     Ok::<_, MachineError>(captures)
                 })
                 .transpose()?;
+            if let Some(expected) = expected_policy_digest {
+                let actual = orchestration
+                    .as_ref()
+                    .map(|captures| captures.policy().digest())
+                    .transpose()?;
+                if actual
+                    .as_ref()
+                    .map(|digest| format!("sha256:{digest}"))
+                    .as_deref()
+                    != Some(expected)
+                {
+                    return Err(MachineError::invalid_argument(
+                        "policy",
+                        "selected policy changed before admission",
+                    ));
+                }
+            }
             let candidate = member
                 .as_ref()
                 .map_or_else(Uuid::now_v7, |member| member.run_id);
@@ -3488,6 +3706,32 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
         run_id,
     )?;
     drop(_process_startup);
+    if admission
+        .as_ref()
+        .is_some_and(|admission| admission.sixth_generation_warning)
+    {
+        crate::profile::append_profile_diagnostic(
+            &home
+                .root()
+                .join("profiles")
+                .join(&intent.global_profile_binding.server_key),
+            "sixth_dedicated_generation",
+            json!({"profile":intent.request.profile,"live_dedicated_generations":6}),
+            crate::profile::DiagnosticProjection::Minimal,
+        )?;
+    }
+    if manifest.execution_lane == ExecutionLane::SharedReadonly {
+        ensure_run_worker(&view, &state_root, run_id)?;
+        publish_pool_start_receipt(&state_root, &reservation)?;
+        return Ok(RunStartReceipt {
+            snapshot: RunSources::load(
+                &state_root,
+                run_id,
+                observed_control_socket_epoch(&state_root, run_id),
+            )?,
+            exact_replay: replay,
+        });
+    }
     // Physical startup always establishes a reader. Writable intent is realized
     // only by the prepared, proof-checked transaction below.
     let start = if intent.request.access == crate::domain::CallerWorkspaceAccess::Writable {
@@ -3589,9 +3833,15 @@ fn load_or_publish_caller_manifest<I: CallerStartGeneration>(
                 if let Some(plan) = member.reviewer_plan {
                     plan.validate_manifest(&manifest)?;
                 }
-            } else if intent.orchestration.is_some() {
-                manifest.aggregate_binding =
-                    caller_primary_binding::<I>(store.state_root(), intent)?;
+            } else {
+                if I::MANIFEST_VERSION == 4 {
+                    manifest.start_operation_receipt =
+                        Some(Some(crate::run::public_start_operation_receipt(intent)?));
+                }
+                if intent.orchestration.is_some() {
+                    manifest.aggregate_binding =
+                        caller_primary_binding::<I>(store.state_root(), intent)?;
+                }
             }
             store.publish(&manifest)?;
             Ok(manifest)
@@ -3699,7 +3949,11 @@ fn replay_published_caller_start<I: crate::run::CallerInstructionGeneration>(
         .load_caller_start_receipt(reservation.run_id, &reservation.normalized_identity_sha256)?
         .is_none()
     {
-        reconcile_caller_start_receipt::<I>(state_root, view, reservation, manifest, carrier)?;
+        if manifest.execution_lane == ExecutionLane::SharedReadonly {
+            publish_pool_start_receipt(state_root, reservation)?;
+        } else {
+            reconcile_caller_start_receipt::<I>(state_root, view, reservation, manifest, carrier)?;
+        }
     }
     if reservation.accepted_intent.orchestration.is_some() {
         crate::orchestration::OrchestrationStore::open(state_root)?
@@ -3961,6 +4215,8 @@ fn build_delegated_manifest(
         .as_ref()
         .ok_or_else(|| internal("delegated manifest has no admitted configuration"))?;
     manifest.agent_configuration = configuration.clone();
+    manifest.execution_lane = configuration.execution_lane;
+    manifest.requested_assurance = configuration.required_assurance;
     manifest.creation_mode = Some(
         if intent.request.access == crate::domain::CallerWorkspaceAccess::Writable {
             "writable"
@@ -4076,6 +4332,41 @@ fn start_caller_writer(
         })?;
     }
     result
+}
+
+fn publish_pool_start_receipt<I: crate::run::CallerInstructionGeneration>(
+    state_root: &Path,
+    reservation: &crate::run::CallerStartReservation<I>,
+) -> Result<(), MachineError> {
+    let snapshot = RunSources::load(
+        state_root,
+        reservation.run_id,
+        observed_control_socket_epoch(state_root, reservation.run_id),
+    )?;
+    let policy = &snapshot.captured_effective_policy;
+    if snapshot.manifest.execution_lane != ExecutionLane::SharedReadonly
+        || policy.access != Access::Read
+        || policy.verification != crate::domain::PolicyVerification::Verified
+    {
+        return Err(internal("pooled startup has no verified read-only binding"));
+    }
+    RunStore::new(SystemWorkspacePlatform, state_root)
+        .publish_caller_start_receipt(&crate::run::CallerStartReceipt {
+            schema: "dolgorae.caller-start-receipt/v1".into(),
+            run_id: reservation.run_id,
+            accepted_intent_sha256: reservation.normalized_identity_sha256.clone(),
+            global_profile_binding_sha256: reservation
+                .accepted_intent
+                .global_profile_binding
+                .digest()?,
+            original_thread_id: snapshot
+                .projection
+                .thread_id
+                .ok_or_else(|| internal("pooled startup is threadless"))?,
+            run_generation: snapshot.projection.run_generation,
+            effective_policy: policy.clone(),
+        })
+        .map(|_| ())
 }
 
 fn publish_caller_start_receipt<I: crate::run::CallerInstructionGeneration>(
@@ -12133,7 +12424,9 @@ fn resume_generation_release(
 /// policy as a generation-3 caller Run; only the legacy generations take the
 /// Standard policy.
 fn caller_session_safety_policy(manifest: &RunManifest) -> crate::turn::SessionSafetyPolicy {
-    if crate::run::is_caller_workspace_generation(manifest.schema_version) {
+    if manifest.schema_version == 4 && manifest.execution_lane == ExecutionLane::SharedReadonly {
+        crate::turn::SessionSafetyPolicy::FixedReadOnly
+    } else if crate::run::is_caller_workspace_generation(manifest.schema_version) {
         crate::turn::SessionSafetyPolicy::CallerWorkspace
     } else {
         crate::turn::SessionSafetyPolicy::Standard
@@ -12148,6 +12441,7 @@ fn caller_session_safety_policy(manifest: &RunManifest) -> crate::turn::SessionS
 /// writer back as legacy runs do.
 fn requires_caller_policy_proof(manifest: &RunManifest) -> bool {
     crate::run::is_caller_workspace_generation(manifest.schema_version)
+        && manifest.execution_lane == ExecutionLane::Dedicated
 }
 
 fn verify_caller_execution_executable(

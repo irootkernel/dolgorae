@@ -5,6 +5,14 @@ pub mod public_v1 {
     include!(concat!(env!("OUT_DIR"), "/dolgorae.public.v1.rs"));
 }
 
+pub mod public_v2 {
+    #![allow(clippy::all)]
+    include!(concat!(env!("OUT_DIR"), "/dolgorae.public.v2.rs"));
+}
+
+pub const PUBLIC_V2_DESCRIPTOR: &[u8] =
+    include_bytes!("../docs/protocol/dolgorae-public-v2.descriptor.pb");
+
 pub const PUBLIC_V1_DESCRIPTOR: &[u8] =
     include_bytes!("../docs/protocol/dolgorae-public-v1.descriptor.pb");
 pub const PUBLIC_V1_DESCRIPTOR_SHA256: &str =

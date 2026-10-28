@@ -28,8 +28,8 @@ TASK-092 are COMPLETE. With that prerequisite met, Master resumed EPIC-020, whic
 is ACTIVE.
 EPIC-009, EPIC-021, and EPIC-022 remain PLANNED for v0.1.4, in that execution
 order. TASK-067 is COMPLETE;
-TASK-068 through TASK-077 are COMPLETE;
-TASK-078 through TASK-089 remain PLANNED.
+TASK-068 through TASK-078 are COMPLETE;
+TASK-079 through TASK-089 remain PLANNED.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -2674,7 +2674,7 @@ Handoff: Implemented transport/export and actual consumer-path evidence for this
 
 ### TASK-078: Serve Modern Runs and Bound Read-Only Execution
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-077.
 

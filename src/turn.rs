@@ -89,6 +89,7 @@ pub enum SessionSafetyPolicy {
     #[default]
     Standard,
     ReviewerReadOnly,
+    FixedReadOnly,
     CallerWorkspace,
 }
 
@@ -2020,6 +2021,7 @@ pub struct TurnCoordinator<S, J, A> {
     sandbox: String,
     approval_policy: String,
     safety_policy: SessionSafetyPolicy,
+    fixed_readonly_verified: bool,
     run_generation: u64,
     server_key: String,
     server_epoch: u64,
@@ -2107,7 +2109,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
         if config.candidate_tools
             && (config.primary_tool.is_some()
-                || config.safety_policy != SessionSafetyPolicy::ReviewerReadOnly
+                || !matches!(
+                    config.safety_policy,
+                    SessionSafetyPolicy::ReviewerReadOnly | SessionSafetyPolicy::FixedReadOnly
+                )
                 || config.sandbox != "read-only"
                 || config.approval_policy != "never"
                 || matches!(config.attach, ThreadAttach::Fork { .. }))
@@ -2117,7 +2122,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         if let Some(reader) = &config.candidate_reader
             && (!config.candidate_tools
                 || config.primary_tool.is_some()
-                || config.safety_policy != SessionSafetyPolicy::ReviewerReadOnly
+                || !matches!(
+                    config.safety_policy,
+                    SessionSafetyPolicy::ReviewerReadOnly | SessionSafetyPolicy::FixedReadOnly
+                )
                 || config.sandbox != "read-only"
                 || config.approval_policy != "never"
                 || reader.run_id() != config.run_id
@@ -2133,7 +2141,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
         let experimental_api = config.primary_tool.is_some()
             || config.candidate_tools
-            || config.safety_policy == SessionSafetyPolicy::CallerWorkspace;
+            || matches!(
+                config.safety_policy,
+                SessionSafetyPolicy::CallerWorkspace | SessionSafetyPolicy::FixedReadOnly
+            );
         let initialized = server.request("initialize", serde_json::json!({
             "clientInfo": {"name":"dolgorae","title":"Dolgorae","version":env!("CARGO_PKG_VERSION")},
             "capabilities": {"experimentalApi":experimental_api,"optOutNotificationMethods":[]}
@@ -2144,7 +2155,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         server.notify("initialized", serde_json::json!({}))?;
         let thread_id = None;
         let state = CoordinatorState::Threadless;
-        Ok(Self {
+        let mut coordinator = Self {
             server,
             journal,
             artifacts,
@@ -2179,6 +2190,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             sandbox: config.sandbox,
             approval_policy: config.approval_policy,
             safety_policy: config.safety_policy,
+            fixed_readonly_verified: false,
             run_generation: config.run_generation,
             server_key: config.server_key,
             server_epoch: config.server_epoch,
@@ -2200,7 +2212,39 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             last_effective_policy: None,
             caller_startup_phase: None,
             caller_startup_failure: None,
-        })
+        };
+        if coordinator.safety_policy == SessionSafetyPolicy::FixedReadOnly {
+            if coordinator.sandbox != "read-only" || coordinator.approval_policy != "never" {
+                return Err(TurnError::CorrelationMismatch);
+            }
+            coordinator.check_caller_configuration()?;
+            let mut cursor = Value::Null;
+            for _ in 0..16 {
+                let features = coordinator.server.request(
+                    "experimentalFeature/list",
+                    serde_json::json!({"cursor":cursor,"limit":100}),
+                )?;
+                if let Some(feature) = features["data"].as_array().and_then(|items| {
+                    items
+                        .iter()
+                        .find(|feature| feature["name"] == "multi_agent")
+                }) {
+                    if feature["enabled"] != false {
+                        return Err(TurnError::CorrelationMismatch);
+                    }
+                    coordinator.fixed_readonly_verified = true;
+                    break;
+                }
+                cursor = features["nextCursor"].clone();
+                if cursor.is_null() {
+                    break;
+                }
+            }
+            if !coordinator.fixed_readonly_verified {
+                return Err(TurnError::CorrelationMismatch);
+            }
+        }
+        Ok(coordinator)
     }
 
     #[must_use]
@@ -2291,7 +2335,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     }
 
     pub(crate) fn is_caller_workspace(&self) -> bool {
-        self.safety_policy == SessionSafetyPolicy::CallerWorkspace || self.candidate_tools
+        matches!(
+            self.safety_policy,
+            SessionSafetyPolicy::CallerWorkspace | SessionSafetyPolicy::FixedReadOnly
+        ) || self.candidate_tools
     }
 
     fn caller_startup_phase(&mut self, phase: &'static str) {
@@ -2511,7 +2558,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         thread_generation: u64,
         write: bool,
     ) -> Result<crate::domain::EffectivePolicy, TurnError> {
-        let qualified = self.caller_runtime.is_some();
+        let qualified = self.caller_runtime.is_some() || self.fixed_readonly_verified;
         Ok(crate::domain::EffectivePolicy {
             access: if qualified {
                 if write {
@@ -2557,7 +2604,12 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         ) {
             return Err(TurnError::TurnBusy);
         }
-        if write && self.safety_policy == SessionSafetyPolicy::ReviewerReadOnly {
+        if write
+            && matches!(
+                self.safety_policy,
+                SessionSafetyPolicy::ReviewerReadOnly | SessionSafetyPolicy::FixedReadOnly
+            )
+        {
             return Err(TurnError::InvalidInput(
                 "Reviewer read-only policy cannot acquire writer access",
             ));
@@ -3857,7 +3909,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         if !params.is_object() {
             return Err(TurnError::InvalidInput("thread parameters are invalid"));
         }
-        if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+        if matches!(
+            self.safety_policy,
+            SessionSafetyPolicy::CallerWorkspace | SessionSafetyPolicy::FixedReadOnly
+        ) {
             self.check_caller_process_quiescence()?;
             params["config"] = serde_json::json!({
                 "project_doc_max_bytes": 0,
@@ -4503,7 +4558,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 .respond_error(request_id, -32601, "method not supported")?;
             return Ok(());
         }
-        if self.safety_policy == SessionSafetyPolicy::ReviewerReadOnly {
+        if matches!(
+            self.safety_policy,
+            SessionSafetyPolicy::ReviewerReadOnly | SessionSafetyPolicy::FixedReadOnly
+        ) {
             self.server.respond_error(
                 request_id,
                 -32000,

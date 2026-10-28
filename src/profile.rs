@@ -2921,6 +2921,50 @@ pub(crate) fn qualified_snapshot_for_global(
     )
 }
 
+/// Successor policy is part of the immutable launch, never the registry DTO.
+pub(crate) fn specialist_snapshot_for_global(
+    home: &DolgoraeHome,
+    name: &str,
+    profile: &RuntimeProfile,
+    native_subagents: bool,
+) -> Result<ProfileSnapshot, MachineError> {
+    let mut snapshot = qualified_snapshot_for_global(home, name, profile)?;
+    snapshot
+        .normalized_argv
+        .extend(["-c".to_owned(), "project_doc_max_bytes=0".to_owned()]);
+    if !native_subagents {
+        snapshot
+            .normalized_argv
+            .extend(["--disable".to_owned(), "multi_agent".to_owned()]);
+        snapshot.enabled_features.clear();
+        snapshot.disabled_features.push("multi_agent".to_owned());
+        snapshot.disabled_features.sort();
+    }
+    snapshot
+        .sanitized_environment
+        .insert("DOLGORAE_SUCCESSOR_PROFILE".to_owned(), name.to_owned());
+    let contract = json!({
+        "schema_version": 1,
+        "canonical_codex_home": snapshot.canonical_codex_home,
+        "normalized_argv": snapshot.normalized_argv,
+        "launch_cwd_policy": snapshot.launch_cwd_policy,
+        "launch_mode": "app_server_unix_socket_v1",
+        "sanitized_environment": snapshot.sanitized_environment,
+        "executable_identity": snapshot.executable_identity,
+        "process_static_configuration": snapshot.process_static_configuration,
+        "codex_version": snapshot.codex_version,
+        "app_server_schema_sha256": snapshot.schema_bundle_sha256,
+        "compatibility_manifest_sha256": snapshot.compatibility_manifest_sha256,
+        "enabled_features": snapshot.enabled_features,
+        "disabled_features": snapshot.disabled_features,
+    });
+    snapshot.launch_contract_sha256 = canonical_sha256(&contract)?;
+    snapshot.server_key = domain_separated_sha256(b"dolgorae-profile-server-key-v1\0", &contract)?;
+    snapshot.derived_launch_cwd =
+        path_utf8(&home.root().join("profiles").join(&snapshot.server_key))?.to_owned();
+    Ok(snapshot)
+}
+
 pub(crate) fn observe_qualified_global_profile(
     home: &DolgoraeHome,
     name: &str,
@@ -7190,6 +7234,112 @@ impl ProfileOperation {
     }
 }
 
+/// Safe diagnostics across the selected Profile's retained launch bindings.
+/// The page fence changes when any source head changes; callers then refresh.
+pub(crate) struct PublicDiagnosticPage {
+    pub offset: usize,
+    pub items: Vec<(String, String)>,
+    pub head: String,
+    pub next: Option<String>,
+}
+pub(crate) fn public_diagnostics(
+    home: &DolgoraeHome,
+    name: &str,
+    after: &str,
+    limit: u32,
+) -> Result<PublicDiagnosticPage, MachineError> {
+    if limit == 0 || limit > 500 {
+        return Err(MachineError::invalid_argument(
+            "limit",
+            "diagnostic page limit must be 1..500",
+        ));
+    }
+    let keys = crate::global_profile::GlobalProfileStore::new(home).with_resolved(name, |_| {
+        crate::global_profile::bound_server_keys_under_root_lock(home.root(), name)
+    })?;
+    let mut items = Vec::new();
+    let mut total = 0;
+    for key in keys {
+        let path = home
+            .root()
+            .join("profiles")
+            .join(key)
+            .join("diagnostics.jsonl");
+        let Some(file) =
+            crate::workspace::open_secure_file_if_present(&path, DarwinSystem.current_uid())?
+        else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        file.take(MAX_DIAGNOSTIC_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(io_error)?;
+        total += bytes.len() as u64;
+        if total > MAX_DIAGNOSTIC_BYTES {
+            return Err(MachineError::new(
+                "STORAGE_CAPACITY_EXCEEDED",
+                "Profile diagnostics exceed the observation bound",
+                false,
+                json!({"resource":"profile_diagnostics"}),
+            ));
+        }
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            return Err(internal("Profile diagnostic append is incomplete"));
+        }
+        for line in bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let record: Value = serde_json::from_slice(line).map_err(internal)?;
+            let id = record["diagnostic_id"]
+                .as_str()
+                .filter(|id| Uuid::parse_str(id).is_ok())
+                .ok_or_else(|| internal("Profile diagnostic identity is invalid"))?;
+            let kind = record["kind"]
+                .as_str()
+                .filter(|kind| {
+                    !kind.is_empty()
+                        && kind.len() <= 128
+                        && kind
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+                })
+                .ok_or_else(|| internal("Profile diagnostic kind is invalid"))?;
+            items.push((id.to_owned(), kind.to_owned()));
+        }
+    }
+    let head = crate::jcs::sha256_hex(&serde_json::to_vec(&(name, &items)).map_err(internal)?);
+    let offset = if after.is_empty() {
+        0
+    } else {
+        let (captured, offset) = after.split_once(':').ok_or_else(|| {
+            MachineError::invalid_argument("after_cursor", "diagnostic cursor is invalid")
+        })?;
+        if captured != head {
+            return Err(MachineError::invalid_argument(
+                "after_cursor",
+                "diagnostic sources changed; refresh the page",
+            ));
+        }
+        offset.parse::<usize>().map_err(|_| {
+            MachineError::invalid_argument("after_cursor", "diagnostic cursor is invalid")
+        })?
+    };
+    if offset > items.len() {
+        return Err(MachineError::invalid_argument(
+            "after_cursor",
+            "diagnostic cursor is beyond the captured head",
+        ));
+    }
+    let end = items.len().min(offset + limit as usize);
+    Ok(PublicDiagnosticPage {
+        offset,
+        items: items[offset..end].to_vec(),
+        next: (end < items.len()).then(|| format!("{head}:{end}")),
+        head: format!("{head}:{}", items.len()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     fn profile_list_fixture() -> (
@@ -7617,6 +7767,62 @@ mod tests {
         let mut invalid = item;
         invalid["isDefault"] = serde_json::json!(false);
         assert!(super::normalize_observed_models("p", &[invalid]).is_err());
+    }
+
+    #[test]
+    fn public_diagnostics_cover_retained_bindings_without_private_details() {
+        let (root, home, definition) = profile_list_fixture();
+        let definition_digest =
+            canonical_sha256(&serde_json::to_value(definition).unwrap()).unwrap();
+        let registry = crate::global_profile::GlobalProfileStore::new(&home);
+        for (key, kind) in [
+            ("a".repeat(64), "foreign_thread_request_ignored"),
+            ("b".repeat(64), "sixth_dedicated_generation"),
+        ] {
+            registry
+                .record_binding(crate::global_profile::ProfileBindingRecord {
+                    selected_name: "profile-0".into(),
+                    definition_sha256: definition_digest.clone(),
+                    server_key: key.clone(),
+                    launch_snapshot_sha256: "c".repeat(64),
+                })
+                .unwrap();
+            append_profile_diagnostic(
+                &home.root().join("profiles").join(key),
+                kind,
+                json!({"private":"credential-canary"}),
+                DiagnosticProjection::Operational,
+            )
+            .unwrap();
+        }
+        let first = public_diagnostics(&home, "profile-0", "", 1).unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].1, "foreign_thread_request_ignored");
+        let next = first.next.unwrap();
+        let second = public_diagnostics(&home, "profile-0", &next, 1).unwrap();
+        assert_eq!(second.items[0].1, "sixth_dedicated_generation");
+        assert!(second.next.is_none());
+        assert!(
+            public_diagnostics(&home, "profile-1", "", 100)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        append_profile_diagnostic(
+            &home.root().join("profiles").join("b".repeat(64)),
+            "server_ready",
+            json!({"private":"credential-canary"}),
+            DiagnosticProjection::Operational,
+        )
+        .unwrap();
+        assert_eq!(
+            public_diagnostics(&home, "profile-0", &next, 1)
+                .err()
+                .unwrap()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

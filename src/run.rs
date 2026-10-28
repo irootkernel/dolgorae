@@ -1325,7 +1325,11 @@ impl CallerStartReceipt {
             }
         };
         if self.schema != "dolgorae.caller-start-receipt/v1"
-            || !manifest.uses_caller_workspace_lane()
+            || !(manifest.uses_caller_workspace_lane()
+                || (manifest.schema_version == 4
+                    && manifest.execution_lane == ExecutionLane::SharedReadonly
+                    && manifest.agent_configuration.native_subagent_policy == "disabled"
+                    && access == Access::Read))
             || self.run_id != manifest.run_id
             || self.accepted_intent_sha256 != intent_sha256
             || !is_sha256(intent_sha256)
@@ -1622,6 +1626,131 @@ enum AllocationReservation {
     Delegation(Box<CallerStartReservation<crate::delegation_identity::InstructionSnapshot>>),
 }
 
+fn public_start_normalized_body<I: CallerInstructionGeneration>(
+    intent: &CallerStartIntent<I>,
+) -> Result<serde_json::Value, MachineError> {
+    #[derive(serde::Serialize)]
+    struct NormalizedStart<'a> {
+        schema: &'static str,
+        workspace: &'a LosslessPath,
+        expected_workspace_id: Option<&'a str>,
+        profile: &'a str,
+        control_mode: ControlMode,
+        requested_access: crate::domain::CallerWorkspaceAccess,
+        role: &'a str,
+        policy_name: Option<&'a str>,
+        policy_snapshot_digest: Option<String>,
+        model: &'a str,
+        effort: &'a str,
+        purpose_kind: crate::domain::PurposeKind,
+        purpose_label: Option<&'a str>,
+        parent: Option<&'a ParentReference>,
+        required_capabilities: &'a [String],
+        execution_lane: ExecutionLane,
+        required_assurance: Assurance,
+        native_subagent_policy: &'a str,
+        configuration_digest: String,
+        role_snapshot_digest: &'a str,
+        instruction_identity_digest: &'a str,
+    }
+    let request = &intent.request;
+    let configuration = intent
+        .admitted_configuration
+        .as_ref()
+        .ok_or_else(|| reservation_invalid("public startup configuration is missing"))?;
+    let admitted = configuration
+        .admitted_configuration
+        .as_ref()
+        .ok_or_else(|| reservation_invalid("public startup admission is missing"))?;
+    let instructions = configuration
+        .instructions
+        .delegation()
+        .ok_or_else(|| reservation_invalid("public startup instructions are missing"))?;
+    serde_json::to_value(NormalizedStart {
+        schema: "dolgorae.public-start-normalized/v1",
+        workspace: &intent.canonical_workspace,
+        expected_workspace_id: request.expected_workspace_id.as_deref(),
+        profile: &request.profile,
+        control_mode: request.control_mode,
+        requested_access: request.access,
+        role: &request.role,
+        policy_name: request.specialist_policy.as_deref(),
+        policy_snapshot_digest: intent
+            .orchestration
+            .as_ref()
+            .map(|captures| {
+                captures
+                    .policy()
+                    .digest()
+                    .map(|digest| format!("sha256:{digest}"))
+            })
+            .transpose()?,
+        model: &intent.readiness.model,
+        effort: &intent.readiness.default_effort,
+        purpose_kind: request.purpose.kind,
+        purpose_label: request.purpose.external_label.as_deref(),
+        parent: request.parent_ref.as_ref(),
+        required_capabilities: &request.required_capabilities,
+        execution_lane: configuration.execution_lane,
+        required_assurance: configuration.required_assurance,
+        native_subagent_policy: &configuration.native_subagent_policy,
+        configuration_digest: admitted.digest()?,
+        role_snapshot_digest: &instructions.role_snapshot_digest,
+        instruction_identity_digest: &instructions.instruction_identity_digest,
+    })
+    .map_err(|error| reservation_invalid(&error.to_string()))
+}
+
+pub(crate) fn public_start_operation_receipt<I: CallerInstructionGeneration>(
+    intent: &CallerStartIntent<I>,
+) -> Result<crate::delegation_identity::OperationReceipt, MachineError> {
+    let bytes = crate::operation::canonical(&public_start_normalized_body(intent)?)
+        .map_err(|error| reservation_invalid(&error.to_string()))?;
+    let namespace = crate::operation::Namespace::delegation(
+        &intent.controller.identity,
+        &intent.workspace_id,
+        None,
+        "start_run",
+        &intent.request.idempotency_key,
+    )
+    .map_err(reservation_invalid)?;
+    let envelope = crate::operation::Envelope {
+        schema: crate::operation::ENVELOPE_SCHEMA.into(),
+        request_schema: "dolgorae.public-start-normalized/v1".into(),
+        namespace: namespace.clone(),
+        trusted_invocation_ref: None,
+        request_body: crate::operation::BytesRef {
+            byte_length: bytes.len() as u64,
+            sha256: format!("sha256:{}", sha256_hex(&bytes)),
+        },
+    };
+    let mut receipt = crate::delegation_identity::OperationReceipt {
+        schema: "dolgorae.operation-receipt/v1".into(),
+        operation_ref: intent.run_id.to_string(),
+        namespace: crate::delegation_identity::LookupNamespace {
+            controller_principal: namespace.controller_principal,
+            controller_generation: namespace.controller_generation,
+            workspace_ref: namespace.workspace_ref,
+            scope_kind: None,
+            scope_ref: None,
+            operation_kind: namespace.operation_kind,
+            idempotency_key: namespace.idempotency_key,
+        },
+        accepted_input_digest: crate::operation::envelope_digest(&envelope)
+            .map_err(|error| reservation_invalid(&error.to_string()))?,
+        accepted_subjects: crate::delegation_identity::AcceptedSubjects {
+            run_ref: Some(intent.run_id.to_string()),
+            ..Default::default()
+        },
+        receipt_digest: String::new(),
+        accepted_revision: 0,
+        result_digest: None,
+    };
+    receipt.receipt_digest = receipt.compute_digest()?;
+    receipt.validate()?;
+    Ok(receipt)
+}
+
 /// The workspace's durable index of `run start` allocation keys.
 pub struct StartReservationStore<P> {
     platform: P,
@@ -1724,6 +1853,127 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
     fn path(&self, operation: &str, idempotency_key: &str) -> PathBuf {
         self.root(operation)
             .join(format!("{}.json", sha256_hex(idempotency_key.as_bytes())))
+    }
+
+    /// Reach an accepted public startup binding before consulting mutable Profile state.
+    pub(crate) fn retained_delegation_start(
+        &self,
+        key: &str,
+        controller: &ControllerIdentity,
+    ) -> Result<
+        Option<CallerStartReservation<crate::delegation_identity::InstructionSnapshot>>,
+        MachineError,
+    > {
+        let Some(record) = self.load_record("run-start", key)? else {
+            return Ok(None);
+        };
+        match record {
+            AllocationReservation::Delegation(reservation) => {
+                reservation.validate()?;
+                if reservation.idempotency_key != key {
+                    return Err(reservation_invalid("startup key differs"));
+                }
+                if &reservation.accepted_intent.controller.identity != controller {
+                    return Err(MachineError::new(
+                        "CONTROLLER_MISMATCH",
+                        "startup key belongs to another Controller",
+                        false,
+                        serde_json::json!({}),
+                    ));
+                }
+                Ok(Some(*reservation))
+            }
+            AllocationReservation::Legacy(_) | AllocationReservation::Caller(_) => {
+                Err(MachineError::new(
+                    "IDEMPOTENCY_CONFLICT",
+                    "startup key belongs to another accepted contract",
+                    false,
+                    serde_json::json!({"idempotency_key":key}),
+                ))
+            }
+        }
+    }
+
+    pub(crate) fn retained_delegation_start_binding(
+        &self,
+        key: &str,
+        controller: &ControllerIdentity,
+    ) -> Result<Option<GlobalProfileBinding>, MachineError> {
+        Ok(self
+            .retained_delegation_start(key, controller)?
+            .map(|reservation| reservation.accepted_intent.global_profile_binding))
+    }
+
+    /// Inventory accepted startup capacity, including a crash before Run publication.
+    pub(crate) fn accepted_caller_capacity(
+        &self,
+    ) -> Result<Vec<(Uuid, String, ExecutionLane)>, MachineError> {
+        let root = self.root("run-start");
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(error) => return Err(run_path_error(&root, error.to_string())),
+        };
+        verify_secure_directory(&root, self.platform.current_uid())?;
+        let mut capacity = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|error| run_path_error(&root, error.to_string()))?
+                .path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            verify_secure_file(&path, self.platform.current_uid())?;
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&path)
+                .map_err(|error| run_path_error(&path, error.to_string()))?;
+            let mut bytes = Vec::new();
+            file.take(MAX_CALLER_START_RESERVATION_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| run_path_error(&path, error.to_string()))?;
+            if bytes.len() > MAX_CALLER_START_RESERVATION_BYTES {
+                return Err(reservation_invalid("reservation exceeds its bound"));
+            }
+            let reservation: AllocationReservation = serde_json::from_slice(&bytes)
+                .map_err(|_| reservation_invalid("startup reservation is unreadable"))?;
+            let (id, key, profile, lane) = match reservation {
+                AllocationReservation::Legacy(reservation) => {
+                    self.load(&reservation.idempotency_key)?;
+                    continue;
+                }
+                AllocationReservation::Caller(reservation) => {
+                    reservation.validate()?;
+                    (
+                        reservation.run_id,
+                        reservation.idempotency_key,
+                        reservation.accepted_intent.request.profile,
+                        ExecutionLane::Dedicated,
+                    )
+                }
+                AllocationReservation::Delegation(reservation) => {
+                    reservation.validate()?;
+                    let lane = reservation
+                        .accepted_intent
+                        .admitted_configuration
+                        .as_ref()
+                        .ok_or_else(|| reservation_invalid("successor admission is missing"))?
+                        .execution_lane;
+                    (
+                        reservation.run_id,
+                        reservation.idempotency_key,
+                        reservation.accepted_intent.request.profile,
+                        lane,
+                    )
+                }
+            };
+            if path != self.path("run-start", &key) {
+                return Err(reservation_invalid("startup reservation filename differs"));
+            }
+            capacity.push((id, profile, lane));
+        }
+        Ok(capacity)
     }
 
     /// The reservation this key already holds, if any.
@@ -3861,6 +4111,51 @@ mod tests {
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
         let store = StartReservationStore::new(crate::workspace::SystemWorkspacePlatform, &root);
         store.reserve_caller_generation(&reservation).unwrap();
+        let body = public_start_normalized_body(&reservation.accepted_intent).unwrap();
+        assert!(body.get("idempotency_key").is_none());
+        assert!(body.get("expected_workspace_id").is_some());
+        assert_eq!(body["policy_name"], serde_json::Value::Null);
+        assert_eq!(body["policy_snapshot_digest"], serde_json::Value::Null);
+        assert!(body["required_capabilities"].is_array());
+        let receipt = public_start_operation_receipt(&reservation.accepted_intent).unwrap();
+        receipt.validate().unwrap();
+        let mut next = reservation.accepted_intent.clone();
+        next.run_id = Uuid::now_v7();
+        next.created_at = "2026-10-28T01:02:03.000000Z".into();
+        let successor = public_start_operation_receipt(&next).unwrap();
+        assert_eq!(
+            receipt.accepted_input_digest, successor.accepted_input_digest,
+            "allocation metadata cannot alter accepted input identity"
+        );
+        assert_ne!(receipt.receipt_digest, successor.receipt_digest);
+        next.request.idempotency_key = "another-original-key".into();
+        assert_ne!(
+            receipt.accepted_input_digest,
+            public_start_operation_receipt(&next)
+                .unwrap()
+                .accepted_input_digest
+        );
+        assert_eq!(
+            store
+                .retained_delegation_start_binding(
+                    &reservation.idempotency_key,
+                    &reservation.accepted_intent.controller.identity
+                )
+                .unwrap(),
+            Some(reservation.accepted_intent.global_profile_binding.clone())
+        );
+        assert_eq!(
+            store.accepted_caller_capacity().unwrap(),
+            vec![(
+                reservation.run_id,
+                reservation.accepted_intent.request.profile.clone(),
+                ExecutionLane::Dedicated
+            )]
+        );
+        assert!(
+            !root.join("runs").exists(),
+            "pending accepted capacity must not depend on a published manifest"
+        );
         let recovered = store
             .load_caller_generation::<crate::delegation_identity::InstructionSnapshot>(
                 &reservation.idempotency_key,

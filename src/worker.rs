@@ -5893,8 +5893,10 @@ impl WorkerSessionBootstrap {
         {
             return Err(WorkerProtocolError::InvalidRuntimeRecord);
         }
-        if self.safety_policy == SessionSafetyPolicy::ReviewerReadOnly
-            && (self.sandbox != "read-only" || self.approval_policy != "never")
+        if matches!(
+            self.safety_policy,
+            SessionSafetyPolicy::ReviewerReadOnly | SessionSafetyPolicy::FixedReadOnly
+        ) && (self.sandbox != "read-only" || self.approval_policy != "never")
         {
             return Err(WorkerProtocolError::InvalidRuntimeRecord);
         }
@@ -7705,7 +7707,9 @@ impl WorkerSession {
                     developer_instructions: session.developer_instructions.clone(),
                     sandbox: session.sandbox.clone(),
                     approval_policy: session.approval_policy.clone(),
-                    safety_policy: if candidate_tools {
+                    safety_policy: if candidate_tools
+                        && session.safety_policy != SessionSafetyPolicy::FixedReadOnly
+                    {
                         SessionSafetyPolicy::ReviewerReadOnly
                     } else {
                         session.safety_policy

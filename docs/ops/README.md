@@ -733,3 +733,74 @@ Run; the full caller-pipeline mode retains the separate writer/replay/recovery
 regression. Qualified fixture cleanup selects the retained
 accepted binding and uses the existing operator-authorized non-interrupting
 stop; generic name-based Profile commands retain their generic contract.
+
+## Successor read-only pool and capacity
+
+Public-v2 clients negotiate protocol 2, the checked descriptor digest, credential
+contract, bounds and the method subset returned by `RuntimeService.GetCapabilities`.
+Start carries explicit captured instructions and provisioning identities; it uses
+the same accepted startup reservation and lifecycle services as Machine startup.
+Keep its original scope, Controller generation and key after response loss.
+`OperationService.LookupOperation` reads the retained Start or Submit owner without
+resubmitting. A Start with no retained completion receipt stays unresolved; a
+missing reservation alone is not authoritative absence. Submit absence uses its
+existing complete ledger/namespace proof. Renegotiate after a gateway restart. Modern Session Close/Recover/Reconcile retain the aggregate
+close owner and its operation identity. Public-v1 Run methods keep their legacy
+contract; mixed listing omits modern entries, while workspace Writer status can
+observe a modern holder. The frozen public-v2 Run shape carries accepted
+instruction/configuration identities, but has no Role-name field. Its Start input
+carries the Role name; Machine-v4 continues to expose `selected_role`.
+
+An authorized operator may install a current-user-owned mode-0600
+`~/.dolgorae/pool-configuration.json` before new admissions:
+
+```json
+{
+  "schema": "dolgorae.pool-configuration/v1",
+  "readonly_server_limit": 1,
+  "dedicated_generation_cap": 8,
+  "sixth_generation_warning": 6,
+  "native_subagent_default": "disabled"
+}
+```
+
+K is an upper bound in 1..16. Compatible fixed read-only members currently share
+one server; increasing K does not promise additional servers. Dedicated capacity
+is 1..32. Accepted pending startup reservations and uncertain generations consume
+capacity, including a crash before manifest publication. A sixth dedicated
+admission records `sixth_dedicated_generation` in Profile diagnostics. Public-v2
+`ListProfileDiagnostics` reads minimal safe records across retained bindings and
+requires a refreshed page when its captured source heads change. New
+admission at the cap returns `POOL_CAPACITY_EXCEEDED` before allocation or provider
+effects. Lowering the cap preserves existing work, same-key replay, recovery and
+finalization.
+
+Compatibility includes the exact Profile, CODEX_HOME/account namespace,
+executable, process-static configuration and immutable native-subagent policy.
+Successor launch enforces project/ancestor instruction suppression and disables
+native subagents by default. Explicit enabled configurations require a qualified
+dedicated lane. A lease cannot elevate access. Closing one pooled member stops
+its Worker participation; Profile lifecycle owns shared-generation shutdown and
+complete membership/descendant proof. Do not stop a shared generation using one
+Thread's quiescence. Accepted earlier Profile launches retain their original
+configuration and recovery meaning; changing configuration requires the existing
+explicit Profile lifecycle and migration controls.
+
+The authorized, account-free native pool check reuses the caller pipeline:
+
+```sh
+DOLGORAE_RUN_NATIVE_CALLER_PIPELINE=1 .venv/bin/python tests/e2e/run_native_caller_pipeline.py \
+  --readonly-pool --pool-limit 1 --driver /absolute/path/native_caller_pipeline --codex /absolute/path/codex
+```
+
+Run the same check with `--pool-limit 4` for the second required bound.
+With the exact qualified Codex pin, the check isolates all homes and Profiles
+and uses scripted loopback Responses. It measures sixteen members against
+configured K, separate Profile/account/configuration bindings, fixed read-only
+policy and write denial, instruction suppression, response-loss lookup without
+resubmission, replay, member close,
+dedicated transitions, the sixth-generation diagnostic and lowered-cap refusal.
+No requests reach an external provider or real account. Group/50-task and final Gul
+load qualification remain separate later work. Failures retain the original
+fixture and cleanup result; successful cleanup retires owned Profiles before
+removing the fixture.
