@@ -151,7 +151,7 @@ fn unpublished_tail_never_becomes_authoritative_absence_evidence() {
     assert_eq!(history.bytes(1), published);
     assert!(matches!(
         ObservedLedger::open_complete(&history.root, history.run_id, 1),
-        Err(LedgerError::Integrity(_))
+        Err(LedgerError::CaptureConflict)
     ));
     assert!(ObservedLedger::open_display(&history.root, history.run_id, 2).is_err());
     assert_eq!(history.bytes(1), published);

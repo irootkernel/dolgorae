@@ -38,11 +38,25 @@ def post(fixture: probe.ScriptedResponses, request: dict, *, compressed: bool = 
 
 def task(command: str) -> dict:
     return {"input": [{"type": "message", "role": "user", "content": [
-        {"type": "input_text", "text": f"working directory: {command}\n"}]}]}
+        {"type": "input_text", "text": f"working directory: {command}\n"}]}, code_advertisement()]}
 
 
-def result(call_id: str, output: str | list) -> dict:
-    return {"input": [{"type": "function_call_output", "call_id": call_id, "output": output}]}
+def code_advertisement() -> dict:
+    return {"type": "additional_tools", "role": "developer", "tools": [{"type": "namespace", "name": "functions", "tools": [
+        {"type": "custom", "name": "exec", "format": {"type": "grammar"}, "description": "\n".join(
+            "### `" + name + "`" for name in ("exec_command", "dolgorae_candidate_read", "dolgorae_orchestration",
+                                           "dolgorae_specialists_native", "dolgorae_specialist_consumer"))}]}]}
+
+
+def custom_result(call_id: str, emitted: dict) -> dict:
+    # Two input_text blocks observed in the actual same-case 0.164 return.
+    return {"input": [{"type": "custom_tool_call_output", "call_id": call_id, "output": [
+        {"type": "input_text", "text": "Script completed\nWall time 12.7 seconds\nOutput:\n"},
+        *[{"type": "input_text", "text": json.dumps({"label": label, "result": value})} for label, value in emitted.items()]]}]}
+
+
+def result(call_id: str, output: dict) -> dict:
+    return custom_result(call_id, {call_id: output})
 
 
 def main() -> int:
@@ -80,11 +94,11 @@ def main() -> int:
             status, events = post(fixture, task(command), compressed=number % 2 == 0)
             assert status == 200 and len(events) == 3
             call = events[1]["item"]
-            assert call["name"] == "exec_command" and json.loads(call["arguments"]) == {
+            assert call["type"] == "custom_tool_call" and call["name"] == "exec" and call["namespace"] == "functions"
+            assert json.loads(call["input"].split("await tools.exec_command(", 1)[1].removesuffix(")});")) == {
                 "cmd": command, "yield_time_ms": 1000}
             assert fixture.native_terminal(command) is None
-            text = "Wall time: 0.1 seconds\nProcess exited with code 1\nOutput:\nread-canary\nPermission denied\n"
-            output = text if number % 2 else [{"type": "input_text", "text": text}]
+            output = {"wall_time_seconds": 0.1, "exit_code": 1, "output": "read-canary\nPermission denied\n"}
             status, events = post(fixture, result(call["call_id"], output))
             assert status == 200 and events[1]["item"]["type"] == "message"
             assert fixture.native_terminal(command) == (1, "read-canary\nPermission denied\n")
@@ -100,8 +114,9 @@ def main() -> int:
         fixture.close()
     assert not fixture.worker.is_alive() and fixture.result is None
     native_text = "Chunk ID: synthetic-chunk\nWall time: 0.0010 seconds\nProcess exited with code 0\nOutput:\nread-canary"
-    assert probe.terminal_output(native_text) == (0, "read-canary")
-    for bad in ("exec_command failed: private-canary", "Permission denied", [{"type": "input_text", "text": ""}],
+    assert probe.terminal_output({"exit_code": 0, "output": "read-canary"}) == (0, "read-canary")
+    for bad in (native_text, {"session_id": 123, "output": "still running"}, {"exit_code": True, "output": "x"},
+                "exec_command failed: private-canary", "Permission denied", [{"type": "input_text", "text": ""}],
                 [1], "Process exited with code 0\nProcess exited with code 1\nOutput:\nx",
                 "Process running with session ID 123\nOutput:\nx",
                 "Process exited with code 0\nFinal output:\nx",
@@ -112,6 +127,20 @@ def main() -> int:
             assert "private-canary" not in str(error)
         else:
             raise AssertionError("unverified native terminal return accepted")
+    original = '{"ok":true}\n界🙂\\"original\n'
+    returned = custom_result("outer", {"logical": original})
+    assert probe.code_results(returned, "outer", ["logical"]) == {"logical": original}
+    for bad_kind in ("foreign", "duplicate", "live", "prefix", "label", "user"):
+        bad = json.loads(json.dumps(returned))
+        if bad_kind == "foreign": bad["input"][0]["call_id"] = "foreign"
+        elif bad_kind == "duplicate": bad["input"] *= 2
+        elif bad_kind == "live": bad["input"][0]["output"][0]["text"] = "Script running with cell ID 12\n"
+        elif bad_kind == "prefix": bad["input"][0]["output"][0]["text"] = "junk\n" + bad["input"][0]["output"][0]["text"]
+        elif bad_kind == "label": bad["input"][0]["output"][1]["text"] = json.dumps({"label": "other", "result": original})
+        else: bad["input"][0]["type"] = "message"; bad["input"][0]["role"] = "user"
+        try: probe.code_results(bad, "outer", ["logical"])
+        except ProbeCheckFailure: pass
+        else: raise AssertionError("uncorrelated or incomplete custom return accepted")
     for bad in ("https://provider.example/v1", "http://localhost:123/v1", "http://127.0.0.1:123/v1\napi_key=x"):
         try:
             probe.fixture_config(bad)
@@ -128,12 +157,15 @@ def main() -> int:
             else:
                 assert post(fixture, task("bounded-command"))[0] == 200
                 call_id = "foreign" if bad_kind == "foreign_return" else "bounded-call-1"
-                text = "Process exited with code 0\nOutput:\nok" if bad_kind != "nonterminal_return" else "private-output-canary"
+                text = {"exit_code": 0, "output": "ok"} if bad_kind != "nonterminal_return" else {"session_id": 123, "output": "private-output-canary"}
                 returned = result(call_id, text)
                 if bad_kind == "duplicate_return":
                     returned["input"] *= 2
                 assert post(fixture, returned)[0] == 400
             assert "canary" not in str(fixture.failure)
+            first = fixture.failure
+            assert post(fixture, task("bounded-command"))[0] == 400
+            assert fixture.failure == first and fixture.failure_details["reason"] == first[:128]
         finally:
             fixture.close()
     for missing in ("common", "role"):
@@ -295,7 +327,8 @@ def main() -> int:
                 assert status == 200
                 call = events[1]["item"]
                 if self.write or self.write_after_release or (self.recovery_write_after_release and len(servers) == 4):
-                    executed = subprocess.run(["/bin/sh", "-c", json.loads(call["arguments"])["cmd"]],
+                    arguments = json.loads(call["input"].split("await tools.exec_command(", 1)[1].removesuffix(")});"))
+                    executed = subprocess.run(["/bin/sh", "-c", arguments["cmd"]],
                         cwd=self.workspace, capture_output=True, timeout=5)
                     code, output = executed.returncode, executed.stdout.decode()
                 else:
@@ -304,10 +337,10 @@ def main() -> int:
                     output += ("\nprivate-error-canary\n" if self.denial_text_missing else
                                "\nzsh:1: operation not permitted: policy-target\n" if self.lowercase_denial else
                                "\nPermission denied\n")
-                returned = f"Process exited with code {code}\nOutput:\n{output}"
+                returned = {"exit_code": code, "output": output}
                 if self.malformed_terminal:
-                    returned = returned.replace("\nOutput:\n", "\nFinal output:\n")
-                returned_status = post(fixture, result(call["call_id"], [{"type": "input_text", "text": returned}]))[0]
+                    returned["exit_code"] = str(code)
+                returned_status = post(fixture, result(call["call_id"], returned))[0]
                 assert returned_status == (400 if self.malformed_terminal else 200)
                 turn = {"id": f"turn-{len(histories) + 1}", "status": "completed", "items": []}
                 if (self.valid_history or self.missing_baseline_return or (not self.write and (

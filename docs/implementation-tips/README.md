@@ -58,7 +58,7 @@ The TASK-063 turnless metadata probe is separately opt-in:
 
 ```sh
 DOLGORAE_RUN_LIVE_WORKSPACE_STARTUP=1 \
-DOLGORAE_CODEX_PINNED_VERSION='codex-cli 0.159.3' \
+DOLGORAE_CODEX_PINNED_VERSION='codex-cli 0.164.0' \
 make PYTHON_BIN=.venv/bin/python test-live-workspace-startup
 ```
 
@@ -479,3 +479,150 @@ Gate D or either publication. Defects block incomplete Epics and require explici
 corrective scheduling. Planning validation proves neither implementation nor
 runtime support; runtime use and separate release workflows remain authorized
 activities in their own right.
+
+### Current runtime qualification
+
+Select Codex CLI `0.164.0`
+(`d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf`) explicitly
+for the native integrated acceptance, workspace-policy fixture and review-reader
+campaigns. Their isolated homes and loopback Responses require no account
+credentials. The integrated campaign includes caller-pipeline coverage; run the
+standalone caller only to isolate missing coverage or a failure. Keep the
+existing `shell_snapshot=false` regression and the process-quiescence checks.
+The default-feature campaign is separate.
+
+MCP host qualification additionally selects Claude Code `2.1.310`
+(`ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd`). The
+[runtime qualification
+owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
+owns the current pins and acceptance boundary. Schema generation at 0.159.3 and
+0.164.0 establishes protocol differences, while native campaigns establish
+behavior. The historical H1 qualification remains unchanged.
+
+## Source preparation checks
+
+Keep actual consumer composition in the existing integrated/native fixtures.
+Extract only the selected Aquarium helpers and referenced instruction files into
+the fixture's private source directory. Retain their exact content identities
+and use the shipped ordinary preparer/renderer rather than copying their
+validation logic. Pass their prepared assignment and original instructions to
+the actual task. Preparation is source plumbing, not native or consumer proof.
+Formal mapping must use the managed Root, member and task's authoritative
+identity; an external Engagement or synthetic fixture identity is not a
+substitute. Keep all original campaign bounds until their owner resolves a
+demonstrated trace conflict.
+
+The existing successor program has five Turns: Primary spawn (two POSTs),
+Primary assignment/await (three), managed Writer (two), Primary consumer
+(ten plus four required continuation exchanges), and external Writer (two).
+Its expected total is 23. The consumer reads these fixture views through current
+correlated tool returns. These are source-derived page allocations; qualification
+must confirm the actual bytes and counts:
+
+| View | Payload / page allocation |
+| --- | --- |
+| Complete result | One modified file, no output attachments: 1111 bytes, two pages |
+| Formal original response | Fixed-width actual UUID/digest bindings: 1857 bytes, two pages |
+| Before / after | 33 / 8 bytes, one page each |
+| Selected package | 901 bytes, one page |
+| Prepared Record | 452 bytes, one page |
+| Original Record outcome | One item result and bounded selected envelope, one page |
+| Prepared Accept | 1348 bytes, two pages |
+| Original acceptance outcome | Bounded selected envelope, one page |
+| Original receipt | Selected envelope and full receipt, three pages |
+
+Read the second result/response pages in one exchange, the second Accept-input
+page in one, and the remaining receipt pages in two. These four exchanges are
+`K`, not spare capacity. Public wrapper UUIDs/timestamps and the physical root
+change bytes but stay within the declared envelope page classes; the original
+whole-body digests remain bound. A changed page class, missing view, wrong
+call/operation/request ID, changed original byte, incomplete read or stale receipt
+fails qualification. Original response bytes come from the scripted executor;
+complete-result metadata comes from the owning collected result; change bytes
+come from the independent fixture before/after values. Prepared inputs are
+checked against the selected closed schemas and current public fences, retaining
+their actual generated original keys. Outcomes are compared with public key
+lookup, and receipt semantics with a separate public receipt read. No original
+body receives credit from a user prompt or unrelated history.
+
+The main integrated program remains 17 Turns/34 POSTs. Its inherited 2 MiB
+per-HTTP-input guard is unchanged. The separate two-host eighteen-row campaign
+keeps its original 8 combined POSTs, 32 deliveries, 90-second row, 30-second
+cleanup and 4 MiB per-input bounds. A source-derived trace is not native proof.
+
+For the selected Codex Code Mode carrier, each independent batch is one custom
+`functions.exec` call that awaits the registered tools and emits labeled results.
+Correlate the outer custom return, require the observed separate `Script completed`
+header and JSON result blocks, and preserve each nested result without trimming
+or searching history. A running cell or a session without a terminal exit is not
+completion. Keep logical test labels separate from actual inner native call IDs.
+Caller, policy, reader and integrated checks share this bounded carrier handling;
+the host campaign's Codex producer does too. Claude/MCP direct host paths keep
+their own framing. The successor's threaded request handling lets its Writer wait
+for the genuine assignment acknowledgment while the Primary request is served;
+request handlers join before fixture shutdown. Preserve actual input sizes, page
+digests/offsets and correlated returns in the result before successful cleanup
+removes the fixture.
+
+Writer task prompts contain one accepted JSON object followed by the producer's
+execution-intent and deadline text. Decode that object and require the exact
+suffix and typed task/context for the case; trailing text is not arbitrary.
+Preserve the first fixture error when a later failed-task observation follows it.
+Cleanup observations retain settlement-port code/reason before service error
+normalization, forwarding arguments and results unchanged.
+
+The state-control fixture takes the close revision from the owning Engagement's
+public getter. Its membership counter is a different fence. Duplicate close
+checks require the first result to show a closed Engagement and retain the
+actual first and replay replies before asserting equality. A missing emission
+record or a native transport error remains a failed row.
+
+The private source-binding adapter is tested separately from native transport.
+Use the source-binding Rust corpus, owning service replay/admission corpus and
+the cold setup CLI test to check preparation publication, provenance, drift and
+identity comparison. The [operator recipe](../ops/README.md#private-source-preparation)
+uses isolated files and inherited authority FDs. Preparation fixtures do not
+prove native host or actual consumer support.
+
+Preparation storage bounds apply to separate components. Public carrier data
+retains its 16 MiB raw/canonical ceiling; assignment selection and registration
+metadata reserve another 64 KiB. A snapshot retains the existing 64 MiB bound,
+and a target manifest retains the capture producer's 8 MiB bound. Private source
+selection reserves 64 MiB for Profile authority, sixfold JSON encoding of
+129 sources with at most 65,536 inline bytes or 64 components of 255 bytes each,
+and 1 MiB for aliases/policy metadata. Reads check length before allocation and
+read through at most limit+1, with checked arithmetic. These ceilings do not
+relax any source, task, count or per-field contract bound.
+
+Within one changes capture, clean paths with the same captured content digest
+and length can reuse an already verified Git before image. Keep references into
+the bounded retained-side buffer rather than another copy of each blob. Every
+path still retains its own modes and contributes to the aggregate content bound.
+Read current tracked and untracked names in separate Git listings: deleted names
+can remain in the index while their replacements are untracked. Each command
+keeps the existing output bound, and the merged domain keeps the existing
+added-path and complete-result change bounds.
+
+Within a native collection call, use the owning service's verified typed result
+and consume the materialization returned with the selection. Do not reconstruct
+the same JSON or walk all change content again for that response. Content reads
+still have opening and closing observations; later inspection and Record/Accept
+calls perform their own checks, including fresh export proof before mutation.
+
+## Complete delegation observation checks
+
+The focused Rust corpus exercises the shared allowance, complete history,
+source/authority changes, pending interactions, both owning services and pinned
+Engagement transactions:
+
+```sh
+cargo +1.97.1 test --locked --offline --lib complete_observation -- --test-threads=2
+```
+
+Use a new isolated target and inherit the shell's default `TMPDIR`; canonicalize
+fixture roots where their owning path contract requires it. A zero-test filter
+is not evidence. The WAL checkpoint case proves that closing source checks run
+while the database snapshot is actually pinned. Scoped mutation controls need
+separate immutable sources and targets; their artifacts must never enter an
+ordinary verification target. These offline checks do not replace native,
+consumer or complete-candidate qualification.

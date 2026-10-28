@@ -6,7 +6,6 @@ use dolgorae::darwin::DarwinSystem;
 use dolgorae::domain::{Access, ControllerKind, PolicyVerification, RunLifecycle};
 use dolgorae::global_profile::GlobalProfileStore;
 use dolgorae::paths::DolgoraeHome;
-use dolgorae::profile::{ProfileOperation, execute_global};
 use dolgorae::run::RunStore;
 use dolgorae::semantic::{
     CoreSemanticService, RunMutationInput, RunMutationOperation, SemanticCommand, SemanticResult,
@@ -19,7 +18,6 @@ use dolgorae::workspace::{
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -127,16 +125,34 @@ fn stop_profiles(home: &DolgoraeHome, operator: &Path) -> bool {
         Err(_) => return false,
     }
     let mut clean = true;
-    for name in ["fixture-a", "fixture-b"] {
-        if GlobalProfileStore::new(home).resolve(name).is_err() {
-            continue;
+    let mut bindings = BTreeMap::new();
+    if let Ok(workspaces) = fs::read_dir(home.root().join("workspaces")) {
+        for workspace in workspaces.flatten() {
+            if let Ok(runs) = fs::read_dir(workspace.path().join("runs")) {
+                for run in runs.flatten() {
+                    let Ok(bytes) = fs::read(run.path().join("manifest.json")) else {
+                        continue;
+                    };
+                    let Ok(manifest) = serde_json::from_slice::<dolgorae::run::RunManifest>(&bytes)
+                    else {
+                        clean = false;
+                        continue;
+                    };
+                    if let Some(binding) = manifest.global_profile_binding {
+                        bindings.insert(binding.server_key.clone(), binding);
+                    }
+                }
+            }
         }
-        let args = [
-            OsString::from(name),
-            OsString::from("--operator-file"),
-            operator.as_os_str().to_owned(),
-        ];
-        if let Err(error) = execute_global(ProfileOperation::ServerStop, &args) {
+    }
+    if bindings.is_empty() {
+        return false;
+    }
+    for binding in bindings.values() {
+        let result = CredentialCarrier::open_path(operator).and_then(|carrier| {
+            dolgorae::profile::retire_qualified_global_server(binding, &carrier)
+        });
+        if let Err(error) = result {
             record_failure(operator.parent().unwrap(), "Profile cleanup", &error);
             clean = false;
         }
@@ -169,6 +185,162 @@ fn inject_writer_guard(state_root: &Path, workspace_id: &str, run_id: Uuid) {
         .unwrap();
 }
 
+fn observed_shell_snapshot(socket: &Path, home: &str, thread: Option<&str>) -> Value {
+    let mut rpc =
+        dolgorae::app_server::JsonRpcConnection::connect(socket, Duration::from_secs(5)).unwrap();
+    let initialized = rpc.request("initialize", json!({"clientInfo":{"name":"dolgorae-m6-observer","version":"1"},"capabilities":{"experimentalApi":false}})).unwrap();
+    assert_eq!(initialized["codexHome"], home);
+    rpc.notify("initialized", json!({})).unwrap();
+    let mut cursor = Value::Null;
+    for _ in 0..16 {
+        let page = rpc
+            .request(
+                "experimentalFeature/list",
+                json!({"cursor":cursor,"limit":100,"threadId":thread}),
+            )
+            .unwrap();
+        for feature in page["data"].as_array().unwrap() {
+            if feature["name"] == "shell_snapshot" {
+                assert_eq!(
+                    feature["enabled"], false,
+                    "native effective feature must be disabled"
+                );
+                return feature.clone();
+            }
+        }
+        cursor = page["nextCursor"].clone();
+        assert!(
+            !cursor.is_null(),
+            "native shell_snapshot feature observation missing"
+        );
+    }
+    panic!("native feature pagination exceeded bound");
+}
+
+fn default_feature_observation(root: &Path, snapshot: &RunSnapshot) -> Value {
+    use sha2::{Digest as _, Sha256};
+    let binding = snapshot.manifest.global_profile_binding.as_ref().unwrap();
+    binding.validate_for_recovery().unwrap();
+    let launch = &binding.launch_snapshot;
+    let contract = json!({"schema_version":1,"canonical_codex_home":launch.canonical_codex_home,
+        "normalized_argv":launch.normalized_argv,"launch_cwd_policy":launch.launch_cwd_policy,
+        "launch_mode":"app_server_unix_socket_v1","sanitized_environment":launch.sanitized_environment,
+        "executable_identity":launch.executable_identity,"process_static_configuration":launch.process_static_configuration,
+        "codex_version":launch.codex_version,"app_server_schema_sha256":launch.schema_bundle_sha256,
+        "compatibility_manifest_sha256":launch.compatibility_manifest_sha256,"enabled_features":launch.enabled_features,"disabled_features":launch.disabled_features});
+    let canonical = |value: &Value| {
+        dolgorae::jcs::canonicalize(&dolgorae::jcs::parse(&value.to_string()).unwrap()).unwrap()
+    };
+    let bytes = canonical(&contract);
+    assert_eq!(
+        dolgorae::jcs::sha256_hex(&bytes),
+        launch.launch_contract_sha256
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(b"dolgorae-profile-server-key-v1\0");
+    hasher.update(&bytes);
+    assert_eq!(format!("{:x}", hasher.finalize()), binding.server_key);
+    assert_eq!(
+        binding.launch_snapshot_sha256,
+        dolgorae::jcs::sha256_hex(&canonical(&json!(launch)))
+    );
+    assert_eq!(
+        dolgorae::run::launch_contract_digest(&snapshot.manifest.profile).unwrap(),
+        snapshot.manifest.profile.launch_contract_sha256
+    );
+    let home = DolgoraeHome::system().unwrap();
+    let state: Value = serde_json::from_slice(
+        &fs::read(
+            home.root()
+                .join("profiles")
+                .join(&binding.server_key)
+                .join("state.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["server_key"], binding.server_key);
+    assert_eq!(state["snapshot"], json!(launch));
+    let pid = state["pid"].as_u64().unwrap();
+    let actual = std::process::Command::new("/bin/ps")
+        .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .unwrap();
+    assert!(actual.status.success());
+    let actual = String::from_utf8(actual.stdout).unwrap();
+    let tokens = actual.split_whitespace().collect::<Vec<_>>();
+    let expected = launch
+        .normalized_argv
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        tokens
+            .windows(expected.len())
+            .any(|window| window == expected),
+        "actual process argv differs from immutable launch"
+    );
+    let shared_feature = observed_shell_snapshot(
+        Path::new(state["socket_path"].as_str().unwrap()),
+        &launch.canonical_codex_home,
+        None,
+    );
+    let state_root = home.workspace_root(&snapshot.manifest.workspace_id);
+    let runtime = dolgorae::worker::runtime_root(&state_root);
+    let bootstrap = dolgorae::worker::read_worker_bootstrap(
+        &dolgorae::worker::bootstrap_path(&runtime, snapshot.manifest.run_id),
+        DarwinSystem.current_uid(),
+    )
+    .unwrap();
+    let session = bootstrap.session.as_ref().unwrap();
+    let dedicated = session.dedicated_server.as_ref().unwrap();
+    assert!(dedicated.argv.starts_with(&launch.normalized_argv));
+    let dedicated_feature = observed_shell_snapshot(
+        &session.app_server_socket,
+        &launch.canonical_codex_home,
+        snapshot.projection.thread_id.as_deref(),
+    );
+    let mut effective = None;
+    for pair in launch.normalized_argv.windows(2) {
+        if pair[1] == "shell_snapshot" {
+            match pair[0].as_str() {
+                "--enable" => effective = Some(true),
+                "--disable" => effective = Some(false),
+                _ => {}
+            }
+        }
+    }
+    let evidence = json!({"variant":fs::read_to_string(root.join("default-feature-variant")).unwrap(),
+        "actual_pid":pid,"actual_command":actual.trim(),"accepted_launch":launch,"recomputed_launch_digest":launch.launch_contract_sha256,"recomputed_server_key":binding.server_key,
+        "run_launch_digest":snapshot.manifest.profile.launch_contract_sha256,"effective_shell_snapshot":dedicated_feature["enabled"],"shared_feature_observation":shared_feature,"dedicated_feature_observation":dedicated_feature,"dedicated_argv":dedicated.argv,"quiescent_startup":true});
+    fs::write(
+        root.join("default-feature-observation.json"),
+        serde_json::to_vec(&evidence).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        launch
+            .disabled_features
+            .iter()
+            .any(|v| v == "shell_snapshot"),
+        "default-feature policy has not disabled shell_snapshot"
+    );
+    assert_eq!(
+        effective,
+        Some(false),
+        "actual final argv must disable shell_snapshot"
+    );
+    assert!(
+        snapshot
+            .manifest
+            .profile
+            .disabled_features
+            .iter()
+            .any(|v| v == "shell_snapshot")
+    );
+    evidence
+}
+
 fn campaign(root: &Path, codex: &Path) -> Value {
     assert_eq!(
         std::env::var("DOLGORAE_RUN_NATIVE_CALLER_PIPELINE").as_deref(),
@@ -198,7 +370,29 @@ fn campaign(root: &Path, codex: &Path) -> Value {
             .add(
                 name.to_owned(),
                 RuntimeProfile {
-                    argv: vec![codex.to_str().unwrap().to_owned()],
+                    argv: {
+                        let mut argv = vec![codex.to_str().unwrap().to_owned()];
+                        if let Ok(variant) =
+                            fs::read_to_string(root.join("default-feature-variant"))
+                        {
+                            match variant.as_str() {
+                                "argv-enable" => {
+                                    argv.extend(["--enable".into(), "shell_snapshot".into()])
+                                }
+                                "ordered-overrides" => argv.extend([
+                                    "--enable".into(),
+                                    "shell_snapshot".into(),
+                                    "--disable".into(),
+                                    "shell_snapshot".into(),
+                                    "--enable".into(),
+                                    "shell_snapshot".into(),
+                                ]),
+                                "default" | "config-enable" => {}
+                                _ => panic!("unknown default-feature variant"),
+                            }
+                        }
+                        argv
+                    },
                     codex_home: root.join(name).to_str().unwrap().to_owned(),
                     environment: BTreeMap::from([
                         (
@@ -234,6 +428,15 @@ fn campaign(root: &Path, codex: &Path) -> Value {
         let first_id = first.snapshot.manifest.run_id;
         let first_thread = first.snapshot.projection.thread_id.clone().unwrap();
         check_policy(&state_root, &first.snapshot, Access::Write, &first_thread);
+        let default_features = root
+            .join("default-feature-variant")
+            .exists()
+            .then(|| default_feature_observation(root, &first.snapshot));
+        if let Some(features) = &default_features {
+            return json!({"schema":"dolgorae.native-caller-pipeline/v1",
+                "mode":"default_feature_startup_only","runs":1,"threads":1,"turns":0,
+                "native_account_environment":"platform_owned","default_feature_startup":features});
+        }
         let original_receipt = fs::read(
             state_root
                 .join("runs")
@@ -394,7 +597,7 @@ fn campaign(root: &Path, codex: &Path) -> Value {
             "cross_profile_writer_exclusion":true,"same_thread_transitions":true,"original_receipt_replay":true,
             "source_removal_replay":true,"guarded_live_recovery":true,
             "guarded_generation_recovery_reader":true,"automatic_writer_reacquisition":false,
-            "native_account_environment":"platform_owned"})
+            "native_account_environment":"platform_owned","default_feature_startup":default_features})
     });
     let mut clean = true;
     for entry in fs::read_dir(state_root.join("runs")).unwrap() {
@@ -449,6 +652,22 @@ fn main() {
         && args[2] == "--root"
     {
         dolgorae::profile::run_log_drainer(Path::new(&args[3])).unwrap();
+    } else if args.len() == 3
+        && args[1] == "--retire-profiles"
+        && std::env::var("DOLGORAE_RUN_NATIVE_CALLER_PIPELINE").as_deref() == Ok("1")
+    {
+        let root = Path::new(&args[2]);
+        assert_eq!(
+            fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap(),
+            root.join("home")
+        );
+        assert_eq!(
+            fs::read(root.join("fixture-owned")).unwrap(),
+            b"native-integrated-acceptance/v1\n"
+        );
+        let clean = stop_profiles(&DolgoraeHome::system().unwrap(), &root.join("operator"));
+        println!("{}", json!({"retained_profiles_retired":clean}));
+        assert!(clean, "accepted Profile cleanup incomplete");
     } else if args.len() == 3
         && std::env::var("DOLGORAE_RUN_NATIVE_CALLER_PIPELINE").as_deref() == Ok("1")
     {

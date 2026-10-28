@@ -77,10 +77,207 @@ pub struct WriterHandoff {
     pub source_retired: bool,
 }
 
+/// Private release authority. The public Writer projection deliberately omits it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GenerationReleasePhase {
+    Prepared,
+    StopStarted,
+    OldAbsent,
+    ReaderStarting,
+    ReaderVerified,
+    Committed,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GenerationRetirementPurpose {
+    #[default]
+    Release,
+    Acquire,
+}
+
+impl GenerationRetirementPurpose {
+    fn is_release(&self) -> bool {
+        *self == Self::Release
+    }
+
+    pub(crate) fn guarded_state(self) -> WriterAuthorityState {
+        match self {
+            Self::Release => WriterAuthorityState::Releasing,
+            Self::Acquire => WriterAuthorityState::Reserved,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GenerationRelease {
+    #[serde(
+        default,
+        skip_serializing_if = "GenerationRetirementPurpose::is_release"
+    )]
+    pub purpose: GenerationRetirementPurpose,
+    pub transaction_id: Uuid,
+    pub source: WriterHolder,
+    pub writer_generation: u64,
+    pub authority_revision: u64,
+    pub source_revision: u64,
+    pub source_ledger_sha256: String,
+    pub source_runtime_sha256: String,
+    pub registration_sha256: String,
+    pub scope_sha256: Option<String>,
+    pub absence_sha256: Option<String>,
+    pub reader_proof_sha256: Option<String>,
+    pub retired_reader_sha256: Option<String>,
+    pub phase: GenerationReleasePhase,
+    pub successor: Option<ReaderReservation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReaderReservation {
+    pub run_generation: u64,
+    pub server_epoch: u64,
+    pub control_socket_epoch: u64,
+    pub attempt_started: bool,
+}
+
+impl GenerationRelease {
+    pub(crate) fn pending(&self) -> bool {
+        self.phase != GenerationReleasePhase::Committed
+    }
+
+    pub(crate) fn verify_ledger_prefix(
+        &self,
+        records: &[crate::audit::AuditRecord],
+    ) -> Result<(), MachineError> {
+        use crate::audit::AuditKind as K;
+        let prefix = records
+            .iter()
+            .find(|r| r.sequence() == self.source_revision)
+            .ok_or_else(|| invariant("release source prefix missing"))?;
+        let head = crate::projection::LedgerHead {
+            sequence: prefix.sequence(),
+            hash: prefix.hash().to_owned(),
+        };
+        if crate::jcs::sha256_hex(
+            &serde_json::to_vec(&head).map_err(|_| invariant("release head encoding"))?,
+        ) != self.source_ledger_sha256
+        {
+            return Err(invariant("release source head changed"));
+        }
+        for record in records
+            .iter()
+            .filter(|r| r.sequence() > self.source_revision)
+        {
+            if !matches!(
+                record.kind(),
+                K::ControllerReset
+                    | K::RunGenerationStarted
+                    | K::RunGenerationStopped
+                    | K::TurnIntent
+                    | K::ThreadBound
+                    | K::ProfileObserved
+                    | K::AppServerRequest
+                    | K::AppServerResponse
+                    | K::AppServerNotification
+                    | K::ClientEvent
+                    | K::CleanupIntent
+                    | K::CleanupResult
+                    | K::StartFailed
+            ) {
+                return Err(invariant(
+                    "unowned ledger advance during generation release",
+                ));
+            }
+            if matches!(record.kind(), K::TurnIntent | K::ThreadBound) {
+                let payload: Value = serde_json::from_slice(
+                    &crate::jcs::canonicalize(record.payload())
+                        .map_err(|_| invariant("release Thread binding encoding"))?,
+                )
+                .map_err(|_| invariant("release Thread binding encoding"))?;
+                let reader_generation = self.successor.as_ref().is_some_and(|reservation| {
+                    record.run_generation() > self.source.run_generation
+                        && (record.run_generation() == reservation.run_generation
+                            && reservation.attempt_started
+                            || record.run_generation() < reservation.run_generation
+                                && self.retired_reader_sha256.is_some())
+                });
+                let provisional = record.kind() == K::TurnIntent;
+                if !matches!(
+                    self.phase,
+                    GenerationReleasePhase::ReaderStarting | GenerationReleasePhase::ReaderVerified
+                ) || !reader_generation
+                    || (provisional && payload.as_object().is_none_or(|fields| fields.len() != 2))
+                    || payload.get("operation_id").and_then(Value::as_str)
+                        != Some(self.transaction_id.to_string().as_str())
+                    || payload
+                        .get(if provisional {
+                            "provisional_thread_id"
+                        } else {
+                            "thread_id"
+                        })
+                        .and_then(Value::as_str)
+                        != self.source.thread_id.as_deref()
+                {
+                    return Err(invariant("release Thread binding names another operation"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> bool {
+        use GenerationReleasePhase as P;
+        let digest =
+            |value: &str| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit());
+        self.transaction_id.get_version_num() == 7
+            && self.writer_generation > 0
+            && self.source_revision > 0
+            && self.source.active_turn_id.is_none()
+            && self.source.pending_interaction_count == 0
+            && matches!(
+                self.source.lifecycle,
+                RunLifecycle::Idle | RunLifecycle::Paused
+            )
+            && self
+                .source
+                .thread_id
+                .as_ref()
+                .is_some_and(|v| !v.is_empty())
+            && digest(&self.source_ledger_sha256)
+            && digest(&self.source_runtime_sha256)
+            && digest(&self.registration_sha256)
+            && self.scope_sha256.as_deref().is_none_or(digest)
+            && self.absence_sha256.as_deref().is_none_or(digest)
+            && self.reader_proof_sha256.as_deref().is_none_or(digest)
+            && self.retired_reader_sha256.as_deref().is_none_or(digest)
+            && (self.phase == P::Prepared || self.scope_sha256.is_some())
+            && (!matches!(
+                self.phase,
+                P::OldAbsent | P::ReaderStarting | P::ReaderVerified | P::Committed
+            ) || self.absence_sha256.is_some())
+            && (!matches!(
+                self.phase,
+                P::ReaderStarting | P::ReaderVerified | P::Committed
+            ) || self.successor.is_some())
+            && (!matches!(self.phase, P::ReaderVerified | P::Committed)
+                || self.reader_proof_sha256.is_some())
+            && self.successor.as_ref().is_none_or(|r| {
+                r.run_generation > self.source.run_generation
+                    && r.server_epoch > self.source.profile_server_epoch
+                    && r.control_socket_epoch > 0
+            })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WriterRecord {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) generation_release: Option<GenerationRelease>,
     pub workspace_id: String,
     pub authority_revision: u64,
     pub state: WriterAuthorityState,
@@ -102,6 +299,7 @@ impl WriterRecord {
     pub fn empty(workspace_id: &str) -> Self {
         Self {
             schema_version: 1,
+            generation_release: None,
             workspace_id: workspace_id.to_owned(),
             authority_revision: 0,
             state: WriterAuthorityState::None,
@@ -136,7 +334,30 @@ impl WriterRecord {
                 | WriterAuthorityState::HandoffPrepared
                 | WriterAuthorityState::BlockedUnknown
         );
-        if self.schema_version != 1
+        if !matches!(self.schema_version, 1 | 2)
+            || (self.schema_version == 1 && self.generation_release.is_some())
+            || (self.schema_version == 2 && self.generation_release.is_none())
+            || self.generation_release.as_ref().is_some_and(|release| {
+                !release.validate()
+                    || (release.purpose == GenerationRetirementPurpose::Acquire
+                        && release.phase == GenerationReleasePhase::Committed
+                        && match self.state {
+                            WriterAuthorityState::None => {
+                                self.writer_generation != release.writer_generation
+                            }
+                            WriterAuthorityState::Reserved
+                            | WriterAuthorityState::BlockedUnknown => self
+                                .acquire_retirement_recovery(release.source.run_id)
+                                .is_none(),
+                            _ => true,
+                        })
+                    || (release.pending()
+                        && (self.transaction_id != Some(release.transaction_id)
+                            || self.holder.as_ref() != Some(&release.source)
+                            || self.writer_generation != release.writer_generation
+                            || (self.state != release.purpose.guarded_state()
+                                && self.state != WriterAuthorityState::BlockedUnknown)))
+            })
             || self.workspace_id != workspace_id
             || self.workspace_id.len() != 64
             || !self
@@ -170,6 +391,199 @@ impl WriterRecord {
         Ok(())
     }
 
+    pub(crate) fn pending_generation_release(&self, run_id: Uuid) -> Option<&GenerationRelease> {
+        self.generation_release
+            .as_ref()
+            .filter(|r| r.pending() && r.source.run_id == run_id)
+    }
+
+    pub(crate) fn acquire_retirement_recovery(&self, run_id: Uuid) -> Option<&GenerationRelease> {
+        self.generation_release.as_ref().filter(|owner| {
+            owner.purpose == GenerationRetirementPurpose::Acquire
+                && owner.phase == GenerationReleasePhase::Committed
+                && owner.source.run_id == run_id
+                && self.transaction_id == Some(owner.transaction_id)
+                && self.writer_generation == owner.writer_generation
+                && matches!(
+                    self.state,
+                    WriterAuthorityState::Reserved | WriterAuthorityState::BlockedUnknown
+                )
+                && self
+                    .holder
+                    .as_ref()
+                    .zip(owner.successor.as_ref())
+                    .is_some_and(|(holder, reader)| {
+                        reader.attempt_started
+                            && reader.run_generation > owner.source.run_generation
+                            && reader.server_epoch > owner.source.profile_server_epoch
+                            && reader.control_socket_epoch > 0
+                            && holder.run_id == run_id
+                            && holder.controller_id == owner.source.controller_id
+                            && holder.controller_generation == owner.source.controller_generation
+                            && holder.profile == owner.source.profile
+                            && holder.profile_server_key == owner.source.profile_server_key
+                            && holder.run_generation == reader.run_generation
+                            && holder.worker_generation == reader.run_generation
+                            && holder.profile_server_epoch == reader.server_epoch
+                            && holder.thread_id == owner.source.thread_id
+                    })
+        })
+    }
+
+    pub(crate) fn prepare_acquire_retirement_recovery(
+        &mut self,
+        run_id: Uuid,
+    ) -> Result<(), MachineError> {
+        if self.acquire_retirement_recovery(run_id).is_none() {
+            return Err(invariant(
+                "latest acquire generation is not a recoverable reservation",
+            ));
+        }
+        self.state = WriterAuthorityState::Reserved;
+        Ok(())
+    }
+
+    pub(crate) fn require_no_generation_release(&self, run_id: Uuid) -> Result<(), MachineError> {
+        if self.pending_generation_release(run_id).is_some()
+            || self.acquire_retirement_recovery(run_id).is_some()
+        {
+            return Err(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "the original generation release must be resumed",
+                false,
+                json!({"run_id":run_id,"required_action":"reconcile_generation_release"}),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_generation_release(
+        &mut self,
+        release: GenerationRelease,
+    ) -> Result<(), MachineError> {
+        if self.state != release.purpose.guarded_state()
+            || self.transaction_id != Some(release.transaction_id)
+            || self.holder.as_ref() != Some(&release.source)
+            || self.writer_generation != release.writer_generation
+            || self
+                .generation_release
+                .as_ref()
+                .is_some_and(GenerationRelease::pending)
+            || !release.validate()
+            || release.phase != GenerationReleasePhase::Prepared
+        {
+            return Err(invariant("generation release admission changed"));
+        }
+        self.schema_version = 2;
+        self.generation_release = Some(release);
+        Ok(())
+    }
+
+    pub(crate) fn advance_generation_release(
+        &mut self,
+        expected: &GenerationRelease,
+        next: GenerationRelease,
+    ) -> Result<(), MachineError> {
+        use GenerationReleasePhase as P;
+        let legal = matches!(
+            (expected.phase, next.phase),
+            (P::Prepared, P::StopStarted)
+                | (P::StopStarted, P::OldAbsent)
+                | (P::OldAbsent, P::ReaderStarting)
+                | (P::ReaderStarting, P::ReaderVerified)
+                | (P::ReaderVerified, P::Committed)
+        );
+        let mut retained = next.clone();
+        retained.phase = expected.phase;
+        retained.scope_sha256 = expected.scope_sha256.clone();
+        retained.absence_sha256 = expected.absence_sha256.clone();
+        retained.reader_proof_sha256 = expected.reader_proof_sha256.clone();
+        retained.successor = expected.successor.clone();
+        if self.generation_release.as_ref() != Some(expected)
+            || self.transaction_id != Some(expected.transaction_id)
+            || !legal
+            || !next.validate()
+            || retained != *expected
+            || (expected.scope_sha256.is_some() && next.scope_sha256 != expected.scope_sha256)
+            || (expected.absence_sha256.is_some() && next.absence_sha256 != expected.absence_sha256)
+            || (expected.successor.is_some() && next.successor != expected.successor)
+        {
+            return Err(invariant("generation release checkpoint changed"));
+        }
+        self.state = next.purpose.guarded_state();
+        self.generation_release = Some(next);
+        Ok(())
+    }
+
+    pub(crate) fn commit_generation_retirement(
+        &mut self,
+        expected: &GenerationRelease,
+        retain_acquire: bool,
+    ) -> Result<(), MachineError> {
+        if expected.phase != GenerationReleasePhase::ReaderVerified
+            || (retain_acquire && expected.purpose != GenerationRetirementPurpose::Acquire)
+        {
+            return Err(invariant("retirement commit purpose changed"));
+        }
+        let mut next = expected.clone();
+        next.phase = GenerationReleasePhase::Committed;
+        self.advance_generation_release(expected, next)?;
+        if expected.purpose == GenerationRetirementPurpose::Acquire {
+            if retain_acquire {
+                let successor = expected
+                    .successor
+                    .as_ref()
+                    .ok_or_else(|| invariant("acquire Reader reservation missing"))?;
+                self.bind_reserved_generation(
+                    expected.transaction_id,
+                    successor.run_generation,
+                    successor.server_epoch,
+                )?;
+            } else {
+                self.cancel_acquire(expected.transaction_id);
+            }
+            Ok(())
+        } else {
+            self.commit_release(expected.transaction_id)
+        }
+    }
+
+    pub(crate) fn replace_absent_reader(
+        &mut self,
+        expected: &GenerationRelease,
+        reservation: ReaderReservation,
+        evidence_sha256: String,
+    ) -> Result<(), MachineError> {
+        let old = expected
+            .successor
+            .as_ref()
+            .ok_or_else(|| invariant("Reader reservation missing"))?;
+        if self.generation_release.as_ref() != Some(expected)
+            || self.transaction_id != Some(expected.transaction_id)
+            || !matches!(
+                expected.phase,
+                GenerationReleasePhase::ReaderStarting | GenerationReleasePhase::ReaderVerified
+            )
+            || !old.attempt_started
+            || reservation.attempt_started
+            || reservation.run_generation <= old.run_generation
+            || reservation.server_epoch <= old.server_epoch
+            || reservation.control_socket_epoch <= old.control_socket_epoch
+            || evidence_sha256.len() != 64
+            || !evidence_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(invariant(
+                "Reader replacement lacks exact candidate absence",
+            ));
+        }
+        let release = self.generation_release.as_mut().expect("checked owner");
+        release.phase = GenerationReleasePhase::ReaderStarting;
+        release.reader_proof_sha256 = None;
+        release.retired_reader_sha256 = Some(evidence_sha256);
+        release.successor = Some(reservation);
+        Ok(())
+    }
+
     pub fn prepare_acquire(
         &mut self,
         requested_run_id: Uuid,
@@ -186,6 +600,14 @@ impl WriterRecord {
         }
         if self.state != WriterAuthorityState::None {
             return Err(writer_busy(self, requested_run_id));
+        }
+        if self.generation_release.as_ref().is_some_and(|owner| {
+            owner.purpose == GenerationRetirementPurpose::Acquire && !owner.pending()
+        }) {
+            // The previous Reader recovery completed. WriterStore preserves its
+            // immutable witness before publishing this new reservation.
+            self.generation_release = None;
+            self.schema_version = 1;
         }
         let generation = self
             .writer_generation
@@ -211,6 +633,22 @@ impl WriterRecord {
         {
             return Err(invariant("writer reservation changed before commit"));
         }
+        if let Some(owner) = self.generation_release.as_ref()
+            && owner.purpose == GenerationRetirementPurpose::Acquire
+        {
+            if self
+                .acquire_retirement_recovery(owner.source.run_id)
+                .is_none()
+            {
+                return Err(invariant(
+                    "acquire retirement is not the verified current reservation",
+                ));
+            }
+            // WriterStore archives the committed Reader witness before this
+            // same atomic record publication consumes it and commits Active.
+            self.generation_release = None;
+            self.schema_version = 1;
+        }
         self.state = WriterAuthorityState::Active;
         self.transaction_id = None;
         Ok(())
@@ -229,6 +667,12 @@ impl WriterRecord {
         {
             return Err(invariant("writer recovery changed before acquire commit"));
         }
+        self.require_no_generation_release(
+            self.holder
+                .as_ref()
+                .ok_or_else(|| invariant("holder missing"))?
+                .run_id,
+        )?;
         self.state = WriterAuthorityState::Reserved;
         self.commit_acquire(transaction_id, generation)
     }
@@ -291,6 +735,12 @@ impl WriterRecord {
         {
             return Err(invariant("writer recovery guard changed before retirement"));
         }
+        self.require_no_generation_release(
+            self.holder
+                .as_ref()
+                .ok_or_else(|| invariant("holder missing"))?
+                .run_id,
+        )?;
         self.state = WriterAuthorityState::Releasing;
         self.commit_release(transaction_id)
     }
@@ -319,6 +769,10 @@ impl WriterRecord {
     pub fn rollback_release(&mut self, transaction_id: Uuid) {
         if self.state == WriterAuthorityState::Releasing
             && self.transaction_id == Some(transaction_id)
+            && self
+                .generation_release
+                .as_ref()
+                .is_none_or(|r| !r.pending())
         {
             self.state = WriterAuthorityState::Active;
             self.transaction_id = None;
@@ -330,6 +784,13 @@ impl WriterRecord {
             || self.transaction_id != Some(transaction_id)
         {
             return Err(invariant("writer release changed before commit"));
+        }
+        if self
+            .generation_release
+            .as_ref()
+            .is_some_and(GenerationRelease::pending)
+        {
+            return Err(invariant("generation release lacks committed Reader proof"));
         }
         self.state = WriterAuthorityState::None;
         self.transaction_id = None;
@@ -545,6 +1006,13 @@ impl WriterStore {
         if bytes.len() > 64 * 1024 {
             return Err(invariant("writer authority record exceeds 64 KiB"));
         }
+        let wire: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| invariant("writer authority record is not valid JSON"))?;
+        match wire.get("schema_version").and_then(Value::as_u64) {
+            Some(1) if wire.get("generation_release").is_none() => {}
+            Some(2) if wire.get("generation_release").is_some_and(Value::is_object) => {}
+            _ => return Err(invariant("unsupported private Writer record version")),
+        }
         let record: WriterRecord = serde_json::from_slice(&bytes)
             .map_err(|_| invariant("writer authority record is not valid JSON"))?;
         record.validate(&self.workspace_id)?;
@@ -573,7 +1041,30 @@ impl WriterStore {
             .map_err(|error| path_error(&self.lock_path(LOCK_NAME), error))?;
         self.revalidate_lock(&lock, LOCK_NAME)?;
         let mut record = self.load()?;
+        let previous_release = record.generation_release.clone();
         let result = operation(&mut record)?;
+        if let Some(previous) = previous_release.as_ref().filter(|r| r.pending())
+            && record.generation_release.as_ref().is_none_or(|r| {
+                r.transaction_id != previous.transaction_id
+                    || r.source != previous.source
+                    || r.writer_generation != previous.writer_generation
+            })
+        {
+            return Err(invariant(
+                "generic mutation cannot discard the original release owner",
+            ));
+        }
+        if let Some(previous) = previous_release.as_ref()
+            && record.generation_release.as_ref() != Some(previous)
+            && !previous.pending()
+        {
+            retain_release_evidence(
+                &self.state_root,
+                previous.source.run_id,
+                &serde_json::to_value(previous)
+                    .map_err(|_| invariant("release archive encoding failed"))?,
+            )?;
+        }
         record.authority_revision = record
             .authority_revision
             .checked_add(1)
@@ -687,6 +1178,13 @@ impl WriterStore {
         self.revalidate_lock(&lock, LOCK_NAME)?;
         let result = (|| {
             let mut record = self.load()?;
+            if record
+                .generation_release
+                .as_ref()
+                .is_some_and(GenerationRelease::pending)
+            {
+                return Ok(());
+            }
             let Some(holder) = record.holder.as_mut() else {
                 return Ok(());
             };
@@ -863,6 +1361,9 @@ impl WriterStore {
         let mut bytes =
             serde_json::to_vec(record).map_err(|_| invariant("writer record encoding failed"))?;
         bytes.push(b'\n');
+        if bytes.len() > 64 * 1024 {
+            return Err(invariant("writer authority record exceeds 64 KiB"));
+        }
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -877,6 +1378,107 @@ impl WriterStore {
         fs::rename(&temporary, &path).map_err(|error| path_error(&path, error))?;
         sync_directory(parent)
     }
+}
+
+/// Content-addressed, immutable evidence owned by the Run's Writer release.
+/// Publication precedes the Writer checkpoint which references its digest.
+pub(crate) fn retain_release_evidence(
+    state_root: &Path,
+    run_id: Uuid,
+    value: &Value,
+) -> Result<String, MachineError> {
+    let run_root = state_root.join("runs").join(run_id.to_string());
+    let root = run_root.join("release-evidence");
+    let uid = crate::darwin::DarwinSystem.current_uid();
+    verify_secure_directory(&run_root, uid)?;
+    match crate::workspace::create_directory(&root, 0o700) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(path_error(&root, error)),
+    }
+    verify_secure_directory(&root, uid)?;
+    let bytes =
+        serde_json::to_vec(value).map_err(|_| invariant("release evidence encoding failed"))?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err(invariant("release evidence exceeds bound"));
+    }
+    let digest = crate::jcs::sha256_hex(&bytes);
+    let path = root.join(format!("generation-release-{digest}.json"));
+    publish_immutable_release_file(&root, &path, &bytes)?;
+    Ok(digest)
+}
+
+/// Fsync a private staging inode before atomically publishing the immutable
+/// name. A crash while writing can leave only an unreferenced staging file.
+pub(crate) fn publish_immutable_release_file(
+    root: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), MachineError> {
+    let uid = crate::darwin::DarwinSystem.current_uid();
+    verify_secure_directory(root, uid)?;
+    let temporary = root.join(format!(".generation-release-{}.tmp", Uuid::now_v7()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&temporary)
+        .map_err(|e| path_error(&temporary, e))?;
+    let result = (|| {
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| path_error(&temporary, e))?;
+        match crate::darwin::DarwinSystem.rename_exclusive(&temporary, path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                verify_secure_file(path, uid)?;
+                if fs::read(path).map_err(|e| path_error(path, e))? != bytes {
+                    return Err(invariant("immutable release evidence collision"));
+                }
+            }
+            Err(e) => return Err(path_error(path, e)),
+        }
+        Ok(())
+    })();
+    // Only this invocation's staging inode is removed. The final name is
+    // immutable and is never replaced or repaired in place.
+    match fs::remove_file(&temporary) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(path_error(&temporary, e)),
+    }
+    sync_directory(root)?;
+    result
+}
+
+pub(crate) fn read_release_evidence(
+    state_root: &Path,
+    run_id: Uuid,
+    digest: &str,
+) -> Result<Value, MachineError> {
+    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(invariant("invalid release evidence digest"));
+    }
+    let run_root = state_root.join("runs").join(run_id.to_string());
+    let root = run_root.join("release-evidence");
+    let uid = crate::darwin::DarwinSystem.current_uid();
+    verify_secure_directory(&run_root, uid)?;
+    verify_secure_directory(&root, uid)?;
+    let path = root.join(format!("generation-release-{digest}.json"));
+    verify_secure_file(&path, uid)?;
+    if fs::symlink_metadata(&path)
+        .map_err(|e| path_error(&path, e))?
+        .len()
+        > 4 * 1024 * 1024
+    {
+        return Err(invariant("release evidence exceeds bound"));
+    }
+    let bytes = fs::read(&path).map_err(|e| path_error(&path, e))?;
+    if crate::jcs::sha256_hex(&bytes) != digest {
+        return Err(invariant("release evidence digest changed"));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| invariant("release evidence is invalid"))
 }
 
 pub fn writer_busy(record: &WriterRecord, requested_run_id: Uuid) -> MachineError {
@@ -983,7 +1585,7 @@ fn invariant(reason: &str) -> MachineError {
 mod tests {
     use super::*;
     use crate::domain::{ControllerIdentity, ControllerKind};
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     fn root() -> PathBuf {
         let root = std::env::temp_dir().join(format!("dolgorae-writer-{}", Uuid::now_v7()));
@@ -1020,6 +1622,571 @@ mod tests {
             Some("thread".to_owned()),
             RunLifecycle::Idle,
         )
+    }
+
+    fn generation_release(record: &WriterRecord, operation: Uuid) -> GenerationRelease {
+        GenerationRelease {
+            purpose: GenerationRetirementPurpose::Release,
+            transaction_id: operation,
+            source: record.holder.clone().unwrap(),
+            writer_generation: record.writer_generation,
+            authority_revision: record.authority_revision,
+            source_revision: 1,
+            source_ledger_sha256: "1".repeat(64),
+            source_runtime_sha256: "2".repeat(64),
+            registration_sha256: "3".repeat(64),
+            scope_sha256: None,
+            absence_sha256: None,
+            reader_proof_sha256: None,
+            retired_reader_sha256: None,
+            phase: GenerationReleasePhase::Prepared,
+            successor: None,
+        }
+    }
+
+    #[test]
+    fn generation_release_keeps_one_durable_owner_through_crash_phases_and_commit_replay() {
+        let root = root();
+        let workspace = "a".repeat(64);
+        let uid = crate::darwin::DarwinSystem.current_uid();
+        WriterStore::initialize_layout(&root, &workspace, uid).unwrap();
+        let store = WriterStore::new(&root, &workspace, uid);
+        let original = fs::read(store.record_path()).unwrap();
+        assert_eq!(store.load().unwrap().schema_version, 1);
+        assert_eq!(fs::read(store.record_path()).unwrap(), original);
+        let run = Uuid::now_v7();
+        let operation = Uuid::now_v7();
+        let recovery = root.join("runs").join(run.to_string()).join("recovery");
+        for directory in [
+            root.join("runs"),
+            root.join("runs").join(run.to_string()),
+            recovery.clone(),
+        ] {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&directory)
+                .unwrap();
+        }
+        store
+            .transact(|record| {
+                let (_, generation) = record.prepare_acquire(run, holder(run), Uuid::now_v7())?;
+                let token = record.transaction_id.unwrap();
+                record.commit_acquire(token, generation)?;
+                record.prepare_release(run, operation)?;
+                record.prepare_generation_release(generation_release(record, operation))
+            })
+            .unwrap();
+        let mut checkpoint = store.load().unwrap().generation_release.unwrap();
+        let mut wrong = checkpoint.clone();
+        wrong.phase = GenerationReleasePhase::OldAbsent;
+        wrong.scope_sha256 = Some("4".repeat(64));
+        wrong.absence_sha256 = Some("5".repeat(64));
+        assert!(
+            store
+                .transact(|r| r.advance_generation_release(&checkpoint, wrong))
+                .is_err()
+        );
+        for phase in [
+            GenerationReleasePhase::StopStarted,
+            GenerationReleasePhase::OldAbsent,
+            GenerationReleasePhase::ReaderStarting,
+            GenerationReleasePhase::ReaderVerified,
+        ] {
+            let mut next = checkpoint.clone();
+            next.phase = phase;
+            if phase == GenerationReleasePhase::StopStarted {
+                next.scope_sha256 = Some("4".repeat(64));
+            }
+            if phase == GenerationReleasePhase::OldAbsent {
+                next.absence_sha256 = Some("5".repeat(64));
+            }
+            if phase == GenerationReleasePhase::ReaderStarting {
+                next.successor = Some(ReaderReservation {
+                    run_generation: 2,
+                    server_epoch: 2,
+                    control_socket_epoch: 2,
+                    attempt_started: true,
+                });
+            }
+            if phase == GenerationReleasePhase::ReaderVerified {
+                next.reader_proof_sha256 = Some("6".repeat(64));
+            }
+            store
+                .transact(|r| r.advance_generation_release(&checkpoint, next))
+                .unwrap();
+            let recovered = store.load().unwrap();
+            checkpoint = recovered.generation_release.clone().unwrap();
+            assert_eq!(recovered.transaction_id, Some(operation));
+            assert_eq!(recovered.holder.as_ref(), Some(&checkpoint.source));
+            assert!(
+                store
+                    .transact(|r| r.retire_verified_reader_guard(operation))
+                    .is_err()
+            );
+            assert!(store.transact(|r| r.commit_release(operation)).is_err());
+            store
+                .transact(|r| {
+                    r.rollback_release(operation);
+                    r.block_unknown(operation);
+                    r.rollback_release(operation);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                store.load().unwrap().state,
+                WriterAuthorityState::BlockedUnknown
+            );
+            assert!(
+                store
+                    .load()
+                    .unwrap()
+                    .require_no_generation_release(run)
+                    .is_err()
+            );
+        }
+        let mut committed = checkpoint.clone();
+        committed.phase = GenerationReleasePhase::Committed;
+        store
+            .transact(|r| {
+                r.advance_generation_release(&checkpoint, committed)?;
+                r.commit_release(operation)
+            })
+            .unwrap();
+        let final_owner = store.load().unwrap().generation_release.clone();
+        assert_eq!(store.load().unwrap().state, WriterAuthorityState::None);
+        let next_run = Uuid::now_v7();
+        store
+            .transact(|r| {
+                r.prepare_acquire(next_run, holder(next_run), Uuid::now_v7())?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.load().unwrap().generation_release, final_owner);
+        assert!(store.transact(|r| r.commit_release(operation)).is_err());
+        let previous = final_owner.unwrap();
+        let archive = serde_json::to_value(&previous).unwrap();
+        let next_operation = Uuid::now_v7();
+        store
+            .transact(|record| {
+                let token = record.transaction_id.unwrap();
+                record.commit_acquire(token, record.writer_generation)?;
+                record.prepare_release(next_run, next_operation)?;
+                record.prepare_generation_release(generation_release(record, next_operation))
+            })
+            .unwrap();
+        let digest = crate::jcs::sha256_hex(&serde_json::to_vec(&archive).unwrap());
+        assert_eq!(read_release_evidence(&root, run, &digest).unwrap(), archive);
+        let archive_path = root
+            .join("runs")
+            .join(run.to_string())
+            .join("release-evidence")
+            .join(format!("generation-release-{digest}.json"));
+        let archive_inode = fs::metadata(&archive_path).unwrap().ino();
+        assert_eq!(
+            retain_release_evidence(&root, run, &archive).unwrap(),
+            digest
+        );
+        assert_eq!(fs::metadata(&archive_path).unwrap().ino(), archive_inode);
+        assert_eq!(fs::read_dir(&recovery).unwrap().count(), 0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn acquire_retirement_preserves_reservation_and_recovery_never_commits_write() {
+        for continue_acquire in [false, true] {
+            let root = root();
+            let workspace = "a".repeat(64);
+            let uid = crate::darwin::DarwinSystem.current_uid();
+            WriterStore::initialize_layout(&root, &workspace, uid).unwrap();
+            let store = WriterStore::new(&root, &workspace, uid);
+            let run = Uuid::now_v7();
+            for directory in [root.join("runs"), root.join("runs").join(run.to_string())] {
+                fs::DirBuilder::new().mode(0o700).create(directory).unwrap();
+            }
+            let operation = Uuid::now_v7();
+            store
+                .transact(|record| {
+                    record.prepare_acquire(run, holder(run), operation)?;
+                    let mut owner = generation_release(record, operation);
+                    owner.purpose = GenerationRetirementPurpose::Acquire;
+                    record.prepare_generation_release(owner)
+                })
+                .unwrap();
+            for phase in [
+                GenerationReleasePhase::StopStarted,
+                GenerationReleasePhase::OldAbsent,
+                GenerationReleasePhase::ReaderStarting,
+                GenerationReleasePhase::ReaderVerified,
+            ] {
+                let owner = store.load().unwrap().generation_release.unwrap();
+                store
+                    .transact(|record| {
+                        let mut next = owner.clone();
+                        next.phase = phase;
+                        if phase == GenerationReleasePhase::StopStarted {
+                            next.scope_sha256 = Some("4".repeat(64));
+                        }
+                        if phase == GenerationReleasePhase::OldAbsent {
+                            next.absence_sha256 = Some("5".repeat(64));
+                        }
+                        if phase == GenerationReleasePhase::ReaderStarting {
+                            next.successor = Some(ReaderReservation {
+                                run_generation: 2,
+                                server_epoch: 2,
+                                control_socket_epoch: 2,
+                                attempt_started: true,
+                            });
+                        }
+                        if phase == GenerationReleasePhase::ReaderVerified {
+                            next.reader_proof_sha256 = Some("6".repeat(64));
+                        }
+                        let mut wrong = next.clone();
+                        wrong.purpose = GenerationRetirementPurpose::Release;
+                        assert!(record.advance_generation_release(&owner, wrong).is_err());
+                        record.advance_generation_release(&owner, next)
+                    })
+                    .unwrap();
+                store
+                    .transact(|record| {
+                        record.block_unknown(operation);
+                        Ok(())
+                    })
+                    .unwrap();
+                let current = store.load().unwrap();
+                assert_eq!(current.transaction_id, Some(operation));
+                assert_eq!(current.holder.as_ref(), Some(&owner.source));
+                assert!(current.require_no_generation_release(run).is_err());
+            }
+            let owner = store.load().unwrap().generation_release.unwrap();
+            store
+                .transact(|record| record.commit_generation_retirement(&owner, continue_acquire))
+                .unwrap();
+            let current = store.load().unwrap();
+            assert_eq!(
+                current.generation_release.as_ref().unwrap().phase,
+                GenerationReleasePhase::Committed
+            );
+            if continue_acquire {
+                assert_eq!(current.state, WriterAuthorityState::Reserved);
+                assert_eq!(current.transaction_id, Some(operation));
+                assert_eq!(current.writer_generation, owner.writer_generation);
+                assert_eq!(current.holder.as_ref().unwrap().run_generation, 2);
+                assert_eq!(
+                    current.holder.as_ref().unwrap().thread_id,
+                    owner.source.thread_id
+                );
+                assert!(
+                    store
+                        .transact(
+                            |record| record.commit_acquire(Uuid::now_v7(), owner.writer_generation)
+                        )
+                        .is_err()
+                );
+                let original = fs::read(store.record_path()).unwrap();
+                for state in [
+                    WriterAuthorityState::Reserved,
+                    WriterAuthorityState::BlockedUnknown,
+                ] {
+                    for field in ["holder", "transaction", "reader"] {
+                        let mut invalid = current.clone();
+                        invalid.state = state;
+                        match field {
+                            "holder" => invalid.holder.as_mut().unwrap().run_generation += 1,
+                            "transaction" => invalid.transaction_id = Some(Uuid::now_v7()),
+                            "reader" => {
+                                invalid
+                                    .generation_release
+                                    .as_mut()
+                                    .unwrap()
+                                    .successor
+                                    .as_mut()
+                                    .unwrap()
+                                    .server_epoch += 1
+                            }
+                            _ => unreachable!(),
+                        }
+                        fs::write(store.record_path(), serde_json::to_vec(&invalid).unwrap())
+                            .unwrap();
+                        assert!(store.load().is_err(), "{state:?}/{field}");
+                    }
+                }
+                fs::write(store.record_path(), &original).unwrap();
+                let mut successful = current.clone();
+                successful
+                    .commit_acquire(operation, owner.writer_generation)
+                    .unwrap();
+                assert_eq!(successful.state, WriterAuthorityState::Active);
+                assert!(successful.generation_release.is_none());
+                assert!(successful.acquire_retirement_recovery(run).is_none());
+                store
+                    .transact(|record| {
+                        record.block_unknown(operation);
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(
+                    store
+                        .transact(|record| record
+                            .commit_verified_recovered_acquire(operation, owner.writer_generation))
+                        .is_err()
+                );
+                store
+                    .transact(|record| {
+                        record.prepare_acquire_retirement_recovery(run)?;
+                        let mut latest = generation_release(record, operation);
+                        latest.purpose = GenerationRetirementPurpose::Acquire;
+                        assert_eq!(latest.source.run_generation, 2);
+                        assert!(latest.scope_sha256.is_none() && latest.absence_sha256.is_none());
+                        assert!(record.commit_generation_retirement(&latest, false).is_err());
+                        record.prepare_generation_release(latest)
+                    })
+                    .unwrap();
+                let pending = store.load().unwrap();
+                assert_eq!(pending.transaction_id, Some(operation));
+                assert_eq!(
+                    pending
+                        .generation_release
+                        .as_ref()
+                        .unwrap()
+                        .source
+                        .run_generation,
+                    2
+                );
+                assert_eq!(pending.state, WriterAuthorityState::Reserved);
+            } else {
+                assert_eq!(current.state, WriterAuthorityState::None);
+                assert!(current.holder.is_none());
+                assert!(current.transaction_id.is_none());
+                let next_run = Uuid::now_v7();
+                let next_operation = Uuid::now_v7();
+                store
+                    .transact(|record| {
+                        let mut next_holder = holder(next_run);
+                        next_holder.thread_id = None;
+                        let (_, next_generation) =
+                            record.prepare_acquire(next_run, next_holder, next_operation)?;
+                        assert!(record.generation_release.is_none());
+                        record.commit_acquire(next_operation, next_generation)
+                    })
+                    .unwrap();
+                let next = store.load().unwrap();
+                assert_eq!(next.state, WriterAuthorityState::Active);
+                assert_eq!(next.holder.as_ref().unwrap().run_id, next_run);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn generation_release_evidence_refuses_unsafe_namespace_without_repair() {
+        use std::os::unix::fs::symlink;
+
+        let state_root = root();
+        let run_id = Uuid::now_v7();
+        let run_root = state_root.join("runs").join(run_id.to_string());
+        for path in [state_root.join("runs"), run_root.clone()] {
+            fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+        }
+        let evidence = json!({"run_id":run_id});
+        let digest = crate::jcs::sha256_hex(&serde_json::to_vec(&evidence).unwrap());
+        let namespace = run_root.join("release-evidence");
+        assert!(read_release_evidence(&state_root, run_id, &digest).is_err());
+        assert!(!namespace.exists());
+        let outside = state_root.join("outside");
+        fs::DirBuilder::new().mode(0o700).create(&outside).unwrap();
+        symlink(&outside, &namespace).unwrap();
+        assert!(retain_release_evidence(&state_root, run_id, &evidence).is_err());
+        assert!(read_release_evidence(&state_root, run_id, &digest).is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        fs::remove_file(&namespace).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&namespace)
+            .unwrap();
+        fs::set_permissions(&namespace, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(retain_release_evidence(&state_root, run_id, &evidence).is_err());
+        assert_eq!(fs::metadata(&namespace).unwrap().mode() & 0o777, 0o755);
+        assert_eq!(fs::read_dir(&namespace).unwrap().count(), 0);
+        fs::remove_dir_all(state_root).unwrap();
+    }
+
+    #[test]
+    fn generation_release_reader_retry_requires_absence_and_never_reuses_reservation() {
+        let run = Uuid::now_v7();
+        let operation = Uuid::now_v7();
+        let mut record = WriterRecord::empty(&"a".repeat(64));
+        let (_, generation) = record
+            .prepare_acquire(run, holder(run), Uuid::now_v7())
+            .unwrap();
+        let token = record.transaction_id.unwrap();
+        record.commit_acquire(token, generation).unwrap();
+        record.prepare_release(run, operation).unwrap();
+        let mut owner = generation_release(&record, operation);
+        owner.phase = GenerationReleasePhase::ReaderStarting;
+        owner.scope_sha256 = Some("4".repeat(64));
+        owner.absence_sha256 = Some("5".repeat(64));
+        owner.successor = Some(ReaderReservation {
+            run_generation: 2,
+            server_epoch: 2,
+            control_socket_epoch: 2,
+            attempt_started: true,
+        });
+        record.schema_version = 2;
+        record.generation_release = Some(owner.clone());
+        let mut verified = owner.clone();
+        verified.phase = GenerationReleasePhase::ReaderVerified;
+        verified.reader_proof_sha256 = Some("8".repeat(64));
+        let mut verified_record = record.clone();
+        verified_record.generation_release = Some(verified.clone());
+        verified_record
+            .replace_absent_reader(
+                &verified,
+                ReaderReservation {
+                    run_generation: 3,
+                    server_epoch: 3,
+                    control_socket_epoch: 3,
+                    attempt_started: false,
+                },
+                "9".repeat(64),
+            )
+            .unwrap();
+        let resumed = verified_record.generation_release.unwrap();
+        assert_eq!(resumed.phase, GenerationReleasePhase::ReaderStarting);
+        assert!(resumed.reader_proof_sha256.is_none());
+        assert_eq!(resumed.transaction_id, owner.transaction_id);
+        assert_eq!(resumed.source, owner.source);
+        let old = owner.successor.clone().unwrap();
+        for bad in [
+            ReaderReservation {
+                attempt_started: false,
+                ..old.clone()
+            },
+            ReaderReservation {
+                run_generation: 3,
+                attempt_started: false,
+                ..old.clone()
+            },
+            ReaderReservation {
+                run_generation: 3,
+                server_epoch: 3,
+                attempt_started: false,
+                ..old.clone()
+            },
+        ] {
+            assert!(
+                record
+                    .replace_absent_reader(&owner, bad, "6".repeat(64))
+                    .is_err()
+            );
+        }
+        let replacement = ReaderReservation {
+            run_generation: 3,
+            server_epoch: 3,
+            control_socket_epoch: 3,
+            attempt_started: false,
+        };
+        assert!(
+            record
+                .replace_absent_reader(&owner, replacement.clone(), "bad".to_owned())
+                .is_err()
+        );
+        record
+            .replace_absent_reader(&owner, replacement.clone(), "6".repeat(64))
+            .unwrap();
+        assert_eq!(
+            record
+                .generation_release
+                .as_ref()
+                .unwrap()
+                .successor
+                .as_ref(),
+            Some(&replacement)
+        );
+        assert!(
+            record
+                .replace_absent_reader(&owner, replacement, "7".repeat(64))
+                .is_err()
+        );
+        assert_eq!(record.transaction_id, Some(operation));
+        assert_eq!(record.holder.as_ref(), Some(&owner.source));
+    }
+
+    #[test]
+    fn generation_release_versions_and_immutable_publication_fail_closed() {
+        let root = root();
+        let workspace = "a".repeat(64);
+        let uid = crate::darwin::DarwinSystem.current_uid();
+        WriterStore::initialize_layout(&root, &workspace, uid).unwrap();
+        let store = WriterStore::new(&root, &workspace, uid);
+        let old = fs::read(store.record_path()).unwrap();
+        let mut wire: Value = serde_json::from_slice(&old).unwrap();
+        for version in [0, 2, 3] {
+            wire["schema_version"] = json!(version);
+            fs::write(store.record_path(), serde_json::to_vec(&wire).unwrap()).unwrap();
+            assert!(store.load().is_err());
+        }
+        wire["schema_version"] = json!(1);
+        wire["generation_release"] = Value::Null;
+        fs::write(store.record_path(), serde_json::to_vec(&wire).unwrap()).unwrap();
+        assert!(store.load().is_err());
+        fs::write(store.record_path(), &old).unwrap();
+        let run = Uuid::now_v7();
+        let operation = Uuid::now_v7();
+        let mut record = store.load().unwrap();
+        let (_, generation) = record.prepare_acquire(run, holder(run), operation).unwrap();
+        record.commit_acquire(operation, generation).unwrap();
+        record.prepare_release(run, operation).unwrap();
+        let historical = generation_release(&record, operation);
+        let original_bytes = serde_json::to_vec(&historical).unwrap();
+        assert!(
+            serde_json::to_value(&historical)
+                .unwrap()
+                .get("purpose")
+                .is_none()
+        );
+        let decoded: GenerationRelease = serde_json::from_slice(&original_bytes).unwrap();
+        assert_eq!(decoded.purpose, GenerationRetirementPurpose::Release);
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), original_bytes);
+        store
+            .transact(|current| {
+                current.prepare_acquire(run, holder(run), operation)?;
+                let mut acquire = generation_release(current, operation);
+                acquire.purpose = GenerationRetirementPurpose::Acquire;
+                current.prepare_generation_release(acquire)
+            })
+            .unwrap();
+        for blocked in [false, true] {
+            if blocked {
+                store
+                    .transact(|current| {
+                        current.block_unknown(operation);
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            let current = store.load().unwrap();
+            assert_eq!(
+                current.state,
+                if blocked {
+                    WriterAuthorityState::BlockedUnknown
+                } else {
+                    WriterAuthorityState::Reserved
+                }
+            );
+            let value = serde_json::to_value(&current).unwrap();
+            assert_eq!(value["generation_release"]["purpose"], "acquire");
+        }
+        let path = root.join("immutable.json");
+        let pending = root.join(".generation-release-interrupted.tmp");
+        fs::write(&pending, b"partial").unwrap();
+        publish_immutable_release_file(&root, &path, b"complete").unwrap();
+        publish_immutable_release_file(&root, &path, b"complete").unwrap();
+        assert!(publish_immutable_release_file(&root, &path, b"different").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"complete");
+        assert_eq!(fs::symlink_metadata(&path).unwrap().nlink(), 1);
+        assert_eq!(fs::read(&pending).unwrap(), b"partial");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -22,11 +22,11 @@ from typing import Any
 from run_live_instruction_discovery import (
     ProbeCheckFailure, checked_codex, executable_identity, isolated_environment, private_file,
 )
-from run_native_workspace_policy_fixture import ScriptedResponses, fixture_config, terminal_output
+from run_native_workspace_policy_fixture import ScriptedResponses, code_call, code_results, fixture_config, terminal_output
 
 OPT_IN = "DOLGORAE_RUN_NATIVE_REVIEW_READER"
-CODEX_VERSION = "0.159.3"
-CODEX_SHA256 = "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878"
+CODEX_VERSION = "0.164.0"
+CODEX_SHA256 = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
 
 
 class ReaderResponses(ScriptedResponses):
@@ -45,29 +45,19 @@ class ReaderResponses(ScriptedResponses):
             if self.posts % 2:
                 users = [item for item in inputs if isinstance(item, dict)
                          and item.get("type") == "message" and item.get("role") == "user"]
-                content = users[-1].get("content", []) if users else []
-                if not any(isinstance(part, dict) and part.get("type") == "input_text"
-                           and f"fixture-step-{step}:" in part.get("text", "") for part in content):
+                if len([user for user in users if any(isinstance(part, dict) and part.get("type") == "input_text"
+                           and f"fixture-step-{step}:" in part.get("text", "") for part in user.get("content", []))]) != 1:
                     raise ProbeCheckFailure("fixture_task_mismatch")
                 if step == 1:
-                    item = {"type": "function_call", "call_id": call_id,
-                            "name": "dolgorae_candidate_read", "arguments": json.dumps({
+                    item = code_call(request, call_id, [(call_id, "dolgorae_candidate_read", {
                                 "side": "after", "path": "file.txt", "byte_offset": 0,
-                                "byte_length": 8})}
+                                "byte_length": 8})])
                 else:
-                    item = {"type": "function_call", "call_id": call_id,
-                            "name": "exec_command", "arguments": json.dumps({
-                                "cmd": "cat file.txt", "yield_time_ms": 1000})}
+                    item = code_call(request, call_id, [(call_id, "exec_command", {
+                                "cmd": "cat file.txt", "yield_time_ms": 1000})])
             else:
-                returned = [item for item in inputs if isinstance(item, dict)
-                            and item.get("type") == "function_call_output"
-                            and item.get("call_id") == call_id]
-                if len(returned) != 1:
-                    raise ProbeCheckFailure("fixture_native_return_ambiguous")
-                output = returned[0].get("output")
+                output = code_results(request, call_id, [call_id])[call_id]
                 if step == 1:
-                    if isinstance(output, list) and len(output) == 1:
-                        output = output[0].get("text")
                     if not isinstance(output, str) or len(output) > 65536:
                         raise ProbeCheckFailure("fixture_candidate_return_missing")
                     result = json.loads(output)

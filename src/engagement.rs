@@ -3156,6 +3156,21 @@ impl EngagementStore {
             .map_err(|_| integrity("external task request is not valid JSON"))
     }
 
+    pub(crate) fn has_external_task_key(
+        &self,
+        engagement_id: Uuid,
+        key: &str,
+    ) -> Result<bool, MachineError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM operations WHERE scope_id=?1
+             AND operation='assign_external_specialist_task' AND idempotency_key=?2)",
+                params![engagement_id.to_string(), key],
+                |row| row.get(0),
+            )
+            .map_err(internal)
+    }
+
     pub(crate) fn external_task_for_key(
         &self,
         engagement_id: Uuid,
@@ -3990,6 +4005,25 @@ impl EngagementStore {
         Ok(Some((digest, bytes)))
     }
 
+    /// Task-owned original checked output. The caller must authorize and verify
+    /// the CompleteResult before resolving these retained representations.
+    pub(crate) fn original_task_output(
+        &self,
+        task: Uuid,
+        structured: bool,
+    ) -> Result<Option<Vec<u8>>, MachineError> {
+        crate::storage_observation::read_content(
+            &self.connection,
+            "accepted_task",
+            &task.to_string(),
+            if structured {
+                "structured_output"
+            } else {
+                "final_response"
+            },
+        )
+    }
+
     /// The accepted task identity one member task retained.
     pub(crate) fn external_task_identity(
         &self,
@@ -4078,6 +4112,37 @@ impl EngagementStore {
         // can never carry a watermark that already includes a matching row.
         let transaction = self.connection.unchecked_transaction().map_err(internal)?;
         intent_lookup(&transaction, namespace)
+    }
+
+    /// Host reconciliation reads receipt and original invocation in one snapshot.
+    pub(crate) fn intent_lookup_bound(
+        &self,
+        namespace: &LookupNamespace,
+        expected: &crate::delegation_identity::TrustedInvocationContext,
+    ) -> Result<IntentLookup, MachineError> {
+        let transaction = self.connection.unchecked_transaction().map_err(internal)?;
+        let lookup = intent_lookup(&transaction, namespace)?;
+        let operation_ref = match &lookup {
+            IntentLookup::Accepted(receipt) => Some(receipt.operation_ref.clone()),
+            IntentLookup::Unresolved { operation_ref, .. }
+            | IntentLookup::NotAccepted { operation_ref, .. } => Some(operation_ref.to_string()),
+            IntentLookup::Absent { .. } => None,
+        };
+        if let Some(operation_ref) = operation_ref {
+            let text: Option<String> = transaction.query_row("SELECT trusted_invocation_json FROM delegation_operations WHERE operation_ref=?1",
+                [operation_ref], |row| row.get(0)).map_err(internal)?;
+            let context: crate::delegation_identity::TrustedInvocationContext =
+                serde_json::from_str(
+                    &text.ok_or_else(|| intent_corrupt("host invocation context is missing"))?,
+                )
+                .map_err(|_| intent_corrupt("host invocation context is malformed"))?;
+            if &context != expected {
+                return Err(intent_corrupt(
+                    "host invocation context differs from original binding",
+                ));
+            }
+        }
+        Ok(lookup)
     }
 
     pub(crate) fn scope_membership_revision(
@@ -4562,6 +4627,39 @@ pub(crate) fn mark_external_task_dispatching_in(
         &task_id.to_string(),
     )?;
     external_task_in(transaction, engagement_id, task_id)
+}
+
+/// Cancel only the accepted successor external task before dispatch reservation.
+pub(crate) fn cancel_successor_before_dispatch(
+    transaction: &Transaction<'_>,
+    engagement_id: Uuid,
+    member: Uuid,
+    task: Uuid,
+    now: i64,
+) -> Result<(), MachineError> {
+    let changed = transaction
+        .execute(
+            "UPDATE tasks SET state='cancelled',updated_at_ms=?4
+         WHERE engagement_id=?1 AND specialist_run_id=?2 AND task_id=?3
+           AND state='accepted' AND turn_id IS NULL AND result_sha256 IS NULL
+           AND NOT EXISTS(SELECT 1 FROM dispatch_indexes WHERE task_id=?3)",
+            params![
+                engagement_id.to_string(),
+                member.to_string(),
+                task.to_string(),
+                now
+            ],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(conflict("task cancellation lost the dispatch boundary"));
+    }
+    append_event(
+        transaction,
+        engagement_id,
+        "external_task_cancelled",
+        "cancelled",
+    )
 }
 
 /// Move one dispatching task to `running` with its accepted Turn.
@@ -5429,6 +5527,7 @@ pub(crate) struct IntentAdmission<'a> {
     pub namespace: &'a LookupNamespace,
     pub mutation_envelope_json: &'a str,
     pub mutation_envelope_digest: &'a str,
+    pub trusted_invocation: Option<&'a crate::delegation_identity::TrustedInvocationContext>,
     pub expected_revision: Option<u64>,
     pub now_ms: i64,
 }
@@ -5447,7 +5546,7 @@ pub(crate) enum IntentPreparation {
 
 /// One complete lookup result before it is projected onto the closed shape.
 #[derive(Debug)]
-pub(crate) enum IntentLookup {
+pub enum IntentLookup {
     Accepted(Box<OperationReceipt>),
     NotAccepted {
         operation_ref: Uuid,
@@ -5504,6 +5603,10 @@ pub(crate) fn intent_prepare(
     admission: IntentAdmission<'_>,
 ) -> Result<IntentPreparation, MachineError> {
     let namespace = admission.namespace;
+    checked_invocation_context(
+        admission.mutation_envelope_json,
+        admission.trusted_invocation,
+    )?;
     checked(&namespace.idempotency_key, 256, "idempotency_key")?;
     checked(&namespace.operation_kind, 128, "operation_kind")?;
     checked(&namespace.workspace_ref, 512, "workspace_ref")?;
@@ -5534,6 +5637,7 @@ pub(crate) fn intent_prepare(
         if digest != admission.mutation_envelope_digest {
             return Err(intent_conflict());
         }
+        verify_retained_invocation(transaction, &operation_ref, &envelope)?;
         let operation_ref = intent_operation_ref(&operation_ref)?;
         return match state.as_str() {
             "accepted" => Ok(IntentPreparation::Accepted(Box::new(intent_receipt(
@@ -5569,7 +5673,7 @@ pub(crate) fn intent_prepare(
                scope_kind,scope_ref,operation_kind,idempotency_key,mutation_envelope_json,
                mutation_envelope_digest,expected_revision,trusted_invocation_json,
                accepted_subjects_json,created_at_ms,updated_at_ms
-             ) VALUES(?1,'prepared',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,NULL,?12,?13,?13)",
+             ) VALUES(?1,'prepared',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?14,?12,?13,?13)",
             params![
                 admission.operation_ref.to_string(),
                 key.0,
@@ -5583,7 +5687,11 @@ pub(crate) fn intent_prepare(
                 admission.mutation_envelope_digest,
                 admission.expected_revision.map(|revision| revision as i64),
                 subjects,
-                admission.now_ms
+                admission.now_ms,
+                admission
+                    .trusted_invocation
+                    .map(canonical_string_context)
+                    .transpose()?
             ],
         )
         .map_err(|error| {
@@ -5615,9 +5723,9 @@ pub(crate) fn intent_accept(
     }
     legacy_operation_collision(transaction, namespace)?;
     let key = intent_key(namespace);
-    let retained: Option<(String, String)> = transaction
+    let retained: Option<(String, String, String)> = transaction
         .query_row(
-            "SELECT state,mutation_envelope_digest FROM delegation_operations
+            "SELECT state,mutation_envelope_digest,mutation_envelope_json FROM delegation_operations
               WHERE operation_ref=?1 AND workspace_ref=?2 AND controller_principal=?3
                 AND controller_generation=?4 AND scope_kind IS ?5 AND scope_ref IS ?6
                 AND operation_kind=?7 AND idempotency_key=?8",
@@ -5631,13 +5739,14 @@ pub(crate) fn intent_accept(
                 key.5,
                 key.6
             ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(internal)?;
-    let Some((state, digest)) = retained else {
+    let Some((state, digest, envelope)) = retained else {
         return Err(intent_corrupt("the accepted intent is missing"));
     };
+    verify_retained_invocation(transaction, &operation_ref.to_string(), &envelope)?;
     if digest != receipt.accepted_input_digest {
         return Err(intent_corrupt(
             "the receipt carries another accepted input digest",
@@ -5763,6 +5872,7 @@ pub(crate) fn intent_lookup(
         .optional()
         .map_err(internal)?;
     if let Some((operation_ref, state, digest, receipt, subjects, envelope)) = existing {
+        verify_retained_invocation(connection, &operation_ref, &envelope)?;
         let operation_ref = intent_operation_ref(&operation_ref)?;
         return match state.as_str() {
             "accepted" => Ok(IntentLookup::Accepted(Box::new(intent_receipt(
@@ -5807,6 +5917,7 @@ pub(crate) fn intent_lookup(
         .optional()
         .map_err(internal)?;
     if let Some((operation_ref, input_digest, refusal_code, refusal_revision, envelope)) = refusal {
+        verify_retained_invocation(connection, &operation_ref, &envelope)?;
         if refusal_code.is_empty() {
             return Err(intent_corrupt("the retained refusal is incomplete"));
         }
@@ -6452,6 +6563,62 @@ fn intent_receipt(
     Ok(receipt)
 }
 
+fn canonical_string_context(
+    context: &crate::delegation_identity::TrustedInvocationContext,
+) -> Result<String, MachineError> {
+    canonical_string(
+        &serde_json::to_value(context).map_err(|_| intent_corrupt("invalid invocation context"))?,
+    )
+}
+
+fn checked_invocation_context(
+    envelope_json: &str,
+    context: Option<&crate::delegation_identity::TrustedInvocationContext>,
+) -> Result<(), MachineError> {
+    let parsed = crate::jcs::parse(envelope_json)
+        .map_err(|_| intent_corrupt("invalid invocation envelope"))?;
+    let bytes = crate::jcs::canonicalize(&parsed)
+        .map_err(|_| intent_corrupt("invalid invocation envelope"))?;
+    let envelope: crate::operation::Envelope = serde_json::from_slice(&bytes)
+        .map_err(|_| intent_corrupt("invalid invocation envelope"))?;
+    if let Some(context) = context {
+        context
+            .validate()
+            .map_err(|_| intent_corrupt("invalid invocation context"))?;
+    }
+    if envelope.trusted_invocation_ref != context.map(|context| context.invocation_ref) {
+        return Err(intent_corrupt(
+            "invocation context does not match mutation envelope",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_retained_invocation(
+    connection: &Connection,
+    operation_ref: &str,
+    envelope: &str,
+) -> Result<(), MachineError> {
+    let context_json: Option<String> = connection
+        .query_row(
+            "SELECT trusted_invocation_json FROM delegation_operations WHERE operation_ref=?1",
+            [operation_ref],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    let context = context_json
+        .map(|text| {
+            let parsed = crate::jcs::parse(&text)
+                .map_err(|_| intent_corrupt("invalid retained invocation context"))?;
+            let bytes = crate::jcs::canonicalize(&parsed)
+                .map_err(|_| intent_corrupt("invalid retained invocation context"))?;
+            serde_json::from_slice::<crate::delegation_identity::TrustedInvocationContext>(&bytes)
+                .map_err(|_| intent_corrupt("invalid retained invocation context"))
+        })
+        .transpose()?;
+    checked_invocation_context(envelope, context.as_ref())
+}
+
 /// Require one retained mutation envelope to be the closed envelope over this
 /// row's own namespace with the digest the row recorded.
 fn intent_envelope(
@@ -6490,21 +6657,22 @@ fn latest_refusal_digest(
     namespace: &LookupNamespace,
 ) -> Result<Option<String>, MachineError> {
     let key = intent_key(namespace);
-    let row: Option<(String, String)> = connection
+    let row: Option<(String, String, String)> = connection
         .query_row(
-            "SELECT mutation_envelope_digest,mutation_envelope_json FROM delegation_operations
+            "SELECT mutation_envelope_digest,mutation_envelope_json,operation_ref FROM delegation_operations
               WHERE workspace_ref=?1 AND controller_principal=?2 AND controller_generation=?3
                 AND scope_kind IS ?4 AND scope_ref IS ?5 AND operation_kind=?6
                 AND idempotency_key=?7 AND state='resolved_not_accepted'
               ORDER BY sequence DESC LIMIT 1",
             params![key.0, key.1, key.2, key.3, key.4, key.5, key.6],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(internal)?;
-    let Some((digest, envelope)) = row else {
+    let Some((digest, envelope, operation_ref)) = row else {
         return Ok(None);
     };
+    verify_retained_invocation(connection, &operation_ref, &envelope)?;
     intent_envelope(namespace, &digest, &envelope)?;
     Ok(Some(digest))
 }
@@ -14273,9 +14441,24 @@ mod tests {
             namespace,
             mutation_envelope_json: envelope_json,
             mutation_envelope_digest: digest,
+            trusted_invocation: None,
             expected_revision: None,
             now_ms: 1,
         }
+    }
+
+    // Reader-corruption fixtures bypass checked admission rather than asking it
+    // to publish a malformed envelope. Immutable production triggers stay live.
+    fn seed_corrupt_retained_envelope(
+        store: &mut EngagementStore,
+        namespace: &LookupNamespace,
+        envelope: &str,
+        digest: &str,
+    ) {
+        store.connection.execute(
+            "INSERT INTO delegation_operations(operation_ref,state,workspace_ref,controller_principal,controller_generation,scope_kind,scope_ref,operation_kind,idempotency_key,mutation_envelope_json,mutation_envelope_digest,accepted_subjects_json,created_at_ms,updated_at_ms) VALUES(?1,'prepared',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,1,1)",
+            params![Uuid::now_v7().to_string(),namespace.workspace_ref,namespace.controller_principal,namespace.controller_generation,namespace.scope_kind,namespace.scope_ref,namespace.operation_kind,namespace.idempotency_key,envelope,digest,serde_json::to_string(&AcceptedSubjects::default()).unwrap()],
+        ).unwrap();
     }
 
     /// Prepare one intent with its own closed envelope, returning its digest.
@@ -14300,6 +14483,523 @@ mod tests {
         store
             .transact(|transaction| intent_accept(transaction, operation_ref, receipt, 2))
             .unwrap();
+    }
+
+    #[test]
+    fn serialized_host_envelope_corpus_checks_all_kinds_states_and_consumers() {
+        use crate::delegation_identity::TrustedInvocationContext;
+        use serde_json::json;
+        let canonical = "00000000-0000-7000-8000-00000000000a";
+        let invalid = [
+            Some(json!(canonical.replace('-', ""))),
+            Some(json!(canonical.to_uppercase())),
+            Some(json!(format!("{{{canonical}}}"))),
+            Some(json!(format!("urn:uuid:{canonical}"))),
+            Some(json!(canonical.replacen("-7000-", "-4000-", 1))),
+            Some(json!(canonical.replacen("-8000-", "-c000-", 1))),
+            Some(json!("")),
+            Some(Value::Null),
+            Some(json!(42)),
+            Some(json!({})),
+            Some(json!([])),
+            None,
+        ];
+        for kind in [
+            "install_provisioning",
+            "open_external_engagement",
+            "hire_external_specialist",
+            "assign_external_specialist_task",
+            "spawn_specialist",
+            "assign_specialist_task",
+        ] {
+            for state in [
+                "prepared",
+                "unresolved",
+                "accepted",
+                "resolved_not_accepted",
+            ] {
+                for host in [false, true] {
+                    let (mut store, root) = store();
+                    let aggregate_ref = Uuid::now_v7().to_string();
+                    let aggregate = match kind {
+                        "install_provisioning" | "open_external_engagement" => None,
+                        "spawn_specialist" | "assign_specialist_task" => {
+                            Some(("orchestrated_session", aggregate_ref.as_str()))
+                        }
+                        _ => Some(("external_engagement", aggregate_ref.as_str())),
+                    };
+                    let ns = intent_namespace(kind, "serialized-host-proof", aggregate);
+                    let context = TrustedInvocationContext {
+                        schema: "dolgorae.trusted-invocation-context/v1".into(),
+                        invocation_ref: Uuid::try_parse(canonical).unwrap(),
+                        host_route: "codex-0.160.0".into(),
+                        state_generation: 1,
+                        accepted_public_input_digest: format!("sha256:{}", "c".repeat(64)),
+                        native_event_digest: format!("sha256:{}", "d".repeat(64)),
+                        server_binding: "dolgorae".into(),
+                        tool_binding: "specialist".into(),
+                    };
+                    let expected = host.then_some(&context);
+                    let (legacy, _) = intent_envelope_for(&ns);
+                    let mut envelope: crate::operation::Envelope =
+                        serde_json::from_str(&legacy).unwrap();
+                    envelope.trusted_invocation_ref = expected.map(|c| c.invocation_ref);
+                    let good = serde_json::to_string(&envelope).unwrap();
+                    let digest = crate::operation::envelope_digest(&envelope).unwrap();
+                    let operation = Uuid::now_v7();
+                    let admission = |operation| {
+                        let mut a = intent_admission(operation, &ns, &good, &digest);
+                        a.trusted_invocation = expected;
+                        a
+                    };
+                    assert!(matches!(
+                        store
+                            .transact(|tx| intent_prepare(tx, admission(operation)))
+                            .unwrap(),
+                        IntentPreparation::Created
+                    ));
+                    let mut receipt = intent_receipt_for(&ns, operation, &digest, 0);
+                    if kind == "spawn_specialist" {
+                        receipt.accepted_subjects.member_ref = Some(Uuid::now_v7().to_string());
+                    }
+                    if kind.starts_with("assign_") {
+                        receipt.accepted_subjects.task_ref = Some(Uuid::now_v7().to_string());
+                    }
+                    receipt.receipt_digest = receipt.compute_digest().unwrap();
+                    match state {
+                        "unresolved" => store
+                            .transact(|tx| intent_mark_unresolved(tx, operation, 2))
+                            .unwrap(),
+                        "accepted" => accept_intent(&mut store, operation, &receipt),
+                        "resolved_not_accepted" => {
+                            store
+                                .transact(|tx| {
+                                    intent_refuse_before_acceptance(
+                                        tx,
+                                        operation,
+                                        "REVISION_CONFLICT",
+                                        2,
+                                    )
+                                })
+                                .unwrap();
+                        }
+                        _ => {}
+                    }
+                    let result = store.intent_lookup(&ns).unwrap();
+                    assert!(match state {
+                        "accepted" => matches!(result, IntentLookup::Accepted(_)),
+                        "resolved_not_accepted" =>
+                            matches!(result, IntentLookup::NotAccepted { .. }),
+                        _ => matches!(result, IntentLookup::Unresolved { .. }),
+                    });
+                    if let Some(context) = expected {
+                        store.intent_lookup_bound(&ns, context).unwrap();
+                    }
+                    if kind == "assign_external_specialist_task" && state == "accepted" {
+                        assert_eq!(
+                            store
+                                .accepted_assignment_body_digest(
+                                    "workspace",
+                                    Uuid::try_parse(&aggregate_ref).unwrap(),
+                                    &ns.idempotency_key
+                                )
+                                .unwrap(),
+                            Some(envelope.request_body.sha256.clone())
+                        );
+                    }
+                    let replay = Uuid::now_v7();
+                    let result = store
+                        .transact(|tx| intent_prepare(tx, admission(replay)))
+                        .unwrap();
+                    assert!(match state {
+                        "accepted" => matches!(result, IntentPreparation::Accepted(_)),
+                        "resolved_not_accepted" => matches!(result, IntentPreparation::Created),
+                        _ => matches!(result, IntentPreparation::Unresolved { .. }),
+                    });
+                    if state == "resolved_not_accepted" {
+                        store
+                            .connection
+                            .execute(
+                                "DELETE FROM delegation_operations WHERE operation_ref=?1",
+                                [replay.to_string()],
+                            )
+                            .unwrap();
+                    }
+                    if !host {
+                        std::fs::remove_dir_all(root).unwrap();
+                        continue;
+                    }
+                    let snapshot = |store: &EngagementStore| {
+                        let mut statement = store
+                            .connection
+                            .prepare("SELECT * FROM delegation_operations ORDER BY sequence")
+                            .unwrap();
+                        let count = statement.column_count();
+                        statement
+                            .query_map([], |row| {
+                                (0..count)
+                                    .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                                    .collect::<Result<Vec<_>, _>>()
+                            })
+                            .unwrap()
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap()
+                    };
+                    let original = snapshot(&store);
+                    let statement = store
+                        .connection
+                        .prepare("SELECT * FROM delegation_operations LIMIT 0")
+                        .unwrap();
+                    let columns: Vec<_> = statement
+                        .column_names()
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                    let envelope_column = columns
+                        .iter()
+                        .position(|s| s == "mutation_envelope_json")
+                        .unwrap();
+                    drop(statement);
+                    let insert = format!(
+                        "INSERT INTO delegation_operations VALUES({})",
+                        (0..columns.len())
+                            .map(|_| "?")
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                    for (case, value) in invalid.iter().enumerate() {
+                        let mut raw = serde_json::to_value(&envelope).unwrap();
+                        if let Some(value) = value {
+                            raw["trusted_invocation_ref"] = value.clone();
+                        } else {
+                            raw.as_object_mut()
+                                .unwrap()
+                                .remove("trusted_invocation_ref");
+                        }
+                        let bad = serde_json::to_string(&raw).unwrap();
+                        // Corrupt only original proof text, keeping the canonical context/digest.
+                        let mut row = original[0].clone();
+                        row[envelope_column] = rusqlite::types::Value::Text(bad.clone());
+                        store
+                            .connection
+                            .execute("DELETE FROM delegation_operations", [])
+                            .unwrap();
+                        store
+                            .connection
+                            .execute(&insert, rusqlite::params_from_iter(row.iter()))
+                            .unwrap();
+                        let before = snapshot(&store);
+                        let label = format!("{kind}/{state}/raw-envelope-{case}");
+                        assert_eq!(
+                            store.intent_lookup(&ns).unwrap_err().code,
+                            "RECOVERY_REQUIRED",
+                            "{label}/lookup"
+                        );
+                        assert_eq!(
+                            store.intent_lookup_bound(&ns, &context).unwrap_err().code,
+                            "RECOVERY_REQUIRED",
+                            "{label}/bound"
+                        );
+                        assert_eq!(
+                            store
+                                .transact(|tx| intent_prepare(tx, admission(Uuid::now_v7())))
+                                .unwrap_err()
+                                .code,
+                            "RECOVERY_REQUIRED",
+                            "{label}/replay"
+                        );
+                        assert_eq!(
+                            store
+                                .transact(|tx| intent_accept(tx, operation, &receipt, 3))
+                                .unwrap_err()
+                                .code,
+                            "RECOVERY_REQUIRED",
+                            "{label}/accept"
+                        );
+                        if state == "resolved_not_accepted" {
+                            assert!(
+                                latest_refusal_digest(&store.connection, &ns).is_err(),
+                                "{label}/latest-refusal"
+                            );
+                        }
+                        if kind == "assign_external_specialist_task" && state == "accepted" {
+                            assert!(
+                                store
+                                    .accepted_assignment_body_digest(
+                                        "workspace",
+                                        Uuid::try_parse(&aggregate_ref).unwrap(),
+                                        &ns.idempotency_key
+                                    )
+                                    .is_err(),
+                                "{label}/body-proof"
+                            );
+                        }
+                        let mut fresh = ns.clone();
+                        fresh.idempotency_key = "fresh-corrupt-input".into();
+                        let mut raw_fresh = raw.clone();
+                        raw_fresh["idempotency_key"] = json!(fresh.idempotency_key);
+                        let raw_fresh = serde_json::to_string(&raw_fresh).unwrap();
+                        let mut fresh_envelope = envelope.clone();
+                        fresh_envelope.namespace.idempotency_key = fresh.idempotency_key.clone();
+                        let fresh_digest =
+                            crate::operation::envelope_digest(&fresh_envelope).unwrap();
+                        let mut a =
+                            intent_admission(Uuid::now_v7(), &fresh, &raw_fresh, &fresh_digest);
+                        a.trusted_invocation = Some(&context);
+                        assert!(
+                            store.transact(|tx| intent_prepare(tx, a)).is_err(),
+                            "{label}/fresh-admission"
+                        );
+                        assert_eq!(snapshot(&store), before, "{label}/changed retained bytes");
+                    }
+                    std::fs::remove_dir_all(root).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn host_context_corpus_covers_all_keyed_kinds_and_retained_states() {
+        use crate::delegation_identity::TrustedInvocationContext;
+        let expected_only = |store: &EngagementStore,
+                             namespace: &LookupNamespace,
+                             context: &TrustedInvocationContext,
+                             operation: Option<Uuid>,
+                             state: &str| {
+            let retained = |operation: Uuid| -> (Option<String>, String, String, Option<String>) {
+                store.connection.query_row("SELECT trusted_invocation_json,mutation_envelope_json,state,receipt_json FROM delegation_operations WHERE operation_ref=?1", [operation.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap()
+            };
+            let before = operation.map(retained);
+            for field in [
+                "invocation_ref",
+                "host_route",
+                "state_generation",
+                "accepted_public_input_digest",
+                "native_event_digest",
+                "tool_binding",
+                "server_binding",
+            ] {
+                let mut expected = context.clone();
+                match field {
+                    "invocation_ref" => expected.invocation_ref = Uuid::now_v7(),
+                    "host_route" => expected.host_route = "claude-code-2.1.295".into(),
+                    "state_generation" => expected.state_generation = 2,
+                    "accepted_public_input_digest" => {
+                        expected.accepted_public_input_digest = format!("sha256:{}", "a".repeat(64))
+                    }
+                    "native_event_digest" => {
+                        expected.native_event_digest = format!("sha256:{}", "b".repeat(64))
+                    }
+                    "tool_binding" => expected.tool_binding = "other-tool".into(),
+                    "server_binding" => expected.server_binding = "foreign".into(),
+                    _ => unreachable!(),
+                }
+                assert_ne!(&expected, context);
+                // The frozen context has exactly one server literal. There is
+                // no schema-valid differing server; that negative is composed
+                // with the sealed producer's validation rather than invented.
+                assert_eq!(expected.validate().is_ok(), field != "server_binding");
+                if state == "absent" {
+                    if field != "server_binding" {
+                        assert!(
+                            matches!(
+                                store.intent_lookup_bound(namespace, &expected).unwrap(),
+                                IntentLookup::Absent { .. }
+                            ),
+                            "absent {field}"
+                        );
+                    }
+                } else {
+                    assert!(
+                        store.intent_lookup_bound(namespace, &expected).is_err(),
+                        "expected-only {}/{state}/{field}",
+                        namespace.operation_kind
+                    );
+                }
+            }
+            assert_eq!(
+                operation.map(retained),
+                before,
+                "expected-only lookups changed retained bytes"
+            );
+        };
+        for kind in [
+            "install_provisioning",
+            "open_external_engagement",
+            "hire_external_specialist",
+            "assign_external_specialist_task",
+            "spawn_specialist",
+            "assign_specialist_task",
+        ] {
+            let (mut store, root) = store();
+            let aggregate = if matches!(kind, "install_provisioning" | "open_external_engagement") {
+                None
+            } else if matches!(kind, "spawn_specialist" | "assign_specialist_task") {
+                Some(("orchestrated_session", "session"))
+            } else {
+                Some(("external_engagement", "engagement"))
+            };
+            let namespace = intent_namespace(kind, "original-host-key", aggregate);
+            let context = TrustedInvocationContext {
+                schema: "dolgorae.trusted-invocation-context/v1".into(),
+                invocation_ref: Uuid::now_v7(),
+                host_route: "codex-0.160.0".into(),
+                state_generation: 1,
+                accepted_public_input_digest: format!("sha256:{}", "c".repeat(64)),
+                native_event_digest: format!("sha256:{}", "d".repeat(64)),
+                server_binding: "dolgorae".into(),
+                tool_binding: "specialist".into(),
+            };
+            let (legacy, _) = intent_envelope_for(&namespace);
+            let mut envelope: crate::operation::Envelope = serde_json::from_str(&legacy).unwrap();
+            envelope.trusted_invocation_ref = Some(context.invocation_ref);
+            let json = serde_json::to_string(&envelope).unwrap();
+            let digest = crate::operation::envelope_digest(&envelope).unwrap();
+            for case in 0..13 {
+                let mut bad = context.clone();
+                match case {
+                    0 => {}
+                    1 => {}
+                    2 => bad.invocation_ref = Uuid::now_v7(),
+                    3 => bad.host_route = "foreign".into(),
+                    4 => bad.state_generation = 0,
+                    5 => bad.accepted_public_input_digest = "bad".into(),
+                    6 => bad.native_event_digest = "bad".into(),
+                    7 => bad.server_binding = "foreign".into(),
+                    8 => bad.tool_binding = "".into(),
+                    9 => bad.invocation_ref = Uuid::nil(),
+                    10 => bad.schema = "foreign".into(),
+                    11 => bad.state_generation = crate::domain::MAX_JCS_SAFE_INTEGER + 1,
+                    12 => bad.tool_binding = "x".repeat(129),
+                    _ => unreachable!(),
+                }
+                let mut admission = intent_admission(Uuid::now_v7(), &namespace, &json, &digest);
+                admission.trusted_invocation = if case == 0 { None } else { Some(&bad) };
+                if case == 1 {
+                    admission.mutation_envelope_json = &legacy;
+                }
+                assert!(
+                    store.transact(|tx| intent_prepare(tx, admission)).is_err(),
+                    "{kind} context mutation {case}"
+                );
+                assert_eq!(
+                    store
+                        .connection
+                        .query_row("SELECT COUNT(*) FROM delegation_operations", [], |row| row
+                            .get::<_, u64>(
+                            0
+                        ))
+                        .unwrap(),
+                    0
+                );
+            }
+            assert!(matches!(
+                store.intent_lookup_bound(&namespace, &context).unwrap(),
+                IntentLookup::Absent { .. }
+            ));
+            expected_only(&store, &namespace, &context, None, "absent");
+            let operation_ref = Uuid::now_v7();
+            let mut admission = intent_admission(operation_ref, &namespace, &json, &digest);
+            admission.trusted_invocation = Some(&context);
+            assert!(matches!(
+                store.transact(|tx| intent_prepare(tx, admission)).unwrap(),
+                IntentPreparation::Created
+            ));
+            assert!(matches!(
+                store.intent_lookup_bound(&namespace, &context).unwrap(),
+                IntentLookup::Unresolved { .. }
+            ));
+            expected_only(
+                &store,
+                &namespace,
+                &context,
+                Some(operation_ref),
+                "prepared",
+            );
+            store
+                .transact(|tx| intent_mark_unresolved(tx, operation_ref, 2))
+                .unwrap();
+            assert!(matches!(
+                store.intent_lookup_bound(&namespace, &context).unwrap(),
+                IntentLookup::Unresolved { .. }
+            ));
+            expected_only(
+                &store,
+                &namespace,
+                &context,
+                Some(operation_ref),
+                "unresolved",
+            );
+            let mut receipt = intent_receipt_for(&namespace, operation_ref, &digest, 0);
+            if kind == "spawn_specialist" {
+                receipt.accepted_subjects.member_ref = Some(Uuid::now_v7().to_string());
+            }
+            if kind.starts_with("assign_") {
+                receipt.accepted_subjects.task_ref = Some(Uuid::now_v7().to_string());
+            }
+            receipt.receipt_digest = receipt.compute_digest().unwrap();
+            accept_intent(&mut store, operation_ref, &receipt);
+            assert!(matches!(
+                store.intent_lookup_bound(&namespace, &context).unwrap(),
+                IntentLookup::Accepted(_)
+            ));
+            expected_only(
+                &store,
+                &namespace,
+                &context,
+                Some(operation_ref),
+                "accepted",
+            );
+            let expected = serde_json::to_string(&context).unwrap();
+            for invalid in [
+                None,
+                Some("{}".to_owned()),
+                Some(expected.replace("codex-0.160.0", "foreign")),
+                Some(expected.replace(
+                    &context.invocation_ref.to_string(),
+                    &Uuid::now_v7().to_string(),
+                )),
+            ] {
+                store.connection.execute("UPDATE delegation_operations SET trusted_invocation_json=?1 WHERE operation_ref=?2",params![invalid,operation_ref.to_string()]).unwrap();
+                assert!(
+                    store.intent_lookup(&namespace).is_err(),
+                    "{kind}: corrupt retained context was accepted"
+                );
+            }
+            store.connection.execute("UPDATE delegation_operations SET trusted_invocation_json=?1 WHERE operation_ref=?2",params![expected,operation_ref.to_string()]).unwrap();
+            assert!(matches!(
+                store.intent_lookup_bound(&namespace, &context).unwrap(),
+                IntentLookup::Accepted(_)
+            ));
+            let refused_ns = intent_namespace(kind, "refused-host-key", aggregate);
+            let (json, _) = intent_envelope_for(&refused_ns);
+            let mut envelope: crate::operation::Envelope = serde_json::from_str(&json).unwrap();
+            envelope.trusted_invocation_ref = Some(context.invocation_ref);
+            let json = serde_json::to_string(&envelope).unwrap();
+            let digest = crate::operation::envelope_digest(&envelope).unwrap();
+            let operation = Uuid::now_v7();
+            let mut admission = intent_admission(operation, &refused_ns, &json, &digest);
+            admission.trusted_invocation = Some(&context);
+            store
+                .transact(|tx| {
+                    intent_prepare(tx, admission)?;
+                    intent_refuse_before_acceptance(tx, operation, "CAPABILITY_UNSUPPORTED", 3)?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(matches!(
+                store.intent_lookup_bound(&refused_ns, &context).unwrap(),
+                IntentLookup::NotAccepted { .. }
+            ));
+            expected_only(&store, &refused_ns, &context, Some(operation), "refused");
+            store.connection.execute("UPDATE delegation_operations SET trusted_invocation_json=NULL WHERE operation_ref=?1",[operation.to_string()]).unwrap();
+            assert!(store.intent_lookup(&refused_ns).is_err());
+            let mut admission = intent_admission(Uuid::now_v7(), &refused_ns, &json, &digest);
+            admission.trusted_invocation = Some(&context);
+            assert!(store.transact(|tx| intent_prepare(tx, admission)).is_err());
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -14648,14 +15348,7 @@ mod tests {
         // A retained envelope that is not the closed envelope is refused too.
         let other = intent_namespace("open_external_engagement", "envelope-open", None);
         let (_, digest) = intent_envelope_for(&other);
-        store
-            .transact(|transaction| {
-                intent_prepare(
-                    transaction,
-                    intent_admission(Uuid::now_v7(), &other, "{\"schema\":\"other\"}", &digest),
-                )
-            })
-            .unwrap();
+        seed_corrupt_retained_envelope(&mut store, &other, "{\"schema\":\"other\"}", &digest);
         assert_eq!(
             store.intent_lookup(&other).unwrap_err().code,
             "RECOVERY_REQUIRED"
@@ -14681,19 +15374,12 @@ mod tests {
         // refuses it before any shape or digest comparison.
         let duplicate = intent_namespace("install_provisioning", "duplicate-key", None);
         let (_, digest) = intent_envelope_for(&duplicate);
-        store
-            .transact(|transaction| {
-                intent_prepare(
-                    transaction,
-                    intent_admission(
-                        Uuid::now_v7(),
-                        &duplicate,
-                        "{\"schema\":\"a\",\"schema\":\"b\"}",
-                        &digest,
-                    ),
-                )
-            })
-            .unwrap();
+        seed_corrupt_retained_envelope(
+            &mut store,
+            &duplicate,
+            "{\"schema\":\"a\",\"schema\":\"b\"}",
+            &digest,
+        );
         assert_eq!(
             store.intent_lookup(&duplicate).unwrap_err().code,
             "RECOVERY_REQUIRED"

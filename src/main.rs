@@ -22,6 +22,30 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args = std::env::args_os().collect::<Vec<_>>();
+    if args
+        .get(1)
+        .is_some_and(|value| value == "__trusted-specialist-host")
+    {
+        let native = args.get(2).is_some_and(|operation| {
+            matches!(
+                operation.to_str(),
+                Some("host-hook" | "host-mcp" | "host-lookup")
+            )
+        });
+        let result = if native {
+            dolgorae::specialist_stdio::run(&args[2..])
+        } else {
+            dolgorae::trusted_host::run_admin(&args[2..])
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let code = dolgorae::trusted_host::administrative_error_code(&error);
+                eprintln!("{code}");
+                ExitCode::from(4)
+            }
+        };
+    }
     if args.len() == 4
         && args[1] == dolgorae::profile::PROFILE_LOG_DRAINER_COMMAND
         && args[2] == "--root"

@@ -6,8 +6,8 @@ use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
 use crate::run::AgentConfigurationSnapshot;
 use crate::semantic::{
-    ExternalAgentConfigurationInput, prepare_external_specialist,
-    prepare_external_specialist_read_only,
+    ExternalAgentConfigurationInput, prepare_legacy_external_specialist,
+    prepare_legacy_external_specialist_read_only,
 };
 use crate::workspace::{
     SystemWorkspacePlatform, WorkspaceService, WorkspaceView, atomic_create, create_directory,
@@ -288,7 +288,7 @@ impl SpecialistPolicyRegistry {
         let workspace = self.workspace.canonical_path.to_path_buf()?;
         for role in &policy.roles {
             let configuration = &role.agent_configuration;
-            let prepared = prepare_external_specialist(
+            let prepared = prepare_legacy_external_specialist(
                 Some(&workspace),
                 &role.role_ref,
                 ExternalAgentConfigurationInput {
@@ -377,7 +377,7 @@ impl SpecialistPolicyRegistry {
                     value
                 }
             };
-            let prepared = prepare_external_specialist_read_only(
+            let prepared = prepare_legacy_external_specialist_read_only(
                 Some(&workspace_path),
                 &role.role_ref,
                 ExternalAgentConfigurationInput {

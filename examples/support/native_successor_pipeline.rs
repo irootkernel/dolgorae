@@ -7,9 +7,8 @@ use crate::domain::{Access, ControllerKind, PolicyVerification, RunLifecycle};
 use crate::engagement::EngagementStore;
 use crate::global_profile::GlobalProfileStore;
 use crate::global_runtime::{GlobalMembershipStore, MembershipDisposition, ResolvedGlobalProfile};
-use crate::instructions::{InstructionSourceStore, SelectedInstructionSource};
+use crate::instructions::{InstructionSourceStore, SelectedInstructionSource, SelectedNamedSource};
 use crate::paths::DolgoraeHome;
-use crate::profile::{ProfileOperation, execute_global};
 use crate::provisioning::{ProvisioningAdmission, ProvisioningSources};
 use crate::run::RunStore;
 use crate::semantic::{
@@ -93,6 +92,7 @@ fn payload(record: &crate::audit::AuditRecord) -> Value {
     serde_json::from_slice(&crate::jcs::canonicalize(record.payload()).unwrap()).unwrap()
 }
 fn verify_closed(root: &Path, workspace: &WorkspaceView, run: Uuid) -> Value {
+    use crate::audit::AuditKind as K;
     let (snapshot, observed) = RunSnapshot::observe(root, run, 0).unwrap();
     assert_eq!(snapshot.projection.lifecycle, RunLifecycle::Closed);
     assert_eq!(observed.effective_policy.access, Access::Read);
@@ -100,10 +100,21 @@ fn verify_closed(root: &Path, workspace: &WorkspaceView, run: Uuid) -> Value {
         observed.effective_policy.verification,
         PolicyVerification::Verified
     );
+    assert!(observed.effective_policy.writer_generation.is_none());
     assert_eq!(
         snapshot.writer.state,
         crate::writer::WriterAuthorityState::None
     );
+    assert!(crate::run::is_caller_workspace_generation(
+        snapshot.manifest.schema_version
+    ));
+    assert_eq!(
+        snapshot.manifest.execution_lane,
+        crate::domain::ExecutionLane::Dedicated
+    );
+    assert_eq!(snapshot.manifest.workspace_id, workspace.workspace_id);
+    let binding = snapshot.manifest.global_profile_binding.as_ref().unwrap();
+    assert!(binding.caller_workspace_supported());
     let runtime_root = crate::worker::runtime_root(root);
     assert!(
         !crate::worker::runtime_record_path(&runtime_root, run)
@@ -115,8 +126,35 @@ fn verify_closed(root: &Path, workspace: &WorkspaceView, run: Uuid) -> Value {
         .expect("owned cleanup must prove generation absence before Profile retirement");
     assert_eq!(absent.run_id, run);
     assert_eq!(absent.run_generation, snapshot.projection.run_generation);
-    let ledger = snapshot.observed_ledger(root).unwrap();
-    let records = ledger.records();
+    let writer =
+        crate::writer::WriterStore::new(root, &workspace.workspace_id, DarwinSystem.current_uid())
+            .load()
+            .unwrap();
+    assert_eq!(writer.state, crate::writer::WriterAuthorityState::None);
+    let release = writer
+        .generation_release
+        .as_ref()
+        .expect("qualified committed release missing");
+    assert_eq!(
+        release.phase,
+        crate::writer::GenerationReleasePhase::Committed
+    );
+    assert_eq!(release.source.run_id, run);
+    assert_eq!(release.writer_generation, writer.writer_generation);
+    assert_eq!(release.source.profile_server_key, binding.server_key);
+    let reservation = release.successor.as_ref().unwrap();
+    assert!(reservation.attempt_started);
+    assert_eq!(
+        reservation.run_generation,
+        snapshot.projection.run_generation
+    );
+    assert!(reservation.run_generation > release.source.run_generation);
+    assert_eq!(
+        observed.effective_policy.server_epoch,
+        Some(reservation.server_epoch)
+    );
+    let thread_id = snapshot.projection.thread_id.as_deref().unwrap();
+    assert_eq!(release.source.thread_id.as_deref(), Some(thread_id));
     let initial_operation = snapshot
         .manifest
         .aggregate_binding
@@ -126,56 +164,87 @@ fn verify_closed(root: &Path, workspace: &WorkspaceView, run: Uuid) -> Value {
                 && binding.member_kind == crate::run::AggregateMemberKind::Specialist)
                 .then_some(binding.operation_id)
         })
-        .unwrap_or(run);
-    let initial_intent = records
+        .unwrap_or(run)
+        .to_string();
+    let ledger = snapshot.observed_ledger(root).unwrap();
+    let records = ledger.records();
+    let initial = records
         .iter()
-        .find(|record| {
-            record.kind() == crate::audit::AuditKind::TurnIntent
-                && payload(record)["schema"] == "dolgorae.caller-native-intent/v1"
+        .find(|r| {
+            r.kind() == K::TurnIntent
+                && payload(r)["schema"] == "dolgorae.caller-native-intent/v1"
+                && payload(r)["method"] == "thread/start"
+                && payload(r)["operation_id"] == initial_operation
         })
-        .unwrap();
-    assert_eq!(
-        payload(initial_intent)["operation_id"],
-        initial_operation.to_string()
-    );
-    let initial_thread = records
+        .expect("original native Thread intent missing");
+    let provisional = records
         .iter()
-        .find(|record| {
-            record.kind() == crate::audit::AuditKind::TurnIntent
-                && payload(record).get("provisional_thread_id").is_some()
+        .find(|r| {
+            r.kind() == K::TurnIntent
+                && payload(r)["operation_id"] == initial_operation
+                && payload(r)["provisional_thread_id"] == thread_id
         })
-        .unwrap();
-    assert_eq!(
-        payload(initial_thread)["operation_id"],
-        initial_operation.to_string()
-    );
-    let seal = records
+        .expect("original provisional Thread missing");
+    let initial_bound = records
         .iter()
-        .find(|record| {
-            record.kind() == crate::audit::AuditKind::LifecycleTransition
-                && payload(record)["terminal_seal"] == true
-                && payload(record)["current"] == "closed"
+        .find(|r| {
+            r.kind() == K::ThreadBound
+                && payload(r)["operation_id"] == initial_operation
+                && payload(r)["thread_id"] == thread_id
         })
-        .unwrap();
-    let reader = records
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind() == crate::audit::AuditKind::WriterReleased
-                && payload(record)["effective_policy"]["access"] == "read"
-                && payload(record)["effective_policy"]["verification"] == "verified"
-        })
-        .unwrap();
+        .expect("original Thread binding missing");
     let acquired = records
         .iter()
         .rev()
-        .find(|record| record.kind() == crate::audit::AuditKind::WriterAcquired)
+        .find(|r| r.kind() == K::WriterAcquired)
         .unwrap();
-    assert!(acquired.sequence() < reader.sequence());
-    assert!(reader.sequence() < seal.sequence());
-    assert_eq!(snapshot.manifest.workspace_id, workspace.workspace_id);
-    json!({"writer_acquired_sequence":acquired.sequence(),"verified_reader_sequence":reader.sequence(),"seal_sequence":seal.sequence(),"sealed_policy":"read","writer_released":true,"owned_generation_absence_verified":true})
+    let acquisition = payload(acquired);
+    assert_eq!(acquired.run_generation(), release.source.run_generation);
+    assert_eq!(
+        acquisition["writer_generation"].as_u64(),
+        Some(release.writer_generation)
+    );
+    assert_eq!(
+        acquisition["effective_policy"]["writer_generation"].as_u64(),
+        Some(release.writer_generation)
+    );
+    assert_eq!(acquisition["effective_policy"]["access"], "write");
+    assert_eq!(acquisition["effective_policy"]["verification"], "verified");
+    assert!(release.source_revision >= acquired.sequence());
+    let reader = records
+        .iter()
+        .find(|r| {
+            if r.kind() != K::ThreadBound || r.run_generation() != reservation.run_generation {
+                return false;
+            }
+            let value = payload(r);
+            value["operation_id"] == release.transaction_id.to_string()
+                && value["thread_id"] == thread_id
+                && value["thread_generation"].as_u64()
+                    == observed.effective_policy.thread_generation
+                && value["effective_policy"]
+                    == serde_json::to_value(&observed.effective_policy).unwrap()
+        })
+        .expect("exact released Reader binding missing");
+    let seal = records.last().unwrap();
+    assert_eq!(seal.kind(), K::LifecycleTransition);
+    assert_eq!(payload(seal)["terminal_seal"], true);
+    assert_eq!(payload(seal)["current"], "closed");
+    let cleanup = &records[records.len() - 2];
+    assert_eq!(cleanup.kind(), K::CleanupResult);
+    assert_eq!(cleanup.run_generation(), reservation.run_generation);
+    assert_eq!(seal.run_generation(), reservation.run_generation);
+    assert!(initial.sequence() < provisional.sequence());
+    assert!(provisional.sequence() < initial_bound.sequence());
+    assert!(initial_bound.sequence() < acquired.sequence());
+    assert!(release.source_revision < reader.sequence());
+    assert!(reader.sequence() < cleanup.sequence());
+    assert!(cleanup.sequence() < seal.sequence());
+    json!({"writer_acquired_sequence":acquired.sequence(),"verified_reader_sequence":reader.sequence(),
+        "cleanup_sequence":cleanup.sequence(),"seal_sequence":seal.sequence(),"sealed_policy":"read",
+        "writer_released":true,"owned_generation_absence_verified":true})
 }
+
 fn task(marker: &str) -> crate::task_request::SpecialistTaskRequest {
     crate::task_request::SpecialistTaskRequest {
         purpose: "change".to_owned(),
@@ -185,6 +254,152 @@ fn task(marker: &str) -> crate::task_request::SpecialistTaskRequest {
         expected_output: "complete_result".to_owned(),
     }
 }
+
+fn consumer_task(
+    root: &Path,
+    marker: &str,
+    formal: bool,
+) -> crate::task_request::SpecialistTaskRequest {
+    let mut request = task(marker);
+    let dispatch = if formal {
+        "formal-dispatch.txt"
+    } else {
+        "ordinary-dispatch.txt"
+    };
+    request.contexts.push(crate::task_request::TaskContext {
+        id: "aquarium-assignment".into(),
+        content: fs::read_to_string(root.join(dispatch)).unwrap(),
+        provenance: "caller".into(),
+    });
+    if formal {
+        let package: Value =
+            serde_json::from_slice(&fs::read(root.join("package.json")).unwrap()).unwrap();
+        request.contexts.push(crate::task_request::TaskContext {
+            id: "delegated-package".into(),
+            content: serde_json::to_string(&package["result"]["package"]).unwrap(),
+            provenance: "caller".into(),
+        });
+    }
+    private(
+        &root.join(if formal {
+            "formal-task.json"
+        } else {
+            "ordinary-task.json"
+        }),
+        &serde_json::to_vec(
+            &json!({"task":request,"execution_intent":"canonical_workspace_write",
+            "deadline_seconds":600}),
+        )
+        .unwrap(),
+    );
+    request
+}
+
+fn managed_consumer_setup(
+    root: &Path,
+    view: &WorkspaceView,
+    primary: Uuid,
+    binding: &crate::run::ControllerBinding,
+    candidate: &crate::provisioning::ProvisioningCandidate,
+    codex: &Path,
+) -> crate::trusted_host::VerifiedOwner {
+    let output = std::process::Command::new("/usr/bin/git")
+        .args([
+            "-C",
+            view.canonical_path.to_path_buf().unwrap().to_str().unwrap(),
+            "rev-parse",
+            "HEAD",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    private(
+        &root.join("managed-consumer-setup.json"),
+        &serde_json::to_vec(&json!({
+            "candidate":candidate,"adapter_version":env!("CARGO_PKG_VERSION"),
+            "base_commit":String::from_utf8(output.stdout).unwrap().trim(),"root_run":primary
+        }))
+        .unwrap(),
+    );
+    let inputs: Value =
+        serde_json::from_slice(&fs::read(root.join("consumer-inputs.json")).unwrap()).unwrap();
+    let prepared = std::process::Command::new(inputs["python"].as_str().unwrap())
+        .arg("-c")
+        .arg("import sys; from pathlib import Path; sys.dont_write_bytecode=True; sys.path.insert(0,sys.argv[1]); import run_native_integrated_acceptance as m; m.prepare_successor_consumers(Path(sys.argv[2]))")
+        .arg(inputs["scripts"].as_str().unwrap()).arg(root).output().unwrap();
+    private(&root.join("consumer-setup.stdout"), &prepared.stdout);
+    private(&root.join("consumer-setup.stderr"), &prepared.stderr);
+    assert!(prepared.status.success(), "selected consumer setup failed");
+    let connection: crate::native_consumer::PodwayConnection =
+        serde_json::from_slice(&fs::read(root.join("connection.json")).unwrap()).unwrap();
+    // Protected host state must be disjoint from the caller workspace.
+    let host_root = root.join("managed-native-host");
+    fs::create_dir(&host_root).unwrap();
+    fs::set_permissions(&host_root, fs::Permissions::from_mode(0o700)).unwrap();
+    private(
+        &host_root.join("controller"),
+        &fs::read(root.join("controller")).unwrap(),
+    );
+    let journal = host_root.join("journal");
+    fs::create_dir(&journal).unwrap();
+    fs::set_permissions(&journal, fs::Permissions::from_mode(0o700)).unwrap();
+    let draft = json!({"route":"codex-0.160.0","executable":{"path":codex,"version":"0.164.0","sha256":"d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"},
+        "owner":{"kind":"managed","session_ref":primary},"controller_generation":binding.identity.generation,
+        "controller_file":host_root.join("controller"),"native_host_root":journal,
+        "allowed_scopes":[{"kind":"orchestrated_session","reference":primary}],
+        "tools":["dolgorae_specialists_native","dolgorae_specialist_consumer"],
+        "caller_scope":{"binding_ref":"local-specialist","podway_workspace_ref":connection.workspace,"podway_session_ref":connection.session,"podway_attempt_ref":connection.attempt,"delegated_placement_ref":connection.placement,"max_rounds":3},
+        "adapter_id":"dolgorae.managed/1","adapter_version":env!("CARGO_PKG_VERSION")});
+    private(
+        &host_root.join("draft.json"),
+        &serde_json::to_vec(&draft).unwrap(),
+    );
+    let operator = CredentialCarrier::open_path(&root.join("operator")).unwrap();
+    let controller = CredentialCarrier::open_path(&root.join("controller")).unwrap();
+    let owner_path = host_root.join("owner.json");
+    for operation in [
+        "owner-config-create",
+        "namespace-setup",
+        "host-state-init",
+        "preparation-init",
+        "managed-connect",
+    ] {
+        let mut args: Vec<OsString> = [
+            operation.to_owned(),
+            "--owner-config".into(),
+            owner_path.to_str().unwrap().into(),
+            "--operator-fd".into(),
+            operator.raw_fd().to_string(),
+            "--controller-fd".into(),
+            controller.raw_fd().to_string(),
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        if operation == "owner-config-create" {
+            args.extend([
+                OsString::from("--workspace"),
+                view.canonical_path.to_path_buf().unwrap().into_os_string(),
+                OsString::from("--request"),
+                host_root.join("draft.json").into_os_string(),
+            ]);
+        }
+        checked(root, operation, crate::trusted_host::run_admin(&args));
+    }
+    let owner =
+        crate::trusted_host::VerifiedOwner::load(&DolgoraeHome::system().unwrap(), &owner_path)
+            .unwrap();
+    crate::native_consumer::initialize(
+        &owner,
+        crate::native_consumer::Mode::Delegated {
+            connection: Box::new(connection),
+        },
+    )
+    .unwrap();
+    owner
+}
+// Only local fault controls and owning-service observation use this test context.
+// The successful managed path obtains provenance from actual Primary Turns.
 fn context<'a>(session: Uuid, key: &'a str) -> delegation::ManagedCallContext<'a> {
     delegation::ManagedCallContext {
         session_id: session,
@@ -193,6 +408,78 @@ fn context<'a>(session: Uuid, key: &'a str) -> delegation::ManagedCallContext<'a
         source_tool_call_id: "native-host-tool",
         idempotency_key: key,
     }
+}
+
+fn primary_turn(
+    root: &Path,
+    view: &WorkspaceView,
+    primary: Uuid,
+    phase: &str,
+    input: Value,
+) -> Value {
+    private(
+        &root.join("primary-phase.json"),
+        &serde_json::to_vec(&json!({
+            "phase":phase,"root_run":primary,"input":input
+        }))
+        .unwrap(),
+    );
+    let message = format!(
+        "native-primary-{phase}\nApply this selected formal contract to delivery only; no goal acceptance is authorized.\n{}",
+        fs::read_to_string(
+            root.join("aquarium-source/references/formal-agent-orchestration-v1.md")
+        )
+        .unwrap()
+    );
+    let args: Vec<OsString> = vec![
+        primary.to_string(),
+        "--workspace".into(),
+        view.canonical_path
+            .to_path_buf()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .into(),
+        "--controller-file".into(),
+        root.join("controller").to_str().unwrap().into(),
+        "--message".into(),
+        message,
+        "--idempotency-key".into(),
+        format!("native-primary-{phase}"),
+        "--timeout".into(),
+        "60s".into(),
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    let result = checked(
+        root,
+        phase,
+        CoreSemanticService.execute(&SemanticCommand::Run {
+            verb: crate::semantic::RunVerb::Send,
+            args,
+        }),
+    );
+    private(
+        &root.join(format!("primary-{phase}-turn.json")),
+        &serde_json::to_vec(&result).unwrap(),
+    );
+    serde_json::from_slice(&fs::read(root.join(format!("primary-{phase}-results.json"))).unwrap())
+        .unwrap()
+}
+
+fn consumer_finish(root: &Path) {
+    let inputs: Value =
+        serde_json::from_slice(&fs::read(root.join("consumer-inputs.json")).unwrap()).unwrap();
+    let output = std::process::Command::new(inputs["python"].as_str().unwrap()).arg("-c")
+        .arg("import sys; from pathlib import Path; sys.dont_write_bytecode=True; sys.path.insert(0,sys.argv[1]); import run_native_integrated_acceptance as m; m.finish_successor_consumer(Path(sys.argv[2]))")
+        .arg(inputs["scripts"].as_str().unwrap()).arg(root).output().unwrap();
+    private(&root.join("consumer-finish.stdout"), &output.stdout);
+    private(&root.join("consumer-finish.stderr"), &output.stderr);
+    assert!(
+        output.status.success(),
+        "separate selected Action completion failed"
+    );
 }
 
 pub fn campaign(root: &Path, codex: &Path) -> Value {
@@ -223,6 +510,10 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
     private(&workspace.join("file.txt"), b"before\n");
     git(&workspace, &["add", "."]);
     git(&workspace, &["commit", "-q", "-m", "fixture baseline"]);
+    private(
+        &workspace.join(".git/info/exclude"),
+        b"/.podway/\n/.dolgorae/\n",
+    );
     let home = DolgoraeHome::system().unwrap();
     private(
         &home.root().join("home/AGENTS.md"),
@@ -230,7 +521,11 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
     );
     private(
         &home.root().join("roles/general/AGENTS.md"),
-        b"integrated-general-017\n",
+        &[
+            b"integrated-general-017\n".as_slice(),
+            &fs::read(root.join("aquarium-source/references/executor-guidance.md")).unwrap(),
+        ]
+        .concat(),
     );
     private(
         &home.root().join("roles/reviewer/AGENTS.md"),
@@ -256,13 +551,19 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         .unwrap();
     let binding = ResolvedGlobalProfile::resolve(&home, PROFILE)
         .unwrap()
-        .prepare(&home)
+        .prepare_qualified(&home)
         .unwrap();
     let operator = root.join("operator");
     OperatorStore::new(home.operator_root())
         .initialize(&operator)
         .unwrap();
-    execute_global(ProfileOperation::ServerStart, &[OsString::from(PROFILE)]).unwrap();
+    assert!(binding.caller_workspace_supported());
+    binding.record_qualified(&home).unwrap();
+    private(
+        &root.join("qualified-binding.json"),
+        &serde_json::to_vec(&binding).unwrap(),
+    );
+    crate::profile::ensure_qualified_global_server(&binding).unwrap();
     let mut policy: Value = serde_json::from_str(include_str!(
         "../../docs/protocol/examples/workspace-policy-input-v3.valid.json"
     ))
@@ -298,6 +599,8 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
     .unwrap();
     start["workspace"] = json!(workspace);
     start["profile"] = json!(PROFILE);
+    start["model"] = json!("gpt-5.6-luna");
+    start["effort"] = json!("low");
     start["control_mode"] = json!("direct_interactive");
     start["access"] = json!("read-only");
     start["purpose"] = json!({"kind":"interactive","external_label":null});
@@ -320,6 +623,7 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         view: &view,
         state_root: &state_root,
         controller: &primary_binding,
+        trusted_invocation: None,
     };
     crate::engagement::ensure_delegation_namespace(&state_root).unwrap();
     let source_store = InstructionSourceStore::new(&home);
@@ -328,11 +632,19 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         binding.launch_snapshot.process_static_configuration["features"]["shell_snapshot"],
         json!(false)
     );
-    let sources = ProvisioningSources {
+    let mut sources = ProvisioningSources {
         instruct: &source_store,
         role_name: "general",
         role: SelectedInstructionSource::File(vec!["roles".to_owned(), "general".to_owned()]),
-        dependencies: Vec::new(),
+        dependencies: vec![SelectedNamedSource {
+            name: "formal-agent-orchestration-v1".into(),
+            source: SelectedInstructionSource::Inline(
+                fs::read_to_string(
+                    root.join("aquarium-source/references/formal-agent-orchestration-v1.md"),
+                )
+                .unwrap(),
+            ),
+        }],
         selected_guidance: Vec::new(),
         profile_binding: binding,
         admission: ProvisioningAdmission {
@@ -352,23 +664,22 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         "provisioning",
         delegation::install_provisioning(&scope, &sources, "native-install", None),
     );
+    let consumer_owner =
+        managed_consumer_setup(root, &view, primary, &primary_binding, &candidate, codex);
     let port = SemanticRunSettlementPort { carrier: &owner };
-    let spawned = checked(
+    let spawned = primary_turn(
         root,
-        "managed spawn",
-        delegation::spawn_specialist(
-            &scope,
-            &context(primary, "native-spawn"),
-            &port,
-            delegation::SpawnSpecialist {
-                provisioning_ref: &candidate.provisioning_ref,
-                role_ref: "general",
-                agent_configuration_digest: &candidate.agent_configuration_digest,
-                expected_revision: None,
-            },
-        ),
+        &view,
+        primary,
+        "spawn",
+        json!({"candidate":candidate}),
     );
-    let member = Uuid::parse_str(&spawned.member.member_ref).unwrap();
+    let member = Uuid::parse_str(
+        spawned[0]["header"]["facts"]["member"]["member_ref"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
     let broker = crate::orchestration::OrchestrationStore::open(&state_root)
         .unwrap()
         .member_credential(member)
@@ -382,63 +693,53 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         manifest.aggregate_binding.as_ref().unwrap().aggregate_id,
         primary
     );
-    let capture_after_acquire = std::rc::Rc::new(std::cell::Cell::new(false));
-    crate::semantic::set_managed_dispatch_preparation({
-        let state = state_root.clone();
-        let workspace = workspace.clone();
-        let checked = std::rc::Rc::clone(&capture_after_acquire);
-        move || {
-            let (snapshot, observed) = RunSnapshot::observe(&state, member, 0).unwrap();
-            assert_eq!(
-                snapshot.writer.state,
-                crate::writer::WriterAuthorityState::Active
-            );
-            assert_eq!(observed.effective_policy.access, Access::Write);
-            assert_eq!(
-                observed.effective_policy.verification,
-                PolicyVerification::Verified
-            );
-            let store =
-                EngagementStore::open(&EngagementStore::workspace_database_path(&state)).unwrap();
-            let task:String=store.connection().query_row("SELECT json_extract(accepted_subjects_json,'$.task_ref') FROM delegation_operations WHERE operation_kind='assign_specialist_task' AND idempotency_key='native-write'",[],|r|r.get(0)).unwrap();
-            assert_eq!(
-                store
-                    .connection()
-                    .query_row(
-                        "SELECT COUNT(*) FROM dispatch_indexes WHERE task_id=?1",
-                        [task],
-                        |r| r.get::<_, u64>(0)
-                    )
-                    .unwrap(),
-                0
-            );
-            private(
-                &workspace.join("file.txt"),
-                b"captured after qualified acquire\n",
-            );
-            checked.set(true);
-        }
-    });
-    let (assigned, receipt) = checked(
-        root,
-        "managed assign",
-        delegation::assign_specialist_task(
-            &scope,
-            &context(primary, "native-write"),
-            &caller_scope::fixture(32),
-            &port,
-            delegation::AssignSpecialistTask {
-                member_ref: member,
-                task: task("native-managed-writer"),
-                execution_intent: "canonical_workspace_write",
-                target: None,
-                deadline_seconds: 600,
-                expected_revision: None,
-            },
-        ),
+    // The actual Root Worker owns this dispatch. The five existing local fault
+    // controls below still inject after acquisition and before index capture.
+    private(
+        &workspace.join("file.txt"),
+        b"captured after qualified acquire\n",
     );
-    assert!(capture_after_acquire.get());
-    let task_id = Uuid::parse_str(&assigned.task_ref).unwrap();
+    let task = consumer_task(root, "native-managed-writer", true);
+    let namespace = crate::operation::Namespace::delegation(
+        &primary_binding.identity,
+        &view.workspace_id,
+        Some(("orchestrated_session", &primary.to_string())),
+        "assign_specialist_task",
+        "native-write",
+    )
+    .unwrap();
+    let accepted = crate::source_binding::prepare_assignment(
+        &consumer_owner,
+        crate::source_binding::AssignmentSelection {
+            namespace: (&namespace).into(),
+            member_ref: member,
+            task: task.clone(),
+            execution_intent: "canonical_workspace_write".into(),
+            deadline_seconds: 600,
+            target: None,
+        },
+    )
+    .unwrap();
+    let assigned = primary_turn(
+        root,
+        &view,
+        primary,
+        "assignment",
+        json!({"member_ref":member,
+        "candidate":candidate,"accepted_task_digest":accepted.digest().unwrap(),
+        "controller_ref":format!("controller:{}",primary_binding.identity.controller_id),
+        "request":{"schema":"dolgorae.external-specialist-request/v5",
+        "operation":"assign_specialist_task","scope_kind":"orchestrated_session","scope_ref":primary,
+        "member_ref":member,"assignment":{"task_body":task,"accepted_task_identity":accepted,"deadline_seconds":600},
+        "idempotency_key":"native-write","expected_revision":null}}),
+    );
+    let receipt = assigned[0]["header"]["facts"]["receipt"].clone();
+    let task_id = Uuid::parse_str(
+        assigned[0]["header"]["facts"]["task"]["task_ref"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
     let collected = loop {
         let got = delegation::collect_specialist_task(
@@ -463,6 +764,7 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         .as_array()
         .unwrap();
     assert!(changes.iter().any(|change| change["path"] == "file.txt"));
+    assert_eq!(changes.len(), 1);
     let store =
         EngagementStore::open(&EngagementStore::workspace_database_path(&state_root)).unwrap();
     assert!(store.dispatch_index_object(task_id).unwrap().is_some());
@@ -478,17 +780,48 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
     // writer cleanup is performed by the next production dispatch or release.
     let failure_evidence =
         dispatch_failures(root, &view, &state_root, primary, member, &scope, &port);
-    let reacquired = mutate(
+    if RunSnapshot::observe(&state_root, member, 0)
+        .unwrap()
+        .0
+        .writer
+        .state
+        == crate::writer::WriterAuthorityState::Active
+    {
+        mutate(
+            &view,
+            &member_carrier,
+            member,
+            RunMutationOperation::ReleaseWriter,
+        );
+    }
+    let complete: crate::delegation_identity::CompleteResult =
+        serde_json::from_value(collected.complete_result.clone().unwrap()).unwrap();
+    let originals = json!({"complete_result":serde_json::to_string(&serde_json::to_value(&complete).unwrap()).unwrap(),
+        "before":"captured after qualified acquire\n","after":"1 after\n"});
+    let consumed = primary_turn(
+        root,
         &view,
-        &member_carrier,
-        member,
-        RunMutationOperation::AcquireWriter,
+        primary,
+        "consumer",
+        json!({
+        "member_ref":member,"task_ref":task_id,"originals":originals,
+        "candidate":candidate,"assignment_receipt":receipt,"result_digest":complete.digest().unwrap(),
+        "execution":{"binding_ref":consumer_owner.configuration.caller_scope.binding_ref,
+        "adapter_id":"dolgorae.managed/1","adapter_version":env!("CARGO_PKG_VERSION"),
+        "primary_host":"managed","scope_kind":"orchestrated_session","scope_ref":primary,
+        "supervisor_ref":format!("controller:{}",primary_binding.identity.controller_id),"worker_ref":member,"task_ref":task_id,
+        "role_ref":"general","role_snapshot_digest":complete.source.role_snapshot_digest,
+        "agent_configuration_digest":complete.source.agent_configuration_digest,"accepted_task_digest":complete.source.accepted_task_digest}}),
     );
-    assert_eq!(reacquired.captured_effective_policy.access, Access::Write);
-    assert_eq!(
-        reacquired.captured_effective_policy.verification,
-        PolicyVerification::Verified
+    assert!(
+        consumed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["header"]["action"] == "accept"
+                && v["header"]["data"]["effect"] == "committed")
     );
+    consumer_finish(root);
     let ordering = std::rc::Rc::new(std::cell::RefCell::new(None));
     crate::semantic::set_member_release_before_retirement({
         let root = state_root.clone();
@@ -537,7 +870,13 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         )
         .is_err()
     );
-    let external_evidence = external_campaign(root, &view, &state_root, &home, &candidate);
+    sources.dependencies.clear();
+    let (ordinary_candidate, _) = checked(
+        root,
+        "ordinary provisioning",
+        delegation::install_provisioning(&scope, &sources, "native-ordinary-install", None),
+    );
+    let external_evidence = external_campaign(root, &view, &state_root, &home, &ordinary_candidate);
     let closed = mutate(
         &view,
         &owner,
@@ -545,14 +884,18 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         RunMutationOperation::Close { interrupt: false },
     );
     assert_eq!(closed.projection.lifecycle, RunLifecycle::Closed);
-    let args = [
-        OsString::from(PROFILE),
-        OsString::from("--operator-file"),
-        operator.as_os_str().to_owned(),
-    ];
-    execute_global(ProfileOperation::ServerStop, &args).unwrap();
+    crate::profile::retire_qualified_global_server(
+        started
+            .snapshot
+            .manifest
+            .global_profile_binding
+            .as_ref()
+            .unwrap(),
+        &CredentialCarrier::open_path(&operator).unwrap(),
+    )
+    .unwrap();
     private(&root.join("cleanup-result"), b"complete\n");
-    json!({"schema":"dolgorae.native-successor-pipeline/v1","passed":true,"managed_manifest":4,"shell_snapshot_disabled":true,"dispatch_failures":failure_evidence,"external":external_evidence,"production_managed_dispatch":true,"broker_writer_acquisition":true,"dispatch_index_before_submit":true,"published_changes":changes.len(),"normal_live_close":ordering.borrow().clone().unwrap(),"cleanup_before_profile_retirement":true,"profile_retired":true,"broker_credential_retired_after_terminal":true,"receipt_operation":receipt.namespace.operation_kind})
+    json!({"schema":"dolgorae.native-successor-pipeline/v1","passed":true,"managed_manifest":4,"shell_snapshot_disabled":true,"dispatch_failures":failure_evidence,"external":external_evidence,"production_managed_dispatch":true,"broker_writer_acquisition":true,"dispatch_index_before_submit":true,"published_changes":changes.len(),"normal_live_close":ordering.borrow().clone().unwrap(),"cleanup_before_profile_retirement":true,"profile_retired":true,"broker_credential_retired_after_terminal":true,"receipt_operation":receipt["namespace"]["operation_kind"],"actual_primary_consumer":true})
 }
 
 fn external_campaign(
@@ -577,6 +920,7 @@ fn external_campaign(
         view,
         state_root: state,
         controller: &binding,
+        trusted_invocation: None,
     };
     let port = SemanticRunSettlementPort { carrier: &carrier };
     let (engagement, _) =
@@ -613,7 +957,7 @@ fn external_campaign(
             delegation::AssignExternalSpecialistTask {
                 engagement_id,
                 member_ref: member,
-                task: task("native-external-writer"),
+                task: consumer_task(root, "native-external-writer", false),
                 execution_intent: "canonical_workspace_write",
                 target: None,
                 deadline_seconds: 600,
@@ -650,12 +994,33 @@ fn external_campaign(
             .iter()
             .any(|c| c["path"] == "file.txt")
     );
-    let acquired = mutate(view, &carrier, member, RunMutationOperation::AcquireWriter);
+    // Ordinary delivery is consumed as v3, without a formal acceptance receipt.
+    let complete: crate::delegation_identity::CompleteResult =
+        serde_json::from_value(collected.complete_result.clone().unwrap()).unwrap();
+    let result_digest = complete.digest().unwrap();
+    let original = crate::delegation_service::original_delegation_response(state, &complete, false)
+        .unwrap()
+        .unwrap();
+    let handoff: Value = serde_json::from_slice(&original).unwrap();
+    assert_eq!(handoff["schema"], "aquarium.executor-handoff/v3");
+    assert_eq!(handoff["assignment"], "ordinary-assignment.json");
+    assert_eq!(handoff["changed_artifacts"][0]["path"], "file.txt");
     assert_eq!(
-        acquired.captured_effective_policy.verification,
-        PolicyVerification::Verified
+        handoff["changed_artifacts"][0]["sha256"],
+        crate::jcs::sha256_hex(
+            &fs::read(view.canonical_path.to_path_buf().unwrap().join("file.txt")).unwrap()
+        )
     );
-    assert_eq!(acquired.captured_effective_policy.access, Access::Write);
+    assert_eq!(handoff["results"][0]["exit"], 0);
+    assert!(!handoff["gaps"].as_array().unwrap().is_empty());
+    private(
+        &root.join("ordinary-consumed.json"),
+        &serde_json::to_vec(&json!({"schema":handoff["schema"],
+            "accepted_task_digest":complete.source.accepted_task_digest,
+            "result_digest":result_digest,"changed_artifacts":handoff["changed_artifacts"],
+            "gaps":handoff["gaps"],"formal_receipt_required":false}))
+        .unwrap(),
+    );
     let ordering = std::rc::Rc::new(std::cell::RefCell::new(None));
     crate::semantic::set_member_release_before_retirement({
         let state = state.to_path_buf();
@@ -696,8 +1061,8 @@ fn external_campaign(
     json!({"manifest":4,"normal_live_close":ordering.borrow().clone().unwrap(),"cleanup_before_profile_retirement":true,"profile_retired":true})
 }
 
-// All injected faults below are owned fixture inputs. Acquire, capture, rollback,
-// dispatch classification and Reader release remain the production operations.
+// Owned preparation faults retain qualified Write proof and rollback before
+// Submit, followed by Reader release or exact guard preservation.
 fn dispatch_failures(
     root: &Path,
     view: &WorkspaceView,
@@ -711,13 +1076,7 @@ fn dispatch_failures(
     use std::rc::Rc;
     let workspace = view.canonical_path.to_path_buf().unwrap();
     let mut evidence = Vec::new();
-    for mode in [
-        "recording_rollback",
-        "file_capacity",
-        "baseline_capacity",
-        "preparation_release_ok",
-        "preparation_release_failed",
-    ] {
+    for mode in ["preparation_release_ok", "preparation_release_failed"] {
         let before = Rc::new(RefCell::new(None));
         let credential_fault = Rc::new(RefCell::new(None));
         let turns = || {
@@ -749,7 +1108,7 @@ fn dispatch_failures(
                     observed.effective_policy.verification,
                     PolicyVerification::Verified
                 );
-                let mut store =
+                let store =
                     EngagementStore::open(&EngagementStore::workspace_database_path(&state))
                         .unwrap();
                 let (task,receipt):(String,String)=store.connection().query_row("SELECT json_extract(accepted_subjects_json,'$.task_ref'),receipt_json FROM delegation_operations WHERE operation_kind='assign_specialist_task' AND idempotency_key=?1",[mode],|row| Ok((row.get(0)?,row.get(1)?))).unwrap();
@@ -764,74 +1123,22 @@ fn dispatch_failures(
                         .unwrap(),
                     0
                 );
-                match mode {
-                    "file_capacity" => private(
-                        &workspace.join("capacity.bin"),
-                        &vec![b'x'; 8 * 1024 * 1024 + 1],
-                    ),
-                    "baseline_capacity" => {
-                        // Valid historical baselines fill the real aggregate budget.
-                        // Content is deduplicated, but each retained index counts.
-                        private(
-                            &workspace.join("baseline.bin"),
-                            &vec![b'b'; 8 * 1024 * 1024],
-                        );
-                        for _ in 0..32 {
-                            let id = Uuid::now_v7();
-                            let capture =
-                                crate::successor_capture::capture_dispatch_index(&workspace, id)
-                                    .unwrap();
-                            let retained:u64=store.connection().query_row("SELECT COALESCE(SUM(baseline_bytes),0) FROM dispatch_indexes WHERE run_ref=?1",[member.to_string()],|r|r.get(0)).unwrap();
-                            if retained + capture.baseline_bytes > 268435456 {
-                                break;
-                            }
-                            store
-                                .transact(|tx| {
-                                    crate::engagement::record_dispatch_index_with_content(
-                                        tx,
-                                        crate::engagement::DispatchIndexRecord {
-                                            task_id: id,
-                                            workspace_ref: &view.workspace_id,
-                                            run_ref: member,
-                                            head_commit: capture.head.as_deref(),
-                                            index_sha256: &capture.sha256,
-                                            index_byte_length: capture.canonical.len() as u64,
-                                            file_count: capture.file_count,
-                                            baseline_bytes: capture.baseline_bytes,
-                                        },
-                                        &capture.canonical,
-                                        &capture.baseline,
-                                        1,
-                                    )
-                                })
-                                .unwrap();
-                        }
-                    }
-                    "recording_rollback" => {
-                        private(&workspace.join("rollback.txt"), b"new rollback content\n");
-                        store.connection().execute_batch("CREATE TRIGGER native_recording_failure BEFORE INSERT ON dispatch_indexes BEGIN SELECT RAISE(ABORT,'injected recording failure'); END;").unwrap();
-                    }
-                    "preparation_release_ok" | "preparation_release_failed" => {
-                        std::os::unix::fs::symlink(
-                            workspace.join("file.txt"),
-                            workspace.join("unsafe-link"),
-                        )
-                        .unwrap();
-                        if mode == "preparation_release_failed" {
-                            let path = state
-                                .join("orchestration/broker-credentials")
-                                .join(format!("{member}.json"));
-                            let original = fs::read(&path).unwrap();
-                            let mut wire: Value = serde_json::from_slice(&original).unwrap();
-                            let mut capability =
-                                wire["capability"].as_str().unwrap().as_bytes().to_vec();
-                            capability[0] = if capability[0] == b'A' { b'B' } else { b'A' };
-                            wire["capability"] = json!(String::from_utf8(capability).unwrap());
-                            private(&path, &serde_json::to_vec(&wire).unwrap());
-                            *credential_fault.borrow_mut() = Some((path, original));
-                        }
-                    }
-                    _ => unreachable!(),
+                std::os::unix::fs::symlink(
+                    workspace.join("file.txt"),
+                    workspace.join("unsafe-link"),
+                )
+                .unwrap();
+                if mode == "preparation_release_failed" {
+                    let path = state
+                        .join("orchestration/broker-credentials")
+                        .join(format!("{member}.json"));
+                    let original = fs::read(&path).unwrap();
+                    let mut wire: Value = serde_json::from_slice(&original).unwrap();
+                    let mut capability = wire["capability"].as_str().unwrap().as_bytes().to_vec();
+                    capability[0] = if capability[0] == b'A' { b'B' } else { b'A' };
+                    wire["capability"] = json!(String::from_utf8(capability).unwrap());
+                    private(&path, &serde_json::to_vec(&wire).unwrap());
+                    *credential_fault.borrow_mut() = Some((path, original));
                 }
                 let contents: u64 = store
                     .connection()
@@ -866,17 +1173,8 @@ fn dispatch_failures(
             },
         )
         .unwrap_err();
-        if mode != "preparation_release_failed" {
-            assert_eq!(
-                error.code,
-                match mode {
-                    "recording_rollback" => "INTERNAL_ERROR",
-                    "file_capacity" => "REVIEW_TARGET_LIMIT_EXCEEDED",
-                    "baseline_capacity" => "STORAGE_CAPACITY_EXCEEDED",
-                    "preparation_release_ok" => "REVIEW_TARGET_UNSAFE_FILE",
-                    _ => unreachable!(),
-                }
-            );
+        if mode == "preparation_release_ok" {
+            assert_eq!(error.code, "REVIEW_TARGET_UNSAFE_FILE");
         }
         let (task_id, receipt, contents, refs, original_guard) = before
             .borrow_mut()
@@ -888,7 +1186,7 @@ fn dispatch_failures(
             before_submits,
             "Submit must not be called"
         );
-        let mut store =
+        let store =
             EngagementStore::open(&EngagementStore::workspace_database_path(state)).unwrap();
         let current:String=store.connection().query_row("SELECT receipt_json FROM delegation_operations WHERE operation_kind='assign_specialist_task' AND idempotency_key=?1",[mode],|r|r.get(0)).unwrap();
         assert_eq!(current, receipt);
@@ -940,34 +1238,30 @@ fn dispatch_failures(
             assert_eq!(writer.state, crate::writer::WriterAuthorityState::None);
         }
         evidence.push(json!({"case":mode,"error":error.code,"qualified_acquire":true,"submit_calls":0,"index_and_content_rolled_back":true,"receipt_unchanged":true,"accounting":accounting,"guard_preserved":unresolved}));
-        match mode {
-            "file_capacity" => fs::remove_file(workspace.join("capacity.bin")).unwrap(),
-            "baseline_capacity" => fs::remove_file(workspace.join("baseline.bin")).unwrap(),
-            "recording_rollback" => {
-                store
-                    .connection()
-                    .execute_batch("DROP TRIGGER native_recording_failure")
-                    .unwrap();
-                fs::remove_file(workspace.join("rollback.txt")).unwrap();
-            }
-            _ => fs::remove_file(workspace.join("unsafe-link")).unwrap(),
-        }
+        fs::remove_file(workspace.join("unsafe-link")).unwrap();
         if let Some((path, original)) = credential_fault.borrow_mut().take() {
             private(&path, &original);
             // Teardown after the uncertain-state assertions: this fixture knows
             // no Submit occurred and restores the exact original carrier bytes.
-            store
-                .transact(|tx| {
-                    crate::orchestration::terminalize_successor_task(
-                        tx,
-                        session,
-                        Uuid::parse_str(&task_id).unwrap(),
-                        "TURN_FAILED",
-                        1,
-                    )?;
-                    crate::caller_scope::proved_nondispatch(tx, Uuid::parse_str(&task_id).unwrap())
-                })
-                .unwrap();
+            delegation::cancel_specialist_task(
+                scope,
+                delegation::SettlementOwner::Managed {
+                    session_id: session,
+                },
+                Some(&context(session, "fixture-fault-cancel")),
+                port,
+                member,
+                Uuid::parse_str(&task_id).unwrap(),
+                store
+                    .scope_membership_revision(
+                        &view.workspace_id,
+                        "orchestrated_session",
+                        &session.to_string(),
+                    )
+                    .unwrap(),
+                "fixture fault cleanup",
+            )
+            .unwrap();
             let broker = crate::orchestration::OrchestrationStore::open(state)
                 .unwrap()
                 .member_credential(member)
@@ -988,11 +1282,60 @@ fn dispatch_failures(
     evidence
 }
 
+fn fixture_pending_tasks(
+    state: &Path,
+    kind: &str,
+    scope: Uuid,
+    member: Uuid,
+) -> Result<Vec<Uuid>, crate::machine::MachineError> {
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(state))?;
+    let query = if kind == "orchestrated_session" {
+        "SELECT t.task_id FROM brokered_tasks t JOIN brokered_task_acceptances a USING(task_id)
+         WHERE session_id=?1 AND target_run_id=?2 AND state IN ('accepted','queued','claimed','dispatching','running')"
+    } else {
+        "SELECT task_id FROM tasks WHERE engagement_id=?1 AND specialist_run_id=?2
+         AND request_json IS NOT NULL AND state IN ('accepted','queued','claimed','dispatching','running')"
+    };
+    let mut stmt = store.connection().prepare(query).map_err(|_| {
+        crate::machine::MachineError::invalid_argument("cleanup", "task observation failed")
+    })?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![scope.to_string(), member.to_string()],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|_| {
+            crate::machine::MachineError::invalid_argument("cleanup", "task observation failed")
+        })?;
+    rows.map(|row| {
+        row.ok()
+            .and_then(|s| Uuid::parse_str(&s).ok())
+            .ok_or_else(|| {
+                crate::machine::MachineError::invalid_argument("cleanup", "invalid task identity")
+            })
+    })
+    .collect()
+}
+
 pub fn cleanup(root: &Path) -> bool {
     assert_eq!(
         fs::read(root.join("fixture-owned")).unwrap(),
         b"native-successor-pipeline/v1\n"
     );
+    let mut observations = Vec::new();
+    let mut record = |stage: &str, run_id: Option<Uuid>, outcome: Value| {
+        observations.push(json!({"stage":stage,"run_id":run_id,"outcome":outcome}));
+        private(
+            &root.join("cleanup-observations.json"),
+            &serde_json::to_vec(&observations).unwrap(),
+        );
+    };
+    let error_fields = |error: &crate::machine::MachineError| {
+        json!({"code":error.code,
+            "message":error.message.chars().take(256).collect::<String>(),
+            "reason":error.details.get("reason").and_then(Value::as_str)
+                .map(|reason| reason.chars().take(256).collect::<String>())})
+    };
     let home = DolgoraeHome::system().unwrap();
     if let Ok(workspaces) = fs::read_dir(home.root().join("workspaces")) {
         for state in workspaces.flatten().map(|entry| entry.path()) {
@@ -1022,6 +1365,158 @@ pub fn cleanup(root: &Path) -> bool {
                 let Ok(manifest) = runs.load_manifest(id) else {
                     continue;
                 };
+                // A closed Run can still have an unsettled successor release.
+                // Its owning service, not legacy Close, retires that membership.
+                let released: Result<
+                    Option<delegation::MemberReleaseView>,
+                    crate::machine::MachineError,
+                > = (|| {
+                    let Some(aggregate) = manifest.aggregate_binding.as_ref().filter(|binding| {
+                        binding.member_kind == crate::run::AggregateMemberKind::Specialist
+                    }) else {
+                        return Ok(None);
+                    };
+                    let store = EngagementStore::open_read_only(
+                        &EngagementStore::workspace_database_path(&state),
+                    )?;
+                    let (kind, controller, credential) = match aggregate.aggregate_kind {
+                        crate::domain::AggregateKind::OrchestratedSession => {
+                            let facts = crate::orchestration::successor_member(
+                                store.connection(),
+                                aggregate.aggregate_id,
+                                id,
+                            )?;
+                            let Some(facts) = facts else { return Ok(None) };
+                            if crate::engagement::successor_spawn_member(
+                                store.connection(),
+                                &facts.spawn_operation_id.to_string(),
+                            )?
+                            .as_deref()
+                                != Some(id.to_string().as_str())
+                            {
+                                return Ok(None);
+                            }
+                            (
+                                "orchestrated_session",
+                                runs.load_controller_binding(aggregate.aggregate_id)?,
+                                "controller",
+                            )
+                        }
+                        crate::domain::AggregateKind::ExternalSpecialistEngagement => {
+                            if !crate::engagement::successor_hire_member(
+                                store.connection(),
+                                &id.to_string(),
+                            )? {
+                                return Ok(None);
+                            }
+                            let (_, controller) =
+                                store.external_owner_binding(aggregate.aggregate_id)?;
+                            ("external_engagement", controller, "external-controller")
+                        }
+                    };
+                    let carrier = CredentialCarrier::open_path(&root.join(credential))?
+                        .with_expected_generation(controller.identity.generation);
+                    let view = WorkspaceView {
+                        workspace_id: manifest.workspace_id.clone(),
+                        canonical_path: manifest.canonical_workspace.clone(),
+                        mode: manifest.workspace_mode,
+                        created: false,
+                    };
+                    let revision = crate::engagement::scope_membership_revision(
+                        store.connection(),
+                        &view.workspace_id,
+                        kind,
+                        &aggregate.aggregate_id.to_string(),
+                    )?;
+                    drop(store);
+                    let scope = delegation::DelegationScope {
+                        view: &view,
+                        state_root: &state,
+                        controller: &controller,
+                        trusted_invocation: None,
+                    };
+                    let port = SemanticRunSettlementPort { carrier: &carrier };
+                    let context = delegation::ManagedCallContext {
+                        session_id: aggregate.aggregate_id,
+                        source_run_id: aggregate.aggregate_id,
+                        source_turn_id: "fixture-cleanup",
+                        source_tool_call_id: "fixture-cleanup-cancel",
+                        idempotency_key: "fixture-cleanup-cancel",
+                    };
+                    for task in fixture_pending_tasks(&state, kind, aggregate.aggregate_id, id)? {
+                        delegation::cancel_specialist_task(
+                            &scope,
+                            if kind == "orchestrated_session" {
+                                delegation::SettlementOwner::Managed {
+                                    session_id: aggregate.aggregate_id,
+                                }
+                            } else {
+                                delegation::SettlementOwner::External {
+                                    engagement_id: aggregate.aggregate_id,
+                                }
+                            },
+                            (kind == "orchestrated_session").then_some(&context),
+                            &port,
+                            id,
+                            task,
+                            revision,
+                            "fixture cleanup",
+                        )?;
+                    }
+                    let result = if kind == "orchestrated_session" {
+                        // Administrative fixture context, never positive native-call evidence.
+                        let context = delegation::ManagedCallContext {
+                            session_id: aggregate.aggregate_id,
+                            source_run_id: aggregate.aggregate_id,
+                            source_turn_id: "fixture-cleanup",
+                            source_tool_call_id: "fixture-cleanup-release",
+                            idempotency_key: "fixture-cleanup-release",
+                        };
+                        delegation::release_specialist(
+                            &scope,
+                            &context,
+                            &port,
+                            delegation::ReleaseSpecialist {
+                                member_ref: id,
+                                expected_revision: revision,
+                                allow_interrupt: true,
+                            },
+                        )?
+                    } else {
+                        delegation::release_external_specialist(
+                            &scope,
+                            &port,
+                            delegation::ReleaseExternalSpecialist {
+                                engagement_id: aggregate.aggregate_id,
+                                member_ref: id,
+                                expected_revision: revision,
+                                allow_interrupt: true,
+                            },
+                        )?
+                    };
+                    Ok(Some(result))
+                })();
+                match released {
+                    Ok(Some(released)) => {
+                        record(
+                            "successor_release",
+                            Some(id),
+                            json!({"ok":released.state == "released",
+                            "state":released.state,"progress":released.operation.progress,
+                            "operation_ref":released.operation.operation_ref}),
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        record(
+                            "successor_release",
+                            Some(id),
+                            json!({"ok":false,"error":error_fields(&error)}),
+                        );
+                        continue;
+                    }
+                    Ok(None) => {}
+                }
                 if runs
                     .load_state_projection(id)
                     .is_ok_and(|state| state.lifecycle == RunLifecycle::Closed)
@@ -1051,6 +1546,11 @@ pub fn cleanup(root: &Path) -> bool {
                         },
                     ))
                 };
+                record(
+                    "credential_open",
+                    Some(id),
+                    json!({"ok":credential.is_ok(),"error":credential.as_ref().err().map(&error_fields)}),
+                );
                 if let Ok(carrier) = credential {
                     let view = WorkspaceView {
                         workspace_id: manifest.workspace_id.clone(),
@@ -1058,7 +1558,7 @@ pub fn cleanup(root: &Path) -> bool {
                         mode: manifest.workspace_mode,
                         created: false,
                     };
-                    let _ = CoreSemanticService.mutate_caller_run(RunMutationInput {
+                    let closed = CoreSemanticService.mutate_caller_run(RunMutationInput {
                         workspace: view.canonical_path.to_path_buf().unwrap(),
                         expected_workspace_id: view.workspace_id,
                         run_id: id,
@@ -1066,30 +1566,49 @@ pub fn cleanup(root: &Path) -> bool {
                         carrier,
                         operation: RunMutationOperation::Close { interrupt: true },
                     });
+                    record(
+                        "close",
+                        Some(id),
+                        json!({"ok":closed.is_ok(),"error":closed.as_ref().err().map(&error_fields)}),
+                    );
                 }
             }
         }
     }
-    if GlobalProfileStore::new(&home).resolve(PROFILE).is_err() {
+    let bytes = fs::read(root.join("qualified-binding.json"));
+    record(
+        "binding_read",
+        None,
+        json!({"ok":bytes.is_ok(),"error":bytes.as_ref().err().map(|error|
+            json!({"code":"IO_ERROR","reason":format!("{:?}",error.kind())}))}),
+    );
+    let Ok(bytes) = bytes else {
         return true;
-    }
-    let status = match execute_global(ProfileOperation::ServerStatus, &[OsString::from(PROFILE)]) {
-        Ok(status) => status,
-        Err(_) => return false,
     };
-    let Some(key) = status["server_key"].as_str() else {
+    let binding = serde_json::from_slice::<crate::global_runtime::GlobalProfileBinding>(&bytes);
+    record(
+        "binding_decode",
+        None,
+        json!({"ok":binding.is_ok(),"error":binding.as_ref().err().map(|error|
+            json!({"code":"INVALID_JSON","reason":format!("{:?}",error.classify())}))}),
+    );
+    let Ok(binding) = binding else {
         return false;
     };
-    execute_global(
-        ProfileOperation::ServerStop,
-        &[
-            OsString::from(PROFILE),
-            OsString::from("--operator-file"),
-            root.join("operator").as_os_str().to_owned(),
-            OsString::from("--interrupt"),
-            OsString::from("--confirm-server-key"),
-            OsString::from(key),
-        ],
-    )
-    .is_ok()
+    let operator = CredentialCarrier::open_path(&root.join("operator"));
+    record(
+        "operator_open",
+        None,
+        json!({"ok":operator.is_ok(),"error":operator.as_ref().err().map(&error_fields)}),
+    );
+    let Ok(operator) = operator else {
+        return false;
+    };
+    let retired = crate::profile::retire_qualified_global_server(&binding, &operator);
+    record(
+        "profile_retire",
+        None,
+        json!({"ok":retired.is_ok(),"error":retired.as_ref().err().map(&error_fields)}),
+    );
+    retired.is_ok()
 }

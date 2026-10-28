@@ -14,7 +14,7 @@ use crate::run::{
 use crate::semantic::{
     ExternalAgentConfigurationInput, ExternalSpecialistStartContext, acquire_external_writer,
     durable_terminal_turn, ensure_external_specialist_worker, finish_external_run_close,
-    prepare_external_specialist, release_external_writer, start_external_specialist_run,
+    prepare_legacy_external_specialist, release_external_writer, start_external_specialist_run,
 };
 use crate::task_request::{STRUCTURED_REVIEW_OUTPUT, SpecialistTaskRequest};
 use crate::turn::FinalResponse;
@@ -557,8 +557,11 @@ pub(crate) fn execute_cli_with_source_contract(
                 }
                 HireConfiguration::Legacy(input) => input,
             };
-            let prepared =
-                prepare_external_specialist(Some(&workspace), &role_ref, agent_configuration)?;
+            let prepared = prepare_legacy_external_specialist(
+                Some(&workspace),
+                &role_ref,
+                agent_configuration,
+            )?;
             if prepared.view.workspace_id != view.workspace_id {
                 return Err(integrity(
                     "prepared Specialist workspace differs from the engagement workspace",
@@ -765,6 +768,7 @@ pub(crate) fn execute_cli_with_source_contract(
             if manifest.schema_version == 3
                 && manifest.purpose.kind == crate::domain::PurposeKind::Review
                 && direct_request.is_none()
+                && !store.has_external_task_key(engagement_id, &idempotency_key)?
             {
                 return Err(crate::direct_review_target::reading_boundary_unsupported());
             }
@@ -776,16 +780,13 @@ pub(crate) fn execute_cli_with_source_contract(
                 {
                     return Err(crate::direct_review_target::reading_boundary_unsupported());
                 }
-                request.admit_profile(
-                    manifest
-                        .global_profile_binding
-                        .as_ref()
-                        .ok_or_else(crate::direct_review_target::reading_boundary_unsupported)?,
-                )?;
             }
-            let reserved = store.reserve_external_task(
+            let reserved = reserve_caller_external_task(
+                &mut store,
                 engagement_id,
                 specialist_run_id,
+                &manifest,
+                direct_request.as_ref(),
                 ExternalTaskRequest {
                     request_value: &request_value,
                     objective: &objective,
@@ -1593,6 +1594,37 @@ fn read_request(arguments: &[OsString]) -> Result<Request, MachineError> {
             format!("request does not match facade v1: {error}"),
         )
     })
+}
+
+/// Keep original-key lookup and qualified admission adjacent to the task commit.
+fn reserve_caller_external_task(
+    store: &mut EngagementStore,
+    engagement_id: Uuid,
+    specialist_run_id: Uuid,
+    manifest: &crate::run::RunManifest,
+    direct_request: Option<&crate::direct_review::ReviewRequestV4>,
+    request: ExternalTaskRequest<'_>,
+) -> Result<ExternalTaskSnapshot, MachineError> {
+    let original = store.has_external_task_key(engagement_id, request.idempotency_key)?;
+    if !original {
+        if manifest.schema_version >= 3
+            && manifest
+                .global_profile_binding
+                .as_ref()
+                .is_none_or(|binding| !binding.caller_workspace_supported())
+        {
+            return Err(crate::direct_review_target::reading_boundary_unsupported());
+        }
+        if let Some(direct) = direct_request {
+            direct.admit_profile(
+                manifest
+                    .global_profile_binding
+                    .as_ref()
+                    .ok_or_else(crate::direct_review_target::reading_boundary_unsupported)?,
+            )?;
+        }
+    }
+    store.reserve_external_task(engagement_id, specialist_run_id, request)
 }
 
 fn authorize(
@@ -2719,31 +2751,6 @@ fn hire_caller_member(
     if reservation.state != "provisioning" {
         return hire_result(&reservation);
     }
-    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
-    let binding = match runs.load_manifest(reservation.specialist_run_id) {
-        Ok(manifest) => manifest
-            .global_profile_binding
-            .ok_or_else(|| integrity("accepted member has no Profile binding"))?,
-        Err(error) if error.code == "RUN_NOT_FOUND" => match prepared_binding {
-            Some(binding) => binding,
-            None => crate::global_runtime::ResolvedGlobalProfile::resolve(
-                &home,
-                &configuration.runtime_profile,
-            )?
-            .prepare(&home)?,
-        },
-        Err(error) => return Err(error),
-    };
-    if binding.digest()? != configuration.runtime_profile_snapshot_sha256 {
-        return Err(integrity(
-            "original accepted Profile binding is unavailable",
-        ));
-    }
-    if configuration.purpose.kind == crate::domain::PurposeKind::Review
-        && !binding.checked_review_supported()
-    {
-        return Err(crate::direct_review_target::reading_boundary_unsupported());
-    }
     let instructions = configuration
         .instructions
         .caller()
@@ -2760,6 +2767,30 @@ fn hire_caller_member(
             agent_configuration_digest(&configuration).map_err(internal)?,
         ),
     };
+    let start_key = format!("caller-member-start:{}", reservation.hire_operation_id);
+    let caller_access = if access == "canonical_workspace_write" {
+        crate::domain::CallerWorkspaceAccess::Writable
+    } else {
+        crate::domain::CallerWorkspaceAccess::ReadOnly
+    };
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
+    let binding = resolve_caller_hire_binding(
+        &home,
+        view,
+        state_root,
+        &configuration,
+        &aggregate,
+        child,
+        reservation.specialist_run_id,
+        caller_access,
+        &start_key,
+        prepared_binding,
+    )?;
+    if configuration.purpose.kind == crate::domain::PurposeKind::Review
+        && !binding.accepted_checked_review_supported()
+    {
+        return Err(crate::direct_review_target::reading_boundary_unsupported());
+    }
     let outcome = start_caller_member_run(CallerMemberStart {
         view,
         state_root,
@@ -2768,12 +2799,8 @@ fn hire_caller_member(
         run_id: reservation.specialist_run_id,
         aggregate: &aggregate,
         carrier: child,
-        access: if access == "canonical_workspace_write" {
-            crate::domain::CallerWorkspaceAccess::Writable
-        } else {
-            crate::domain::CallerWorkspaceAccess::ReadOnly
-        },
-        idempotency_key: format!("caller-member-start:{}", reservation.hire_operation_id),
+        access: caller_access,
+        idempotency_key: start_key,
         reviewer_plan: None,
     });
     let runtime_outcome = if outcome.is_ok() {
@@ -2786,6 +2813,53 @@ fn hire_caller_member(
     let reservation = store.finish_external_hire(&reservation, runtime_outcome, key)?;
     outcome?;
     hire_result(&reservation)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_caller_hire_binding(
+    home: &DolgoraeHome,
+    view: &WorkspaceView,
+    state_root: &Path,
+    configuration: &crate::run::AgentConfigurationSnapshot,
+    aggregate: &AggregateBinding,
+    child: &CredentialCarrier,
+    run_id: Uuid,
+    access: crate::domain::CallerWorkspaceAccess,
+    start_key: &str,
+    prepared: Option<crate::global_runtime::GlobalProfileBinding>,
+) -> Result<crate::global_runtime::GlobalProfileBinding, MachineError> {
+    let binding = match RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id) {
+        Ok(manifest) => manifest
+            .global_profile_binding
+            .ok_or_else(|| integrity("accepted member has no Profile binding"))?,
+        Err(error) if error.code == "RUN_NOT_FOUND" => match prepared {
+            Some(binding) => binding,
+            None => match crate::semantic::retained_caller_member_binding(
+                view,
+                state_root,
+                configuration,
+                aggregate,
+                child,
+                run_id,
+                access,
+                start_key,
+            )? {
+                Some(binding) => binding,
+                None => crate::global_runtime::ResolvedGlobalProfile::resolve(
+                    home,
+                    &configuration.runtime_profile,
+                )?
+                .prepare(home)?,
+            },
+        },
+        Err(error) => return Err(error),
+    };
+    if binding.digest()? != configuration.runtime_profile_snapshot_sha256 {
+        return Err(integrity(
+            "original accepted Profile binding is unavailable",
+        ));
+    }
+    Ok(binding)
 }
 
 fn require_matching_caller_hire(
@@ -2940,6 +3014,169 @@ mod tests {
     use crate::run::{AgentConfigurationSnapshot, ControllerBinding, InstructionSnapshot};
     use crate::workspace::WorkspaceMode;
     use std::process::Command;
+
+    #[test]
+    fn historical_hire_recovers_the_sealed_start_binding_without_a_live_registry() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::historical();
+        let legacy = fixture.legacy_member("retained-hire");
+        let home = DolgoraeHome::from_canonical_home(fixture.root.clone()).unwrap();
+        let manifest = &legacy.manifest;
+        let configuration = &manifest.agent_configuration;
+        let aggregate = manifest.aggregate_binding.as_ref().unwrap();
+        let key = "caller-member-start:retained-hire";
+        let reservation = crate::semantic::fixture_caller_member_reservation(
+            &fixture.view,
+            &fixture.state_root,
+            manifest,
+            &fixture.owner,
+            key,
+        );
+        let before = serde_json::to_vec(&reservation).unwrap();
+        std::fs::remove_dir_all(run_root(&fixture.state_root, legacy.run_id)).unwrap();
+        assert!(!home.root().join("profiles.yaml").exists());
+        let resolve = |cfg: &AgentConfigurationSnapshot, run, selected_key| {
+            resolve_caller_hire_binding(
+                &home,
+                &fixture.view,
+                &fixture.state_root,
+                cfg,
+                aggregate,
+                &fixture.owner,
+                run,
+                crate::domain::CallerWorkspaceAccess::ReadOnly,
+                selected_key,
+                None,
+            )
+        };
+        let restored = resolve(configuration, legacy.run_id, key).unwrap();
+        assert_eq!(restored, reservation.accepted_intent.global_profile_binding);
+        assert!(!restored.caller_workspace_supported());
+        assert!(restored.accepted_caller_workspace_supported());
+        let mut bad_digest = configuration.clone();
+        bad_digest.runtime_profile_snapshot_sha256 = "0".repeat(64);
+        assert!(resolve(&bad_digest, legacy.run_id, key).is_err());
+        assert!(resolve(configuration, Uuid::now_v7(), key).is_err());
+        let mut bad_role = configuration.clone();
+        let original = configuration.instructions.caller().unwrap();
+        let body = "A changed Role body.\n".to_owned();
+        let role = crate::instructions::RoleCapture {
+            name: original.role.name.clone(),
+            byte_length: body.len() as u64,
+            sha256: crate::jcs::sha256_hex(body.as_bytes()),
+            body,
+        };
+        let instructions =
+            crate::instructions::InstructionSnapshot::compose(original.common.clone(), role)
+                .unwrap();
+        bad_role.normalized_instructions = instructions.developer_prefix().unwrap();
+        bad_role.instructions = instructions.into();
+        assert!(resolve(&bad_role, legacy.run_id, key).is_err());
+        assert!(resolve(configuration, legacy.run_id, "missing-start-key").is_err());
+        let stored =
+            crate::run::StartReservationStore::new(SystemWorkspacePlatform, &fixture.state_root)
+                .load_caller(key, &reservation.request_sha256)
+                .unwrap()
+                .unwrap();
+        assert_eq!(serde_json::to_vec(&stored).unwrap(), before);
+        assert!(
+            !run_root(&fixture.state_root, legacy.run_id)
+                .join("manifest.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn historical_external_tasks_replay_but_every_new_output_refuses_before_commit() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::historical();
+        let legacy = fixture.legacy_member("historical-cli");
+        let manifest_before = serde_json::to_vec(&legacy.manifest).unwrap();
+        let mut store = fixture.store();
+        let external = json!({"namespace":"test","kind":"task","id":"historical"});
+        let accepted = json!({"objective":"original accepted task"});
+        fn request<'a>(
+            value: &'a Value,
+            key: &'a str,
+            external: &'a Value,
+        ) -> ExternalTaskRequest<'a> {
+            ExternalTaskRequest {
+                request_value: value,
+                objective: "original accepted task",
+                external_request_ref: external,
+                execution_intent: "read_only",
+                deadline_seconds: 60,
+                idempotency_key: key,
+            }
+        }
+        let original = store
+            .reserve_external_task(
+                fixture.engagement_id,
+                legacy.run_id,
+                request(&accepted, "accepted-old", &external),
+            )
+            .unwrap();
+        let replay = reserve_caller_external_task(
+            &mut store,
+            fixture.engagement_id,
+            legacy.run_id,
+            &legacy.manifest,
+            None,
+            request(&accepted, "accepted-old", &external),
+        )
+        .unwrap();
+        assert_eq!(replay, original);
+        assert_eq!(
+            reserve_caller_external_task(
+                &mut store,
+                fixture.engagement_id,
+                legacy.run_id,
+                &legacy.manifest,
+                None,
+                request(&json!({"objective":"changed"}), "accepted-old", &external)
+            )
+            .unwrap_err()
+            .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        store
+            .finish_external_task(
+                fixture.engagement_id,
+                original.task_id,
+                None,
+                "failed",
+                Some("TURN_REJECTED"),
+            )
+            .unwrap();
+        for output in ["plain_text", "structured_review_v3", "structured_review_v4"] {
+            let before = store.external_snapshot(fixture.engagement_id).unwrap();
+            let value = json!({"task":{"expected_output":output}});
+            assert_eq!(
+                reserve_caller_external_task(
+                    &mut store,
+                    fixture.engagement_id,
+                    legacy.run_id,
+                    &legacy.manifest,
+                    None,
+                    request(&value, output, &external)
+                )
+                .unwrap_err()
+                .code,
+                "REVIEW_READING_BOUNDARY_UNSUPPORTED"
+            );
+            assert_eq!(
+                store.external_snapshot(fixture.engagement_id).unwrap(),
+                before
+            );
+            assert!(
+                !store
+                    .has_external_task_key(fixture.engagement_id, output)
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            serde_json::to_vec(&legacy.manifest).unwrap(),
+            manifest_before
+        );
+    }
 
     #[test]
     fn caller_source_contract_refuses_external_isolation_before_carriers_or_workspace() {

@@ -120,6 +120,99 @@ original one.
 
 ## Keyed intents, receipts and lookup
 
+### Protected host setup and invocation ownership
+
+The private administrative entry point `__trusted-specialist-host` separates
+`owner-config-create`, `namespace-setup` and `host-state-init`, in that order.
+Each step authenticates the current Operator and retains its authorization hold
+through publication. It also verifies the configured Controller carrier and
+canonical workspace. Managed configuration additionally names an existing
+session and its root Run Controller. The Root manifest must carry that session's
+Primary aggregate binding, bootstrap operation and policy digest, in the same
+workspace. External native calls cannot use managed configuration. Setup does
+not install a host or edit host configuration.
+
+Owner configuration lives outside the workspace in an existing private root.
+It pins the historical route identifier separately from the current executable
+version/hash, workspace, Controller generation/carrier, allowed aggregate scopes,
+the five caller references and budget, and adapter provenance. Its credential
+and isolated native-host journal root remain private. Configuration is immutable:
+repeating creation must match the original canonical bytes. Host state binds its generation
+to that configuration and the existing delegation namespace birth. Normal hook,
+delivery and lookup paths neither initialize nor repair missing state. A partial
+or mismatched host database requires recovery; initialization never resets it.
+Only a verified complete setup can supply a host launch recipe. Administrative
+configuration requests and stored owner configuration each have a 128 KiB raw
+JSON limit.
+
+Public requests are limited to 16 MiB in both raw UTF-8 and canonical JSON.
+The frozen per-field bounds also apply; the aggregate limit does not enlarge
+individual fields. Private native records include additional identity and
+linkage metadata and are not subject to the public-request byte limit.
+
+The host store keeps a native-event map for every external call. It preserves
+the canonical public request, checked trusted-invocation context, native session,
+optional native Turn, tool-use, server/tool and a separate random 256-bit
+capability. Equal native identity/input retains its UUID and capability; changed
+input conflicts. The native key includes route, session, optional Turn,
+tool-use, server and tool.
+A retained session/call cannot be rebound to a different Turn/server/tool.
+Codex delivery must select exactly one session/call binding.
+Claude delivery must match the dynamic `dolgorae` origin and private capability;
+the capability is removed before public-request processing. Neither route can
+recreate a missing binding. Raw capabilities have no Debug/ordinary-log or
+export representation. Claude's native journal is protected identity state,
+inside the configured isolated host root, never public evidence.
+
+Only K methods have a product linkage in the checked
+`dolgorae.protected-invocation-state/v1` shape: its namespace contains the real
+request key, and receipt/operation reference remain null before acceptance.
+The product Engagement transaction is the sole acceptance authority. The native
+mirror can lag that transaction and is restored only from authorized original-key
+lookup. Checked persisted UUIDs require canonical lowercase, hyphenated UUIDv7
+text. This also applies to the original serialized mutation envelope before
+typed decoding; alternate encodings are invalid. The storage API preserves accepted,
+unresolved, definitively refused and absent lookup outcomes separately. It cannot authorize redispatch. Product
+intents retain the safe context beside the envelope's matching `trusted_invocation_ref`; non-host callers keep
+null context. No Engagement schema migration is added.
+
+R methods retain only the native binding and perform a fresh observation on
+each delivery; no cached result or timeout is authoritative. S methods retain
+the original target/input and commit a delivery marker before effect. Repeated
+or ambiguous delivery requires the method's authoritative getter, never a
+transparent mutation retry. Neither R nor S receives a synthetic key, K intent,
+receipt or checked K invocation envelope. Full facade decoding, transport and
+getter/service dispatch remain separate adapter boundaries.
+
+Caller/member Writer release retains the original external opening owner or
+managed Root/Broker authorization. On the exact qualified caller-workspace
+binding it retires the whole old physical generation, verifies the original
+thread/catalog/model on a reserved Reader successor, then retires Writer
+atomically. This applies to both Primary and Specialist Runs. Logical Run,
+Role/configuration, task acceptance, original result/receipt and caller-scope
+accounting remain unchanged. This physical transition adds no native Turn;
+Paused remains Paused. Existing cancellation proves only its accepted-before-
+reservation no-dispatch case, not native quiescence. Member settlement continues
+through its original release owner and borrows that owner's lifecycle lease.
+
+State access uses current-user 0700 directories and 0600 regular single-link
+files, descriptor-relative no-follow traversal and physical-identity checks.
+Journal verification permits at most 10,000 descendant entries and refuses an
+entry encountered at nesting depth 64; it neither truncates nor deletes history.
+The protected root serializes initialization and native-map updates; SQLite
+commits use full synchronization. An unpublished interrupted database is retained
+as recovery evidence, not silently overwritten. No delivery creates a missing
+lock, database, namespace or owner configuration.
+The private database publishes from an exclusive staging file only after its
+metadata transaction is durable. Initialization refuses retained staging files and SQLite sidecars for either
+the final or staging database name, even when the final database is absent. Initialization checks the original namespace birth, owner
+configuration digest and random safe-integer generation. Ordinary access checks
+the same metadata and physical database identity, without CREATE or migration.
+K mirror reconciliation accepts only an authorized lookup result for its exact
+original namespace. Reconciliation never authorizes dispatch. A separate durable
+K delivery marker, like the S marker, makes an ambiguous first delivery require
+lookup before any later dispatch decision. R has no delivery result cache.
+
 All six successor keyed kinds — `install_provisioning`,
 `open_external_engagement`, `hire_external_specialist`,
 `assign_external_specialist_task`, `spawn_specialist`,
@@ -246,6 +339,121 @@ discovery stays suppressed through the existing discovery control
 (CW:233-241), so captured bytes survive source edits and deletion after
 install.
 
+## Protected source preparation
+
+Private host administration initializes preparation state, registers sources
+and projects their identities. It requires the current Operator and the
+configured Controller, an initialized host store and the exact workspace
+namespace birth. Managed preparation also verifies the accepted Root/session,
+bootstrap and policy binding. Preparation creates no product intent, receipt,
+Run, task or round and grants no delivery authority.
+
+Immutable registration binds the owner configuration, physical workspace,
+namespace birth, Controller principal/generation, caller references and budget,
+adapter generation and managed owner to explicit instruction or target
+selection and its complete capture. Equal public identities with different
+selection provenance conflict. Existing records and interrupted publication
+remnants are preserved; ordinary reads never initialize or repair preparation
+state. Public identity/request limits remain 16 MiB raw and canonical. Private
+selection, snapshot and manifest components have separate finite producer-based
+bounds and descriptor-checked private storage.
+
+Provisioning registration retains explicit Inline/File selections, common and
+Role bytes, dependencies, ordered guidance, Profile binding and admission.
+Fresh validation/install captures the registered selection once and compares the
+complete supplied sources identity and registered snapshot before any intent.
+Accepted install replay verifies the retained snapshot, normalized body and
+receipt without registration, source files or Current qualification.
+
+Both assignment owners authenticate and resolve original replay, conflict or
+unresolved state first. For new assignments, owner/member/runtime agreement,
+Current qualification and checked-review admission precede live target
+resolution and task capture. The exact registered selector is re-admitted in
+the authenticated workspace. Its complete manifest and the generated accepted
+task identity must match registration and the supplied identity before intent
+creation. The checked capture enters the existing atomic content, identity,
+round and receipt transaction without a second capture. Facade replay verifies
+all supplied identity fields against retained bytes and the original receipt;
+it needs no live registration or current Git ref. Typed callers retain original
+target-presence, kind and requested-revision comparisons. Changed input
+conflicts; corrupt retained proof requires recovery. Private preparation fields
+never enter the public normalized mutation body.
+
+Preparation records selections for the native adapters; it does not establish
+delivery or consumer acceptance. Results and remaining qualification are recorded
+under [Current host and Profile runtime qualification](#current-host-and-profile-runtime-qualification).
+
+## Native delivery and managed Worker dispatch
+
+The stdio server supports MCP `2025-06-18`. An otherwise valid initialize proposing another version receives that supported version; the client decides whether to continue. Required initialize fields remain mandatory. Request params may carry object `_meta`; its optional `progressToken` is a string or integer and does not require progress notifications. Initialized notifications use their separate object metadata definition. Explicit null params are invalid. Inert protocol dictionary extensions are accepted where the selected method and common request definitions permit them. Tool listing returns one complete page and issues no cursor. Public facade arguments keep their closed grammar. Ignored protocol metadata supplies no native identity, caller scope or product authority.
+
+Incoming MCP requests require string or integer IDs; a present null ID is invalid and cannot initialize or dispatch. Valid notifications omit the ID. Parse and invalid-message error envelopes may use null when the request ID is unknown.
+
+Managed native completion preserves the complete successor response or failure body. A failure sets the native success flag to false, including an unresolved post-admission outcome with its original operation reference. Legacy Primary result/error projection remains unchanged. Full valid collect metadata must cross the native JSON-string wrapper without truncation or smaller producer limits; large outgoing messages use bounded WebSocket frames whose entire message is serialized against other senders. Input and per-frame limits remain independent.
+
+Native Root registration emits the selected function-tool wire tag `"type":"function"` for both orchestration and successor tools. MCP tool-list metadata keeps its separate shape. Specialist and consumer-control input schemas declare the root `"type":"object"` and require their discriminator. The checked alternatives are its `dependentSchemas` constraint, so host APIs receive no top-level union while the complete operation constraints remain intact. The legacy orchestration request schema and behavior are unchanged.
+
+New Root Threads advertise `dolgorae_specialists` separately from the legacy orchestration tool. `managed-connect` binds an explicit protected managed owner configuration to its existing Root Run under Operator and current Root Controller authorization. The Worker resolves this connection at each call, verifies the original Root, generation, Thread, Turn and tool call, and passes the public operation key with the authenticated native context. It never derives authority from a public scope reference. Connection setup does not admit work. A missing connection refuses successor calls; legacy calls keep their existing behavior. Selected Codex `thread/resume` has no dynamic-tool registration field, so reconnect retains the Thread's original tool set. A Thread created before successor-tool registration remains a legacy Thread; it is not silently replaced. Managed calls retain normal non-host null invocation context and never fabricate an external UUID or carrier. Paths and caller configuration come only from the protected connection.
+
+The private `host-hook` and `host-mcp` entrypoints consume an explicitly configured
+owner file. The synchronous native hook commits its binding before allowing a
+tool call. Codex selects it by native thread/call metadata. Claude uses only the
+hook-injected private capability, removed before public processing. Model schemas
+contain only the selected facade-v5 request branches. The adapter negotiates
+`2025-06-18`, the selected native protocol, and exposes neither future methods nor
+credentials, configuration paths or private carriers in ordinary output.
+
+Every external delivery authenticates its exact native input, server/tool, owner,
+scope and generation before product dispatch. K services receive the sealed
+trusted context; their existing intent and receipt transaction remains the sole
+acceptance authority. A delivery marker commits before a mutator runs. Repeated
+ambiguous delivery performs authorized original-key or state observation only;
+it cannot retry a mutation transparently. Read methods always observe afresh.
+Host locks cover authentication, marker publication and mirror reconciliation,
+then release before service operations or awaits. Reconnection and response loss
+retain original identities and receipts. Stdio EOF has no cancellation, release
+or Profile-stop meaning.
+
+The initial engagement getter projects a complete member set of at most 64 entries, as the frozen response requires. A larger set returns a typed capacity refusal before a close is admitted; it is never truncated or given an unusable cursor. Complete bounded observation beyond that set remains with the consistent-observation boundary. This transport limit does not impose a member-admission limit.
+
+Member views retain the membership/residency projection. Identity export derives
+its Worker-disposition proof through [bounded consistent observation](#bounded-consistent-identity-observation); member-view state alone supplies no such proof.
+
+A cancellation or close admitted once is observed on ordinary repeats, including a new native call for the same target. A partially completed close remains `closing`; its remaining effectful continuation belongs to explicit recovery. Errors after state admission retain the original operation reference and an unresolved effect, including a failed commit or a lost post-effect read.
+
+Each fresh member release during close reads the current scoped membership revision before admission. A preceding member's terminal release may advance that shared counter. Already released members are skipped. Close observes a release owner visible at its per-member precheck without resuming that owner. An owner admitted after this read may be joined by the actual release call under the existing RPC §7 convergence rules, preserving the original operation and live-owner busy protection. Ordinary close repeats remain observations. Explicit member-task/history recovery is a separate boundary.
+
+Each private state-owner record checksums its original operation reference, namespace, target, input digest and terminal flag. Reads reject an altered or malformed record without rewriting it. Only the explicit close owner may update its terminal flag and checksum.
+
+These joins belong to `delegation_service`; the legacy close path in `external_engagement` keeps its existing successor-member refusal.
+
+Cancellation fences the scoped membership revision exposed by the member view;
+engagement close fences that engagement's revision. Their non-keyed owners use
+private versioned records in the existing Engagement metadata table, without a
+schema migration, caller key or K receipt. For an accepted task, the authenticated
+cancellation owner may prove no Submit by winning a transaction against dispatch
+reservation: the retained acceptance matches, no dispatch index or content
+reference exists, no task Turn or original Submit admission is recorded in the
+Dolgorae Run audit ledger, and its round remains `counted_unresolved`. The
+transaction commits `cancelled`, `proved_nondispatch`, the task event and member
+workload revision together. Once
+reservation or submission may have occurred, cancellation addresses the exact
+recorded task Turn at the Worker serialization boundary, so a later task cannot
+be interrupted by a stale cancellation. Close first commits its original owner
+and the closing fence, then uses the existing member release owners; completion
+commits only after every member is released. Lost or repeated delivery observes
+the original owner and target without starting another effect.
+
+State controls retain real non-keyed operation owners in the product store and
+report their references, never synthetic keyed receipts. Repeated delivery reads
+those owners without invoking a mutator. Cancellation acknowledgement is not a
+Turn terminal. Missing execution after dispatch reservation, inconsistent
+no-dispatch evidence or unresolved ownership requires the original recovery path.
+An admission whose effect was not completed stays with its original owner;
+ordinary repeats never resubmit it. A closed/released immutable proof can be
+projected; active idle proof requires the bounded consistent observation below.
+An incomplete interaction read never proves idle or qualifies export.
+
 ## Complete results and the changes producer
 
 A complete result binds complete bytes, never a preview or summary
@@ -255,7 +463,10 @@ complete-result source — inline text, history fallback, or an artifact within
 a response is a valid result with a null final response. Checked
 `structured_review_v3` output is validated before publication; invalid
 findings settle as the failed-output result with `FINDINGS_OUTPUT_INVALID`
-and no payload (MDC:471-473). Direct-target manifest capture is supported for
+and no payload (MDC:471-473). A reader reconstructs the v3 canonical output
+from the verified original response and accepted task when that representation
+was not retained separately, then verifies its complete-result length and
+digest. Missing or inconsistent source bytes remain unavailable. Direct-target manifest capture is supported for
 both assignment owners. Checked `structured_review_v4` tasks require an
 explicit target and a manifest-4 Specialist admitted with read-only Review
 purpose and a qualified checked-review Profile. The initial Thread has the
@@ -465,8 +676,33 @@ integrity errors. The preparation is never settlement evidence. Storage and
 publication errors propagate; they do not turn a recoverable response into an
 unavailable result.
 
-Explicit member recovery is an internal Rust service/port operation under the
-original aggregate owner and member Controller. It borrows or acquires the
+Explicit recovery on an attached Worker must obtain acknowledged exclusive read
+ownership before sending its authoritative history request. A quiet native peer
+must not prevent that handoff. The existing 120-second operation budget includes
+the handoff and history processing; no retry, new execution or buffered
+whole-history fallback may replace the original Thread/Turn proof. A failed
+history command preserves the existing command-versus-active-Turn loss rules.
+
+Explicit member recovery has a private local administrative entry:
+`dolgorae __trusted-specialist-host member-recover --owner-config PATH --scope-ref SCOPE --member-ref MEMBER --task-ref TASK`,
+with inherited `--operator-fd` and `--controller-fd`. It requires current Operator
+authority, the protected exact owner/workspace/scope and current Controller before
+effect. It calls the original external or managed reconciliation service and
+semantic port. Managed recovery reads the original accepted assignment's key,
+Root, Turn and tool-call provenance; missing or inconsistent provenance is a
+closed refusal. The semantic port reauthenticates the actual owner. For managed recovery,
+it obtains the member's Broker-held carrier internally. No carrier is returned to the administrator or
+model, and the Root carrier is never substituted for the member carrier.
+
+This entry is not an MCP/public operation, new acceptance or receipt. A successful
+exit means the explicit call completed; existing collect and identity getters
+establish subsequent result/disposition facts. A lost reply is observed through
+those getters, without an automatic retry. Lookup, collect, identity and export
+never invoke this administrative entry. Recovery retains the member's originally accepted qualification and does not
+perform a new Current admission.
+
+The internal Rust service/port operates under the original aggregate owner and
+member Controller. It borrows or acquires the
 member lifecycle lease once. A definitively lost checked reader with a proved
 absent worker takes a history-only path before normal worker construction.
 That path validates an already-running retained Profile Server and sends only
@@ -530,11 +766,10 @@ Turn remain the release path's recovery obligation.
 dispatching and unresolved work, no pending interaction and no pending
 cleanup, observed after the collected result —
 `observed_after_result_digest` equals the collected `result_digest`
-(MDC:625-627, RPC:396-423). The read-side idle computation cannot see a
-Run-side pending interaction today: the store-level quiescence flag stays
-`false` (the v0.1.4 limit stated under managed services), and the release
-gate is the only reader of the Run's own durable interactions. An
-asynchronous write terminal leaves the writer held as pending owned cleanup,
+(MDC:625-627, RPC:396-423). The service combines the store facts with a fresh,
+complete Run interaction observation. The store-only flag cannot establish
+absence. The observation folds the existing pending-at-context rules without
+copying protected payload lists. An asynchronous write terminal leaves the writer held as pending owned cleanup,
 which blocks `idle` until the member's next authorized mutation or its
 release settles it.
 
@@ -611,9 +846,10 @@ owned-generation cleanup verification. Ordinary Closed-Run writer operations
 retain their lifecycle refusal. Absent-generation retirement uses the caller
 workspace rules for both manifest generations 3 and 4.
 
-Managed R services report `pending_interaction = false`
-today — the same current limit as the external side — until TASK-079 makes
-the field reflect actual state (RPC:288).
+Both managed and external R services fold the complete Run interaction verdict
+into the consistent database observation. The store-only quiescence flag has no
+interaction authority. TASK-079 retains its later answer-routing and disclosure
+work.
 
 ## Member release owners
 
@@ -769,8 +1005,132 @@ A session with only successor members reports the legacy composition state
 `standalone_primary`; the legacy session observation still includes successor
 rows in its member, nonterminal-spawn and pending-approval counts while its
 task counts filter successor rows like every other legacy reader (projection
-only); `source_turn_id` and
-`source_tool_call_id` are recorded as provenance without ledger verification
-until TASK-077 supplies authenticated values; and an
-`ACCEPTED_ASSIGNMENT_MISMATCH` is classified as an uncertain dispatch, not a
-proved non-dispatch.
+only). Legacy `source_turn_id` and `source_tool_call_id` remain provenance
+without ledger verification; modern managed Worker dispatch supplies
+authenticated source references. `ACCEPTED_ASSIGNMENT_MISMATCH` remains an
+uncertain dispatch, not a proved non-dispatch.
+
+## Current host and Profile runtime qualification
+
+Status: the selected runtime and individual-task paths have the scoped native
+results below. Repository verification and Task acceptance are recorded by their
+delivery owners.
+
+TASK-077 selects Codex CLI `0.164.0`
+(`d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf`) for the MCP
+host and caller-workspace Profile runtime, and Claude Code `2.1.310`
+(`ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd`) for the
+Claude MCP host. The results below apply to these selected executables;
+checksums alone do not establish runtime behavior. The H1 host qualification
+remains the historical design-time record. Its route identifiers retain their
+checked encoding; actual executable versions and checksums remain explicit.
+
+New qualified caller-workspace startup/policy, instruction-discovery and
+checked-review admissions, and member/task acceptances depending on those
+mechanisms, require the current Codex pin before their acceptance commits or
+launches. An installed provisioning snapshot, accepted policy or pending approval does not
+qualify a new member or task. Authenticate the owner and check the original key
+and request digest before applying current admission. Exact accepted replay and
+recovery use the original binding and preserve its bytes, launch contract,
+receipts and supported release, closure and collection paths. Accepted Codex
+0.159.3 bindings retain their original qualification and never inherit the new
+executable. Missing or changed executables refuse restart without substitution
+or re-execution.
+
+An approval resolution that would admit a new member performs the current-pin
+check after owner authentication and original-resolution lookup, before storing
+the resolution receipt. Refusal leaves the pending approval unresolved so the
+owner can still deny it. Denial does not require runtime admission. A resolution
+replay or recovery of an already reserved member retains its original receipt
+and accepted binding.
+
+Profile registry, binding-history observation and server lifecycle retain generic
+compatibility admission: the tested minimum and compatible unverified runtimes
+remain usable. This includes doctor probes, start/restart/stop, operator and
+automatic migration, compensation and diagnostics. The exact current pin applies
+only at qualified-mechanism admission callers; shared snapshot, bind, history
+and Profile launch helpers do not apply that pin.
+
+Current consumer qualification selects Aquarium commit
+`db132845624c24bb4d0a889503b35a2a59b2571d` and Podway commit
+`7c4a4c1ec98fd4e6eb143852419977180755d0df` (0.2.15), with Podway contract
+generation 1. Aquarium owns finding severity and local-correction policy;
+Dolgorae preserves supplied severity and reports round facts only for work it
+dispatched.
+
+The full caller pipeline passed 17 native Turns and 34 loopback POSTs through
+whole-session close. Its separate caller-startup check used zero Turns and POSTs.
+All four startup-only default-feature forms passed: omission, configuration,
+raw argv and ordered enable/disable. They used zero Turns and POSTs and retained
+the full process-quiescence proof. The separate native workspace-policy campaign
+passed six Turns and twelve POSTs.
+
+The successor pipeline passed five Turns, 23 POSTs and four dispatch checks. It
+exercised managed and external one-file tasks, actual Primary Record/Accept and
+Podway Action completion, and the ordinary v3 handoff. The unqualified native
+review-reader fixture passed two Turns and four POSTs, preserving original index
+receipts across reopen and rejecting deliberate native worktree access. This
+fixture does not establish production checked-review support.
+
+Production-host evidence combines 32 passing rows from the earlier 36-row
+campaign with four later passing rows: the quote-heavy 20,000-change backend
+restart and ordinary 20,000-change fresh-result cases on each selected host.
+These records span source changes, including ledger observation, collection,
+legacy review routing and Writer/Worker retirement. They are not a single
+36-row run on the final binary; reuse applicability belongs to the completion
+assessment. The 64 MiB full-output receiver limitation remains, and
+these results change none of the producer or retained-content budgets.
+
+These scoped results cover individual-task paths. TASK-086 retains its broader
+receipt-mapping/handoff matrix; TASK-087 owns artifact requalification after
+cleanup. TASK-078's modern Run/pool work and TASK-079's activity/interaction
+routing retain their existing scope.
+
+## Bounded consistent identity observation
+
+Both owning services allow at most three attempts under one
+cumulative 512 MiB, 1,000,000-record, `MAX_AUDIT_LINE_BYTES` and 300,000 ms
+ledger allowance. Source selection, immutable segment verification, parsing
+and interaction reduction share that allowance; retries do not reset it.
+Display caches and prefix-only histories cannot prove interaction absence.
+
+Each attempt first captures the Run manifest, current Controller, projection,
+runtime record and exact selected ledger sources, followed by the writer fact.
+Fresh verified history at the captured head/hash must reproduce the Run
+projection and supply the interaction revision and pending verdict. After
+rechecking those Run/source facts, the service opens a fresh pinned Engagement
+read transaction for task/result linkage, caller counts, membership and workload
+revisions, write work, cleanup and original terminal release proof. The current
+task, accepted identity and typed complete result are materialized on that same
+connection. The service checks the writer and Run/source facts again before the
+transaction ends; only the confirmed task/result and disposition leave together. A proof
+requires all three Run/source captures and both writer captures to match, with
+the collected result/digest matching the database facts. The database snapshot
+is their common observation instant; it does not fence future operations.
+
+The stamp includes generation, lifecycle, active Turn, Controller and manifest
+fingerprints, control/App Server epochs, runtime fingerprint, projection and
+ledger generation/head/hash/source identities. Unpublished suffixes, replacement
+sources and open/resolve ABA changes invalidate the attempt. After dropping the
+failed transaction, a retry may wait at most the existing 100-ms group-commit
+interval within the same remaining allowance; no wait follows the third attempt.
+Torn, incomplete,
+unclassified or unreadable history never defaults to pending=false. Motion
+through all three attempts or cumulative exhaustion returns `RECOVERY_REQUIRED`,
+`RecoveryNeeded`, `restore_state`, retaining a safe underlying classification.
+Interaction correlation follows ledger order: a decision closes only an already
+observed request, and a reused native request ID opens a new request. An
+unresolved raw open also prevents idle during interrupted normalization or
+automatic refusal. To prove absence, the interaction reducer must validate resolution fields,
+kind/status linkage and date-time values for decisions and initially resolved
+or stale requests. It validates normalized interaction arms separately from
+raw journal decisions. The Turn producer's `terminal_turn` stale reason and
+nonsecret answered receipt remain valid, and historical nonsecret decisions
+may lack the outer receipt. The proof never invents receipts or rewrites
+journal metadata. Malformed resolution metadata requires recovery.
+Pending interactions prevent idle. An original released
+proof still requires coherent settled work. Reads never start, recover, cancel or release work.
+
+External and managed exports preserve their existing mapping IDs, caller scope,
+accepted authority, complete result and digest. This observation does not resolve
+native full-output receiver compatibility or establish actual consumer acceptance.

@@ -1820,8 +1820,7 @@ fn an_observer_reconstructs_the_last_terminal_turn_from_the_ledger() {
     assert_eq!(terminal["final_response"]["text"], "answered");
 }
 
-/// A projection head the durable bytes cannot account for is an integrity
-/// failure, not an empty answer.
+/// An unpublished suffix cannot prove complete operation absence.
 #[test]
 fn complete_operation_observation_refuses_a_synced_unpublished_reservation() {
     for barrier in [
@@ -1858,7 +1857,7 @@ fn complete_operation_observation_refuses_a_synced_unpublished_reservation() {
         assert!(
             matches!(
                 ObservedLedger::open_complete(&tree.root, tree.run_id, published),
-                Err(LedgerError::Integrity(_))
+                Err(LedgerError::CaptureConflict)
             ),
             "{barrier:?}"
         );

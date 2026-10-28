@@ -19,7 +19,7 @@ import tempfile
 import threading
 import uuid
 from contextlib import ExitStack
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -40,26 +40,53 @@ class FixturePolicyServer(PolicyServer):
 
 
 def terminal_output(value: Any) -> tuple[int, str]:
-    if (isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict)
-            and value[0].get("type") == "input_text"):
-        value = value[0].get("text")
-    if not isinstance(value, str) or len(value) > MAX_BODY:
-        raise ProbeCheckFailure("native_terminal_output_missing")
-    # Native ExecCommandToolOutput::response_header uses Output:, whereas a
-    # host CLI display may use another heading. Neither display nor success
-    # metadata establishes a terminal result.
-    # https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/core/src/tools/context.rs
-    codes = re.findall(r"^Process exited with code (-?[0-9]+)$", value, re.MULTILINE)
-    if (len(codes) != 1 or "\nOutput:\n" not in value
-            or "Process running with session ID " in value):
+    # The selected 0.164 Code Mode exec result has structured terminal facts.
+    if (not isinstance(value, dict) or type(value.get("exit_code")) is not int
+            or not isinstance(value.get("output"), str) or len(value["output"].encode()) > MAX_BODY):
         raise ProbeCheckFailure("native_terminal_output_unverified")
-    return int(codes[0]), value.split("\nOutput:\n", 1)[1]
+    return value["exit_code"], value["output"]
+
+
+def code_call(request: dict, call_id: str, calls: list[tuple[str, str, dict]]) -> dict:
+    advertised = [tool for item in request.get("input", []) if item.get("type") == "additional_tools"
+                  for namespace in item.get("tools", []) if namespace.get("name") == "functions"
+                  for tool in namespace.get("tools", []) if tool.get("type") == "custom" and tool.get("name") == "exec"]
+    if (len(advertised) != 1 or advertised[0].get("format", {}).get("type") != "grammar"
+            or any("### `" + name + "`" not in advertised[0].get("description", "") for _, name, _ in calls)):
+        raise ProbeCheckFailure("advertised_code_mode_tool_missing")
+    return {"type": "custom_tool_call", "call_id": call_id, "name": "exec", "namespace": "functions",
+            "input": "\n".join(f"text({{label:{json.dumps(label)},result:await tools.{name}({json.dumps(args)})}});"
+                               for label, name, args in calls)}
+
+
+def code_results(request: dict, call_id: str, labels: list[str]) -> dict:
+    # Observed in the same native successor case: a separate completion/header
+    # block followed by exactly the JSON text(...) blocks we emitted.
+    returned = [item for item in request.get("input", [])
+                if item.get("type") == "custom_tool_call_output" and item.get("call_id") == call_id]
+    if len(returned) != 1:
+        raise ProbeCheckFailure("custom_return_correlation_missing_or_duplicate")
+    blocks = returned[0].get("output")
+    if (not isinstance(blocks, list) or len(blocks) != len(labels) + 1
+            or any(not isinstance(block, dict) or block.get("type") != "input_text" or not isinstance(block.get("text"), str) for block in blocks)
+            or re.fullmatch(r"Script completed\nWall time [0-9]+(?:\.[0-9]+)? seconds\nOutput:\n", blocks[0]["text"]) is None):
+        raise ProbeCheckFailure("custom_return_not_observed_completed_shape")
+    results = {}
+    for block in blocks[1:]:
+        value = json.loads(block["text"])
+        if (not isinstance(value, dict) or set(value) != {"label", "result"} or not isinstance(value.get("label"), str)
+                or value["label"] not in labels or value["label"] in results):
+            raise ProbeCheckFailure("custom_return_label_missing_or_duplicate")
+        results[value["label"]] = value["result"]
+    if set(results) != set(labels):
+        raise ProbeCheckFailure("custom_return_label_missing_or_duplicate")
+    return results
 
 
 class ScriptedResponses:
     """One exact call and correlated native return per Turn; twelve POSTs total."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, concurrent_requests: bool = False) -> None:
         self.posts = 0
         self.steps = 0
         self.command: str | None = None
@@ -67,6 +94,8 @@ class ScriptedResponses:
         self.issued = False
         self.result: tuple[int, str] | None = None
         self.failure: str | None = None
+        self.failure_details: dict | None = None
+        self.input_sizes: list[dict] = []
         self.instruction_markers: dict[str, str] = {}
         self.ambient_seen = {name: False for name in ("profile", "project", "ancestor")}
         self.positive_control_seen = self.ambient_seen.copy()
@@ -99,7 +128,11 @@ class ScriptedResponses:
                         raise ProbeCheckFailure("fixture_encoding_unsupported")
                     if len(body) > MAX_BODY:
                         raise ProbeCheckFailure("fixture_body_outside_bound")
-                    events = owner.respond(json.loads(body))
+                    request = json.loads(body)
+                    with owner.lock:
+                        owner.input_sizes.append({"wire_bytes": size, "decoded_bytes": len(body),
+                            "model": request.get("model") if isinstance(request, dict) else None})
+                    events = owner.respond(request)
                     wire = "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
                                    for event in events).encode()
                     self.send_response(200)
@@ -109,12 +142,21 @@ class ScriptedResponses:
                     self.wfile.write(wire)
                     self.wfile.flush()
                 except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as error:
-                    owner.failure = error.kind if isinstance(error, ProbeCheckFailure) else "fixture_request_invalid"
+                    with owner.lock:
+                        if owner.failure is None:
+                            owner.failure = error.kind if isinstance(error, ProbeCheckFailure) else "fixture_request_invalid"
+                            owner.failure_details = {"class": type(error).__name__[:64], "reason": owner.failure[:128]}
                     self.send_error(400, "fixture request rejected")
 
-        class QuietServer(HTTPServer):
+        class QuietServer(ThreadingHTTPServer if concurrent_requests else HTTPServer):
+            # Join concurrent handlers in server_close, including an ack waiter.
+            daemon_threads = False
+
             def handle_error(self, _request: object, _address: object) -> None:
-                owner.failure = "fixture_transport_failure"
+                with owner.lock:
+                    if owner.failure is None:
+                        owner.failure = "fixture_transport_failure"
+                        owner.failure_details = {"class": "TransportError", "reason": owner.failure}
 
         self.http = QuietServer(("127.0.0.1", 0), Handler)
         self.worker = threading.Thread(target=self.http.serve_forever, daemon=True)
@@ -171,14 +213,12 @@ class ScriptedResponses:
                            f"working directory: {self.command}\n" in part.get("text", "") for part in texts):
                     raise ProbeCheckFailure("fixture_task_command_mismatch")
                 self.issued = True
-                item = {"type": "function_call", "call_id": self.call_id, "name": "exec_command",
-                        "arguments": json.dumps({"cmd": self.command, "yield_time_ms": 1000})}
+                item = code_call(request, self.call_id, [(self.call_id, "exec_command",
+                    {"cmd": self.command, "yield_time_ms": 1000})])
             else:
-                returns = [item for item in inputs if item.get("type") == "function_call_output"
-                           and item.get("call_id") == self.call_id]
-                if self.result is not None or len(returns) != 1:
+                if self.result is not None:
                     raise ProbeCheckFailure("fixture_native_return_missing_or_ambiguous")
-                self.result = terminal_output(returns[0].get("output"))
+                self.result = terminal_output(code_results(request, self.call_id, [self.call_id])[self.call_id])
                 item = {"type": "message", "role": "assistant", "id": f"bounded-message-{self.steps}",
                         "content": [{"type": "output_text", "text": "Done."}]}
             identity = f"bounded-response-{self.posts}"

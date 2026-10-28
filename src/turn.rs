@@ -1,6 +1,6 @@
 //! Thread and Turn lifecycle owned by one Run worker connection.
 
-use crate::app_server::{JsonRpcConnection, SolicitedSink, TransportError, Wire};
+use crate::app_server::{JsonGrammar, JsonRpcConnection, SolicitedSink, TransportError, Wire};
 use crate::audit::AuditKind;
 use crate::domain::RunLifecycle;
 use crate::fault::{FaultInjector, NoFaults};
@@ -47,6 +47,8 @@ pub const MAX_IGNORED_FOREIGN_REQUESTS: usize = 64;
 pub const MAX_FOREIGN_FIELD_CHARS: usize = 128;
 #[derive(Clone, Debug)]
 pub struct PrimaryToolCall {
+    pub(crate) tool_name: String,
+    pub(crate) source_thread_id: String,
     pub request_id: u64,
     pub run_generation: u64,
     pub context: PrimaryCallContext,
@@ -73,6 +75,9 @@ pub struct PrimaryToolConfig {
 
 #[derive(Clone, Debug)]
 struct PendingPrimaryToolCall {
+    tool_name: String,
+    control_correlation: Option<crate::native_consumer::ControlCorrelation>,
+    successor_operation: Option<String>,
     payload_sha256: String,
     request_ids: Vec<u64>,
 }
@@ -866,7 +871,10 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> DurableTurnJournal
                 .writer
                 .observe_locked(|writer| {
                     if kind == AuditKind::TurnStarted {
-                        payload["acceptance_writer"] = serde_json::to_value(writer)
+                        let mut observation = writer.clone();
+                        observation.schema_version = 1;
+                        observation.generation_release = None;
+                        payload["acceptance_writer"] = serde_json::to_value(observation)
                             .map_err(|error| TurnError::Journal(error.to_string()))?;
                     }
                     let mut ledger = self.ledger.lock().map_err(|_| {
@@ -1358,360 +1366,14 @@ pub trait ForeignDiagnostics: Send {
     ) -> Result<(), TurnError>;
 }
 
-/// Validates one JSON value without retaining its keys, strings or numbers.
-/// Proof extraction has separate identity, duplicate-key and Turn bounds.
-#[derive(Debug, Default)]
-struct JsonGrammar {
-    stack: Vec<JsonFrame>,
-    token: JsonToken,
-    complete: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum JsonFrame {
-    Object(JsonObject),
-    Array(JsonArray),
-}
-
-#[derive(Clone, Copy, Debug)]
-enum JsonObject {
-    KeyOrEnd,
-    Key,
-    Colon,
-    Value,
-    CommaOrEnd,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum JsonArray {
-    ValueOrEnd,
-    Value,
-    CommaOrEnd,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-enum JsonToken {
-    #[default]
-    None,
-    String(JsonString),
-    Literal {
-        bytes: &'static [u8],
-        next: usize,
-    },
-    Number(JsonNumber),
-}
-
-#[derive(Clone, Copy, Debug)]
-enum JsonNumber {
-    Sign,
-    Zero,
-    Integer,
-    Dot,
-    Fraction,
-    Exponent,
-    ExponentSign,
-    ExponentDigits,
-}
-
-impl JsonNumber {
-    fn can_end(self) -> bool {
-        matches!(
-            self,
-            Self::Zero | Self::Integer | Self::Fraction | Self::ExponentDigits
-        )
-    }
-
-    fn push(self, byte: u8) -> Result<Option<Self>, TurnError> {
-        if matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b',' | b']' | b'}') {
-            return self
-                .can_end()
-                .then_some(None)
-                .ok_or(TurnError::CorrelationMismatch);
-        }
-        let next = match (self, byte) {
-            (Self::Sign, b'0') => Self::Zero,
-            (Self::Sign, b'1'..=b'9') => Self::Integer,
-            (Self::Integer, b'0'..=b'9') => Self::Integer,
-            (Self::Zero | Self::Integer, b'.') => Self::Dot,
-            (Self::Zero | Self::Integer | Self::Fraction, b'e' | b'E') => Self::Exponent,
-            (Self::Dot | Self::Fraction, b'0'..=b'9') => Self::Fraction,
-            (Self::Exponent, b'+' | b'-') => Self::ExponentSign,
-            (Self::Exponent | Self::ExponentSign | Self::ExponentDigits, b'0'..=b'9') => {
-                Self::ExponentDigits
-            }
-            _ => return Err(TurnError::CorrelationMismatch),
-        };
-        Ok(Some(next))
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-enum JsonEscape {
-    #[default]
-    None,
-    Slash,
-    Hex {
-        digits: u8,
-        value: u16,
-        low: bool,
-    },
-    LowSlash,
-    LowU,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct JsonString {
-    key: bool,
-    escape: JsonEscape,
-    continuation: u8,
-    lower: u8,
-    upper: u8,
-}
-
-impl JsonString {
-    fn push(&mut self, byte: u8) -> Result<bool, TurnError> {
-        match self.escape {
-            JsonEscape::Slash => {
-                self.escape = match byte {
-                    b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => JsonEscape::None,
-                    b'u' => JsonEscape::Hex {
-                        digits: 0,
-                        value: 0,
-                        low: false,
-                    },
-                    _ => return Err(TurnError::CorrelationMismatch),
-                };
-            }
-            JsonEscape::Hex { digits, value, low } => {
-                let digit = match byte {
-                    b'0'..=b'9' => byte - b'0',
-                    b'a'..=b'f' => byte - b'a' + 10,
-                    b'A'..=b'F' => byte - b'A' + 10,
-                    _ => return Err(TurnError::CorrelationMismatch),
-                };
-                let value = (value << 4) | u16::from(digit);
-                self.escape = if digits < 3 {
-                    JsonEscape::Hex {
-                        digits: digits + 1,
-                        value,
-                        low,
-                    }
-                } else if low {
-                    if !(0xdc00..=0xdfff).contains(&value) {
-                        return Err(TurnError::CorrelationMismatch);
-                    }
-                    JsonEscape::None
-                } else if (0xd800..=0xdbff).contains(&value) {
-                    JsonEscape::LowSlash
-                } else if (0xdc00..=0xdfff).contains(&value) {
-                    return Err(TurnError::CorrelationMismatch);
-                } else {
-                    JsonEscape::None
-                };
-            }
-            JsonEscape::LowSlash => {
-                if byte != b'\\' {
-                    return Err(TurnError::CorrelationMismatch);
-                }
-                self.escape = JsonEscape::LowU;
-            }
-            JsonEscape::LowU => {
-                if byte != b'u' {
-                    return Err(TurnError::CorrelationMismatch);
-                }
-                self.escape = JsonEscape::Hex {
-                    digits: 0,
-                    value: 0,
-                    low: true,
-                };
-            }
-            JsonEscape::None => {
-                if self.continuation > 0 {
-                    if !(self.lower..=self.upper).contains(&byte) {
-                        return Err(TurnError::CorrelationMismatch);
-                    }
-                    self.continuation -= 1;
-                    self.lower = 0x80;
-                    self.upper = 0xbf;
-                    return Ok(false);
-                }
-                let (remaining, lower, upper) = match byte {
-                    0..=0x1f => return Err(TurnError::CorrelationMismatch),
-                    b'"' => return Ok(true),
-                    b'\\' => {
-                        self.escape = JsonEscape::Slash;
-                        return Ok(false);
-                    }
-                    0x20..=0x7f => return Ok(false),
-                    0xc2..=0xdf => (1, 0x80, 0xbf),
-                    0xe0 => (2, 0xa0, 0xbf),
-                    0xe1..=0xec | 0xee..=0xef => (2, 0x80, 0xbf),
-                    0xed => (2, 0x80, 0x9f),
-                    0xf0 => (3, 0x90, 0xbf),
-                    0xf1..=0xf3 => (3, 0x80, 0xbf),
-                    0xf4 => (3, 0x80, 0x8f),
-                    _ => return Err(TurnError::CorrelationMismatch),
-                };
-                self.continuation = remaining;
-                self.lower = lower;
-                self.upper = upper;
-            }
-        }
-        Ok(false)
-    }
-}
-
-impl JsonGrammar {
-    fn value_complete(&mut self) {
-        if self.stack.is_empty() {
-            self.complete = true;
-        }
-    }
-
-    fn close(&mut self) {
-        self.stack.pop();
-        self.value_complete();
-    }
-
-    fn start_value(&mut self, byte: u8) -> Result<(), TurnError> {
-        if let Some(frame) = self.stack.last_mut() {
-            *frame = match *frame {
-                JsonFrame::Object(JsonObject::Value) => JsonFrame::Object(JsonObject::CommaOrEnd),
-                JsonFrame::Array(JsonArray::ValueOrEnd | JsonArray::Value) => {
-                    JsonFrame::Array(JsonArray::CommaOrEnd)
-                }
-                _ => return Err(TurnError::CorrelationMismatch),
-            };
-        }
-        match byte {
-            b'{' | b'[' => {
-                if self.stack.len() >= 256 {
-                    return Err(TurnError::CorrelationMismatch);
-                }
-                self.stack.push(if byte == b'{' {
-                    JsonFrame::Object(JsonObject::KeyOrEnd)
-                } else {
-                    JsonFrame::Array(JsonArray::ValueOrEnd)
-                });
-            }
-            b'"' => self.token = JsonToken::String(JsonString::default()),
-            b't' => {
-                self.token = JsonToken::Literal {
-                    bytes: b"true",
-                    next: 1,
-                }
-            }
-            b'f' => {
-                self.token = JsonToken::Literal {
-                    bytes: b"false",
-                    next: 1,
-                }
-            }
-            b'n' => {
-                self.token = JsonToken::Literal {
-                    bytes: b"null",
-                    next: 1,
-                }
-            }
-            b'-' => self.token = JsonToken::Number(JsonNumber::Sign),
-            b'0' => self.token = JsonToken::Number(JsonNumber::Zero),
-            b'1'..=b'9' => self.token = JsonToken::Number(JsonNumber::Integer),
-            _ => return Err(TurnError::CorrelationMismatch),
-        }
-        Ok(())
-    }
-
-    fn push(&mut self, byte: u8) -> Result<(), TurnError> {
-        match self.token {
-            JsonToken::String(mut string) => {
-                if string.push(byte)? {
-                    self.token = JsonToken::None;
-                    if string.key {
-                        *self
-                            .stack
-                            .last_mut()
-                            .ok_or(TurnError::CorrelationMismatch)? =
-                            JsonFrame::Object(JsonObject::Colon);
-                    } else {
-                        self.value_complete();
-                    }
-                } else {
-                    self.token = JsonToken::String(string);
-                }
-                return Ok(());
-            }
-            JsonToken::Literal { bytes, next } => {
-                if byte != bytes[next] {
-                    return Err(TurnError::CorrelationMismatch);
-                }
-                if next + 1 == bytes.len() {
-                    self.token = JsonToken::None;
-                    self.value_complete();
-                } else {
-                    self.token = JsonToken::Literal {
-                        bytes,
-                        next: next + 1,
-                    };
-                }
-                return Ok(());
-            }
-            JsonToken::Number(number) => {
-                if let Some(next) = number.push(byte)? {
-                    self.token = JsonToken::Number(next);
-                    return Ok(());
-                }
-                self.token = JsonToken::None;
-                self.value_complete();
-            }
-            JsonToken::None => {}
-        }
-        if matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
-            return Ok(());
-        }
-        if self.complete {
-            return Err(TurnError::CorrelationMismatch);
-        }
-        match (self.stack.last().copied(), byte) {
-            (Some(JsonFrame::Object(JsonObject::KeyOrEnd | JsonObject::CommaOrEnd)), b'}')
-            | (Some(JsonFrame::Array(JsonArray::ValueOrEnd | JsonArray::CommaOrEnd)), b']') => {
-                self.close()
-            }
-            (Some(JsonFrame::Object(JsonObject::KeyOrEnd | JsonObject::Key)), b'"') => {
-                self.token = JsonToken::String(JsonString {
-                    key: true,
-                    ..JsonString::default()
-                });
-            }
-            (Some(JsonFrame::Object(JsonObject::Colon)), b':') => {
-                *self.stack.last_mut().unwrap() = JsonFrame::Object(JsonObject::Value);
-            }
-            (Some(JsonFrame::Object(JsonObject::CommaOrEnd)), b',') => {
-                *self.stack.last_mut().unwrap() = JsonFrame::Object(JsonObject::Key);
-            }
-            (Some(JsonFrame::Array(JsonArray::CommaOrEnd)), b',') => {
-                *self.stack.last_mut().unwrap() = JsonFrame::Array(JsonArray::Value);
-            }
-            (Some(JsonFrame::Object(JsonObject::Value)), _)
-            | (Some(JsonFrame::Array(JsonArray::ValueOrEnd | JsonArray::Value)), _)
-            | (None, _) => self.start_value(byte)?,
-            _ => return Err(TurnError::CorrelationMismatch),
-        }
-        Ok(())
-    }
-
-    fn finish(mut self) -> Result<(), TurnError> {
-        if let JsonToken::Number(number) = self.token
-            && number.can_end()
-        {
-            self.token = JsonToken::None;
-            self.value_complete();
-        }
-        if self.complete && self.stack.is_empty() && matches!(self.token, JsonToken::None) {
-            Ok(())
-        } else {
-            Err(TurnError::CorrelationMismatch)
-        }
-    }
+/// Bounded history commitment: complete original Turn bytes and terminal count.
+/// Thread metadata such as last-access timestamps is deliberately outside it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GenerationHistory {
+    pub thread_id: String,
+    pub turns: u64,
+    pub sha256: String,
 }
 
 /// Streams one `thread/read(includeTurns:true)` reply, retaining only the Turn
@@ -1748,6 +1410,12 @@ pub struct ThreadTurnSink {
     active_name_bytes: usize,
     recovered_turn: Option<Value>,
     seen: u64,
+    generation_history: bool,
+    history_hash: Sha256,
+    history_turns: u64,
+    history_turns_array_seen: bool,
+    reading_turn_status: bool,
+    turn_status: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1786,12 +1454,38 @@ impl ThreadTurnSink {
             active_name_bytes: 0,
             recovered_turn: None,
             seen: 0,
+            generation_history: false,
+            history_hash: Sha256::new(),
+            history_turns: 0,
+            history_turns_array_seen: false,
+            reading_turn_status: false,
+            turn_status: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_parser_bytes(&self) -> usize {
+        self.element.as_ref().map_or(0, Vec::capacity)
+            + self.name.capacity()
+            + self.element_id.capacity()
+            + self.thread_id_bytes.capacity()
+            + self.stack.capacity() * std::mem::size_of::<Frame>()
+            + self.grammar.retained_bytes()
+            + self
+                .stack
+                .iter()
+                .map(|frame| {
+                    frame.name.as_ref().map_or(0, Vec::capacity)
+                        + frame.names.iter().map(Vec::capacity).sum::<usize>()
+                })
+                .sum::<usize>()
     }
 
     /// The wanted Turn's items, once the reply has been fully streamed.
     pub fn into_items(self) -> Result<Vec<Value>, TurnError> {
-        self.grammar.finish()?;
+        self.grammar
+            .finish()
+            .map_err(|_| TurnError::CorrelationMismatch)?;
         if !self.stack.is_empty() || self.in_string {
             return Err(TurnError::CorrelationMismatch);
         }
@@ -1814,7 +1508,9 @@ impl ThreadTurnSink {
     }
 
     pub(crate) fn into_recovery(self) -> Result<RecoveredHistory, TurnError> {
-        self.grammar.finish()?;
+        self.grammar
+            .finish()
+            .map_err(|_| TurnError::CorrelationMismatch)?;
         if !self.stack.is_empty()
             || self.in_string
             || self.expected_thread_id != self.observed_thread_id
@@ -1839,6 +1535,34 @@ impl ThreadTurnSink {
                 && self.items.is_some(),
             items: self.items.unwrap_or_default(),
             usage: turn.get("usage").cloned(),
+        })
+    }
+
+    pub(crate) fn for_generation(thread: &str) -> Self {
+        let mut sink = Self::for_recovery(thread, "");
+        sink.generation_history = true;
+        sink
+    }
+
+    pub(crate) fn into_generation(self) -> Result<GenerationHistory, TurnError> {
+        self.grammar
+            .finish()
+            .map_err(|_| TurnError::CorrelationMismatch)?;
+        if !self.generation_history
+            || !self.history_turns_array_seen
+            || !self.stack.is_empty()
+            || self.in_string
+            || self.expected_thread_id != self.observed_thread_id
+            || self.root_parent_null != Some(true)
+        {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        Ok(GenerationHistory {
+            thread_id: self
+                .observed_thread_id
+                .ok_or(TurnError::CorrelationMismatch)?,
+            turns: self.history_turns,
+            sha256: data_encoding::HEXLOWER.encode(&self.history_hash.finalize()),
         })
     }
 
@@ -1873,6 +1597,22 @@ impl ThreadTurnSink {
     fn finish_element(&mut self, closing: u8) -> Result<(), TurnError> {
         self.element_active = false;
         self.reading_element_id = false;
+        if self.generation_history {
+            if self.element_id.is_empty()
+                || !matches!(
+                    self.turn_status.as_slice(),
+                    b"completed" | b"failed" | b"interrupted"
+                )
+            {
+                return Err(TurnError::OutcomeUnknown);
+            }
+            self.history_turns = self
+                .history_turns
+                .checked_add(1)
+                .ok_or(TurnError::OutcomeUnknown)?;
+            self.element = None;
+            return Ok(());
+        }
         let Some(mut bytes) = self.element.take() else {
             return Ok(());
         };
@@ -1905,7 +1645,12 @@ impl ThreadTurnSink {
 
     fn step(&mut self, byte: u8) -> Result<(), TurnError> {
         self.seen = self.seen.saturating_add(1);
-        self.grammar.push(byte)?;
+        if self.generation_history && self.element_active {
+            self.history_hash.update([byte]);
+        }
+        self.grammar
+            .push(byte)
+            .map_err(|_| TurnError::CorrelationMismatch)?;
         if let Some(element) = self.element.as_mut() {
             if element.len() >= MAX_SOLICITED_TURN_BYTES {
                 return Err(TurnError::CorrelationMismatch);
@@ -1919,7 +1664,10 @@ impl ThreadTurnSink {
                     self.push_name_byte(byte)?;
                 }
             } else if byte == b'\\' {
-                if self.reading_thread_id {
+                if self.reading_thread_id
+                    || self.reading_turn_status
+                    || (self.generation_history && self.reading_element_id)
+                {
                     return Err(TurnError::CorrelationMismatch);
                 }
                 self.escaped = true;
@@ -1964,6 +1712,8 @@ impl ThreadTurnSink {
                         String::from_utf8(std::mem::take(&mut self.thread_id_bytes))
                             .map_err(|_| TurnError::CorrelationMismatch)?,
                     );
+                } else if self.reading_turn_status {
+                    self.reading_turn_status = false;
                 } else if self.reading_element_id {
                     self.reading_element_id = false;
                     self.discard_unless_wanted();
@@ -1975,6 +1725,11 @@ impl ThreadTurnSink {
                     return Err(TurnError::CorrelationMismatch);
                 }
                 self.thread_id_bytes.push(byte);
+            } else if self.reading_turn_status {
+                if self.turn_status.len() >= 32 {
+                    return Err(TurnError::CorrelationMismatch);
+                }
+                self.turn_status.push(byte);
             } else if self.reading_element_id {
                 if self.element_id.len() >= 256 {
                     return Err(TurnError::CorrelationMismatch);
@@ -2040,6 +1795,14 @@ impl ThreadTurnSink {
                 {
                     self.reading_thread_id = true;
                     self.thread_id_bytes.clear();
+                } else if self.generation_history
+                    && self.element_active
+                    && self.last_significant == b':'
+                    && self.stack.len() == self.element_depth + 1
+                    && self.pending_name.as_deref() == Some(b"status")
+                {
+                    self.reading_turn_status = true;
+                    self.turn_status.clear();
                 } else if self.element_active
                     && self.last_significant == b':'
                     && self.stack.len() == self.element_depth + 1
@@ -2052,8 +1815,23 @@ impl ThreadTurnSink {
             }
             b'{' | b'[' => {
                 let array = byte == b'[';
+                if self.generation_history
+                    && array
+                    && self.stack.len() == 2
+                    && self
+                        .stack
+                        .last()
+                        .is_some_and(|f| f.name.as_deref() == Some(b"thread"))
+                    && self.pending_name.as_deref() == Some(b"turns")
+                {
+                    self.history_turns_array_seen = true;
+                }
                 if byte == b'{' && !self.element_active && self.inside_turns_array() {
-                    self.element = Some(vec![b'{']);
+                    self.element = (!self.generation_history).then(|| vec![b'{']);
+                    if self.generation_history {
+                        self.history_hash.update(b"{");
+                        self.turn_status.clear();
+                    }
                     self.element_depth = self.stack.len();
                     self.element_active = true;
                     self.element_id.clear();
@@ -2614,6 +2392,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
 
     fn check_caller_process_quiescence(&mut self) -> Result<(), TurnError> {
         if self.caller_runtime.is_some() {
+            let caller_context = self.caller_startup_phase;
             self.caller_startup_phase("configuration_readback");
             self.check_caller_configuration()?;
             self.caller_startup_phase("process_quiescence");
@@ -2630,6 +2409,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             if let Err(error) = result {
                 if self.caller_startup_phase.is_some() {
                     self.caller_startup_failure = Some(serde_json::json!({
+                        "caller_context": caller_context,
                         "process_proof": diagnostic, "worker_error_code": error.code(),
                     }));
                 }
@@ -2700,7 +2480,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.caller_startup_failure = None;
         let result = (|| {
             if operation_id.get_version_num() != 7
-                || self.state != CoordinatorState::Idle
+                || (self.state != CoordinatorState::Idle
+                    && !(self.state == CoordinatorState::Paused
+                        && self.caller_runtime.as_ref().is_some_and(|runtime| {
+                            runtime.is_pending_generation_reader(operation_id)
+                        })))
                 || !self.pending.is_empty()
             {
                 return Err(TurnError::TurnBusy);
@@ -3247,6 +3031,57 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
     }
 
+    pub(crate) fn generation_history(
+        &mut self,
+        thread: &str,
+    ) -> Result<GenerationHistory, TurnError> {
+        let mut sink = ThreadTurnSink::for_generation(thread);
+        self.server.request_streamed(
+            "thread/read",
+            serde_json::json!({"threadId":thread,"includeTurns":true}),
+            &mut sink,
+        )?;
+        sink.into_generation()
+    }
+
+    pub(crate) fn prepare_generation_retirement(&mut self) -> Result<GenerationHistory, TurnError> {
+        if !matches!(
+            self.state,
+            CoordinatorState::Idle | CoordinatorState::Paused
+        ) || self.active_turn_id.is_some()
+            || !self.pending.is_empty()
+            || !self.is_caller_workspace()
+        {
+            return Err(TurnError::TurnBusy);
+        }
+        let thread = self.thread_id.clone().ok_or(TurnError::OutcomeUnknown)?;
+        self.check_caller_transition_quiescence(&thread)?;
+        self.generation_history(&thread)
+    }
+
+    pub(crate) fn start_generation_reader(
+        &mut self,
+        history: &GenerationHistory,
+        paused: bool,
+        operation_id: Uuid,
+    ) -> Result<(), TurnError> {
+        // This connection has no native Thread attachment yet. History is read
+        // before ensure_thread can issue ID-only resume.
+        if self.generation_history(&history.thread_id)? != *history {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        let rebound = self.rebind_retained_thread_with_operation(Some(operation_id));
+        self.finish_caller_connection_startup();
+        rebound?;
+        if self.generation_history(&history.thread_id)? != *history {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        if paused {
+            self.state = CoordinatorState::Paused;
+        }
+        Ok(())
+    }
+
     pub(crate) fn successor_history(
         &mut self,
         thread: &str,
@@ -3465,6 +3300,13 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     }
 
     fn rebind_retained_thread_inner(&mut self) -> Result<(), TurnError> {
+        self.rebind_retained_thread_with_operation(None)
+    }
+
+    fn rebind_retained_thread_with_operation(
+        &mut self,
+        operation: Option<Uuid>,
+    ) -> Result<(), TurnError> {
         if let Some(previous_thread) = self.thread_id.clone() {
             if self.is_caller_workspace() {
                 self.sandbox = "read-only".to_owned();
@@ -3475,7 +3317,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 .thread_generation
                 .checked_add(1)
                 .ok_or(TurnError::OutcomeUnknown)?;
-            let operation_id = Uuid::now_v7();
+            let operation_id = operation.unwrap_or_else(Uuid::now_v7);
             self.attach = ThreadAttach::Resume {
                 thread_id: previous_thread.clone(),
             };
@@ -4025,10 +3867,16 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 },
             });
         }
-        if method == "thread/start"
+        if method == "thread/start" && self.caller_runtime.is_some() {
+            params["dynamicTools"] = Value::Array(
+                self.primary_tool
+                    .as_ref()
+                    .map_or_else(Vec::new, |tool| tool.contract.tool_specs()),
+            );
+        } else if method == "thread/start"
             && let Some(primary_tool) = &self.primary_tool
         {
-            params["dynamicTools"] = Value::Array(vec![primary_tool.contract.tool_spec()]);
+            params["dynamicTools"] = Value::Array(primary_tool.contract.tool_specs());
         }
         if self.candidate_tools {
             if method == "thread/start" {
@@ -4046,6 +3894,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 })?;
         }
         self.caller_startup_phase(method);
+        let registered_catalog = params
+            .get("dynamicTools")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let result = self.server.request(method, params.take())?;
         let thread_id = nested_identity(&result, "thread", "id")
             .or_else(|| identity(&result, "threadId"))
@@ -4122,6 +3975,18 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                     return Err(TurnError::CorrelationMismatch);
                 }
             }
+        }
+        if method == "thread/start"
+            && let Some(runtime) = &self.caller_runtime
+        {
+            runtime
+                .retain_registration(
+                    &thread_id,
+                    &self.fixed_model,
+                    &self.default_effort,
+                    &registered_catalog,
+                )
+                .map_err(|_| TurnError::CorrelationMismatch)?;
         }
         Ok(thread_id)
     }
@@ -4819,7 +4684,12 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty() && value.len() <= 256)
             .ok_or(TurnError::CorrelationMismatch)?;
-        if params.get("tool").and_then(Value::as_str) != Some(contract.name()) {
+        let tool = params
+            .get("tool")
+            .and_then(Value::as_str)
+            .ok_or(TurnError::CorrelationMismatch)?;
+        let successor = contract.allows_specialists() && crate::native_consumer::managed_tool(tool);
+        if tool != contract.name() && !successor {
             self.server
                 .respond_error(request_id, -32601, "tool not registered")?;
             return Ok(());
@@ -4828,12 +4698,40 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             .get("arguments")
             .cloned()
             .ok_or(TurnError::CorrelationMismatch)?;
+        let native_tool = successor.then_some(tool);
+        let successor_operation = successor.then(|| {
+            payload["operation"]
+                .as_str()
+                .filter(|operation| crate::specialist_facade::MANAGED.contains(operation))
+                .unwrap_or("lookup_operation")
+                .to_owned()
+        });
         let raw = serde_json::to_vec(&payload).map_err(|_| TurnError::CorrelationMismatch)?;
-        if raw.len() > MAX_INTERACTION_PAYLOAD_BYTES {
+        let control_correlation = native_tool
+            .filter(|tool| crate::native_consumer::is_control(tool))
+            .and_then(|_| crate::native_consumer::Control::parse(&raw).ok())
+            .map(|control| control.correlation());
+        if raw.len()
+            > if successor {
+                crate::specialist_facade::PUBLIC_LIMIT
+            } else {
+                MAX_INTERACTION_PAYLOAD_BYTES
+            }
+        {
             return Err(TurnError::CorrelationMismatch);
         }
-        if let Err(error) = contract.reject_model_identity(&payload) {
-            return self.respond_primary_tool(request_id, Err(error));
+        if let Err(error) = if successor {
+            crate::host_invocation::normalize_tool_request(tool, &payload).map(|_| ())
+        } else {
+            contract.reject_model_identity(&payload)
+        } {
+            return self.respond_primary_tool(
+                request_id,
+                Err(error),
+                successor_operation.as_deref(),
+                native_tool,
+                control_correlation.as_ref(),
+            );
         }
         let payload_sha256 = sha256_hex(
             &canonicalize(
@@ -4845,7 +4743,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             .map_err(|_| TurnError::CorrelationMismatch)?,
         );
         if let Some(pending) = self.pending_primary_tools.get_mut(call_id) {
-            if pending.payload_sha256 != payload_sha256 {
+            if pending.payload_sha256 != format!("{tool}:{payload_sha256}") {
                 return self.respond_primary_tool(
                     request_id,
                     Err(MachineError::new(
@@ -4854,6 +4752,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                         false,
                         serde_json::json!({"source_tool_call_id":call_id}),
                     )),
+                    successor_operation.as_deref(),
+                    native_tool,
+                    control_correlation.as_ref(),
                 );
             }
             pending.request_ids.push(request_id);
@@ -4868,6 +4769,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                     true,
                     serde_json::json!({}),
                 )),
+                successor_operation.as_deref(),
+                native_tool,
+                control_correlation.as_ref(),
             );
         }
         let idempotency_key = sha256_hex(
@@ -4878,6 +4782,8 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             .as_bytes(),
         );
         let call = PrimaryToolCall {
+            tool_name: tool.into(),
+            source_thread_id: thread_id.into(),
             request_id,
             run_generation: self.run_generation,
             context: PrimaryCallContext {
@@ -4892,13 +4798,22 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.pending_primary_tools.insert(
             call_id.to_owned(),
             PendingPrimaryToolCall {
-                payload_sha256,
+                tool_name: tool.into(),
+                control_correlation: control_correlation.clone(),
+                successor_operation: successor_operation.clone(),
+                payload_sha256: format!("{tool}:{payload_sha256}"),
                 request_ids: vec![request_id],
             },
         );
         if let Err(error) = dispatcher.dispatch(call) {
             self.pending_primary_tools.remove(call_id);
-            return self.respond_primary_tool(request_id, Err(error));
+            return self.respond_primary_tool(
+                request_id,
+                Err(error),
+                successor_operation.as_deref(),
+                native_tool,
+                control_correlation.as_ref(),
+            );
         }
         Ok(())
     }
@@ -4920,7 +4835,13 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             return Err(TurnError::CorrelationMismatch);
         }
         for request_id in pending.request_ids {
-            self.respond_primary_tool(request_id, completion.result.clone())?;
+            self.respond_primary_tool(
+                request_id,
+                completion.result.clone(),
+                pending.successor_operation.as_deref(),
+                Some(&pending.tool_name),
+                pending.control_correlation.as_ref(),
+            )?;
         }
         Ok(())
     }
@@ -4929,10 +4850,47 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         &mut self,
         request_id: u64,
         result: Result<Value, MachineError>,
+        successor_operation: Option<&str>,
+        native_tool: Option<&str>,
+        control_correlation: Option<&crate::native_consumer::ControlCorrelation>,
     ) -> Result<(), TurnError> {
-        let (success, body) = match result {
-            Ok(value) => (true, value),
-            Err(error) => {
+        if let Some(tool) = native_tool.filter(|tool| crate::native_consumer::is_native(tool)) {
+            let body = match result {
+                Ok(value) => value,
+                Err(error) if crate::native_consumer::is_control(tool) => {
+                    crate::specialist_facade::control_failure_for(control_correlation, &error)
+                }
+                Err(error) => crate::consumer_bridge::semantic_presentation(
+                    &crate::specialist_facade::failure(
+                        successor_operation.unwrap_or("lookup_operation"),
+                        &error,
+                        false,
+                    ),
+                ),
+            };
+            let (success, content) = match crate::consumer_bridge::native_content(&body, true) {
+                Ok(content) => (!crate::consumer_bridge::native_failed(&body), content),
+                Err(_) => (
+                    false,
+                    serde_json::json!([{"type":"inputText","text":crate::consumer_bridge::presentation_failure(&body).to_string()}]),
+                ),
+            };
+            return self.server.respond_result(
+                request_id,
+                serde_json::json!({"success":success,"contentItems":content}),
+            );
+        }
+        let (success, body) = match (successor_operation, result) {
+            (Some(_), Ok(value)) => (
+                value["schema"] != "dolgorae.external-specialist-failure/v5",
+                value,
+            ),
+            (Some(operation), Err(error)) => (
+                false,
+                crate::specialist_facade::failure(operation, &error, false),
+            ),
+            (None, Ok(value)) => (true, value),
+            (None, Err(error)) => {
                 let primary_tool = self
                     .primary_tool
                     .as_ref()
@@ -5656,6 +5614,23 @@ struct RestoredTurnReceipts {
 
 pub(crate) fn validate_submit_history(records: Vec<(AuditKind, Value)>) -> Result<(), TurnError> {
     restore_turn_receipt_maps(records).map(|_| ())
+}
+
+pub(crate) fn submit_audit_history_is_quiescent(
+    records: &[crate::audit::AuditRecord],
+) -> Result<bool, TurnError> {
+    let payloads = records
+        .iter()
+        .map(|record| {
+            let bytes =
+                canonicalize(record.payload()).map_err(|_| TurnError::CorrelationMismatch)?;
+            Ok((
+                record.kind(),
+                serde_json::from_slice(&bytes).map_err(|_| TurnError::CorrelationMismatch)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, TurnError>>()?;
+    submit_history_is_quiescent(payloads)
 }
 
 pub(crate) fn submit_history_is_quiescent(
@@ -6408,6 +6383,101 @@ pub(crate) mod tests {
     use std::collections::VecDeque;
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 
+    pub(crate) fn native_worker_completion(
+        state_root: &Path,
+        root: Uuid,
+        workspace_id: &str,
+        workspace: &Path,
+        tool: &str,
+        payload: Value,
+    ) -> Result<(Value, Value, Vec<u8>), TurnError> {
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut replies = Vec::new();
+        for (id, result) in [
+            (1, serde_json::json!({"codexHome":"/tmp/fixture"})),
+            (2, serde_json::json!({"thread":{"id":"native-thread"}})),
+            (3, serde_json::json!({"turn":{"id":"native-turn"}})),
+        ] {
+            let bytes = serde_json::to_vec(&serde_json::json!({"id":id,"result":result})).unwrap();
+            assert!(bytes.len() < 126);
+            replies.extend([0x81, bytes.len() as u8]);
+            replies.extend(bytes);
+        }
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let shared = Arc::new(crate::app_server::SharedWire::new(Capture(Arc::clone(
+            &output,
+        ))));
+        let wire = crate::app_server::SplitWire::new(std::io::Cursor::new(replies), shared);
+        let worker =
+            crate::worker::tests::PrimaryWorkerFixture::new(state_root, root, workspace_id);
+        let mut coordinator = TurnCoordinator::initialize(
+            JsonRpcConnection::new(wire),
+            MemoryJournal::default(),
+            MemoryArtifactStore::default(),
+            CoordinatorConfig {
+                attach: ThreadAttach::Start,
+                foreign_diagnostics: Box::new(RecordingDiagnostics::default()),
+                fixed_model: "gpt-5".into(),
+                default_effort: "medium".into(),
+                supported_efforts: ["medium".into()].into(),
+                cwd: workspace.into(),
+                developer_instructions: String::new(),
+                sandbox: "read-only".into(),
+                approval_policy: "never".into(),
+                safety_policy: SessionSafetyPolicy::Standard,
+                run_generation: 1,
+                server_key: "a".repeat(64),
+                server_epoch: 1,
+                run_id: root,
+                controller_id: Uuid::now_v7(),
+                control_mode: "managed_agent".into(),
+                record_accepted_user_input: false,
+                primary_tool: Some(PrimaryToolConfig {
+                    session_id: root,
+                    contract: PrimaryToolContract::load().unwrap().with_specialists(),
+                    dispatcher: Arc::clone(&worker.dispatcher),
+                }),
+                candidate_tools: false,
+                candidate_reader: None,
+                file_change_publication_dir: None,
+            },
+            "/tmp/fixture",
+        )?;
+        coordinator.start_turn(request("native-fixture", DeliveryMode::Submit))?;
+        output.lock().unwrap().clear();
+        coordinator.ingest(serde_json::json!({"id":73,"method":"item/tool/call","params":{"threadId":"native-thread","turnId":"native-turn","callId":"native-call","tool":tool,"arguments":payload}}))?;
+        let completion = worker.completion();
+        let original = completion.result.clone();
+        coordinator.complete_primary_tool(completion)?;
+        let bytes = output.lock().unwrap().clone();
+        let messages = crate::app_server::tests::client_messages(&bytes);
+        assert_eq!(messages.len(), 1);
+        let envelope: Value = serde_json::from_slice(&messages[0]).unwrap();
+        assert_eq!(envelope["id"], 73);
+        Ok((
+            match original {
+                Ok(body) => body,
+                Err(error) => coordinator
+                    .primary_tool
+                    .as_ref()
+                    .unwrap()
+                    .contract
+                    .error_result(&error),
+            },
+            envelope["result"].clone(),
+            bytes,
+        ))
+    }
+
     #[derive(Default)]
     struct RecordingPrimaryDispatcher {
         calls: Mutex<Vec<PrimaryToolCall>>,
@@ -7158,6 +7228,238 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn native_control_conflict_busy_and_completion_keep_original_correlation() {
+        let dispatcher = Arc::new(RecordingPrimaryDispatcher::default());
+        let session = Uuid::now_v7();
+        let mut server = FakeServer::default();
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+        let mut coordinator = coordinator_in_with_primary(
+            server,
+            ThreadAttach::Start,
+            Box::new(RecordingDiagnostics::default()),
+            SessionSafetyPolicy::Standard,
+            Some(PrimaryToolConfig {
+                session_id: session,
+                contract: PrimaryToolContract::load().unwrap().with_specialists(),
+                dispatcher: dispatcher.clone(),
+            }),
+        );
+        coordinator.run_id = session;
+        coordinator
+            .start_turn(request("native-control", DeliveryMode::Submit))
+            .unwrap();
+        let frame = |id: u64, call: &str, request: &str| {
+            serde_json::json!({"id":id,"method":"item/tool/call","params":{
+            "threadId":"thread-1","turnId":"turn-1","callId":call,"tool":crate::native_consumer::MANAGED_CONTROL,
+            "arguments":{"schema":"dolgorae.consumer-control/v1","action":"status","target":{"kind":"request","request_id":request}}}})
+        };
+        let check = |server: &FakeServer, id, request, code| {
+            let reply = &server
+                .responses
+                .iter()
+                .find(|(key, _)| *key == id)
+                .unwrap()
+                .1;
+            assert_eq!(reply["success"], false);
+            let body: Value =
+                serde_json::from_str(reply["contentItems"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["ok"], false);
+            assert_eq!(body["action"], "status");
+            assert_eq!(body["request_id"], request);
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["effect"], "not_called");
+            assert!(body.get("data").is_none());
+        };
+        for index in 0..MAX_PENDING_PRIMARY_TOOLS {
+            coordinator
+                .ingest(frame(
+                    index as u64 + 1,
+                    &format!("call-{index}"),
+                    &format!("request-{index}"),
+                ))
+                .unwrap();
+        }
+        coordinator
+            .ingest(frame(1000, "call-0", "changed-request"))
+            .unwrap();
+        check(
+            &coordinator.server,
+            1000,
+            "changed-request",
+            "request_conflict",
+        );
+        coordinator
+            .ingest(frame(1001, "overflow", "busy-request"))
+            .unwrap();
+        check(&coordinator.server, 1001, "busy-request", "busy");
+        assert_eq!(
+            dispatcher.calls.lock().unwrap().len(),
+            MAX_PENDING_PRIMARY_TOOLS
+        );
+        coordinator
+            .complete_primary_tool(PrimaryToolCompletion {
+                run_generation: coordinator.run_generation,
+                source_tool_call_id: "call-0".into(),
+                request_id: 1,
+                result: Err(MachineError::new(
+                    "IDEMPOTENCY_CONFLICT",
+                    "retained completion conflict",
+                    false,
+                    serde_json::json!({}),
+                )),
+            })
+            .unwrap();
+        check(&coordinator.server, 1, "request-0", "request_conflict");
+        assert_eq!(
+            coordinator.pending_primary_tools.len(),
+            MAX_PENDING_PRIMARY_TOOLS - 1
+        );
+    }
+
+    #[test]
+    fn successor_primary_tool_keeps_native_context_and_separates_legacy_schema() {
+        let make = || {
+            let dispatcher = Arc::new(RecordingPrimaryDispatcher::default());
+            let session_id = Uuid::now_v7();
+            let mut server = FakeServer::default();
+            server
+                .replies
+                .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+            server
+                .replies
+                .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+            let mut coordinator = coordinator_in_with_primary(
+                server,
+                ThreadAttach::Start,
+                Box::new(RecordingDiagnostics::default()),
+                SessionSafetyPolicy::Standard,
+                Some(PrimaryToolConfig {
+                    session_id,
+                    contract: PrimaryToolContract::load().unwrap().with_specialists(),
+                    dispatcher: dispatcher.clone(),
+                }),
+            );
+            coordinator.run_id = session_id;
+            coordinator
+                .start_turn(request("primary", DeliveryMode::Submit))
+                .unwrap();
+            let public = serde_json::json!({"schema":"dolgorae.external-specialist-request/v5","operation":"release_specialist","scope_kind":"orchestrated_session","scope_ref":session_id,"member_ref":Uuid::now_v7(),"expected_revision":1});
+            let params = serde_json::json!({"threadId":"thread-1","turnId":"turn-1","callId":"actual-call","tool":crate::specialist_facade::MANAGED_TOOL,"arguments":public});
+            (coordinator, dispatcher, params)
+        };
+        let (mut coordinator, dispatcher, params) = make();
+        let tools = &coordinator
+            .server
+            .calls
+            .iter()
+            .find(|(method, _)| method == "thread/start")
+            .unwrap()
+            .1["dynamicTools"];
+        assert_eq!(tools.as_array().unwrap().len(), 3);
+        for tool in tools.as_array().unwrap() {
+            assert_eq!(tool["type"], "function");
+        }
+        assert_eq!(tools[0]["name"], PRIMARY_TOOL_NAME);
+        assert_eq!(
+            tools[0]["inputSchema"]["oneOf"].as_array().unwrap().len(),
+            9
+        );
+        assert_eq!(tools[1]["name"], crate::native_consumer::MANAGED_NATIVE);
+        assert_eq!(tools[2]["name"], crate::native_consumer::MANAGED_CONTROL);
+        for tool in &tools.as_array().unwrap()[1..] {
+            assert_eq!(tool["inputSchema"]["type"], "object");
+        }
+        coordinator
+            .ingest(serde_json::json!({"id":73,"method":"item/tool/call","params":params}))
+            .unwrap();
+        let calls = dispatcher.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool_name, crate::specialist_facade::MANAGED_TOOL);
+        assert_eq!(calls[0].source_thread_id, "thread-1");
+        assert_eq!(calls[0].run_generation, coordinator.run_generation);
+        assert_eq!(calls[0].context.session_id, coordinator.run_id);
+        assert_eq!(calls[0].context.source_run_id, coordinator.run_id);
+        assert_eq!(calls[0].context.source_turn_id, "turn-1");
+        assert_eq!(calls[0].context.source_tool_call_id, "actual-call");
+        assert_eq!(calls[0].payload, params["arguments"]);
+        for (field, value) in [
+            ("threadId", "foreign"),
+            ("turnId", "foreign"),
+            ("callId", ""),
+            ("threadId", ""),
+            ("tool", "unregistered"),
+        ] {
+            let (mut coordinator, dispatcher, mut params) = make();
+            params[field] = serde_json::json!(value);
+            let _ = coordinator
+                .ingest(serde_json::json!({"id":72,"method":"item/tool/call","params":params}));
+            assert!(
+                dispatcher.calls.lock().unwrap().is_empty(),
+                "axis {field}={value}"
+            );
+        }
+        let (mut coordinator, dispatcher, mut params) = make();
+        params["arguments"]["controller_principal"] = serde_json::json!("model-authority");
+        coordinator
+            .ingest(serde_json::json!({"id":74,"method":"item/tool/call","params":params}))
+            .unwrap();
+        assert!(dispatcher.calls.lock().unwrap().is_empty());
+        let (id, native) = coordinator.server.responses.last().unwrap();
+        assert_eq!(*id, 74);
+        assert_eq!(native["success"], false);
+        let body: Value =
+            serde_json::from_str(native["contentItems"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["schema"], "dolgorae.external-specialist-failure/v5");
+        assert_eq!(body["operation"], "release_specialist");
+        assert_eq!(body["error"]["effect"], "none");
+
+        let (mut coordinator, dispatcher, params) = make();
+        coordinator
+            .ingest(serde_json::json!({"id":75,"method":"item/tool/call","params":params}))
+            .unwrap();
+        let mut changed = params;
+        changed["arguments"]["expected_revision"] = serde_json::json!(2);
+        coordinator
+            .ingest(serde_json::json!({"id":76,"method":"item/tool/call","params":changed}))
+            .unwrap();
+        assert_eq!(dispatcher.calls.lock().unwrap().len(), 1);
+        let (id, native) = coordinator.server.responses.last().unwrap();
+        assert_eq!(*id, 76);
+        assert_eq!(native["success"], false);
+        let body: Value =
+            serde_json::from_str(native["contentItems"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["schema"], "dolgorae.external-specialist-failure/v5");
+        assert_eq!(body["operation"], "release_specialist");
+        assert_eq!(body["error"]["code"], "IDEMPOTENCY_CONFLICT");
+        assert_eq!(body["error"]["effect"], "none");
+        for invalid_operation in [
+            Value::Null,
+            serde_json::json!(false),
+            serde_json::json!("unknown"),
+        ] {
+            let (mut coordinator, dispatcher, mut params) = make();
+            params["arguments"]["operation"] = invalid_operation;
+            coordinator
+                .ingest(serde_json::json!({"id":77,"method":"item/tool/call","params":params}))
+                .unwrap();
+            assert!(dispatcher.calls.lock().unwrap().is_empty());
+            let (id, native) = coordinator.server.responses.last().unwrap();
+            assert_eq!(*id, 77);
+            assert_eq!(native["success"], false);
+            let body: Value =
+                serde_json::from_str(native["contentItems"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["schema"], "dolgorae.external-specialist-failure/v5");
+            assert_eq!(body["operation"], "lookup_operation");
+            assert_eq!(body["error"]["effect"], "none");
+        }
+    }
+
+    #[test]
     fn primary_tool_is_run_scoped_authenticated_deduplicated_and_generation_fenced() {
         let dispatcher = Arc::new(RecordingPrimaryDispatcher::default());
         let session_id = Uuid::now_v7();
@@ -7419,6 +7721,46 @@ pub(crate) mod tests {
         );
         coordinator.approval_policy = "never".to_owned();
         coordinator
+    }
+
+    pub(crate) fn assert_startup_process_context(runtime: crate::worker::QualifiedCallerRuntime) {
+        let mut coordinator = caller_coordinator();
+        let initial_calls = coordinator.server.calls.len();
+        let initial_journal = coordinator.journal.entries.clone();
+        coordinator.caller_runtime = Some(runtime);
+        coordinator.server.replies.clear();
+        for context in ["retained_thread_preparation", "original_thread_binding"] {
+            coordinator.caller_startup_phase = Some(context);
+            coordinator.caller_startup_failure = None;
+            coordinator.server.replies.push_back(Ok(serde_json::json!({
+                "config":{"project_doc_max_bytes":0},
+                "layers":[{"name":{"type":"sessionFlags"},"config":{"project_doc_max_bytes":0}}],
+            })));
+            let error = coordinator.check_caller_process_quiescence().unwrap_err();
+            coordinator.record_caller_startup_failure(&error);
+            let diagnostic = coordinator.caller_startup_failure().unwrap();
+            assert_eq!(diagnostic["caller_context"], context);
+            assert_eq!(diagnostic["substage"], "process_quiescence");
+            assert_eq!(
+                diagnostic["process_proof"]["predicate"],
+                "startup_quiescence_timeout"
+            );
+            assert_eq!(
+                diagnostic["process_proof"]["observation"]["proof_entry_remaining_ms"],
+                0
+            );
+            assert_eq!(error, TurnError::TurnBusy);
+        }
+        assert_eq!(coordinator.server.calls.len(), initial_calls + 2);
+        assert!(
+            coordinator
+                .server
+                .calls
+                .iter()
+                .skip(initial_calls)
+                .all(|(method, _)| method == "config/read")
+        );
+        assert_eq!(coordinator.journal.entries, initial_journal);
     }
 
     fn settings_notification(write: bool) -> Value {
@@ -9859,20 +10201,26 @@ pub(crate) mod tests {
                 Value::String("final_answer".to_owned()),
                 "final",
             ),
+            (
+                "thread-1",
+                Value::String("partial_answer".to_owned()),
+                "partial",
+            ),
         ] {
             server.messages.push_back(serde_json::json!({"method":"item/completed","params":{"threadId":thread,"turnId":"turn-1","item":{"type":"agentMessage","status":"completed","phase":phase,"text":text}}}));
         }
         server.replies.push_back(Ok(serde_json::json!({"thread":{"turns":[{"id":"turn-1","items":[
             {"type":"agentMessage","status":"completed","phase":null,"text":"fallback"},
             {"type":"agentMessage","status":"completed","phase":"commentary","text":"commentary"},
-            {"type":"agentMessage","status":"completed","phase":"final_answer","text":"final"}
+            {"type":"agentMessage","status":"completed","phase":"final_answer","text":"final"},
+            {"type":"agentMessage","status":"completed","phase":"partial_answer","text":"partial"}
         ]}]}})));
         server.messages.push_back(serde_json::json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","usage":{"inputTokens":3}}}}));
         let mut coordinator = coordinator(server);
         coordinator
             .start_turn(request("key", DeliveryMode::Submit))
             .unwrap();
-        for _ in 0..4 {
+        for _ in 0..5 {
             assert!(coordinator.next_event().unwrap().is_none());
         }
         let terminal = coordinator.next_event().unwrap().unwrap();
@@ -10678,6 +11026,41 @@ pub(crate) mod tests {
             ("empty", Vec::new(), false),
         ];
         assert_history_partitions(&cases);
+    }
+
+    #[test]
+    fn generation_release_history_binds_complete_terminal_bytes_and_original_thread() {
+        fn boundary(bytes: &[u8]) -> Result<GenerationHistory, TurnError> {
+            let mut sink = ThreadTurnSink::for_generation("original");
+            for byte in bytes.chunks(1) {
+                sink.accept(byte)?;
+            }
+            sink.into_generation()
+        }
+        let empty = br#"{"thread":{"id":"original","parentThreadId":null,"turns":[]}}"#;
+        assert_eq!(boundary(empty).unwrap().turns, 0);
+        let original=br#"{"thread":{"id":"original","parentThreadId":null,"turns":[{"id":"t1","status":"completed","items":[{"text":"original bytes"}]}]}}"#;
+        let proof = boundary(original).unwrap();
+        assert_eq!(proof.turns, 1);
+        let changed = String::from_utf8(original.to_vec())
+            .unwrap()
+            .replace("original bytes", "changed bytes");
+        assert_ne!(boundary(changed.as_bytes()).unwrap(), proof);
+        let active = String::from_utf8(original.to_vec())
+            .unwrap()
+            .replace("completed", "inProgress");
+        assert!(boundary(active.as_bytes()).is_err());
+        for invalid in [br#"{"thread":{"id":"other","parentThreadId":null,"turns":[]}}"#.as_slice(),br#"{"thread":{"id":"original","parentThreadId":"parent","turns":[]}}"#,br#"{"thread":{"id":"original","parentThreadId":null}}"#,br#"{"thread":{"id":"original","parentThreadId":null,"turns":[{"id":"t","items":[]}]}}"#] {assert!(boundary(invalid).is_err());}
+        let mut large = original.to_vec();
+        let text = "x".repeat(2 * 1024 * 1024);
+        large = String::from_utf8(large)
+            .unwrap()
+            .replace("original bytes", &text)
+            .into_bytes();
+        let mut sink = ThreadTurnSink::for_generation("original");
+        sink.accept(&large).unwrap();
+        assert!(sink.retained_parser_bytes() < 8192);
+        assert_eq!(sink.into_generation().unwrap().turns, 1);
     }
 
     fn assert_history_partitions(cases: &[(&str, Vec<u8>, bool)]) {

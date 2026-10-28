@@ -2305,6 +2305,441 @@ mod tests {
     }
 
     #[test]
+    fn caller_writer_prefix_reopens_for_generation_reader() {
+        use crate::turn::{DurableTurnJournal, JournalEntry, LedgerTurnJournal};
+        use crate::writer::{GenerationRelease, GenerationReleasePhase as P, ReaderReservation};
+
+        let run_id = Uuid::now_v7();
+        let thread_operation = Uuid::now_v7();
+        let thread_id = Uuid::now_v7().to_string();
+        let state_root =
+            PathBuf::from("/tmp").join(format!("dolgorae-caller-replay-{}", Uuid::now_v7()));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&state_root)
+            .unwrap();
+        let state_root = state_root.canonicalize().unwrap();
+        let root = state_root.join("runs").join(run_id.to_string());
+        for path in [state_root.join("runs"), root.clone()] {
+            fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+        }
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join("recovery"))
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("audit.jsonl"))
+            .unwrap();
+        let mut bootstrap = ConformantLedger::open(&root, run_id).unwrap();
+        bootstrap
+            .with_event_context(
+                crate::event::EventAppendContext {
+                    workspace_id: "a".repeat(64),
+                    server_key: "c".repeat(64),
+                    server_epoch: 1,
+                    writer_state_revision: 0,
+                },
+                |ledger| {
+                    ledger.bootstrap(&BootstrapRequest {
+                        timestamp: TIMESTAMP.to_owned(),
+                        workspace_id: "a".repeat(64),
+                        intent: IdempotencyIntent {
+                            schema_version: 1,
+                            operation: IdempotencyOperation::StartRun,
+                            idempotency_key: "caller-reader".to_owned(),
+                            normalized_identity_sha256: "b".repeat(64),
+                            run_id,
+                        },
+                        record_kind: BootstrapRecordKind::RunCreated,
+                        initial_access: "unknown".to_owned(),
+                        default_effort: Some("low".to_owned()),
+                    })
+                },
+            )
+            .unwrap();
+        drop(bootstrap);
+        // The live caller journal writes these records through Ledger, before
+        // a successor Worker reopens them through ConformantLedger.
+        let mut ledger = Ledger::open(&root, run_id).unwrap();
+        let read_policy = serde_json::json!({
+            "access":"read", "policy_epoch":1, "server_epoch":3,
+            "thread_generation":1, "verification":"verified", "writer_generation":null,
+        });
+        let mut write_policy = read_policy.clone();
+        write_policy["access"] = serde_json::json!("write");
+        write_policy["policy_epoch"] = serde_json::json!(2);
+        write_policy["writer_generation"] = serde_json::json!(1);
+        for (kind, payload) in [
+            (
+                AuditKind::LifecycleTransition,
+                serde_json::json!({
+                    "previous":"starting", "current":"idle", "terminal_seal":false,
+                }),
+            ),
+            (
+                AuditKind::TurnIntent,
+                serde_json::to_value(CallerNativeIntent {
+                    schema: "dolgorae.caller-native-intent/v1".to_owned(),
+                    operation_id: thread_operation,
+                    method: "thread/start".to_owned(),
+                })
+                .unwrap(),
+            ),
+            (
+                AuditKind::TurnIntent,
+                serde_json::json!({
+                    "operation_id":thread_operation, "provisional_thread_id":thread_id,
+                }),
+            ),
+            (
+                AuditKind::ThreadBound,
+                serde_json::json!({
+                    "operation_id":thread_operation, "thread_id":thread_id,
+                    "thread_generation":1, "effective_policy":read_policy,
+                }),
+            ),
+            (
+                AuditKind::TurnIntent,
+                serde_json::to_value(CallerNativeIntent {
+                    schema: "dolgorae.caller-native-intent/v1".to_owned(),
+                    operation_id: run_id,
+                    method: "thread/settings/update".to_owned(),
+                })
+                .unwrap(),
+            ),
+            (
+                AuditKind::WriterAcquired,
+                serde_json::json!({
+                    "transaction_id":run_id, "writer_generation":1, "effective_policy":write_policy,
+                }),
+            ),
+        ] {
+            ledger
+                .with_event_context(
+                    crate::event::EventAppendContext {
+                        workspace_id: "a".repeat(64),
+                        server_key: "c".repeat(64),
+                        server_epoch: 3,
+                        writer_state_revision: if kind == AuditKind::WriterAcquired {
+                            2
+                        } else {
+                            1
+                        },
+                    },
+                    |ledger| {
+                        if kind == AuditKind::LifecycleTransition {
+                            ledger.append_conformance_payload(kind, &payload, 1)
+                        } else {
+                            ledger.append_required_payload(kind, &payload, 1)
+                        }
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(ledger.durable_records().unwrap().len(), 9);
+        let records = ledger.durable_records().unwrap();
+        for (index, record) in records.iter().enumerate() {
+            assert_eq!(record.run_generation(), u64::from(index >= 3));
+            assert_eq!(
+                record.client_projection().is_some(),
+                [2, 3, 8].contains(&index)
+            );
+        }
+        let writer_event = serde_json::to_value(records[8].client_projection().unwrap()).unwrap();
+        assert_eq!(writer_event["record"]["type"], "writer.state_changed");
+        assert_eq!(writer_event["stamp"]["captured_head_cursor"], "9");
+        assert_eq!(writer_event["stamp"]["run_state_revision"], 9);
+        assert_eq!(writer_event["stamp"]["writer_state_revision"], 2);
+        let operation = Uuid::now_v7();
+        let controller = crate::domain::ControllerIdentity {
+            controller_id: Uuid::now_v7(),
+            kind: crate::domain::ControllerKind::HumanCli,
+            instance_id: "caller-reader".to_owned(),
+            subject_id: None,
+            generation: 1,
+        };
+        let source = crate::writer::WriterHolder {
+            run_id,
+            profile: "caller-reader".to_owned(),
+            controller_id: controller.controller_id,
+            controller_generation: 1,
+            run_generation: 1,
+            worker_generation: 1,
+            profile_server_key: "c".repeat(64),
+            profile_server_epoch: 3,
+            thread_id: Some(thread_id.clone()),
+            lifecycle: RunLifecycle::Idle,
+            active_turn_id: None,
+            pending_interaction_count: 0,
+            last_event_cursor: Some("9".to_owned()),
+        };
+        let release = GenerationRelease {
+            purpose: crate::writer::GenerationRetirementPurpose::Release,
+            transaction_id: operation,
+            source,
+            writer_generation: 1,
+            authority_revision: 2,
+            source_revision: 9,
+            source_ledger_sha256: crate::jcs::sha256_hex(
+                &serde_json::to_vec(&crate::projection::LedgerHead {
+                    sequence: 9,
+                    hash: records[8].hash().to_owned(),
+                })
+                .unwrap(),
+            ),
+            source_runtime_sha256: "1".repeat(64),
+            registration_sha256: "2".repeat(64),
+            scope_sha256: Some("3".repeat(64)),
+            absence_sha256: Some("4".repeat(64)),
+            reader_proof_sha256: None,
+            retired_reader_sha256: None,
+            phase: P::ReaderStarting,
+            successor: Some(ReaderReservation {
+                run_generation: 2,
+                server_epoch: 4,
+                control_socket_epoch: 3,
+                attempt_started: true,
+            }),
+        };
+        let release_evidence = serde_json::json!({
+            "run_id":run_id, "thread_id":thread_id, "source_revision":9,
+        });
+        let release_digest =
+            crate::writer::retain_release_evidence(&state_root, run_id, &release_evidence).unwrap();
+        drop(ledger);
+        let conformant = ConformantLedger::open(&root, run_id).unwrap_or_else(|error| {
+            panic!("ConformantLedger::open at {}: {error:?}", root.display())
+        });
+        let checked = conformant.inner().projection().unwrap();
+        assert_eq!(checked.lifecycle, RunLifecycle::Idle);
+        assert_eq!(checked.thread_id.as_deref(), Some(thread_id.as_str()));
+        assert_eq!(checked.run_generation, 1);
+        drop(conformant);
+        let plain = Ledger::open(&root, run_id)
+            .unwrap_or_else(|error| panic!("Ledger::open at {}: {error:?}", root.display()));
+        assert_eq!(plain.projection().unwrap(), checked);
+        drop(plain);
+        assert_eq!(
+            crate::writer::read_release_evidence(&state_root, run_id, &release_digest).unwrap(),
+            release_evidence
+        );
+        assert_eq!(fs::read_dir(root.join("recovery")).unwrap().count(), 0);
+        let append_reader = |ledger: &mut Ledger, generation, epoch, thread_generation| {
+            ledger
+                .with_event_context(
+                    crate::event::EventAppendContext {
+                        workspace_id: "a".repeat(64),
+                        server_key: "c".repeat(64),
+                        server_epoch: epoch,
+                        writer_state_revision: 3,
+                    },
+                    |ledger| {
+                        let mut journal = LedgerTurnJournal::new(ledger, generation);
+                        journal.append_and_sync(JournalEntry::ProvisionalThread {
+                            operation_id: operation,
+                            thread_id: thread_id.clone(),
+                        })?;
+                        journal.append_and_sync(JournalEntry::ThreadBound {
+                            operation_id: operation,
+                            thread_id: thread_id.clone(),
+                            thread_generation,
+                            effective_policy: serde_json::from_value(serde_json::json!({
+                                "access":"read", "policy_epoch":thread_generation + 1,
+                                "server_epoch":epoch,"thread_generation":thread_generation,
+                                "verification":"verified","writer_generation":null,
+                            }))
+                            .unwrap(),
+                        })
+                    },
+                )
+                .unwrap();
+        };
+        let mut ledger = Ledger::open(&root, run_id).unwrap();
+        append_reader(&mut ledger, 2, 4, 2);
+        drop(ledger);
+        let conformant = ConformantLedger::open(&root, run_id).unwrap();
+        let records = conformant.inner().durable_records().unwrap();
+        assert_eq!(records.len(), 11);
+        assert_eq!(records[9].kind(), AuditKind::TurnIntent);
+        assert_eq!(records[9].run_generation(), 2);
+        release.verify_ledger_prefix(records).unwrap();
+        let mut verified = release.clone();
+        verified.phase = P::ReaderVerified;
+        verified.reader_proof_sha256 = Some("5".repeat(64));
+        verified.verify_ledger_prefix(records).unwrap();
+
+        // A proven-absent Reader's records remain owned when replacement
+        // reserves a later Worker generation, before that new attempt starts.
+        let mut writer = crate::writer::WriterRecord::empty(&"a".repeat(64));
+        let (_, generation) = writer
+            .prepare_acquire(run_id, release.source.clone(), Uuid::now_v7())
+            .unwrap();
+        writer
+            .commit_acquire(writer.transaction_id.unwrap(), generation)
+            .unwrap();
+        writer.prepare_release(run_id, operation).unwrap();
+        writer.schema_version = 2;
+        writer.generation_release = Some(verified.clone());
+        writer
+            .replace_absent_reader(
+                &verified,
+                ReaderReservation {
+                    run_generation: 4,
+                    server_epoch: 6,
+                    control_socket_epoch: 4,
+                    attempt_started: false,
+                },
+                "6".repeat(64),
+            )
+            .unwrap();
+        let mut replacement = writer.generation_release.unwrap();
+        replacement.verify_ledger_prefix(records).unwrap();
+        let mut unretired = replacement.clone();
+        unretired.retired_reader_sha256 = None;
+        assert!(unretired.verify_ledger_prefix(records).is_err());
+        drop(conformant);
+        let mut ledger = Ledger::open(&root, run_id).unwrap();
+        append_reader(&mut ledger, 4, 6, 3);
+        drop(ledger);
+        let conformant = ConformantLedger::open(&root, run_id).unwrap();
+        let records = conformant.inner().durable_records().unwrap().to_vec();
+        assert_eq!(records.len(), 13);
+        assert_eq!(records[12].run_generation(), 4);
+        assert!(replacement.verify_ledger_prefix(&records).is_err());
+        replacement.successor.as_mut().unwrap().attempt_started = true;
+        replacement.verify_ledger_prefix(&records).unwrap();
+        replacement.phase = P::ReaderVerified;
+        replacement.reader_proof_sha256 = Some("7".repeat(64));
+        replacement.verify_ledger_prefix(&records).unwrap();
+        assert_eq!(
+            conformant
+                .inner()
+                .projection()
+                .unwrap()
+                .thread_id
+                .as_deref(),
+            Some(thread_id.as_str())
+        );
+        drop(conformant);
+
+        let reject = |kind, payload: serde_json::Value, generation| {
+            let mut candidate = records.clone();
+            candidate.push(
+                AuditRecord::new(
+                    14,
+                    TIMESTAMP,
+                    run_id,
+                    generation,
+                    kind,
+                    crate::jcs::parse(&serde_json::to_string(&payload).unwrap()).unwrap(),
+                    records.last().unwrap().hash(),
+                )
+                .unwrap(),
+            );
+            assert!(
+                replacement.verify_ledger_prefix(&candidate).is_err(),
+                "{kind:?}/{generation}/{payload}"
+            );
+        };
+        for (kind, index, thread_key) in [
+            (AuditKind::TurnIntent, 11, "provisional_thread_id"),
+            (AuditKind::ThreadBound, 12, "thread_id"),
+        ] {
+            let payload: serde_json::Value = serde_json::from_slice(
+                &crate::jcs::canonicalize(records[index].payload()).unwrap(),
+            )
+            .unwrap();
+            let mut foreign = payload.clone();
+            foreign["operation_id"] = serde_json::json!(Uuid::now_v7());
+            reject(kind, foreign, 4);
+            let mut wrong_thread = payload.clone();
+            wrong_thread[thread_key] = serde_json::json!("replacement-thread");
+            reject(kind, wrong_thread, 4);
+            for generation in [0, 1, 5] {
+                reject(kind, payload.clone(), generation);
+            }
+            if kind == AuditKind::TurnIntent {
+                let mut extra = payload;
+                extra["input"] = serde_json::json!("must not become a model Turn");
+                reject(kind, extra, 4);
+            }
+        }
+        for phase in [P::Prepared, P::StopStarted, P::OldAbsent, P::Committed] {
+            let mut wrong_phase = replacement.clone();
+            wrong_phase.phase = phase;
+            assert!(wrong_phase.verify_ledger_prefix(&records).is_err());
+        }
+        reject(
+            AuditKind::TurnIntent,
+            serde_json::to_value(CallerNativeIntent {
+                schema: "dolgorae.caller-native-intent/v1".to_owned(),
+                operation_id: operation,
+                method: "thread/start".to_owned(),
+            })
+            .unwrap(),
+            4,
+        );
+        let submit = crate::operation::SubmitIdentity::prepare(
+            operation,
+            crate::operation::Namespace::submit(&controller, &"a".repeat(64), run_id, "new-submit")
+                .unwrap(),
+            &crate::turn::TurnRequest {
+                write: false,
+                idempotency_key: "new-submit".to_owned(),
+                message: "must remain refused".to_owned(),
+                images: vec![],
+                model: "gpt-5".to_owned(),
+                effort: None,
+                delivery: crate::turn::DeliveryMode::Submit,
+            },
+            "low",
+        )
+        .unwrap();
+        submit.validate().unwrap();
+        let mut ledger = Ledger::open(&root, run_id).unwrap();
+        ledger
+            .with_event_context(
+                crate::event::EventAppendContext {
+                    workspace_id: "a".repeat(64),
+                    server_key: "c".repeat(64),
+                    server_epoch: 6,
+                    writer_state_revision: 3,
+                },
+                |ledger| {
+                    LedgerTurnJournal::new(ledger, 4)
+                        .append_and_sync(JournalEntry::SubmitIdentity(Box::new(submit)))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            ledger.durable_records().unwrap().last().unwrap().kind(),
+            AuditKind::TurnIntent
+        );
+        assert!(
+            replacement
+                .verify_ledger_prefix(ledger.durable_records().unwrap())
+                .is_err()
+        );
+        drop(ledger);
+        // Release evidence must not broaden the ledger's repair namespace.
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("recovery/foreign.json"))
+            .unwrap();
+        assert!(matches!(
+            ConformantLedger::open(&root, run_id),
+            Err(ConformanceError::Ledger(LedgerError::Integrity(reason)))
+                if reason.contains("unrecognized recovery entry")
+        ));
+        fs::remove_dir_all(state_root).unwrap();
+    }
+
+    #[test]
     fn caller_native_intent_allows_idle_uncertainty_without_relaxing_legacy_history() {
         for caller in [false, true] {
             let run_id = Uuid::now_v7();

@@ -398,6 +398,21 @@ private-endpoint disclosure, and any MCP advertisement under the selected
 
 #### Planned External Specialist MCP host boundary
 
+`trusted_host` owns explicit Operator-authorized setup, immutable protected
+owner configuration and the complete-setup launch precondition. `host_invocation`
+owns the private native-event map and separate K linkage. `specialist_stdio`
+owns native framing/lifecycle and `specialist_facade` projects authenticated
+requests onto the existing semantic services. `managed_specialist` connects the
+separate successor tool at the authenticated Worker boundary; the legacy Primary
+bridge keeps its contract. The existing Engagement
+transaction remains the only product acceptance authority. A lagging host mirror
+is recoverable through original-key lookup; it is not a second acceptance log.
+R has no product receipt and S's durable delivery marker permits authoritative
+reconciliation only. The sealed caller-scope producer reads verified owner state;
+model arguments cannot construct one. External native configuration and managed
+root/session authority remain separate. The [runtime owner](../specs/dolgorae-v014-delegation-runtime.md#protected-host-setup-and-invocation-ownership)
+defines protection, setup order and retained-state behavior.
+
 The v0.1.4 successor must resolve host feasibility in TASK-067/TASK-068 before
 contract freeze. The historical external-review disposition and run-bound
 Primary transport are separate authorities; neither proves successor Codex
@@ -430,6 +445,12 @@ authority. If an alternative carrier is needed, adopt its successor ADR and
 checked shapes explicitly. Both mandatory host routes require version-pinned
 pre-contract qualification; failure leaves contract freeze/Gate A and dependent
 work unavailable. Runtime execution remains separately authorized.
+
+The facade releases the HostStore before service waits/effects, then reopens it
+only for protected reconciliation. State controls remain service-owned non-keyed
+operations. Neither transport nor preparation supplies an alternative acceptance
+log. Managed configuration is a protected explicit Root-to-owner connection;
+Worker-native context and the current Root Controller fence its use.
 
 #### Planned three-consumer qualification boundary
 
@@ -748,6 +769,12 @@ admission at the public boundary. New adapter operations select
 `CallerWorkspace`, including Primary requests in accepted legacy sessions.
 `LegacyBeforeCutover` is an internal historical-record preparation contract;
 it does not choose a Run version or lane or authorize a new public copy request.
+Accepted capture-backed v1–v3 reviews retain generic Profile preparation and
+their original launch policy. The one-shot coordinator selects this preparation
+for `Legacy`, `Scoped` and `Task` invocations; `Direct` retains qualified Current
+admission independently of the internal source contract. Shared Reviewer
+assembly preserves the selected binding's launch policy. Review-owned servers
+retain their existing owner checks and deny-rollover fence.
 
 External and
 brokered provisioning share the workspace service rather than calling launch
@@ -1830,7 +1857,7 @@ verify the selected runtime policy. Writable startup uses the existing
 prepare/apply/verify/commit writer transaction without a synthetic Turn.
 Initial runtime qualification, configuration readback and turnless Thread
 binding or original-Thread rebinding share one monotonic process-census deadline
-for each new physical Worker connection, capped at ten seconds and the session
+for each new physical Worker connection, capped at thirty seconds and the session
 transport budget. They may wait for same-user Dedicated startup
 descendants, retaining each observed PID and BSD birth until exact kernel
 absence. Every sample revalidates both leaders, socket identity and complete
@@ -1842,14 +1869,56 @@ window. Binding success or failure consumes it permanently; connection startup
 also closes it before WorkerReady when no eager Thread binding is requested.
 Diagnostic phases and later resumes cannot restore it. No task Turn or provider
 dispatch occurs inside the window. Failure retains the original or provisional
-Thread, unknown-state retry fence and Writer guard. Policy proofs and access
-transitions retain their immediate refusal.
+Thread, unknown-state retry fence and Writer guard. Policy proofs and in-place
+access transitions retain their immediate refusal. A qualified acquire with an
+original Thread and protected recorded Read policy uses the durable retirement
+owner before any Write update. It stops its checked Reader scope, proves full
+absence and verifies a Reader successor on the same Thread. The original
+reservation remains guarded until the authorized Write update and fresh proof;
+retirement alone grants no Write authority. Its committed Acquire marker stays
+durable through that update and any uncertainty; the fresh Write commit consumes
+it in the same atomic Writer publication, retaining its immutable evidence.
+The old generation receives no startup window, and the successor receives one
+normal connection window.
+
+An uncertain Write continuation after Reader retirement keeps the original
+Acquire transaction and guard. Explicit recovery captures the actual latest
+holder/runtime scope and history, proves that generation absent and verifies
+another Reader before clearing the guard. Earlier source absence is never proof
+for that latest generation, and recovery never issues Write or commits a pending
+Acquire as Active. An existing S release may perform this read-only recovery
+only under its exact owner, Controller, member and live lifecycle witness.
+A prepared writable Send/Submit keeps its original durable admission throughout
+Reader succession. Only the two Reader preparation commands may run under that
+admission without consuming it, after matching the protected Acquire transaction,
+Controller, source-head admission/input identity and exact owned Reader markers.
+Read-only, completed or foreign admissions retain their refusal; Write update and
+Submit still validate the original admitted request.
+Historical Release records omit the purpose field; explicit Acquire records
+retain it even in BlockedUnknown so an older closed reader rejects them.
+
+Startup timeout diagnostics retain the budget remaining at proof entry and the
+last completed sample's elapsed time and starting budget, using the existing
+sample clock reads. The private failure also retains the caller phase before
+configuration and process checks overwrite it, distinguishing checks before and
+after original-Thread resume. These observations do not extend the shared budget
+or add a probe. At startup ownership commit, the existing clock reads distinguish
+expiry before the final proof from expiry after it. The private refusal retains
+the starting budget, elapsed proof time (null when the proof did not run) and
+deadline overrun. The final strict proof and original deadline remain unchanged.
+
 For a prepared writable Send or Submit that reuses an active Writer, the CLI
 wraps policy verification in the existing admitted-mutation request. The Worker
 validates the exact admission, Controller and write intent before verification;
 verification is preparation and does not complete the parent Turn admission.
 Unwrapped verification remains serialized behind any pending mutation. The
 original Thread, idle-state, process-census and Writer proof checks still apply.
+Writable member dispatch keeps the same member's Active Writer before its first
+Run Turn when a fresh complete ledger observation has no `latest_turn_id`.
+The subsequent acquire replay still verifies current Write policy and authority
+before dispatch-index capture and Submit. Read-only dispatch, prior Run Turns
+and transitional or blocked Writer authority keep their existing cleanup or
+recovery path; an asynchronous terminal's retained guard is never initial state.
 New caller Worker generations publish [private runtime schema version 2](../protocol/dolgorae-worker-runtime-v2.schema.json) before
 Dedicated launch. Its bounded startup ownership witness binds the immutable
 Worker generation, app-server epoch, Dedicated identity and physical socket.
@@ -2336,6 +2405,21 @@ Operator credentials or add a credential-generation RPC. Continuation
 authorization compares normalized principals and requires a new Controller ID
 and capability.
 
+### Current runtime admission and retained execution
+
+The [runtime qualification
+owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
+pins new qualified caller-workspace, instruction-discovery and checked-review
+admissions to Codex 0.164.0. The shared Profile and worker launch
+functions serve both new admissions and retained execution. Their callers
+authenticate and resolve original acceptance first, then apply the current check
+before a new qualified-mechanism acceptance or its launch. Retained execution
+validates its original binding, executable and process evidence. A member install
+or policy acceptance does not authorize a new member or task. Generic Profile
+lifecycle and binding history retain tested/unverified compatibility admission. Migration compensation retains its original snapshot
+and durable owner. Current host qualification uses Codex
+0.164.0 and Claude Code 2.1.310 with the exact executable hashes in that owner.
+
 ### Durable Aggregate Store
 
 `~/.dolgorae/workspaces/<workspace-id>/orchestration/orchestration.sqlite3` is the sole
@@ -2578,6 +2662,58 @@ consumed by a constant-memory streaming visitor retaining required turn/status
 fields plus raw-wire length and SHA-256. It has the 120-second deadline but no
 arbitrary total size cap. An ambiguous oversize prefix fails compatibility and
 follows SPEC-006's active-turn quarantine rule.
+
+The matching numeric id must be lexically complete before the raw prefix
+reaches 16 MiB. An ambiguous prefix reaching that boundary closes the connection.
+The measured id member-name offset remains available to compatibility probes; it
+does not establish value availability. Once the id is confirmed, later metadata
+or whitespace does not restart that classification window. Envelope retention
+uses the ordinary 32 MiB allowance, with insignificant outer whitespace runs
+compacted; the streamed result keeps its existing separate retention rules.
+History-only recovery uses the existing deadline-aware socket adapter. Each
+solicited history request starts its own absolute 120-second budget, covering
+request writes, partial reads and visitor processing. Ordinary model and Profile
+probes retain their existing timeout behavior.
+
+Both streaming adapters verify the actual `thread/read(includeTurns:true)`
+request, the already observed matching id and message classification before
+forwarding an uncapped body. Ordinary small replies remain bounded by the
+ordinary message cap and reach the sink only after final correlation, with
+the original result bytes preserved. An already known foreign id
+or native method cannot enter the application sink under that exception. Later
+malformed, duplicate or method members still invalidate the final envelope.
+
+The Worker obtains an acknowledged exclusive read lease before registering or
+sending a solicited streamed request. A private wake event interrupts a quiet
+background reader only before any bytes of a new message have been consumed.
+Wire protocol and UTF-8 failures close the connection even after a final frame.
+Only a protocol-valid complete message may return read ownership after an
+application-sink error. Both streamed adapters finish the shared streaming JSON
+grammar before certifying a normal response; the Turn visitor uses that same
+grammar for body extraction. Physical frame completion or a valid envelope with
+an elided body alone is insufficient. A
+rejected single frame can be checked by the existing duplicate-detecting JSON
+reader; an unvalidated fragmented failure closes the connection.
+An in-progress header, payload or continuation must finish at a message boundary
+under the same absolute 120-second operation deadline, or close the connection.
+The acknowledgement binds one ticket to one connection and follows ordered
+mailbox delivery and release of the read half. Pending and held leases exclude
+new background reads, including a grant issued before acquisition. Delivered,
+carried and transport-queued messages retain their order; a native request with
+both method and id remains a request. The drain keeps the borrowed sink and does
+not reenter lifecycle processing to obtain the lease.
+
+The operation deadline covers handoff, send and streamed processing without a
+reset after acknowledgement. Eligible history requests cap the configured
+transport budget at 120 seconds; ordinary requests keep their configured budget.
+Idle background reads have no deadline. Lease
+return or cancellation has one owner; pre-send cancellation dispatches nothing.
+Loss and shutdown wake all waiters and fence subsequent sends. A separate send
+fence serializes dispatch against failure without holding the mailbox mutex over
+I/O, sink callbacks or waits. A fully consumed solicited recovery error belongs
+to the requesting command; a partial read closes the connection and leaves any
+accepted active Turn to the existing outcome-unknown loss owner.
+
 
 The TASK-006 implementation keeps this boundary split into two internal worker
 components. `app_server` owns the strict WebSocket and JSON-RPC transport,
@@ -3053,6 +3189,73 @@ automatically replayed. Primary loss changes an Orchestration Session to
 `degraded` without implicitly closing its owned Specialists or discarding mail.
 
 
+Qualified caller-workspace Writer release is owned by the existing WriterStore
+transaction. Its private v2 record adds a generation-release checkpoint; v1
+records remain readable without observation-time migration, and future versions
+are refused. Public Writer and Run projections omit the private checkpoint.
+The checkpoint binds the original controller, Writer authority, source head,
+registration witness, retained process-scope evidence and single successor
+reservation. Scope, history and archived checkpoint evidence belong to the Run's
+private `release-evidence/` directory. Its creation and immutable files are
+fsynced before their digests enter Writer checkpoints; ledger `recovery/` remains
+reserved for torn-tail repair evidence.
+Original native registration witnesses and their staging files belong to the
+separate private Run directory `thread-registrations/`. Publication is immutable
+and durable; checked reads do not create or repair a missing namespace.
+
+The sequential owner persists stop intent before effects, proves the entire old
+Worker/server/descendant scope absent, inspects original history before resume,
+and verifies its reserved Reader successor before atomic authority retirement.
+No Writer/startup short lock spans shutdown, history or startup waits. Member
+settlement lends its existing Run lifecycle lease; direct release takes that
+lease before short Writer transactions. Pending checkpoints dominate generic
+recovery and missing-runtime cleanup, including Idle and Paused schema-3/4 Runs.
+The committed checkpoint survives acquisitions; supersession first archives it
+write-once. A terminal Run never receives a Reader successor. Legacy handoff
+admission and the shared Profile singleton remain unchanged.
+
+The release prefix admits the Reader's provisional registration of the original
+Thread: a `turn_intent` containing only the release operation ID and original
+provisional Thread ID. Both this marker and its `thread_bound` record must name
+a Reader generation above the source and no later than the current reservation,
+while the release is ReaderStarting or ReaderVerified. The current generation
+requires a started reservation; older generations require retained absent-Reader
+evidence. Replacement preserves those older owned records even before its new
+attempt starts. Model and Submit intents, foreign operations or Threads, and
+additional provisional-marker fields remain refused.
+
+The stop owner stages each scope observation before adoption. Only a retained
+actor's group disagreement or missing executable path may invalidate the sample
+after fresh BSD absence or a matching zombie is verified. Every other group,
+socket, scope and inventory check must still pass. The staged scope is discarded
+without publication or signals, the empty counter resets, and the existing
+deadline and sampling interval continue. Five new complete samples are required.
+Strict capture, absence and fresh signal callers do not use this exception. The
+existing private log records at most the first discarded sample per stop from
+these typed observations, without diagnostic probes.
+
+The launching process gives each ready Worker's actual `Child` to one private
+waiter bound to its complete immutable Worker identity. Every error after spawn,
+including errors before `Bound` or `Ready`, transfers that actual `Child` to the
+same waiter mechanism. An unqualified failed-start owner has no verified Worker
+identity; its launch Run, generation and PID are diagnostic context only, and
+ordinary Worker observers return `NotOwned`. That waiter waits for
+exit even while the parent is idle or another process controls the Run. It holds
+no registry, Writer or startup lock while waiting. Callers only observe its
+cached state. Completion or `ECHILD` retires the matching identity and owner
+entry; later calls cannot wait on a recycled PID. A failed waiter transfer or
+unexpected wait error retains the actual `Child` with an explicit I/O refusal.
+A missing or mismatched owner supplies neither PID-only wait authority nor
+absence proof. Each waiter serves one launched Child, performs no sweep or
+logical settlement, and preserves the identity, group and five-sample checks.
+
+A generation-stop refusal retains its failing coordinator or process-proof
+site and typed error in the existing private Dedicated log. Census agreement,
+ownership, fresh signal checks and deadline refusals retain their first failed
+predicate and bounded observations from the checks already performed. These
+diagnostics add no process lookup, hash, clock read, wait or retry and do not
+change the stop proof or its public error.
+
 Recovery never auto-replays user input. The new worker first replays the ledger,
 validates profile identity and compatibility, and inspects the pinned Codex
 thread with stable history APIs only after the lane-specific barrier below is
@@ -3393,8 +3596,8 @@ Release orchestration stays with `semantic`: it implements
 `RunSettlementPort` — member task dispatch for both owners, terminal task
 settlement, writer observation and the member release settlement — while
 `delegation_service` supplies the intent, lookup and proof helpers and never
-names `semantic` or `worker`. `worker` reaches `delegation_service` only for
-the settlement owner type a member Run derives from its own manifest, and
+names `semantic` or `worker`. `worker` reaches `delegation_service` for
+the settlement owner a member Run derives from its own manifest, and
 reaches `successor_capture` to bind a dispatched generation-4 Turn to its
 preserved accepted bytes. The full approved edge sets live in
 `tests/architecture_contract.rs`. Managed writable dispatch uses the member's
@@ -3446,11 +3649,8 @@ authorizes the result boundary. Its depth bound remains the sink's existing
 bound, and UTF-8, escapes and surrogate pairs are checked across chunks.
 Duplicate-key bookkeeping is released as objects close and uses the existing
 solicited-Turn byte bound for active member names.
-The worker's recovery tests read the existing global membership store to check
-that release alone retires membership. This adds the test-only dependency
-`worker` → `global_runtime` to the source graph.
-Every production dependency edge TASK-076
-added, exactly as that contract allows it:
+The delegation runtime's production dependency additions, exactly as the
+architecture contract allows them:
 
 - `delegation_identity` → `domain`, `instructions`, `jcs`, `machine`
 - `caller_scope` → `delegation_identity`, `machine`
@@ -3460,8 +3660,9 @@ added, exactly as that contract allows it:
   `review_target`, `run`, `task_request`
 - `delegation_service` → `caller_scope`, `delegation_identity`,
   `direct_review_target` (metadata admission before intent preparation), `domain`,
-  `engagement`, `instructions`, `jcs`, `machine`, `operation`,
-  `orchestration`, `provisioning`, `review`, `run`, `storage_observation`,
+  `engagement`, `global_runtime` (the immutable member binding and its
+  current-admission qualification), `instructions`, `jcs`, `machine`, `operation`,
+  `orchestration`, `provisioning`, `review`, `run`, `ledger`, `snapshot`, `storage_observation`,
   `successor_capture`, `task_request`, `workspace`, `writer`
 - `operation` → `delegation_identity`
 - `engagement` → `delegation_identity`, `operation` (the retained mutation
@@ -3469,17 +3670,50 @@ added, exactly as that contract allows it:
 - `run` → `delegation_identity`
 - `semantic` → `caller_scope`, `delegation_identity`, `delegation_service`,
   `process_inventory` (the locator-missing proof enumerates the Run's
-  retained process-inventory registrations), `review_target` (the changes
+  retained process-inventory registrations), `review` (the original executable
+  preflight and its typed review-drift refusal), `review_target` (the changes
   producer bounds one Turn's snapshots by the existing workspace enumeration
   bound), `successor_capture`, `task_request`
 - `worker` → `delegation_service`, `successor_capture`
+- `trusted_host` → `caller_scope`, `controller`, `darwin`, `delegation_identity`,
+  `domain`, `engagement`, `host_invocation`, `jcs`, `machine`, `orchestration`,
+  `paths`, `run`, `source_binding`, `workspace`, `delegation_service`, `semantic`: explicit setup, verified owner provenance and administrative recovery
+- `source_binding` → `caller_scope`, `darwin`, `delegation_identity`,
+  `direct_review_target`,
+  `delegation_service`, `domain`, `engagement`, `global_runtime`,
+  `host_invocation`, `instructions`, `jcs`, `machine`, `operation`,
+  `orchestration`, `paths`, `provisioning`, `review`, `run`, `successor_capture`,
+  `task_request`, `trusted_host`: protected preparation and source projection
+- `host_invocation` → `caller_scope`, `darwin`, `delegation_identity`,
+  `engagement`, `jcs`, `machine`, `operation`, `trusted_host`: protected native
+  identity, K-only linkage and delivery bookkeeping
 
-The remaining edges the contract annotates are test-only fixtures:
-`delegation_identity` → `paths`, `caller_scope` → `engagement`,
-`delegation_service` → `paths`, `specialist_policy`, `successor_capture` →
-`instructions`, `review`, `provisioning` → `paths`, `engagement` →
-`ledger_generation`, `orchestration`, `orchestration` → `caller_scope`,
-`run` → `profile` and `semantic` → `provisioning`. The
+`specialist_stdio` depends on `darwin`, `host_invocation`, `jcs`, `machine`, `paths`, `specialist_facade` and `trusted_host`. `specialist_facade` depends on `caller_scope`, `controller`, `delegation_identity`, `delegation_service`, `engagement`, `host_invocation`, `machine`, `operation`, `paths`, `semantic`, `source_binding`, `task_request` and `trusted_host`; it owns transport projection, never product acceptance. `managed_specialist` uses the same verified owner and service projection from `worker`, plus `run`, `turn`, `controller`, `delegation_identity`, `operation`, `paths`, `machine` and `host_invocation`. It resolves the protected Root connection and current authority before dispatch. `trusted_host` calls it only for explicit connection publication. `trusted_host` owns administrative member recovery. It authenticates Operator and exact protected owner scope, then calls the existing reconciliation services/semantic port. `delegation_service` reads managed recovery provenance from the original accepted task and verified intent/receipt in one read snapshot. It returns only an internal owned context, never a model capability. The adapter revalidates its protected configuration before the effectful port; no host persistence lock spans history I/O. The existing lifecycle/history owner retains settlement, member credentials and original-generation absence proofs. No observer or ordinary MCP dispatch enters this boundary.
+
+The native `primary_tool::tool_specs` projection preserves the legacy function tag and adds `"type":"function"` to the successor function tool, as the selected app-server schema requires. The MCP projection and legacy `tool_spec` value remain separate.
+
+`primary_tool` uses `specialist_facade` solely to describe the separate successor tool when the Worker enables it for a Root. `turn` uses that schema and `host_invocation` validation after native correlation. `worker` dispatches the successor family through `managed_specialist`; its legacy `primary_bridge` path is unchanged. These adapters join the existing service/Worker component without adding a listener or moving authority into transport. App-server frames reserve 65,536 bytes above the 16 MiB public argument bound for private framing, and the decoder checks raw dynamic-call arguments before lossy conversion. The legacy interaction bound remains owned by its existing path.
+
+`source_binding` is the private preparation adapter. It uses the verified
+host owner and descriptor-based storage, instruction/provisioning and direct
+target producers, then passes a source resolver and expected identity into
+`delegation_service`. Services control authentication, retained replay and
+fresh admission order; they never import preparation or host storage. A resolver
+cannot run before fresh member/runtime admission. Typed and registered callers
+share the same capture and acceptance core. Private preparation is neither a
+receipt authority nor a model-facing capability.
+
+The host and preparation modules form one private adapter component. The administrative
+owner calls storage initialization, while storage consumes only verified owner
+state; this mutual edge does not move product acceptance or receipt authority.
+Their production dependencies on the existing cyclic service region are
+outgoing. Product services receive a sealed caller/invocation proof and do not
+call the host store.
+
+The [architecture contract](../../tests/architecture_contract.rs) retains the
+approved test-only references. They grant no runtime authority.
+
+The
 `delegation_service → orchestration → semantic → delegation_service`
 transitive cycle remains, as HEAD already tolerates the mutual
 `semantic ↔ orchestration` pair.
@@ -3488,6 +3722,11 @@ Direct-target admission adds the path
 inside that existing permitted cyclic region. The service passes admitted
 identity and exact manifest bytes to `successor_capture`; retained-content
 verification needs no target admission or source resolution at dispatch.
+The direct `delegation_service` → `global_runtime` edge shortens its existing
+path through `provisioning`. Likewise `semantic` → `review` shortens its existing
+path through `direct_review_target`. Both remain within the same permitted
+cyclic region; neither moves receipt authority or executable verification into
+a new component. The exact approved dependency-set comparison remains required.
 
 For both successor owners, qualified Review members enable candidate tools at
 initial Thread creation. The accepted task selects its own retained reader;
@@ -3508,3 +3747,116 @@ acceptance rows; complete-result and dispatch-index bytes reuse the
 content-addressed result-content store with explicit per-task provenance
 links. The ledger's write-once terminal resolution records remain Run-owned
 private state under each member Run's root.
+
+The native app-server sender fragments a large outgoing text message into bounded masked frames. Shared senders serialize the complete message, so another text message cannot enter between its continuation frames. Control frames retain their framing and close behavior. Native successor completion derives its success flag from the authenticated pending tool family and preserves the full frozen failure body; the legacy Primary projection keeps its own semantics.
+
+### Consistent delegation observation
+
+The Run-side snapshot and ledger owners supply fresh source stamps and complete
+interaction reduction through the existing settlement port. The delegation
+service owns the three-attempt cumulative budget and the Engagement read
+transaction. Its closing writer/Run/source checks execute while that database
+snapshot remains pinned. Task/result/caller/work/release facts share this one
+instant. Each attempt materializes the current task, accepted identity and typed
+complete result through the owning service's result reader on that same pinned
+connection. The confirmed task/result bytes and disposition leave the attempt
+together after its closing fences succeed. Retries discard those values with the
+failed snapshot; a legitimate task completion is never compared with a task
+preloaded before the observation. Result-source, digest and provenance validation
+remain mandatory. Prior task rows and writer equality alone cannot establish idle.
+The reader preserves immutable generation validation and bounds all prefix work.
+It does not use a display cache, reset the budget in nested retries or copy
+protected payload lists.
+An unpublished suffix invalidates the capture as `LedgerError::CaptureConflict`.
+The private observation-motion marker survives the Run/interaction error
+projection so the existing three-attempt loop can recapture within its original
+cumulative budget. After source motion invalidates an attempt, its database
+transaction and captured sources are dropped before a wait of at most
+`ledger::GROUP_COMMIT_MILLIS`, bounded by the same remaining observation budget.
+The next attempt captures every source afresh; the final attempt has no following
+wait. A failed closing fence returns through the database callback, closing its
+pinned transaction before that wait. Committed-prefix damage remains an integrity
+failure. Persistent valid, torn or opaque suffixes exhaust
+the attempts without supplying absence or database facts.
+Public identity/export shapes and acceptance authority remain unchanged.
+
+`snapshot` → `ledger_generation` supplies protected source selection. The Run settlement port interprets and validates interactions through
+the existing `interaction_payload` owner. `interaction` → `jcs`,
+`projection`, `run` for the existing typed pending context. Ledger generation
+verification receives the enclosing allowance; other readers keep their existing
+wrappers and budgets.
+
+The source-binding test port forwards the read-only observation methods to
+its existing fixture port; its `ledger` and `snapshot` references are test-only.
+Delegation-service admission fixtures use `profile`'s qualified snapshot
+constructor; their historical recovery cases retain the pre-policy binding.
+
+
+## Private native consumer boundary
+
+`native_consumer` owns the closed private control grammar, immutable protected
+setup, typed selection handles and durable request claim/recovery state.
+`consumer_bridge` composes authorized delegation-service observations with
+EngagementStore content readers and selected consumer facts. `podway_client`
+owns fixed generation-1 argv, exact stdin, executable checks and association of
+output, original-key outcome and receipt. Native dispatch supplies authenticated
+call witnesses; it cannot derive authority from private JSON fields.
+
+The consumer store contains configuration, witnesses, references and bounded
+prepared inputs/outcomes. Original result and capture bytes stay with their
+existing owners. It adds no bulk spool, acceptance mirror, Merkle index or
+automatic garbage collection. Content work and subprocess execution occur
+outside the store lock. A persisted launch claim permits at most one child;
+loss at a claim/spawn/result boundary requires lookup and preserves uncertainty.
+Setup is explicit and normal calls cannot initialize or repair missing state.
+
+Native semantic and consumer tools share the existing host-mcp/host-hook
+transport and Worker correlation boundary. HostStore authenticates each family
+before dispatch; the consumer store retains its own request claims and keys.
+The facade validates full public semantic results before private presentation;
+ordinary collection uses the same authorized materializer as explicit identity
+observation. Original bytes stay in their existing stores and inspection emits
+a bounded metadata block followed by a separate original-text block. Legacy
+public handlers and accepted Thread catalogs retain their original behavior.
+Ordinary content selections bind the original task/result and recheck their
+authorized retained source on each read. They do not retain current export
+eligibility. Consumer proof preparation and submission obtain the existing
+fresh delegation identity before checking the original content and preimage.
+Native assignment package checks run through the existing assignment source
+resolver, which the service calls after retained replay and fresh member
+admission. Transport authentication still precedes replay.
+
+Managed consumer calls use the authenticated Worker authority and protected
+owner configuration. Ordinary v3 delivery uses the owning result reader;
+consumer receipts and Action completion do not supply a semantic goal verdict.
+Explicit cleanup uses each member's existing settlement owner before Root Close
+and Profile retirement, preserving typed failures and physical absence checks.
+
+Qualified caller preparation uses the existing fresh Profile snapshot constructor
+with a private enforced-disable policy. It appends `--disable shell_snapshot`
+and sets disabled features before the existing hash/key derivation. Generic
+preparation and display-only cached observations keep their original identities.
+Legacy v2 Specialist Policy validation and session resolution use generic
+Profile preparation and observation. The explicitly selected legacy engagement
+and broker branches share that route, including binding-digest, model and
+capability checks. Public legacy authoring still requires migration; caller
+configuration and Markdown-policy preparation retain the qualified Current pin
+gate.
+Qualified candidates are unrecorded until their caller admits the current
+runtime; the registry owner then rechecks the definition while recording.
+`review_recovery` uses `direct_review_target`'s existing unsupported-boundary
+error when qualified one-shot preparation refuses before reservation.
+Observe-only qualified catalogs inspect that exact candidate generation without
+publishing history or changing physical state. Qualified shared readiness uses
+the existing deny-rollover path, as review already does. Shared and Dedicated
+launches consume the retained snapshot argv. Recovery uses accepted bindings
+without resealing them or resolving a replacement definition.
+Retained qualified bindings keep deny-rollover readiness through member start,
+reservation replay and Run recovery. Pre-policy accepted bindings retain their
+original readiness behavior; recovery does not upgrade their launch policy.
+
+Fixture-owned qualified retirement selects the retained binding and carries an
+operator capability through the existing non-interrupting stop. It retains
+membership and process-absence guards. Generic name-based lifecycle commands
+continue selecting their generic contract and do not discover or replace a
+qualified generation implicitly.

@@ -38,6 +38,7 @@ pub struct PrimaryCallContext {
 
 #[derive(Clone, Debug)]
 pub struct PrimaryToolContract {
+    successor_enabled: bool,
     tool_spec: Value,
 }
 
@@ -56,6 +57,7 @@ impl PrimaryToolContract {
             .map(|name| serde_json::json!({"$ref":format!("#/$defs/{name}")}))
             .collect::<Vec<_>>();
         Ok(Self {
+            successor_enabled: false,
             tool_spec: serde_json::json!({
                 "type":"function",
                 "name":PRIMARY_TOOL_NAME,
@@ -77,6 +79,30 @@ impl PrimaryToolContract {
     #[must_use]
     pub fn tool_spec(&self) -> Value {
         self.tool_spec.clone()
+    }
+
+    pub(crate) fn with_specialists(mut self) -> Self {
+        self.successor_enabled = true;
+        self
+    }
+    pub(crate) fn allows_specialists(&self) -> bool {
+        self.successor_enabled
+    }
+    pub(crate) fn tool_specs(&self) -> Vec<Value> {
+        let mut tools = vec![self.tool_spec()];
+        if self.successor_enabled {
+            for mut tool in [
+                crate::specialist_facade::tool_spec(
+                    crate::native_consumer::MANAGED_NATIVE,
+                    crate::specialist_facade::MANAGED,
+                ),
+                crate::native_consumer::control_spec(crate::native_consumer::MANAGED_CONTROL),
+            ] {
+                tool["type"] = Value::String("function".into());
+                tools.push(tool);
+            }
+        }
+        tools
     }
 
     pub fn reject_model_identity(&self, payload: &Value) -> Result<(), MachineError> {
@@ -178,6 +204,36 @@ fn contract_invalid(reason: &'static str) -> MachineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_registration_tags_function_specs_without_changing_model_contracts() {
+        let contract = PrimaryToolContract::load().unwrap();
+        let legacy = contract.tool_spec();
+        for successor in [false, true] {
+            let selected = if successor {
+                contract.clone().with_specialists()
+            } else {
+                contract.clone()
+            };
+            let mut tools = selected.tool_specs();
+            assert_eq!(tools.len(), if successor { 3 } else { 1 });
+            for tool in &tools {
+                assert_eq!(tool["type"], "function");
+            }
+            assert_eq!(tools[0], legacy);
+            if successor {
+                assert_eq!(tools[2]["name"], crate::native_consumer::MANAGED_CONTROL);
+                tools[1].as_object_mut().unwrap().remove("type");
+                assert_eq!(
+                    tools[1],
+                    crate::specialist_facade::tool_spec(
+                        crate::native_consumer::MANAGED_NATIVE,
+                        crate::specialist_facade::MANAGED
+                    )
+                );
+            }
+        }
+    }
 
     #[test]
     fn contract_excludes_transport_identity_and_maps_safe_errors() {

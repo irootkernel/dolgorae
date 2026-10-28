@@ -2452,6 +2452,7 @@ impl OrchestrationStore {
         )? {
             return Ok(existing);
         }
+        require_current_policy_role(&session.specialist_policy, &request.role_ref)?;
         let role_snapshot_sha256 = digest_value(&role)?;
         let agent_configuration_sha256 =
             crate::run::agent_configuration_digest(role.agent_configuration()).map_err(internal)?;
@@ -2740,6 +2741,9 @@ impl OrchestrationStore {
                 )
             })?;
         let decision = if approved { "approve" } else { "reject" };
+        let context = self.spawn_context(interaction.operation_id)?;
+        validate_context(&context)?;
+        let session = self.authorize_primary(&context)?;
         let prior = self
             .connection
             .query_row(
@@ -2765,6 +2769,14 @@ impl OrchestrationStore {
             }
             parse_uuid(&receipt)?
         } else {
+            // An approval receipt must not survive refusal of a new member.
+            // Already accepted member recovery and a denial need no new admission.
+            if approved && interaction.operation_state == "awaiting_approval" {
+                require_current_policy_role(
+                    &session.specialist_policy,
+                    &interaction.request.role_ref,
+                )?;
+            }
             let receipt = new_uuid_v7();
             self.connection
                 .execute(
@@ -2784,7 +2796,6 @@ impl OrchestrationStore {
                 .map_err(internal)?;
             receipt
         };
-        let context = self.spawn_context(interaction.operation_id)?;
         let operation =
             self.decide_specialist(&context, interaction.operation_id, approved, adapter)?;
         Ok(BrokerApprovalResolution {
@@ -2991,6 +3002,8 @@ impl OrchestrationStore {
         request_sha256: &str,
         adapter: &mut A,
     ) -> Result<SpecialistOperationSnapshot, MachineError> {
+        let session = self.authorize_primary(context)?;
+        require_current_policy_role(&session.specialist_policy, role.role_ref())?;
         let run_id = new_uuid_v7();
         self.faults
             .check(OrchestrationBarrier::BeforeSpawnReservation)?;
@@ -3445,6 +3458,7 @@ impl OrchestrationStore {
             if member.membership_state != "active" {
                 return Err(specialist_not_member(request.specialist_run_id));
             }
+            require_current_policy_role(&session.specialist_policy, &member.role_ref)?;
             let role = session.specialist_policy.role(&member.role_ref)?;
             if role.role_ref() != member.role_snapshot.role_ref()
                 || !member_access_permits(&member.requested_access, &request.requested_access)
@@ -6980,6 +6994,43 @@ pub(crate) fn mark_successor_task_running(
     )
 }
 
+/// Cancel only the accepted successor row whose dispatch reservation has not committed.
+pub(crate) fn cancel_successor_before_dispatch(
+    transaction: &Transaction<'_>,
+    session_id: Uuid,
+    member: Uuid,
+    task: Uuid,
+    now: i64,
+) -> Result<(), MachineError> {
+    let changed = transaction
+        .execute(
+            "UPDATE brokered_tasks SET state='cancelled',updated_at_ms=?4
+         WHERE session_id=?1 AND target_run_id=?2 AND task_id=?3
+           AND state='accepted' AND target_turn_id IS NULL AND result_sha256 IS NULL
+           AND NOT EXISTS(SELECT 1 FROM dispatch_indexes WHERE task_id=?3)",
+            params![
+                session_id.to_string(),
+                member.to_string(),
+                task.to_string(),
+                now
+            ],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(session_conflict(
+            session_id,
+            "task cancellation lost the dispatch boundary",
+        ));
+    }
+    append_event(
+        transaction,
+        session_id,
+        "specialist_task_controlled",
+        &sha256_hex(format!("{task}\0cancelled").as_bytes()),
+        now,
+    )
+}
+
 /// Record one proved non-dispatch of a successor task (Case B).
 pub(crate) fn terminalize_successor_task(
     transaction: &Transaction<'_>,
@@ -7454,6 +7505,23 @@ fn table_present(connection: &Connection, name: &str) -> Result<bool, MachineErr
 ///
 /// `activation_policy` is the successor marker: an installed Specialist Policy
 /// admits only `on_mail` or `keep_resident`, so no legacy member can carry it.
+fn require_current_policy_role(
+    policy: &crate::session_policy::SessionPolicySnapshot,
+    role_ref: &str,
+) -> Result<(), MachineError> {
+    if let crate::session_policy::SessionPolicySnapshot::Caller(captures) = policy
+        && !captures
+            .profile_binding(role_ref)?
+            .caller_workspace_supported()
+    {
+        return Err(policy_denied(
+            role_ref,
+            "new qualified work requires the current runtime pin",
+        ));
+    }
+    Ok(())
+}
+
 fn successor_member_count(connection: &Connection, session_id: Uuid) -> Result<i64, MachineError> {
     if !table_present(connection, "brokered_members")? {
         return Ok(0);
@@ -8593,6 +8661,287 @@ mod tests {
         changed.request_sha256 = "d".repeat(64);
         assert!(store.prepare_caller_session(&changed).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // Accepted captures are historical fixtures, not a new policy admission.
+    // The current-pin decision applies at each new member or task effect.
+    #[test]
+    fn historical_caller_policy_refuses_new_broker_effects_but_resumes_accepted_members() {
+        for approval in ["fully_delegated", "user_approval_required"] {
+            let root = root();
+            let home = root.join(".dolgorae");
+            let mut value: Value = serde_json::from_slice(include_bytes!(
+                "../docs/protocol/examples/accepted-policy-session-v1-captured.valid.json"
+            ))
+            .unwrap();
+            value["captures"]["home_root"] =
+                serde_json::to_value(crate::workspace::LosslessPath::from_path(&home)).unwrap();
+            value["captures"]["policy"]["approval_policy"] = serde_json::json!(approval);
+            let original: crate::global_runtime::GlobalProfileBinding =
+                serde_json::from_value(value["captures"]["profile_bindings"]["reviewer"].clone())
+                    .unwrap();
+            let mut snapshot = original.launch_snapshot.clone();
+            snapshot.executable_identity.sha256 =
+                "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878".to_owned();
+            let binding = crate::global_runtime::ResolvedGlobalProfile::from_definition(
+                &original.selected_name,
+                original.definition,
+            )
+            .unwrap()
+            .bind(snapshot)
+            .unwrap();
+            assert!(binding.accepted_caller_workspace_supported());
+            let digest = binding.digest().unwrap();
+            value["captures"]["profile_bindings"]["reviewer"] =
+                serde_json::to_value(binding).unwrap();
+            value["captures"]["configurations"]["reviewer"]["global_profile_binding_sha256"] =
+                serde_json::json!(digest);
+            value["captures"]["policy"]["roles"][0]["agent_configuration"]["global_profile_binding_sha256"] =
+                serde_json::json!(digest);
+            let accepted: AcceptedPolicySessionSnapshot = serde_json::from_value(value).unwrap();
+            let state_root = home
+                .join("workspaces")
+                .join(accepted.captures.workspace_id());
+            let mut store = OrchestrationStore::open(&state_root).unwrap();
+            let accepted = store
+                .accept_policy_session(
+                    accepted.root_run_id,
+                    &accepted.idempotency_key,
+                    &accepted.request_sha256,
+                    accepted.captures,
+                )
+                .unwrap();
+            let session = store.prepare_caller_session(&accepted).unwrap();
+            store.mark_primary_intent(session.session_id).unwrap();
+            let session = store
+                .finish_primary_publication(session.session_id, Ok(()))
+                .unwrap();
+            let before = canonical_string(&session.specialist_policy).unwrap();
+            let mut adapter = FakeAdapter::default();
+            let request = request("read_only");
+            std::fs::create_dir_all(&store.credential_root).unwrap();
+            std::fs::set_permissions(
+                &store.credential_root,
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            let count_credentials = || std::fs::read_dir(&store.credential_root).unwrap().count();
+            let credentials = count_credentials();
+            let changes = store.connection.total_changes();
+            assert_eq!(
+                store
+                    .request_specialist(
+                        &context(session.session_id, "new-old"),
+                        &request,
+                        &mut adapter
+                    )
+                    .unwrap_err()
+                    .code,
+                "SPECIALIST_POLICY_DENIED"
+            );
+            assert_eq!(store.connection.total_changes(), changes);
+            assert!(adapter.calls.is_empty());
+            assert_eq!(
+                std::fs::read_dir(&store.credential_root).unwrap().count(),
+                credentials
+            );
+            assert!(store.members(session.session_id).unwrap().is_empty());
+
+            // A pending approval has not yet accepted a member identity.
+            let pending = Uuid::now_v7();
+            let approval_id = Uuid::now_v7();
+            let pending_context = context(session.session_id, "old-pending");
+            store
+                .insert_spawn(
+                    &pending_context,
+                    &request,
+                    pending,
+                    None,
+                    Some(approval_id),
+                    "awaiting_approval",
+                    &digest_value(&request).unwrap(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            let changes = store.connection.total_changes();
+            // The direct decision entry point retains its own pre-credential gate.
+            assert_eq!(
+                store
+                    .decide_specialist(&pending_context, pending, true, &mut adapter)
+                    .unwrap_err()
+                    .code,
+                "SPECIALIST_POLICY_DENIED"
+            );
+            assert_eq!(store.connection.total_changes(), changes);
+            assert_eq!(
+                store
+                    .resolve_specialist_approval(
+                        session.session_id,
+                        approval_id,
+                        true,
+                        "approve-old",
+                        &mut adapter
+                    )
+                    .unwrap_err()
+                    .code,
+                "SPECIALIST_POLICY_DENIED"
+            );
+            assert_eq!(store.connection.total_changes(), changes);
+            assert!(store.spawn(pending).unwrap().specialist_run_id.is_none());
+            assert_eq!(
+                std::fs::read_dir(&store.credential_root).unwrap().count(),
+                credentials
+            );
+            assert!(adapter.calls.is_empty());
+            let unresolved = store
+                .approval_interaction(session.session_id, approval_id)
+                .unwrap()
+                .unwrap();
+            assert!(unresolved.decision.is_none());
+            assert!(unresolved.resolution_receipt_id.is_none());
+            assert_eq!(unresolved.operation_state, "awaiting_approval");
+            assert_eq!(store.connection.query_row(
+                "SELECT COUNT(*) FROM brokered_approval_resolutions WHERE approval_request_id=?1",
+                [approval_id.to_string()], |row| row.get::<_, u64>(0)).unwrap(), 0);
+            let denied = store
+                .resolve_specialist_approval(
+                    session.session_id,
+                    approval_id,
+                    false,
+                    "deny-old",
+                    &mut adapter,
+                )
+                .unwrap();
+            assert_eq!(denied.operation.state, "denied");
+            let changes = store.connection.total_changes();
+            assert_eq!(
+                store
+                    .resolve_specialist_approval(
+                        session.session_id,
+                        approval_id,
+                        false,
+                        "deny-old",
+                        &mut adapter
+                    )
+                    .unwrap(),
+                denied
+            );
+            assert_eq!(store.connection.total_changes(), changes);
+            assert_eq!(
+                std::fs::read_dir(&store.credential_root).unwrap().count(),
+                credentials
+            );
+            assert!(adapter.calls.is_empty());
+
+            // Seed an already accepted member reservation below admission.
+            // Its original key must finish publication without resealing captures.
+            let member = Uuid::now_v7();
+            let operation = Uuid::now_v7();
+            let original = context(session.session_id, "accepted-old-member");
+            let role = session.specialist_policy.role(&request.role_ref).unwrap();
+            let credential =
+                BrokerCredential::create(&store.credential_root, store.uid, member).unwrap();
+            let accepted_approval = (approval == "user_approval_required").then(Uuid::now_v7);
+            store
+                .insert_spawn(
+                    &original,
+                    &request,
+                    operation,
+                    Some(member),
+                    accepted_approval,
+                    "requested",
+                    &digest_value(&request).unwrap(),
+                    Some(&role),
+                    Some(&credential.binding),
+                )
+                .unwrap();
+            if let Some(approval_id) = accepted_approval {
+                let receipt = Uuid::now_v7();
+                let resolved_at = store.now_ms().unwrap();
+                store.connection.execute(
+                    "INSERT INTO brokered_approval_resolutions(approval_request_id,operation_id,
+                     decision,idempotency_key,resolution_receipt_id,resolved_at_ms)
+                     VALUES(?1,?2,'approve','original-accepted-approval',?3,?4)",
+                    params![approval_id.to_string(), operation.to_string(), receipt.to_string(), resolved_at]
+                ).unwrap();
+                let recovered = store
+                    .resolve_specialist_approval(
+                        session.session_id,
+                        approval_id,
+                        true,
+                        "original-accepted-approval",
+                        &mut adapter,
+                    )
+                    .unwrap();
+                assert_eq!(recovered.operation.specialist_run_id, Some(member));
+                assert_eq!(recovered.operation.state, "ready");
+                assert_eq!(recovered.resolution_receipt_id, receipt);
+                let changes = store.connection.total_changes();
+                let calls = adapter.calls.len();
+                assert_eq!(
+                    store
+                        .resolve_specialist_approval(
+                            session.session_id,
+                            approval_id,
+                            true,
+                            "original-accepted-approval",
+                            &mut adapter
+                        )
+                        .unwrap(),
+                    recovered
+                );
+                assert_eq!(store.connection.total_changes(), changes);
+                assert_eq!(adapter.calls.len(), calls);
+            }
+            let resumed = store
+                .request_specialist(&original, &request, &mut adapter)
+                .unwrap();
+            assert_eq!(resumed.specialist_run_id, Some(member));
+            assert_eq!(resumed.state, "ready");
+            let calls = adapter.calls.len();
+            assert_eq!(
+                store
+                    .request_specialist(&original, &request, &mut adapter)
+                    .unwrap(),
+                resumed
+            );
+            assert_eq!(adapter.calls.len(), calls);
+            let changes = store.connection.total_changes();
+            assert_eq!(
+                store
+                    .request_specialist(
+                        &context(session.session_id, "new-old-reuse"),
+                        &request,
+                        &mut adapter
+                    )
+                    .unwrap_err()
+                    .code,
+                "SPECIALIST_POLICY_DENIED"
+            );
+            assert_eq!(store.connection.total_changes(), changes);
+            assert_eq!(adapter.calls.len(), calls);
+            assert_eq!(
+                store
+                    .assign_task(
+                        &context(session.session_id, "new-old-task"),
+                        &task_request(member, "read_only"),
+                        &mut adapter
+                    )
+                    .unwrap_err()
+                    .code,
+                "SPECIALIST_POLICY_DENIED"
+            );
+            assert_eq!(store.connection.total_changes(), changes);
+            assert_eq!(adapter.calls.len(), calls);
+            assert_eq!(
+                canonical_string(&store.session(session.session_id).unwrap().specialist_policy)
+                    .unwrap(),
+                before
+            );
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

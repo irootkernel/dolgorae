@@ -600,8 +600,9 @@ pub(crate) struct PreparedExternalSpecialist {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExternalSpecialistPreparation {
-    EnsureServer,
-    ObserveOnly,
+    LegacyEnsureServer,
+    LegacyObserveOnly,
+    QualifiedObserveOnly,
 }
 
 fn verify_external_profile_binding(
@@ -619,7 +620,7 @@ fn verify_external_profile_binding(
     Ok(())
 }
 
-pub(crate) fn prepare_external_specialist(
+pub(crate) fn prepare_legacy_external_specialist(
     workspace: Option<&Path>,
     role_ref: &str,
     input: ExternalAgentConfigurationInput,
@@ -628,7 +629,7 @@ pub(crate) fn prepare_external_specialist(
         workspace,
         role_ref,
         input,
-        ExternalSpecialistPreparation::EnsureServer,
+        ExternalSpecialistPreparation::LegacyEnsureServer,
     )
 }
 
@@ -641,7 +642,20 @@ pub(crate) fn prepare_external_specialist_read_only(
         workspace,
         role_ref,
         input,
-        ExternalSpecialistPreparation::ObserveOnly,
+        ExternalSpecialistPreparation::QualifiedObserveOnly,
+    )
+}
+
+pub(crate) fn prepare_legacy_external_specialist_read_only(
+    workspace: Option<&Path>,
+    role_ref: &str,
+    input: ExternalAgentConfigurationInput,
+) -> Result<PreparedExternalSpecialist, MachineError> {
+    prepare_external_specialist_with(
+        workspace,
+        role_ref,
+        input,
+        ExternalSpecialistPreparation::LegacyObserveOnly,
     )
 }
 
@@ -688,7 +702,7 @@ fn prepare_external_specialist_with(
         observed_efforts,
         live_state,
     ) = match preparation {
-        ExternalSpecialistPreparation::EnsureServer => {
+        ExternalSpecialistPreparation::LegacyEnsureServer => {
             let binding = resolved.prepare(&home)?;
             verify_external_profile_binding(&input, &binding)?;
             let state = crate::profile::ensure_global_server(&binding)?;
@@ -701,9 +715,27 @@ fn prepare_external_specialist_with(
                 Some(state),
             )
         }
-        ExternalSpecialistPreparation::ObserveOnly => {
-            let observation =
-                crate::profile::observe_global_profile(&home, &input.runtime_profile)?;
+        ExternalSpecialistPreparation::LegacyObserveOnly
+        | ExternalSpecialistPreparation::QualifiedObserveOnly => {
+            let binding = if preparation == ExternalSpecialistPreparation::QualifiedObserveOnly {
+                let binding = resolved.clone().prepare_qualified(&home)?;
+                if !binding.caller_workspace_supported() {
+                    return Err(workspace_startup_unsupported());
+                }
+                verify_external_profile_binding(&input, &binding)?;
+                Some(binding)
+            } else {
+                None
+            };
+            let observation = if let Some(binding) = &binding {
+                crate::profile::observe_qualified_global_profile(
+                    &home,
+                    &input.runtime_profile,
+                    binding.launch_snapshot.clone(),
+                )?
+            } else {
+                crate::profile::observe_global_profile(&home, &input.runtime_profile)?
+            };
             if !observation.blockers.is_empty() {
                 let blockers = observation
                     .blockers
@@ -725,8 +757,14 @@ fn prepare_external_specialist_with(
                     "read-only Specialist Policy validation cannot start or repair a Profile Server",
                 ));
             }
-            let binding = resolved.bind(observation.snapshot)?;
-            verify_external_profile_binding(&input, &binding)?;
+            let binding = match binding {
+                Some(binding) => binding,
+                None => {
+                    let binding = resolved.bind(observation.snapshot)?;
+                    verify_external_profile_binding(&input, &binding)?;
+                    binding
+                }
+            };
             let default_model = observation
                 .models
                 .iter()
@@ -918,9 +956,24 @@ pub(crate) fn prepare_reviewer(
     let view = WorkspaceService::system()?.discover(workspace)?;
     let home = DolgoraeHome::system()?;
     let global_profile_binding =
-        ResolvedGlobalProfile::resolve(&home, profile_name)?.prepare(&home)?;
+        ResolvedGlobalProfile::resolve(&home, profile_name)?.prepare_qualified(&home)?;
+    if !global_profile_binding.caller_workspace_supported() {
+        return Err(workspace_startup_unsupported());
+    }
+    global_profile_binding.record_qualified(&home)?;
     let state_root = workspace_state_root(&view)?;
     prepare_reviewer_with_binding(view, state_root, global_profile_binding, None)
+}
+
+pub(crate) fn prepare_legacy_reviewer(
+    workspace: Option<&Path>,
+    profile_name: &str,
+) -> Result<PreparedReviewer, MachineError> {
+    let view = WorkspaceService::system()?.discover(workspace)?;
+    let home = DolgoraeHome::system()?;
+    let binding = ResolvedGlobalProfile::resolve(&home, profile_name)?.prepare(&home)?;
+    let state_root = workspace_state_root(&view)?;
+    prepare_reviewer_with_binding(view, state_root, binding, None)
 }
 
 pub(crate) fn prepare_reviewer_with_binding(
@@ -934,7 +987,7 @@ pub(crate) fn prepare_reviewer_with_binding(
         Some(owner) => {
             crate::profile::ensure_global_server_for_review(&global_profile_binding, owner)?
         }
-        None => crate::profile::ensure_global_server(&global_profile_binding)?,
+        None => crate::profile::ensure_retained_global_server(&global_profile_binding)?,
     };
     let configuration = &global_profile_binding
         .launch_snapshot
@@ -990,7 +1043,9 @@ pub(crate) fn start_direct_reviewer_run(
     controller_path: &Path,
 ) -> Result<RunStartReceipt, MachineError> {
     let plan = &prepared.plan;
-    if !prepared.global_profile_binding.checked_review_supported()
+    if !prepared
+        .global_profile_binding
+        .accepted_checked_review_supported()
         || plan.agent_configuration.schema_version != 3
         || plan.agent_configuration.execution_lane != ExecutionLane::Dedicated
     {
@@ -1044,18 +1099,20 @@ pub(crate) fn start_delegated_member_run(
     start_caller_member_run_generation::<crate::delegation_identity::InstructionSnapshot>(input)
 }
 
-fn start_caller_member_run_generation<I: CallerStartGeneration>(
-    input: CallerMemberStart<'_>,
-) -> Result<RunStartReceipt, MachineError> {
-    let configuration = input.configuration;
+fn caller_member_request<I: CallerStartGeneration>(
+    view: &WorkspaceView,
+    configuration: &AgentConfigurationSnapshot,
+    profile: &str,
+    aggregate: &AggregateBinding,
+    access: CallerWorkspaceAccess,
+    idempotency_key: &str,
+) -> Result<CallerRunStartRequest, MachineError> {
     let instructions = I::from_run_capture(&configuration.instructions)
         .ok_or_else(|| internal("caller member requires captured instructions"))?;
-    let request = CallerRunStartRequest {
+    CallerRunStartRequest {
         schema: "dolgorae-run-start-request/v2".to_owned(),
         workspace: Some(
-            input
-                .view
-                .canonical_path
+            view.canonical_path
                 .to_path_buf()?
                 .to_str()
                 .ok_or_else(|| {
@@ -1066,17 +1123,17 @@ fn start_caller_member_run_generation<I: CallerStartGeneration>(
                 })?
                 .to_owned(),
         ),
-        expected_workspace_id: Some(input.view.workspace_id.clone()),
+        expected_workspace_id: Some(view.workspace_id.clone()),
         specialist_policy: None,
-        profile: input.global_profile_binding.selected_name.clone(),
+        profile: profile.to_owned(),
         control_mode: ControlMode::ManagedAgent,
-        access: input.access,
+        access,
         role: instructions.role_name().to_owned(),
         model: Some(configuration.model.clone()),
         effort: Some(configuration.default_effort.clone()),
         purpose: configuration.purpose.clone(),
         parent_ref: Some(ParentReference {
-            namespace: match input.aggregate.aggregate_kind {
+            namespace: match aggregate.aggregate_kind {
                 AggregateKind::ExternalSpecialistEngagement => {
                     "dolgorae.external-specialist-engagement.v1"
                 }
@@ -1084,12 +1141,114 @@ fn start_caller_member_run_generation<I: CallerStartGeneration>(
             }
             .to_owned(),
             kind: "specialist".to_owned(),
-            id: input.aggregate.aggregate_id.to_string(),
+            id: aggregate.aggregate_id.to_string(),
         }),
         required_capabilities: configuration.required_capabilities.clone(),
-        idempotency_key: input.idempotency_key.clone(),
+        idempotency_key: idempotency_key.to_owned(),
     }
-    .resolve_member(input.aggregate)?;
+    .resolve_member(aggregate)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn retained_caller_member_binding(
+    view: &WorkspaceView,
+    state_root: &Path,
+    configuration: &AgentConfigurationSnapshot,
+    aggregate: &AggregateBinding,
+    carrier: &CredentialCarrier,
+    run_id: Uuid,
+    access: CallerWorkspaceAccess,
+    idempotency_key: &str,
+) -> Result<Option<GlobalProfileBinding>, MachineError> {
+    let mut request = caller_member_request::<crate::instructions::InstructionSnapshot>(
+        view,
+        configuration,
+        &configuration.runtime_profile,
+        aggregate,
+        access,
+        idempotency_key,
+    )?;
+    let presented = presented_controller_from_carrier(carrier, 1)?;
+    admit_caller_orchestration_launch(&mut request, &presented, true)?;
+    let digest = crate::run::caller_start_request_digest(
+        &request,
+        &view.canonical_path,
+        &presented.binding,
+    )?;
+    let Some(reservation) = StartReservationStore::new(SystemWorkspacePlatform, state_root)
+        .load_caller(idempotency_key, &digest)?
+    else {
+        return Ok(None);
+    };
+    let intent = reservation.accepted_intent;
+    if reservation.run_id != run_id
+        || intent.global_profile_binding.digest()? != configuration.runtime_profile_snapshot_sha256
+        || configuration.instructions.caller() != Some(&intent.instructions)
+    {
+        return Err(internal(
+            "retained member reservation differs from accepted configuration",
+        ));
+    }
+    Ok(Some(intent.global_profile_binding))
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_caller_member_reservation(
+    view: &WorkspaceView,
+    state_root: &Path,
+    manifest: &RunManifest,
+    carrier: &CredentialCarrier,
+    key: &str,
+) -> crate::run::CallerStartReservation {
+    let configuration = &manifest.agent_configuration;
+    let mut request = caller_member_request::<crate::instructions::InstructionSnapshot>(
+        view,
+        configuration,
+        &configuration.runtime_profile,
+        manifest.aggregate_binding.as_ref().unwrap(),
+        CallerWorkspaceAccess::ReadOnly,
+        key,
+    )
+    .unwrap();
+    let presented = presented_controller_from_carrier(carrier, 1).unwrap();
+    admit_caller_orchestration_launch(&mut request, &presented, true).unwrap();
+    let mut intent = serde_json::from_str::<crate::run::CallerStartReservation>(include_str!(
+        "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+    ))
+    .unwrap()
+    .accepted_intent;
+    intent.run_id = manifest.run_id;
+    intent.workspace_id = view.workspace_id.clone();
+    intent.canonical_workspace = view.canonical_path.clone();
+    intent.workspace_mode = view.mode;
+    intent.start_baseline = manifest.start_baseline.clone();
+    intent.request = request;
+    intent.controller = presented.binding;
+    intent.global_profile_binding = manifest.global_profile_binding.clone().unwrap();
+    intent.instructions = configuration.instructions.caller().unwrap().clone();
+    intent.admitted_configuration = None;
+    intent.orchestration = None;
+    intent.readiness.model = configuration.model.clone();
+    intent.readiness.default_effort = configuration.default_effort.clone();
+    intent.readiness.profile_capability_snapshot = manifest.profile_capability_snapshot.clone();
+    let reservation = crate::run::CallerStartReservation::new(intent).unwrap();
+    StartReservationStore::new(SystemWorkspacePlatform, state_root)
+        .reserve_caller(&reservation)
+        .unwrap();
+    reservation
+}
+
+fn start_caller_member_run_generation<I: CallerStartGeneration>(
+    input: CallerMemberStart<'_>,
+) -> Result<RunStartReceipt, MachineError> {
+    let request = caller_member_request::<I>(
+        input.view,
+        input.configuration,
+        &input.global_profile_binding.selected_name,
+        input.aggregate,
+        input.access,
+        &input.idempotency_key,
+    )?;
     let carrier = CredentialCarrier::duplicate_fd(input.carrier.raw_fd())?;
     start_caller_run_generation::<I>(request, carrier, Some(input))
 }
@@ -1156,6 +1315,92 @@ pub(crate) struct SemanticRunSettlementPort<'a> {
 }
 
 impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<'_> {
+    fn cancel_member_task(
+        &self,
+        request: crate::delegation_service::MemberTaskSettlement<'_>,
+    ) -> Result<(), MachineError> {
+        let manifest = RunStore::new(SystemWorkspacePlatform, request.state_root)
+            .load_manifest(request.member_ref)?;
+        let binding = manifest
+            .aggregate_binding
+            .as_ref()
+            .ok_or_else(|| reconciliation_error("member_binding_missing"))?;
+        if manifest.schema_version != 4
+            || binding.member_kind != crate::run::AggregateMemberKind::Specialist
+            || binding.aggregate_id != request.owner.scope_ref()
+            || manifest.workspace_id != request.view.workspace_id
+            || binding.aggregate_kind
+                != match request.owner {
+                    SettlementOwner::External { .. } => AggregateKind::ExternalSpecialistEngagement,
+                    SettlementOwner::Managed { .. } => AggregateKind::OrchestratedSession,
+                }
+        {
+            return Err(reconciliation_error("foreign_member"));
+        }
+        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+            request.state_root,
+        ))?;
+        let broker;
+        let (turn, engagement, carrier) = match request.owner {
+            SettlementOwner::External { engagement_id } => {
+                store.authorize_external_owner(
+                    &request.view.workspace_id,
+                    engagement_id,
+                    "run.interrupt",
+                    self.carrier,
+                )?;
+                let task = store.external_task(engagement_id, request.task_ref)?;
+                if task.specialist_run_id != request.member_ref {
+                    return Err(reconciliation_error("foreign_task"));
+                }
+                (task.turn_id, Some(engagement_id), self.carrier)
+            }
+            SettlementOwner::Managed { session_id } => {
+                let session =
+                    crate::orchestration::OrchestrationStore::open_observer(request.state_root)?
+                        .session(session_id)?;
+                let root =
+                    load_reconciled_controller_binding(request.state_root, session.root_run_id)?;
+                authorize_controller(session.root_run_id, "run.interrupt", &root, self.carrier)?;
+                let task = crate::orchestration::successor_task(
+                    store.connection(),
+                    session_id,
+                    request.task_ref,
+                )?
+                .ok_or_else(|| reconciliation_error("foreign_task"))?;
+                if task.member_ref != request.member_ref.to_string() {
+                    return Err(reconciliation_error("foreign_task"));
+                }
+                broker =
+                    crate::orchestration::OrchestrationStore::open_observer(request.state_root)?
+                        .member_credential(request.member_ref)?
+                        .controller_carrier()?;
+                (task.target_turn_id, None, &broker)
+            }
+        };
+        let Some(turn) = turn else {
+            return cancel_accepted_member_task(&request);
+        };
+        let response = crate::worker::call_run_worker(
+            request.state_root,
+            request.member_ref,
+            DarwinSystem.current_uid(),
+            Some(carrier.raw_fd()),
+            |expected| ControlRequestV1::InterruptTask {
+                expected,
+                caller: None,
+                engagement_id: engagement,
+                turn_id: turn.clone(),
+            },
+        )
+        .map_err(|error| error.machine_error(request.member_ref, request.state_root))?;
+        match response {
+            ControlResponseV1::Interrupted { turn_id, .. } if turn_id == turn => Ok(()),
+            ControlResponseV1::Terminal { terminal } if terminal.turn_id == turn => Ok(()),
+            _ => Err(reconciliation_error("task_cancellation_unresolved")),
+        }
+    }
+
     /// Dispatch one accepted member task inside its Run's authority.
     ///
     /// The authority is taken first, the dispatch index is captured and
@@ -1191,6 +1436,7 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
                 engagement_id: request.engagement_id,
             },
             self.carrier,
+            write,
         )?;
         if write {
             if let Err(error) = acquire_external_writer(
@@ -1420,6 +1666,21 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
     /// for exactly the Turn the dispatch recorded on the task; the settlement is
     /// one guarded transaction (`terminalize_external_task_in` refuses a settled
     /// row), and the writer authority is released only after that publication.
+    fn member_run_observation(
+        &self,
+        request: crate::delegation_service::MemberCleanupObservation<'_>,
+        budget: &mut crate::ledger::ObservationBudget,
+    ) -> Result<crate::snapshot::MemberRunObservation, MachineError> {
+        member_run_observation(request, budget)
+    }
+    fn member_interaction_observation(
+        &self,
+        request: crate::delegation_service::MemberCleanupObservation<'_>,
+        source: &crate::snapshot::MemberRunObservation,
+        budget: &mut crate::ledger::ObservationBudget,
+    ) -> Result<(bool, crate::domain::ProjectionStamp), MachineError> {
+        member_interaction_observation(request, source, budget)
+    }
     fn member_writer_observation(
         &self,
         request: crate::delegation_service::MemberCleanupObservation<'_>,
@@ -1644,6 +1905,7 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
             request.member_ref,
             owner,
             &carrier,
+            write,
         )?;
         let release = || {
             if write {
@@ -1809,6 +2071,103 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
         )?;
         Ok(MemberDispatchOutcome::Accepted { turn_ref: turn_id })
     }
+}
+
+/// Prove no Submit by winning accepted-before-reservation CAS and checking the
+/// original task's dispatch/admission evidence in the verified Dolgorae Run
+/// audit ledger. This does not establish native in-process quiescence.
+fn cancel_accepted_member_task(
+    request: &crate::delegation_service::MemberTaskSettlement<'_>,
+) -> Result<(), MachineError> {
+    let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(
+        request.state_root,
+    ))?;
+    store.transact(|tx| {
+        crate::delegation_service::require_cancellation_owner(tx, request)?;
+        let (state, turn, accepted_json, digest, marker): (String, Option<String>, String, String, String) = match request.owner {
+            SettlementOwner::External { engagement_id } => tx.query_row(
+                "SELECT state,turn_id,request_json,objective_sha256,external_request_ref_json FROM tasks
+                 WHERE engagement_id=?1 AND specialist_run_id=?2 AND task_id=?3",
+                rusqlite::params![engagement_id.to_string(), request.member_ref.to_string(), request.task_ref.to_string()],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+            ),
+            SettlementOwner::Managed { session_id } => tx.query_row(
+                "SELECT t.state,t.target_turn_id,a.accepted_request_json,a.accepted_request_sha256,t.request_json
+                 FROM brokered_tasks t JOIN brokered_task_acceptances a USING(task_id)
+                 WHERE t.session_id=?1 AND t.target_run_id=?2 AND t.task_id=?3",
+                rusqlite::params![session_id.to_string(), request.member_ref.to_string(), request.task_ref.to_string()],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+            ),
+        }.map_err(|_| reconciliation_error("task_acceptance_unavailable"))?;
+        let accepted = crate::successor_capture::retained_accepted_task(&accepted_json)?;
+        let marker: Value = serde_json::from_str(&marker).map_err(|_| reconciliation_error("task_acceptance_unavailable"))?;
+        if marker["accepted_task_digest"].as_str() != Some(accepted.digest()?.as_str()) {
+            return Err(reconciliation_error("task_acceptance_unavailable"));
+        }
+        let expected = match request.owner {
+            SettlementOwner::External { .. } => accepted.digest()?,
+            SettlementOwner::Managed { .. } => crate::jcs::sha256_hex(accepted_json.as_bytes()),
+        };
+        if state != "accepted" || turn.is_some() || digest != expected
+            || accepted.execution_intent != request.execution_intent {
+            return Err(reconciliation_error("task_dispatch_not_excluded"));
+        }
+        // Recover the original executor key from the accepted assignment, not
+        // the cancellation call or an arbitrary absent Turn.
+        let operation = match request.owner {
+            SettlementOwner::External { .. } => "assign_external_specialist_task",
+            SettlementOwner::Managed { .. } => "assign_specialist_task",
+        };
+        let receipt_json: String = tx.query_row(
+            "SELECT receipt_json FROM delegation_operations WHERE workspace_ref=?1
+             AND scope_kind=?2 AND scope_ref=?3 AND operation_kind=?4 AND state='accepted'
+             AND json_extract(accepted_subjects_json,'$.task_ref')=?5",
+            rusqlite::params![request.view.workspace_id, request.owner.scope_kind(), request.owner.scope_ref().to_string(), operation, request.task_ref.to_string()],
+            |r| r.get(0),
+        ).map_err(|_| reconciliation_error("task_acceptance_unavailable"))?;
+        let receipt: crate::delegation_identity::OperationReceipt = serde_json::from_str(&receipt_json)
+            .map_err(|_| reconciliation_error("task_acceptance_unavailable"))?;
+        receipt.validate()?;
+        if receipt.accepted_subjects.task_ref.as_deref() != Some(request.task_ref.to_string().as_str())
+            || receipt.accepted_subjects.member_ref.as_deref() != Some(request.member_ref.to_string().as_str())
+            || receipt.namespace.workspace_ref != request.view.workspace_id
+            || receipt.namespace.scope_ref.as_deref() != Some(request.owner.scope_ref().to_string().as_str())
+            || receipt.namespace.scope_kind.as_deref() != Some(request.owner.scope_kind())
+            || receipt.namespace.operation_kind != operation {
+            return Err(reconciliation_error("task_acceptance_unavailable"));
+        }
+        let key = match request.owner {
+            SettlementOwner::External { .. } => receipt.namespace.idempotency_key,
+            SettlementOwner::Managed { .. } => format!("successor-task:{}", request.task_ref),
+        };
+        let (_, ledger) = observe_run_ledger(request.state_root, request.member_ref, true)?;
+        for record in ledger.records() {
+            let value = audit_value(record)?;
+            if value["idempotency_key"].as_str() == Some(&key)
+                || value["mutation_envelope"]["idempotency_key"].as_str() == Some(&key) {
+                return Err(reconciliation_error("task_dispatch_not_excluded"));
+            }
+        }
+        let clean: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM caller_scope_assignments
+              WHERE assignment_id=?1 AND workspace_ref=?2 AND aggregate_scope_kind=?3
+                AND aggregate_scope_ref=?4 AND member_ref=?5 AND accounting_state='counted_unresolved')
+             AND NOT EXISTS(SELECT 1 FROM dispatch_indexes WHERE task_id=?1)
+             AND NOT EXISTS(SELECT 1 FROM result_content_refs WHERE owner_id=?1 AND owner_kind<>'accepted_task')",
+            rusqlite::params![request.task_ref.to_string(), request.view.workspace_id, request.owner.scope_kind(), request.owner.scope_ref().to_string(), request.member_ref.to_string()],
+            |r| r.get(0),
+        ).map_err(|_| reconciliation_error("task_dispatch_not_excluded"))?;
+        if !clean { return Err(reconciliation_error("task_dispatch_not_excluded")); }
+        let now = unix_time_ms_semantic()?;
+        match request.owner {
+            SettlementOwner::External { engagement_id } => crate::engagement::cancel_successor_before_dispatch(tx, engagement_id, request.member_ref, request.task_ref, now)?,
+            SettlementOwner::Managed { session_id } => crate::orchestration::cancel_successor_before_dispatch(tx, session_id, request.member_ref, request.task_ref, now)?,
+        }
+        crate::caller_scope::proved_nondispatch(tx, request.task_ref)?;
+        crate::engagement::advance_member_workload_revision(tx, &request.view.workspace_id,
+            request.owner.scope_kind(), &request.owner.scope_ref().to_string(), &request.member_ref.to_string())?;
+        Ok(())
+    })
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2405,13 +2764,14 @@ fn coordinate_session_close_inner(
                 .as_ref()
                 .is_some_and(|holder| holder.run_id == run_id)
             {
-                release_writer_authorized(
+                release_writer_authorized_with_lifecycle(
                     &view,
                     state_root,
                     run_id,
                     carrier,
                     None,
                     Some(current.stamp.run_state_revision),
+                    Some(lifecycle),
                 )?;
                 current = RunSources::load(state_root, run_id, 0)?;
             }
@@ -2906,7 +3266,7 @@ fn validate_caller_member_start<I: CallerStartGeneration>(
         ));
     }
     member.global_profile_binding.validate_for_recovery()?;
-    crate::instructions::require_discovery_control(member.global_profile_binding)
+    crate::instructions::require_accepted_discovery_control(member.global_profile_binding)
 }
 
 fn start_caller_run_generation<I: CallerStartGeneration>(
@@ -2968,10 +3328,16 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
                 Err(error) => return Err(error),
             }
             let binding = &reservation.accepted_intent.global_profile_binding;
-            if !binding.caller_workspace_supported() {
+            if !binding.accepted_caller_workspace_supported() {
                 return Err(workspace_startup_unsupported());
             }
-            let state = crate::profile::ensure_global_server(binding)?;
+            verify_caller_execution_executable(
+                &state_root,
+                reservation.run_id,
+                binding,
+                reservation.accepted_intent.request.purpose.kind,
+            )?;
+            let state = crate::profile::ensure_retained_global_server(binding)?;
             (reservation, state)
         }
         None => {
@@ -2991,10 +3357,16 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
             };
             let binding = match &member {
                 Some(member) => member.global_profile_binding.clone(),
-                None => ResolvedGlobalProfile::resolve(&home, &request.profile)?.prepare(&home)?,
+                None => ResolvedGlobalProfile::resolve(&home, &request.profile)?
+                    .prepare_qualified(&home)?,
             };
-            if !binding.caller_workspace_supported() {
+            if !binding.caller_workspace_supported()
+                && !(member.is_some() && binding.accepted_caller_workspace_supported())
+            {
                 return Err(workspace_startup_unsupported());
+            }
+            if member.is_none() {
+                binding.record_qualified(&home)?;
             }
             let orchestration = request
                 .specialist_policy
@@ -3025,7 +3397,19 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
             }
             // Shared Profile readiness is pre-allocation evidence, never this
             // caller's Dedicated Server, Thread or task dispatch.
-            let state = crate::profile::ensure_global_server(&binding)?;
+            if let Some(member) = &member {
+                verify_caller_execution_executable(
+                    &state_root,
+                    member.run_id,
+                    &binding,
+                    request.purpose.kind,
+                )?;
+            }
+            let state = if member.is_some() {
+                crate::profile::ensure_retained_global_server(&binding)?
+            } else {
+                crate::profile::ensure_qualified_global_server(&binding)?
+            };
             let (model, effort) = validate_caller_start_catalog(&request, &state)?;
             let profile_snapshot = run_profile_snapshot(&binding.launch_snapshot)?;
             let capability_snapshot = run_capability_snapshot(&profile_snapshot, &state);
@@ -3876,6 +4260,7 @@ fn call_admitted_caller_policy_proof(
         Some(carrier.raw_fd()),
         |expected| {
             let request = ControlRequestV1::VerifyCallerPolicy {
+                engagement_id: None,
                 expected,
                 caller: None,
                 operation_id,
@@ -3914,6 +4299,7 @@ fn recover_caller_writer_transaction(
     let writer =
         crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
     let record = writer.load()?;
+    record.require_no_generation_release(run_id)?;
     if record.state != crate::writer::WriterAuthorityState::BlockedUnknown
         || record
             .holder
@@ -3974,6 +4360,7 @@ fn retire_caller_reader_guard(
     let writer =
         crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
     let record = writer.load()?;
+    record.require_no_generation_release(run_id)?;
     if !record
         .holder
         .as_ref()
@@ -5000,6 +5387,32 @@ fn history_reconciliation_with_lifecycle(
 ) -> Result<Value, MachineError> {
     let member_manifest =
         RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
+    let writer =
+        crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid())
+            .load()?;
+    let pending = writer.pending_generation_release(run_id).is_some()
+        || writer.acquire_retirement_recovery(run_id).is_some();
+    if pending {
+        let external = member_manifest.aggregate_binding.as_ref().and_then(|b| {
+            (b.aggregate_kind == AggregateKind::ExternalSpecialistEngagement)
+                .then_some(b.aggregate_id)
+        });
+        release_writer_authorized_with_lifecycle(
+            view,
+            state_root,
+            run_id,
+            carrier,
+            external,
+            expected_state_revision,
+            lifecycle,
+        )?;
+        return run_object(
+            state_root,
+            run_id,
+            observed_control_socket_epoch(state_root, run_id),
+            projection_identity_verdict(state_root, run_id),
+        );
+    }
     let successor = member_manifest.schema_version == 4
         && member_manifest
             .aggregate_binding
@@ -5326,11 +5739,11 @@ fn reconcile_successor_history_only(
             thread_id: executions.first().map(|e| e.thread_id.clone()),
             turn_id: executions.first().map(|e| e.turn_id.clone()),
         };
-        let mut connection =
-            JsonRpcConnection::connect(Path::new(&server.socket_path), Duration::from_secs(120))
-                .map_err(|error| {
-                    crate::turn::TurnError::from(error).into_machine_error(&context)
-                })?;
+        let mut connection = JsonRpcConnection::connect_history(
+            Path::new(&server.socket_path),
+            Duration::from_secs(120),
+        )
+        .map_err(|error| crate::turn::TurnError::from(error).into_machine_error(&context))?;
         let initialized=connection.request("initialize",json!({"clientInfo":{"name":"dolgorae","title":"Dolgorae","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true,"optOutNotificationMethods":[]}})).map_err(|error|crate::turn::TurnError::from(error).into_machine_error(&context))?;
         if initialized.get("codexHome").and_then(Value::as_str)
             != Some(&binding.launch_snapshot.canonical_codex_home)
@@ -5352,9 +5765,9 @@ fn reconcile_successor_history_only(
             let mut sink =
                 crate::turn::ThreadTurnSink::for_recovery(&execution.thread_id, &execution.turn_id);
             connection
-                .request_solicited(
-                    "thread/read",
+                .request_history(
                     json!({"threadId":execution.thread_id,"includeTurns":true}),
+                    Duration::from_secs(120),
                     &mut sink,
                 )
                 .map_err(|error| {
@@ -5663,7 +6076,7 @@ impl<'a> ProductionOrchestrationEffects<'a> {
             .map(|_| ())
             .map_err(|error| classify_brokered_start_failure(self.state_root, plan.run_id, error));
         }
-        let prepared = prepare_external_specialist(
+        let prepared = prepare_legacy_external_specialist(
             Some(&workspace),
             plan.role.role_ref(),
             ExternalAgentConfigurationInput {
@@ -6525,7 +6938,11 @@ fn start_run_typed(
         ));
     }
     let state = select_start_server(reviewer, || {
-        crate::profile::ensure_global_server(&global_profile_binding)
+        if external.is_some() || brokered.is_some() {
+            crate::profile::ensure_retained_global_server(&global_profile_binding)
+        } else {
+            crate::profile::ensure_global_server(&global_profile_binding)
+        }
     })?;
     let model = model.unwrap_or_else(|| state.default_model.clone());
     if !state.models.contains(&model) {
@@ -6984,6 +7401,7 @@ fn start_run_typed(
         }
 
         let session = WorkerSessionBootstrap {
+            generation_reader: None,
             app_server_socket: PathBuf::from(&state.socket_path),
             canonical_codex_home: state.snapshot.canonical_codex_home.clone(),
             server_key: state.snapshot.server_key.clone(),
@@ -7484,10 +7902,21 @@ pub(crate) fn successor_close_run(
     carrier: &CredentialCarrier,
     interrupt: bool,
 ) -> Result<SemanticResult, MachineError> {
+    successor_close_run_with_lifecycle(view, state_root, run_id, carrier, interrupt, None)
+}
+
+fn successor_close_run_with_lifecycle(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    interrupt: bool,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
+) -> Result<SemanticResult, MachineError> {
     // The close is fenced exactly as the retiring path fences it; a missing
     // caller-supplied revision resolves to the durable head inside the inner
     // control path.
-    let (result, _) = run_control_admitted_inner(
+    let (result, _) = run_control_admitted_with_lifecycle(
         view,
         state_root,
         run_id,
@@ -7496,6 +7925,7 @@ pub(crate) fn successor_close_run(
         Prepared::Close { interrupt },
         false,
         None,
+        lifecycle,
     )?;
     Ok(result)
 }
@@ -7507,9 +7937,34 @@ fn run_control_admitted_inner(
     run_id: Uuid,
     verb: RunVerb,
     carrier: Option<&CredentialCarrier>,
+    prepared: Prepared,
+    write: bool,
+    expected_state_revision: Option<u64>,
+) -> Result<(SemanticResult, Option<ControlResponseV1>), MachineError> {
+    run_control_admitted_with_lifecycle(
+        view,
+        state_root,
+        run_id,
+        verb,
+        carrier,
+        prepared,
+        write,
+        expected_state_revision,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_control_admitted_with_lifecycle(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    verb: RunVerb,
+    carrier: Option<&CredentialCarrier>,
     mut prepared: Prepared,
     write: bool,
     expected_state_revision: Option<u64>,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
 ) -> Result<(SemanticResult, Option<ControlResponseV1>), MachineError> {
     // Authority is checked against the Run's own published binding before the
     // control socket is touched, so an unauthorised caller never occupies a
@@ -7543,7 +7998,7 @@ fn run_control_admitted_inner(
     };
     if verb == RunVerb::AcquireWrite {
         let carrier = carrier.as_ref().expect("mutating verb has a carrier");
-        acquire_writer_authorized(
+        acquire_writer_authorized_with_lifecycle(
             view,
             state_root,
             run_id,
@@ -7552,6 +8007,7 @@ fn run_control_admitted_inner(
             None,
             expected_state_revision,
             None,
+            lifecycle,
         )?;
         return run_object(
             state_root,
@@ -7563,13 +8019,14 @@ fn run_control_admitted_inner(
     }
     if verb == RunVerb::ReleaseWrite {
         let carrier = carrier.as_ref().expect("mutating verb has a carrier");
-        release_writer_authorized(
+        release_writer_authorized_with_lifecycle(
             view,
             state_root,
             run_id,
             carrier,
             None,
             expected_state_revision,
+            lifecycle,
         )?;
         return run_object(
             state_root,
@@ -7672,13 +8129,14 @@ fn run_control_admitted_inner(
                     verb.operation_name(),
                 ));
             }
-            expected_state_revision = Some(release_writer_authorized(
+            expected_state_revision = Some(release_writer_authorized_with_lifecycle(
                 view,
                 state_root,
                 run_id,
                 carrier,
                 None,
                 expected_state_revision,
+                lifecycle,
             )?);
         }
     }
@@ -7721,7 +8179,7 @@ fn run_control_admitted_inner(
         None
     };
     if write && matches!(verb, RunVerb::Send | RunVerb::Submit) {
-        let acquired = acquire_writer_authorized(
+        let acquired = acquire_writer_authorized_with_lifecycle(
             view,
             state_root,
             run_id,
@@ -7730,6 +8188,7 @@ fn run_control_admitted_inner(
             None,
             None,
             admission_id,
+            lifecycle,
         );
         if let Err(error) = acquired {
             if error.code == "WRITER_BUSY" {
@@ -7894,7 +8353,8 @@ fn stop_lifecycle_generation(
         .checked_add(Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
     loop {
-        let _ = DarwinSystem.reap_child_nonblocking(record.identity.pid);
+        crate::worker::observe_owned_worker_child(&record.identity)
+            .map_err(|error| error.machine_error(run_id, runtime_record))?;
         if crate::worker::prove_worker_generation_absent(&record).is_ok() {
             let lock = RunStartupLock::open(state_root, run_id)?;
             lock.acquire()?;
@@ -7965,6 +8425,7 @@ fn retire_absent_generation_writer(
         record.identity.uid,
     );
     let current = writers.load()?;
+    current.require_no_generation_release(run_id)?;
     if !retirable(current.state)
         || current
             .holder
@@ -9069,12 +9530,13 @@ fn settle_admitted_release(
                     member,
                 )?;
                 let broker = credential.controller_carrier()?;
-                successor_close_run(
+                successor_close_run_with_lifecycle(
                     input.view,
                     input.state_root,
                     member,
                     &broker,
                     input.allow_interrupt,
+                    Some(lease),
                 )
                 .map(|_| ())
             }
@@ -9101,12 +9563,14 @@ fn settle_admitted_release(
                         // ExternalClose reaches the worker directly. Prepare its
                         // verified Reader policy before that worker can seal,
                         // under this release's lease and external authority.
-                        release_external_writer(
+                        release_writer_authorized_with_lifecycle(
                             input.view,
                             input.state_root,
                             member,
-                            engagement_id,
                             carrier,
+                            Some(engagement_id),
+                            None,
+                            Some(lease),
                         )?;
                     }
                     external_close_control_request(input, carrier, engagement_id)
@@ -9878,6 +10342,14 @@ fn offline_lifecycle_transition(
     {
         return Ok(None);
     }
+    let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
+    crate::writer::WriterStore::new(
+        state_root,
+        &manifest.workspace_id,
+        DarwinSystem.current_uid(),
+    )
+    .load()?
+    .require_no_generation_release(run_id)?;
     let lock = RunStartupLock::open(state_root, run_id)?;
     lock.acquire()?;
     let result = (|| {
@@ -10033,6 +10505,31 @@ fn acquire_writer_authorized(
     expected_state_revision: Option<u64>,
     admission_id: Option<Uuid>,
 ) -> Result<(), MachineError> {
+    acquire_writer_authorized_with_lifecycle(
+        view,
+        state_root,
+        run_id,
+        carrier,
+        allow_threadless,
+        external_engagement,
+        expected_state_revision,
+        admission_id,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn acquire_writer_authorized_with_lifecycle(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    allow_threadless: bool,
+    external_engagement: Option<Uuid>,
+    expected_state_revision: Option<u64>,
+    admission_id: Option<Uuid>,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
+) -> Result<(), MachineError> {
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let manifest = store.load_manifest(run_id)?;
@@ -10072,6 +10569,59 @@ fn acquire_writer_authorized(
         authorize_controller(run_id, "run.acquire_write", &binding, carrier)?;
     }
     let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid);
+    let current = writer.load()?;
+    current.require_no_generation_release(run_id)?;
+    let retire_reader = current.state == crate::writer::WriterAuthorityState::None
+        && projection.thread_id.is_some()
+        && requires_caller_policy_proof(&manifest)
+        && manifest
+            .global_profile_binding
+            .as_ref()
+            .is_some_and(|binding| binding.caller_workspace_supported());
+    if retire_reader && manifest.purpose.kind == PurposeKind::Review {
+        return Err(write_forbidden(state_root, run_id));
+    }
+    let registration = if retire_reader {
+        let authority = crate::worker::RunControllerAuthority::new(state_root.to_owned(), run_id);
+        if let Some(external) = external_engagement {
+            authority.authorize_external(external, "engagement.acquire_write", carrier)?;
+        } else {
+            authority.authorize("run.acquire_write", carrier)?;
+        }
+        let (_, policy) = observe_caller_policy(state_root, run_id)?;
+        if policy.access != Access::Read
+            || policy.verification != crate::domain::PolicyVerification::Verified
+            || policy.writer_generation.is_some()
+        {
+            return Err(internal(
+                "acquire retirement requires verified original Reader policy",
+            ));
+        }
+        Some(
+            crate::worker::read_thread_registration(
+                state_root,
+                &manifest,
+                projection.thread_id.as_deref().expect("checked Thread"),
+            )
+            .map_err(|error| error.machine_error(run_id, state_root))?,
+        )
+    } else {
+        None
+    };
+    let owned_lifecycle = if retire_reader && lifecycle.is_none() {
+        Some(
+            crate::worker::RunLifecycleLease::acquire(
+                state_root,
+                &view.workspace_id,
+                run_id,
+                projection.run_generation.max(1),
+            )
+            .map_err(|error| error.machine_error(run_id, state_root))?,
+        )
+    } else {
+        None
+    };
+    let lifecycle = lifecycle.or(owned_lifecycle.as_ref());
     let transaction_id = Uuid::now_v7();
     let holder = crate::writer::WriterStore::holder(
         run_id,
@@ -10095,7 +10645,19 @@ fn acquire_writer_authorized(
                 expected_state_revision,
             )?;
         }
-        record.prepare_acquire(run_id, holder.clone(), transaction_id)
+        let prepared = record.prepare_acquire(run_id, holder.clone(), transaction_id)?;
+        if let Some(registration) = registration.as_ref() {
+            prepare_generation_retirement_owner(
+                state_root,
+                &manifest,
+                &binding,
+                record,
+                transaction_id,
+                crate::writer::GenerationRetirementPurpose::Acquire,
+                registration,
+            )?;
+        }
+        Ok(prepared)
     })?;
     if replayed {
         if matches!(manifest.schema_version, 3 | 4) {
@@ -10121,6 +10683,17 @@ fn acquire_writer_authorized(
         }
         return Ok(());
     }
+    if retire_reader {
+        resume_generation_release(
+            view,
+            state_root,
+            run_id,
+            carrier,
+            external_engagement,
+            lifecycle.ok_or_else(|| internal("acquire retirement lifecycle lease missing"))?,
+            true,
+        )?;
+    }
     let runtime_record =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
             .map_err(|error| error.machine_error(run_id, state_root))?;
@@ -10128,7 +10701,11 @@ fn acquire_writer_authorized(
         && let Err(error) = ensure_run_worker(view, state_root, run_id)
     {
         writer.transact(|record| {
-            record.cancel_acquire(transaction_id);
+            if retire_reader {
+                record.block_unknown(transaction_id);
+            } else {
+                record.cancel_acquire(transaction_id);
+            }
             Ok(())
         })?;
         return Err(error);
@@ -10160,14 +10737,30 @@ fn acquire_writer_authorized(
         })?;
         return Err(error);
     }
-    if prove_writer_pre_effect_absence(
-        &writer,
-        transaction_id,
-        WriterPreEffectTransition::Acquire,
-        || crate::worker::prove_worker_workload_absent_with_diagnostic(state_root, &worker_record),
-    )?
-    .is_err()
-    {
+    let workload = if retire_reader {
+        let proof =
+            crate::worker::prove_worker_workload_absent_with_diagnostic(state_root, &worker_record);
+        if proof.is_err() {
+            writer.transact(|record| {
+                record.block_unknown(transaction_id);
+                Ok(())
+            })?;
+        }
+        proof
+    } else {
+        prove_writer_pre_effect_absence(
+            &writer,
+            transaction_id,
+            WriterPreEffectTransition::Acquire,
+            || {
+                crate::worker::prove_worker_workload_absent_with_diagnostic(
+                    state_root,
+                    &worker_record,
+                )
+            },
+        )?
+    };
+    if workload.is_err() {
         return Err(background_execution_unverified(
             run_id,
             &projection,
@@ -10334,6 +10927,96 @@ pub(crate) fn release_external_writer(
         .map(|_| ())
 }
 
+fn prepare_generation_retirement_owner(
+    state_root: &Path,
+    manifest: &RunManifest,
+    binding: &crate::run::ControllerBinding,
+    record: &mut crate::writer::WriterRecord,
+    transaction_id: Uuid,
+    purpose: crate::writer::GenerationRetirementPurpose,
+    registration: &crate::worker::ThreadRegistration,
+) -> Result<(), MachineError> {
+    let run_id = manifest.run_id;
+    let uid = DarwinSystem.current_uid();
+    let (source, records) = observe_run_ledger(state_root, manifest.run_id, true)?;
+    if !matches!(source.lifecycle, RunLifecycle::Idle | RunLifecycle::Paused)
+        || source.active_turn_id.is_some()
+        || !source.pending_requests.is_empty()
+        || !crate::turn::submit_audit_history_is_quiescent(records.records()).map_err(|e| {
+            e.into_machine_error(&crate::turn::TurnFailureContext {
+                run_id,
+                profile: manifest.profile.profile_name.clone(),
+                thread_id: source.thread_id.clone(),
+                turn_id: None,
+            })
+        })?
+    {
+        return Err(internal("generation release has unresolved source work"));
+    }
+    let path = crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+        .map_err(|e| e.machine_error(run_id, state_root))?;
+    let runtime = crate::worker::read_runtime_record(&path, uid)
+        .map_err(|e| e.machine_error(run_id, &path))?;
+    if purpose == crate::writer::GenerationRetirementPurpose::Acquire {
+        record.bind_reserved_generation(
+            transaction_id,
+            runtime.identity.run_generation,
+            runtime
+                .app_server_epoch
+                .ok_or_else(|| internal("Reader server epoch missing"))?,
+        )?;
+    }
+    let mut source_holder = record
+        .holder
+        .clone()
+        .ok_or_else(|| internal("generation release holder missing"))?;
+    source_holder.lifecycle = source.lifecycle;
+    source_holder.active_turn_id = source.active_turn_id.clone();
+    source_holder.pending_interaction_count = source.pending_requests.len();
+    source_holder.last_event_cursor = source.last_event_cursor.clone();
+    record.holder = Some(source_holder.clone());
+    if source_holder.run_generation != runtime.identity.run_generation
+        || source_holder.worker_generation != runtime.identity.run_generation
+        || source_holder.profile_server_epoch != runtime.app_server_epoch.unwrap_or(0)
+        || source_holder.controller_id != binding.identity.controller_id
+        || source_holder.controller_generation != binding.identity.generation
+        || source_holder.thread_id != source.thread_id
+        || source.run_generation != runtime.identity.run_generation
+    {
+        return Err(internal("generation release source binding changed"));
+    }
+    let registration_sha256 = crate::writer::retain_release_evidence(
+        state_root,
+        run_id,
+        &serde_json::to_value(registration).map_err(|_| internal("registration encoding"))?,
+    )?;
+    let source_runtime_sha256 = crate::writer::retain_release_evidence(
+        state_root,
+        run_id,
+        &serde_json::to_value(runtime).map_err(|_| internal("runtime encoding"))?,
+    )?;
+    record.prepare_generation_release(crate::writer::GenerationRelease {
+        purpose,
+        transaction_id,
+        source: source_holder,
+        writer_generation: record.writer_generation,
+        authority_revision: record.authority_revision,
+        source_revision: source.ledger_head.sequence,
+        source_ledger_sha256: crate::jcs::sha256_hex(
+            &serde_json::to_vec(&source.ledger_head).map_err(|_| internal("head encoding"))?,
+        ),
+        source_runtime_sha256,
+        registration_sha256,
+        scope_sha256: None,
+        absence_sha256: None,
+        reader_proof_sha256: None,
+        retired_reader_sha256: None,
+        phase: crate::writer::GenerationReleasePhase::Prepared,
+        successor: None,
+    })?;
+    Ok(())
+}
+
 fn release_writer_authorized(
     view: &WorkspaceView,
     state_root: &Path,
@@ -10341,6 +11024,27 @@ fn release_writer_authorized(
     carrier: &CredentialCarrier,
     external_engagement: Option<Uuid>,
     expected_state_revision: Option<u64>,
+) -> Result<u64, MachineError> {
+    release_writer_authorized_with_lifecycle(
+        view,
+        state_root,
+        run_id,
+        carrier,
+        external_engagement,
+        expected_state_revision,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn release_writer_authorized_with_lifecycle(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    external_engagement: Option<Uuid>,
+    expected_state_revision: Option<u64>,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
 ) -> Result<u64, MachineError> {
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
@@ -10366,12 +11070,81 @@ fn release_writer_authorized(
             "run.release_write",
         ));
     }
-    let binding = store.load_controller_binding(run_id)?;
+    let binding = load_reconciled_controller_binding(state_root, run_id)?;
     if external_engagement.is_none() {
         authorize_controller(run_id, "run.release_write", &binding, carrier)?;
     }
+    let qualified = requires_caller_policy_proof(&manifest)
+        && manifest.execution_lane == ExecutionLane::Dedicated
+        && manifest
+            .global_profile_binding
+            .as_ref()
+            .is_some_and(|binding| binding.caller_workspace_supported())
+        && !externally_closed;
+    let owned_lifecycle = if qualified && lifecycle.is_none() {
+        Some(
+            crate::worker::RunLifecycleLease::acquire(
+                state_root,
+                &view.workspace_id,
+                run_id,
+                projection.run_generation.max(1),
+            )
+            .map_err(|e| e.machine_error(run_id, state_root))?,
+        )
+    } else {
+        None
+    };
+    let lifecycle = lifecycle.or(owned_lifecycle.as_ref());
+    if let Some(lifecycle) = lifecycle {
+        lifecycle
+            .verify_scope(state_root, &view.workspace_id, run_id)
+            .map_err(|e| e.machine_error(run_id, state_root))?;
+    }
+    let authority = crate::worker::RunControllerAuthority::new(state_root.to_owned(), run_id);
     let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid);
-    let transaction_id = Uuid::now_v7();
+    let current = writer.load()?;
+    if let Some(engagement_id) = external_engagement
+        && (qualified || current.pending_generation_release(run_id).is_some())
+    {
+        authority.authorize_external(engagement_id, "engagement.release_write", carrier)?;
+    }
+
+    if current.pending_generation_release(run_id).is_some() {
+        return resume_generation_release(
+            view,
+            state_root,
+            run_id,
+            carrier,
+            external_engagement,
+            lifecycle.ok_or_else(|| internal("generation release lifecycle lease missing"))?,
+            false,
+        );
+    }
+    if current.state == crate::writer::WriterAuthorityState::None
+        && current.generation_release.as_ref().is_some_and(|r| {
+            r.source.run_id == run_id && r.phase == crate::writer::GenerationReleasePhase::Committed
+        })
+    {
+        return durable_head(state_root, run_id);
+    }
+    // The original actual registration is required before PREPARE changes authority.
+    let registration = if qualified && current.state != crate::writer::WriterAuthorityState::None {
+        let thread = projection
+            .thread_id
+            .as_deref()
+            .ok_or_else(|| internal("generation release requires original native thread"))?;
+        Some(
+            crate::worker::read_thread_registration(state_root, &manifest, thread)
+                .map_err(|e| e.machine_error(run_id, state_root))?,
+        )
+    } else {
+        None
+    };
+    let recover_acquire = current.acquire_retirement_recovery(run_id).cloned();
+    let transaction_id = recover_acquire
+        .as_ref()
+        .map_or_else(Uuid::now_v7, |owner| owner.transaction_id);
+
     let (_, generation) = writer.transact(|record| {
         if external_engagement.is_none() {
             require_mutation_revision(
@@ -10382,7 +11155,28 @@ fn release_writer_authorized(
                 expected_state_revision,
             )?;
         }
-        record.prepare_release(run_id, transaction_id)
+        let generation = if recover_acquire.is_some() {
+            record.prepare_acquire_retirement_recovery(run_id)?;
+            Some(record.writer_generation)
+        } else {
+            record.prepare_release(run_id, transaction_id)?
+        };
+        if let Some(registration) = registration.as_ref() {
+            prepare_generation_retirement_owner(
+                state_root,
+                &manifest,
+                &binding,
+                record,
+                transaction_id,
+                if recover_acquire.is_some() {
+                    crate::writer::GenerationRetirementPurpose::Acquire
+                } else {
+                    crate::writer::GenerationRetirementPurpose::Release
+                },
+                registration,
+            )?;
+        }
+        Ok(generation)
     })?;
     let Some(generation) = generation else {
         if matches!(manifest.schema_version, 3 | 4) {
@@ -10403,6 +11197,17 @@ fn release_writer_authorized(
         }
         return durable_head(state_root, run_id);
     };
+    if registration.is_some() {
+        return resume_generation_release(
+            view,
+            state_root,
+            run_id,
+            carrier,
+            external_engagement,
+            lifecycle.expect("qualified release owns lifecycle"),
+            false,
+        );
+    }
     let runtime_record =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
             .map_err(|error| error.machine_error(run_id, state_root))?;
@@ -10540,6 +11345,788 @@ fn release_writer_authorized(
     committed.map(|(_, revision)| revision)
 }
 
+/// Resume the one durable release owner; no generic Worker replacement is used.
+#[cfg(target_os = "macos")]
+fn resume_generation_release(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    external: Option<Uuid>,
+    lifecycle: &crate::worker::RunLifecycleLease,
+    retain_acquire: bool,
+) -> Result<u64, MachineError> {
+    let mut diagnostic = json!({"site":"lifecycle_scope"});
+    let result = resume_generation_release_inner(
+        view,
+        state_root,
+        run_id,
+        carrier,
+        external,
+        lifecycle,
+        retain_acquire,
+        &mut diagnostic,
+    );
+    if let Err(error) = &result {
+        let writer = crate::writer::WriterStore::new(
+            state_root,
+            &view.workspace_id,
+            DarwinSystem.current_uid(),
+        );
+        writer.transact(|record| {
+            if let Some(release) = record.pending_generation_release(run_id).cloned()
+                && release.phase != crate::writer::GenerationReleasePhase::Prepared
+            {
+                if release.phase == crate::writer::GenerationReleasePhase::StopStarted {
+                    let log = run_root(state_root, run_id).join(format!(
+                        "dedicated-server-{}.log", release.source.run_generation
+                    ));
+                    crate::worker::append_private_diagnostic(&log, &json!({
+                        "stage": "coordinator_stop_started",
+                        "transaction_id": release.transaction_id,
+                        "error_code": error.code,
+                        "failure": diagnostic,
+                        "transport_stage": error.details.get("stage").and_then(Value::as_str)
+                            .map(|v| v.chars().take(64).collect::<String>()),
+                        "path": error.details.get("path").and_then(Value::as_str)
+                            .map(|v| v.chars().take(4096).collect::<String>()),
+                        "reason": error.details.get("reason").and_then(Value::as_str)
+                            .map(|v| v.chars().take(512).collect::<String>()),
+                        "expected_device": error.details.pointer("/expected_identity/device").and_then(Value::as_u64),
+                        "expected_inode": error.details.pointer("/expected_identity/inode").and_then(Value::as_u64),
+                        "observed_device": error.details.pointer("/observed_identity/device").and_then(Value::as_u64),
+                        "observed_inode": error.details.pointer("/observed_identity/inode").and_then(Value::as_u64),
+                        "subject": error.details.pointer("/expected_identity/subject").and_then(Value::as_str)
+                            .map(|v| v.chars().take(64).collect::<String>()),
+                    }));
+                }
+                record.block_unknown(release.transaction_id);
+            }
+            Ok(())
+        })?;
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn resume_generation_release_inner(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    external: Option<Uuid>,
+    lifecycle: &crate::worker::RunLifecycleLease,
+    retain_acquire: bool,
+    diagnostic: &mut Value,
+) -> Result<u64, MachineError> {
+    use crate::writer::GenerationReleasePhase as P;
+    let uid = DarwinSystem.current_uid();
+    lifecycle
+        .verify_scope(state_root, &view.workspace_id, run_id)
+        .map_err(|error| {
+            diagnostic["worker_error"] = format!("{error:?}").into();
+            error.machine_error(run_id, state_root)
+        })?;
+    let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid);
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    *diagnostic = json!({"site":"manifest_load"});
+    let manifest = store.load_manifest(run_id)?;
+    *diagnostic = json!({"site":"binding_validation"});
+    let binding = manifest
+        .global_profile_binding
+        .as_ref()
+        .ok_or_else(|| internal("release binding missing"))?;
+    if !binding.caller_workspace_supported()
+        || manifest.execution_lane != ExecutionLane::Dedicated
+        || !requires_caller_policy_proof(&manifest)
+    {
+        return Err(workspace_startup_unsupported());
+    }
+    let authorize = || -> Result<(), MachineError> {
+        let authority = crate::worker::RunControllerAuthority::new(state_root.to_owned(), run_id);
+        if let Some(id) = external {
+            authority.authorize_external(
+                id,
+                if retain_acquire {
+                    "engagement.acquire_write"
+                } else {
+                    "engagement.release_write"
+                },
+                carrier,
+            )
+        } else {
+            authority.authorize(
+                if retain_acquire {
+                    "run.acquire_write"
+                } else {
+                    "run.release_write"
+                },
+                carrier,
+            )
+        }
+    };
+    *diagnostic = json!({"site":"runtime_record_path"});
+    let path = crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+        .map_err(|error| {
+            diagnostic["worker_error"] = format!("{error:?}").into();
+            error.machine_error(run_id, state_root)
+        })?;
+    loop {
+        *diagnostic = json!({"site":"authorization"});
+        authorize()?;
+        *diagnostic = json!({"site":"writer_load"});
+        let current = writer.load()?;
+        let Some(release) = current.pending_generation_release(run_id).cloned() else {
+            if current
+                .generation_release
+                .as_ref()
+                .is_some_and(|r| r.source.run_id == run_id && r.phase == P::Committed)
+            {
+                return durable_head(state_root, run_id);
+            }
+            return Err(internal("original generation release owner missing"));
+        };
+        if retain_acquire && release.purpose != crate::writer::GenerationRetirementPurpose::Acquire
+        {
+            return Err(internal(
+                "acquire continuation requires its original retirement purpose",
+            ));
+        }
+        *diagnostic = json!({"site":"ledger_observation"});
+        let (projection, records) = observe_run_ledger(state_root, run_id, true)?;
+        if !matches!(
+            projection.lifecycle,
+            RunLifecycle::Idle | RunLifecycle::Paused
+        ) || projection.active_turn_id.is_some()
+            || !projection.pending_requests.is_empty()
+        {
+            return Err(run_state_conflict_error(
+                run_id,
+                projection.lifecycle,
+                "run.release_write",
+            ));
+        }
+        *diagnostic = json!({"site":"ledger_prefix"});
+        release.verify_ledger_prefix(records.records())?;
+        if projection.thread_id != release.source.thread_id {
+            return Err(internal("release original thread changed"));
+        }
+        *diagnostic = json!({"site":"executable_verification"});
+        verify_caller_execution_executable(state_root, run_id, binding, manifest.purpose.kind)?;
+        *diagnostic = json!({"site":"registration_read"});
+        let registration = crate::worker::read_thread_registration(
+            state_root,
+            &manifest,
+            release
+                .source
+                .thread_id
+                .as_deref()
+                .ok_or_else(|| internal("release thread missing"))?,
+        )
+        .map_err(|error| {
+            diagnostic["worker_error"] = format!("{error:?}").into();
+            error.machine_error(run_id, state_root)
+        })?;
+        *diagnostic = json!({"site":"registration_evidence_read"});
+        if crate::writer::read_release_evidence(state_root, run_id, &release.registration_sha256)?
+            != serde_json::to_value(&registration).map_err(|_| internal("registration encoding"))?
+        {
+            return Err(internal("release registration witness changed"));
+        }
+        if matches!(release.phase, P::ReaderStarting | P::ReaderVerified) {
+            let reservation = release
+                .successor
+                .as_ref()
+                .ok_or_else(|| internal("Reader reservation missing"))?;
+            if path.exists() && reservation.attempt_started {
+                let candidate = crate::worker::read_runtime_record(&path, uid)
+                    .map_err(|e| e.machine_error(run_id, &path))?;
+                if candidate.identity.run_generation != reservation.run_generation
+                    || candidate.app_server_epoch != Some(reservation.server_epoch)
+                {
+                    return Err(internal("reserved Reader locator changed"));
+                }
+                match crate::worker::classify_worker_identity(&candidate) {
+                    crate::worker::ProcessIdentityVerdict::Absent => {
+                        // Retire only this already reserved candidate; the
+                        // original Writer guard is deliberately untouched.
+                        crate::worker::stop_orphaned_dedicated_server(&candidate)
+                            .map_err(|e| e.machine_error(run_id, &path))?;
+                        crate::worker::prove_worker_generation_absent(&candidate)
+                            .map_err(|e| e.machine_error(run_id, &path))?;
+                        let startup = RunStartupLock::open(state_root, run_id)?;
+                        startup.acquire()?;
+                        startup
+                            .lock
+                            .require_unowned_worker_range()
+                            .map_err(|e| e.machine_error(run_id, &path))?;
+                        crate::worker::remove_verified_absent_runtime(&path, uid)
+                            .map_err(|e| e.machine_error(run_id, &path))?;
+                        startup.release();
+                    }
+                    crate::worker::ProcessIdentityVerdict::Match => {}
+                    _ => return Err(internal("reserved Reader identity is uncertain")),
+                }
+            }
+            if !path.exists() && reservation.attempt_started {
+                let startup = RunStartupLock::open(state_root, run_id)?;
+                startup.acquire()?;
+                let absent =
+                    prove_missing_locator_generation_absent_held(state_root, run_id, &startup)?;
+                if absent != reservation.run_generation {
+                    return Err(internal("reserved Reader absence is unresolved"));
+                }
+                let prior = startup
+                    .lock
+                    .read_owner(0)
+                    .map_err(|e| e.machine_error(run_id, &path))?
+                    .map_or(0, |o| o.identity.run_generation);
+                startup.release();
+                let evidence = crate::writer::retain_release_evidence(
+                    state_root,
+                    run_id,
+                    &json!({"schema_version":1,"owner":release,"absent_reader":reservation,"verified_absent_generation":absent}),
+                )?;
+                let home = state_root
+                    .parent()
+                    .and_then(Path::parent)
+                    .ok_or_else(|| internal("release home missing"))?;
+                let state = crate::profile::observe_history_server(home, binding)?;
+                let epoch = writer
+                    .allocate_server_epoch(state.server_epoch.max(reservation.server_epoch))?;
+                let generation = projection
+                    .run_generation
+                    .max(prior)
+                    .max(reservation.run_generation)
+                    .checked_add(1)
+                    .ok_or_else(|| internal("Reader generation exhausted"))?;
+                let replacement = crate::writer::ReaderReservation {
+                    run_generation: generation,
+                    server_epoch: epoch,
+                    control_socket_epoch: reservation
+                        .control_socket_epoch
+                        .checked_add(1)
+                        .ok_or_else(|| internal("Reader control epoch exhausted"))?,
+                    attempt_started: false,
+                };
+                writer.transact(|record| {
+                    record.replace_absent_reader(&release, replacement, evidence)
+                })?;
+                continue;
+            }
+        }
+        match release.phase {
+            P::Prepared => {
+                let reply = crate::worker::call_run_worker(
+                    state_root,
+                    run_id,
+                    uid,
+                    Some(carrier.raw_fd()),
+                    |expected| ControlRequestV1::PrepareGenerationRetirement {
+                        expected,
+                        caller: None,
+                        engagement_id: external,
+                        transaction_id: release.transaction_id,
+                        writer_revision: current.authority_revision,
+                        source_revision: release.source_revision,
+                    },
+                );
+                match reply {
+                    Ok(ControlResponseV1::GenerationRetirementPrepared { .. }) => {}
+                    Ok(ControlResponseV1::Failed {
+                        code,
+                        message,
+                        retryable,
+                        details,
+                    }) => return Err(MachineError::new(code, message, retryable, details)),
+                    Err(error) => return Err(error.machine_error(run_id, &path)),
+                    _ => return Err(internal("invalid generation retirement preparation reply")),
+                }
+            }
+            P::StopStarted => {
+                *diagnostic = json!({"site":"source_scope_read"});
+                let scope: crate::worker::GenerationScope =
+                    serde_json::from_value(crate::writer::read_release_evidence(
+                        state_root,
+                        run_id,
+                        release
+                            .scope_sha256
+                            .as_deref()
+                            .ok_or_else(|| internal("release scope missing"))?,
+                    )?)
+                    .map_err(|_| internal("invalid release scope"))?;
+                *diagnostic = json!({"site":"source_runtime_read"});
+                let original: crate::worker::WorkerRuntimeRecord =
+                    serde_json::from_value(crate::writer::read_release_evidence(
+                        state_root,
+                        run_id,
+                        &release.source_runtime_sha256,
+                    )?)
+                    .map_err(|_| internal("invalid original release runtime"))?;
+                if scope.runtime != original {
+                    return Err(internal("release scope crossed runtime generation"));
+                }
+                *diagnostic = json!({"site":"runtime_record_read"});
+                if path.exists() {
+                    let runtime =
+                        crate::worker::read_runtime_record(&path, uid).map_err(|error| {
+                            diagnostic["worker_error"] = format!("{error:?}").into();
+                            error.machine_error(run_id, &path)
+                        })?;
+                    if runtime.identity != original.identity {
+                        return Err(internal("release locator names another generation"));
+                    }
+                    if crate::worker::classify_worker_identity(&runtime)
+                        == crate::worker::ProcessIdentityVerdict::Match
+                    {
+                        // The drain authenticated and fsynced StopStarted. Frozen
+                        // shutdown addresses that exact Worker, never another lane.
+                        let _reply = crate::worker::call_run_worker(
+                            state_root,
+                            run_id,
+                            uid,
+                            None,
+                            |expected| ControlRequestV1::Shutdown { expected },
+                        );
+                    }
+                }
+                // Let the live Worker's bounded shutdown finish first. Only an
+                // absent Worker lends this same scope to coordinator recovery.
+                // The lifecycle lease serializes the original operation; no
+                // short Writer/startup lock spans the wait or process stop.
+                *diagnostic = json!({"site":"worker_shutdown_wait"});
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    // Only observe the launch parent's cached waiter state;
+                    // this caller never waits on a Child or a reconstructed PID.
+                    crate::worker::observe_owned_worker_child(&original.identity)
+                        .map_err(|error| error.machine_error(run_id, &path))?;
+                    let verdict = crate::worker::classify_worker_identity(&original);
+                    diagnostic["worker_verdict"] = verdict.as_str().into();
+                    match verdict {
+                        crate::worker::ProcessIdentityVerdict::Absent => break,
+                        crate::worker::ProcessIdentityVerdict::Match
+                            if std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(100))
+                        }
+                        _ => return Err(internal("old Worker shutdown remains unverified")),
+                    }
+                }
+                *diagnostic = json!({"site":"stop_owner_reload"});
+                let stopped = writer
+                    .load()?
+                    .pending_generation_release(run_id)
+                    .cloned()
+                    .ok_or_else(|| internal("release owner lost during shutdown"))?;
+                if stopped.transaction_id != release.transaction_id
+                    || stopped.phase != P::StopStarted
+                {
+                    return Err(internal("release stop owner changed"));
+                }
+                *diagnostic = json!({"site":"retained_scope_read"});
+                let scope: crate::worker::GenerationScope =
+                    serde_json::from_value(crate::writer::read_release_evidence(
+                        state_root,
+                        run_id,
+                        stopped
+                            .scope_sha256
+                            .as_deref()
+                            .ok_or_else(|| internal("release scope missing"))?,
+                    )?)
+                    .map_err(|_| internal("invalid retained stop scope"))?;
+                if scope.runtime != original {
+                    return Err(internal("retained stop scope crossed generation"));
+                }
+                *diagnostic = json!({"site":"scope_stop"});
+                let settled =
+                    crate::worker::stop_generation_scope(state_root, &writer, scope, false)
+                        .map_err(|error| {
+                            diagnostic["worker_error"] = format!("{error:?}").into();
+                            error.machine_error(run_id, &path)
+                        })?;
+                *diagnostic = json!({"site":"post_stop_authorization"});
+                authorize()?;
+                *diagnostic = json!({"site":"post_stop_owner_reload"});
+                let latest = writer
+                    .load()?
+                    .pending_generation_release(run_id)
+                    .cloned()
+                    .ok_or_else(|| internal("release owner lost during stop"))?;
+                *diagnostic = json!({"site":"absence_publication"});
+                let absence = crate::writer::retain_release_evidence(
+                    state_root,
+                    run_id,
+                    &json!({"schema_version":1,"transaction_id":release.transaction_id,"scope_sha256":latest.scope_sha256,"consecutive_empty_samples":5,"runtime":settled.runtime}),
+                )?;
+                *diagnostic = json!({"site":"locator_startup_lock_open"});
+                let startup = RunStartupLock::open(state_root, run_id)?;
+                *diagnostic = json!({"site":"locator_startup_lock_acquire"});
+                startup.acquire()?;
+                *diagnostic = json!({"site":"locator_worker_lock"});
+                startup
+                    .lock
+                    .require_unowned_worker_range()
+                    .map_err(|error| {
+                        diagnostic["worker_error"] = format!("{error:?}").into();
+                        error.machine_error(run_id, &path)
+                    })?;
+                *diagnostic = json!({"site":"locator_remove"});
+                if path.exists() {
+                    crate::worker::remove_verified_absent_runtime(&path, uid).map_err(|error| {
+                        diagnostic["worker_error"] = format!("{error:?}").into();
+                        error.machine_error(run_id, &path)
+                    })?;
+                }
+                let mut next = latest.clone();
+                next.phase = P::OldAbsent;
+                next.absence_sha256 = Some(absence);
+                startup.release();
+                *diagnostic = json!({"site":"old_absent_checkpoint"});
+                writer.transact(|record| record.advance_generation_release(&latest, next))?;
+            }
+            P::OldAbsent => {
+                // Observing the retained Profile does not start or retire it.
+                // The new Dedicated server is the one reserved Reader below;
+                // its authority-free thread/read precedes ID-only resume.
+                let home = state_root
+                    .parent()
+                    .and_then(Path::parent)
+                    .ok_or_else(|| internal("release home missing"))?;
+                let state = crate::profile::observe_history_server(home, binding)?;
+                let epoch = writer.allocate_server_epoch(
+                    state.server_epoch.max(release.source.profile_server_epoch),
+                )?;
+                let startup = RunStartupLock::open(state_root, run_id)?;
+                startup.acquire()?;
+                startup
+                    .lock
+                    .require_unowned_worker_range()
+                    .map_err(|e| e.machine_error(run_id, &path))?;
+                let prior = startup
+                    .lock
+                    .read_owner(0)
+                    .map_err(|e| e.machine_error(run_id, &path))?
+                    .map_or(0, |o| o.identity.run_generation);
+                let generation = projection
+                    .run_generation
+                    .max(release.source.run_generation)
+                    .max(prior)
+                    .checked_add(1)
+                    .ok_or_else(|| internal("release generation exhausted"))?;
+                let original: crate::worker::WorkerRuntimeRecord =
+                    serde_json::from_value(crate::writer::read_release_evidence(
+                        state_root,
+                        run_id,
+                        &release.source_runtime_sha256,
+                    )?)
+                    .map_err(|_| internal("invalid release runtime"))?;
+                let mut next = release.clone();
+                next.phase = P::ReaderStarting;
+                next.successor = Some(crate::writer::ReaderReservation {
+                    run_generation: generation,
+                    server_epoch: epoch,
+                    control_socket_epoch: observed_control_socket_epoch(state_root, run_id)
+                        .max(original.control_socket_epoch)
+                        .checked_add(1)
+                        .ok_or_else(|| internal("release control epoch exhausted"))?,
+                    attempt_started: false,
+                });
+                startup.release();
+                writer.transact(|record| record.advance_generation_release(&release, next))?;
+            }
+            P::ReaderStarting => {
+                let reservation = release
+                    .successor
+                    .as_ref()
+                    .ok_or_else(|| internal("Reader reservation missing"))?;
+                if !path.exists() {
+                    start_generation_reader(
+                        view,
+                        state_root,
+                        &manifest,
+                        &projection,
+                        &current,
+                        &release,
+                    )?;
+                }
+                authorize()?;
+                let proof = match crate::worker::call_run_worker(
+                    state_root,
+                    run_id,
+                    uid,
+                    Some(carrier.raw_fd()),
+                    |expected| ControlRequestV1::VerifyCallerPolicy {
+                        expected,
+                        caller: None,
+                        operation_id: release.transaction_id,
+                        engagement_id: external,
+                    },
+                )
+                .map_err(|e| e.machine_error(run_id, &path))?
+                {
+                    ControlResponseV1::CallerPolicyVerified { proof } => proof,
+                    ControlResponseV1::Failed {
+                        code,
+                        message,
+                        retryable,
+                        details,
+                    } => return Err(MachineError::new(code, message, retryable, details)),
+                    _ => return Err(internal("reserved Reader did not return policy proof")),
+                };
+                if proof.identity.run_generation != reservation.run_generation {
+                    return Err(internal("Reader proof crossed reserved generation"));
+                }
+                let proof_sha256 = crate::writer::retain_release_evidence(
+                    state_root,
+                    run_id,
+                    &serde_json::to_value(&proof).map_err(|_| internal("Reader proof encoding"))?,
+                )?;
+                // Both checks perform fresh observations before the short CAS.
+                verify_generation_release_absence(state_root, &release)?;
+                writer.transact(|record| {
+                    let expected = record
+                        .pending_generation_release(run_id)
+                        .cloned()
+                        .ok_or_else(|| internal("Reader owner lost"))?;
+                    if expected.transaction_id != release.transaction_id
+                        || expected
+                            .successor
+                            .as_ref()
+                            .map(|r| (r.run_generation, r.server_epoch))
+                            != Some((reservation.run_generation, reservation.server_epoch))
+                    {
+                        return Err(internal("Reader reservation changed"));
+                    }
+                    validate_caller_policy_current_authorized(
+                        state_root,
+                        run_id,
+                        carrier,
+                        release.transaction_id,
+                        Access::Read,
+                        Some(record),
+                        &proof,
+                        crate::worker::CallerPolicyPhase::GenerationRelease,
+                        external,
+                    )?;
+                    let mut next = expected.clone();
+                    next.phase = P::ReaderVerified;
+                    next.reader_proof_sha256 = Some(proof_sha256);
+                    record.advance_generation_release(&expected, next)
+                })?;
+            }
+            P::ReaderVerified => {
+                // A retained proof is explanatory evidence. Commit always asks
+                // the exact live Reader for fresh proof after a lost reply.
+                let proof = match crate::worker::call_run_worker(
+                    state_root,
+                    run_id,
+                    uid,
+                    Some(carrier.raw_fd()),
+                    |expected| ControlRequestV1::VerifyCallerPolicy {
+                        expected,
+                        caller: None,
+                        operation_id: release.transaction_id,
+                        engagement_id: external,
+                    },
+                )
+                .map_err(|e| e.machine_error(run_id, &path))?
+                {
+                    ControlResponseV1::CallerPolicyVerified { proof } => proof,
+                    ControlResponseV1::Failed {
+                        code,
+                        message,
+                        retryable,
+                        details,
+                    } => return Err(MachineError::new(code, message, retryable, details)),
+                    _ => return Err(internal("Reader commit proof unavailable")),
+                };
+                verify_generation_release_absence(state_root, &release)?;
+                writer.transact(|record| {
+                    authorize()?;
+                    validate_caller_policy_current_authorized(
+                        state_root,
+                        run_id,
+                        carrier,
+                        release.transaction_id,
+                        Access::Read,
+                        Some(record),
+                        &proof,
+                        crate::worker::CallerPolicyPhase::GenerationRelease,
+                        external,
+                    )?;
+                    record.commit_generation_retirement(&release, retain_acquire)
+                })?;
+                return durable_head(state_root, run_id);
+            }
+            P::Committed => unreachable!("pending owner excludes committed"),
+        }
+    }
+}
+
+fn verify_generation_release_absence(
+    state_root: &Path,
+    release: &crate::writer::GenerationRelease,
+) -> Result<(), MachineError> {
+    let scope: crate::worker::GenerationScope =
+        serde_json::from_value(crate::writer::read_release_evidence(
+            state_root,
+            release.source.run_id,
+            release
+                .scope_sha256
+                .as_deref()
+                .ok_or_else(|| internal("release scope missing"))?,
+        )?)
+        .map_err(|_| internal("invalid release scope"))?;
+    crate::worker::prove_retained_generation_absent(&scope)
+        .map_err(|e| e.machine_error(release.source.run_id, state_root))
+}
+
+#[cfg(target_os = "macos")]
+fn start_generation_reader(
+    view: &WorkspaceView,
+    state_root: &Path,
+    manifest: &RunManifest,
+    projection: &crate::projection::RunStateProjection,
+    current: &crate::writer::WriterRecord,
+    release: &crate::writer::GenerationRelease,
+) -> Result<(), MachineError> {
+    let run_id = manifest.run_id;
+    let reservation = release
+        .successor
+        .as_ref()
+        .ok_or_else(|| internal("Reader reservation missing"))?;
+    let binding = manifest
+        .global_profile_binding
+        .as_ref()
+        .ok_or_else(|| internal("release binding missing"))?;
+    let home = state_root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| internal("release home missing"))?;
+    let state = crate::profile::observe_history_server(home, binding)?;
+    let efforts = advertised_efforts(&state, &manifest.profile.profile_name, &manifest.model)?;
+    let startup = RunStartupLock::open(state_root, run_id)?;
+    startup.acquire()?;
+    startup
+        .lock
+        .require_unowned_worker_range()
+        .map_err(|e| e.machine_error(run_id, state_root))?;
+    let server = DedicatedServerBootstrap {
+        socket_path: crate::worker::dedicated_server_socket_path(
+            DarwinSystem.current_uid(),
+            run_id,
+            reservation.run_generation,
+        )
+        .map_err(|e| e.machine_error(run_id, state_root))?,
+        argv: crate::worker::caller_workspace_argv(manifest),
+        cwd: PathBuf::from(&manifest.profile.derived_launch_cwd),
+        environment: manifest.profile.sanitized_environment.clone(),
+        log_path: run_root(state_root, run_id).join(format!(
+            "dedicated-server-{}.log",
+            reservation.run_generation
+        )),
+        executable_device: manifest.profile.executable_identity.device,
+        executable_inode: manifest.profile.executable_identity.inode,
+        executable_sha256: manifest.profile.executable_identity.sha256.clone(),
+        server_epoch: reservation.server_epoch,
+    };
+    let cwd = view
+        .canonical_path
+        .to_path_buf()
+        .map_err(|_| internal("release workspace path invalid"))?;
+    let mut session = run_worker_session_bootstrap(
+        manifest,
+        projection,
+        &state,
+        current,
+        efforts,
+        cwd,
+        false,
+        Some(server),
+        state_root,
+    )?;
+    session.attach = SessionAttach::Resume {
+        thread_id: release
+            .source
+            .thread_id
+            .clone()
+            .ok_or_else(|| internal("release thread missing"))?,
+    };
+    session.sandbox = "read-only".to_owned();
+    session.approval_policy = "never".to_owned();
+    session.eager_thread_operation_id = Some(release.transaction_id);
+    session.generation_reader = Some(crate::worker::GenerationReaderBootstrap {
+        transaction_id: release.transaction_id,
+        scope_sha256: release
+            .scope_sha256
+            .clone()
+            .ok_or_else(|| internal("release scope missing"))?,
+        registration_sha256: release.registration_sha256.clone(),
+    });
+    crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid())
+        .transact(|record| {
+            if record.generation_release.as_ref() != Some(release) {
+                return Err(internal("Reader reservation changed before spawn"));
+            }
+            record
+                .generation_release
+                .as_mut()
+                .expect("checked owner")
+                .successor
+                .as_mut()
+                .expect("checked reservation")
+                .attempt_started = true;
+            Ok(())
+        })?;
+    let owner = crate::worker::current_startup_owner(
+        &view.workspace_id,
+        run_id,
+        reservation.run_generation,
+    )
+    .map_err(|e| e.machine_error(run_id, state_root))?;
+    startup
+        .lock
+        .write_owner(&owner)
+        .map_err(|e| e.machine_error(run_id, state_root))?;
+    crate::profile::fence_global_run_worker_start(binding, &state, &view.workspace_id, run_id)?;
+    let RunStartupLock {
+        lock: startup_range,
+        _process_guard,
+        ..
+    } = startup;
+    start_worker(
+        state_root,
+        &crate::worker::RunWorkerStart {
+            workspace_id: manifest.workspace_id.clone(),
+            run_id,
+            run_generation: reservation.run_generation,
+            ledger_root: run_root(state_root, run_id),
+            dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+            mutation_protocol_version: crate::worker::WORKER_PROTOCOL_VERSION,
+            control_socket_epoch: reservation.control_socket_epoch,
+            profile: manifest.profile.profile_name.clone(),
+            session: Some(session),
+        },
+        startup_range,
+    )?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resume_generation_release(
+    _view: &WorkspaceView,
+    _state_root: &Path,
+    _run_id: Uuid,
+    _carrier: &CredentialCarrier,
+    _external: Option<Uuid>,
+    _lifecycle: &crate::worker::RunLifecycleLease,
+    _retain_acquire: bool,
+) -> Result<u64, MachineError> {
+    Err(workspace_startup_unsupported())
+}
+
 /// The session safety policy a Run's worker starts with.
 ///
 /// A generation-4 successor member restarts into the same caller-workspace
@@ -10563,6 +12150,23 @@ fn requires_caller_policy_proof(manifest: &RunManifest) -> bool {
     crate::run::is_caller_workspace_generation(manifest.schema_version)
 }
 
+fn verify_caller_execution_executable(
+    state_root: &Path,
+    run_id: Uuid,
+    binding: &GlobalProfileBinding,
+    purpose: PurposeKind,
+) -> Result<(), MachineError> {
+    if purpose == PurposeKind::Review {
+        crate::review::verify_executable_identity(&binding.launch_snapshot).map(|_| ())
+    } else {
+        let path =
+            crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+                .map_err(|error| error.machine_error(run_id, state_root))?;
+        crate::worker::verify_binding_executable(binding)
+            .map_err(|error| error.machine_error(run_id, &path))
+    }
+}
+
 fn require_caller_runtime(manifest: &RunManifest) -> Result<(), MachineError> {
     // Generation 4 (delegated) runs the same caller-workspace-lane machinery;
     // only its instruction and Agent Configuration generations differ.
@@ -10570,7 +12174,7 @@ fn require_caller_runtime(manifest: &RunManifest) -> Result<(), MachineError> {
         || manifest
             .global_profile_binding
             .as_ref()
-            .is_none_or(|binding| !binding.caller_workspace_supported())
+            .is_none_or(|binding| !binding.accepted_caller_workspace_supported())
     {
         return Err(workspace_startup_unsupported());
     }
@@ -10611,11 +12215,42 @@ fn validate_caller_policy_current(
     proof: &crate::worker::CallerPolicyProof,
     phase: crate::worker::CallerPolicyPhase,
 ) -> Result<(), MachineError> {
+    validate_caller_policy_current_authorized(
+        state_root,
+        run_id,
+        carrier,
+        operation_id,
+        access,
+        writer,
+        proof,
+        phase,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_caller_policy_current_authorized(
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    operation_id: Uuid,
+    access: Access,
+    writer: Option<&crate::writer::WriterRecord>,
+    proof: &crate::worker::CallerPolicyProof,
+    phase: crate::worker::CallerPolicyPhase,
+    external_engagement: Option<Uuid>,
+) -> Result<(), MachineError> {
     use std::os::unix::fs::MetadataExt as _;
     let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
     require_caller_runtime(&manifest)?;
     let controller = load_reconciled_controller_binding(state_root, run_id)?;
-    authorize_controller(run_id, "run.verify_caller_policy", &controller, carrier)?;
+    if let Some(engagement_id) = external_engagement {
+        crate::worker::RunControllerAuthority::new(state_root.to_owned(), run_id)
+            .authorize_external(engagement_id, "engagement.release_write", carrier)?;
+    } else {
+        authorize_controller(run_id, "run.verify_caller_policy", &controller, carrier)?;
+    }
+
     let uid = DarwinSystem.current_uid();
     let path = crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
         .map_err(|error| error.machine_error(run_id, state_root))?;
@@ -10637,7 +12272,9 @@ fn validate_caller_policy_current(
         .thread_id
         .as_deref()
         .ok_or_else(|| internal("caller original Thread is unavailable"))?;
-    if projection.lifecycle != RunLifecycle::Idle
+    if (projection.lifecycle != RunLifecycle::Idle
+        && !(phase == crate::worker::CallerPolicyPhase::GenerationRelease
+            && projection.lifecycle == RunLifecycle::Paused))
         || !projection.pending_requests.is_empty()
         || projection.active_turn_id.is_some()
         || projection.run_generation != runtime.identity.run_generation
@@ -10881,6 +12518,9 @@ fn reset_writer(
     let writer =
         crate::writer::WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
     let current = writer.load()?;
+    if let Some(release) = current.generation_release.as_ref().filter(|r| r.pending()) {
+        current.require_no_generation_release(release.source.run_id)?;
+    }
     if let Some(holder) = &current.holder
         && let Err(error) =
             prove_recorded_writer_absent(state_root, holder, DarwinSystem.current_uid())
@@ -10897,12 +12537,15 @@ fn reset_writer(
                 json!({"reason": "authority_not_blocked", "required_action": "reconcile_dedicated_lane"}),
             ));
         }
+        let retained_release=record.generation_release.clone();
+        if let Some(release)=retained_release.as_ref().filter(|r|r.pending()) {record.require_no_generation_release(release.source.run_id)?;}
         let generation = record.writer_generation;
         let writer_lock_device = record.writer_lock_device;
         let writer_lock_inode = record.writer_lock_inode;
         let handoff_lock_device = record.handoff_lock_device;
         let handoff_lock_inode = record.handoff_lock_inode;
         *record = crate::writer::WriterRecord::empty(&view.workspace_id);
+        if retained_release.is_some() {record.schema_version=2;record.generation_release=retained_release;}
         record.writer_generation = generation;
         record.writer_lock_device = writer_lock_device;
         record.writer_lock_inode = writer_lock_inode;
@@ -13498,6 +15141,9 @@ fn ensure_run_worker_locked(
     startup: &mut Option<RunStartupLock>,
 ) -> Result<u64, MachineError> {
     let uid = DarwinSystem.current_uid();
+    crate::writer::WriterStore::new(state_root, &view.workspace_id, uid)
+        .load()?
+        .require_no_generation_release(run_id)?;
     let runtime_record =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
             .map_err(|error| error.machine_error(run_id, state_root))?;
@@ -13556,7 +15202,15 @@ fn ensure_run_worker_locked(
         )
     })?;
     global_binding.validate_for_recovery()?;
-    let state = crate::profile::ensure_global_server(global_binding)?;
+    if crate::run::is_caller_workspace_generation(manifest.schema_version) {
+        verify_caller_execution_executable(
+            state_root,
+            run_id,
+            global_binding,
+            manifest.purpose.kind,
+        )?;
+    }
+    let state = crate::profile::ensure_retained_global_server(global_binding)?;
     ensure_global_run_membership(
         &DolgoraeHome::system()?,
         &view.workspace_id,
@@ -13779,6 +15433,7 @@ fn run_worker_session_bootstrap(
                     .then_some(run_id)
             }),
         transport_timeout_seconds: 900,
+        generation_reader: None,
         dedicated_server,
     })
 }
@@ -14947,6 +16602,49 @@ fn proved_non_dispatch(code: &str) -> bool {
 /// reserved, releasing or blocked-unknown — in which case the effects are
 /// unknown and only recovery may settle them. A record that owns no transition
 /// of this Run proves the Turn was never dispatched.
+fn member_run_observation(
+    request: crate::delegation_service::MemberCleanupObservation<'_>,
+    budget: &mut crate::ledger::ObservationBudget,
+) -> Result<crate::snapshot::MemberRunObservation, MachineError> {
+    let root = match request.owner {
+        crate::delegation_service::SettlementOwner::Managed { session_id } => Some(session_id),
+        crate::delegation_service::SettlementOwner::External { .. } => None,
+    };
+    crate::snapshot::MemberRunObservation::read(
+        request.state_root,
+        request.member_ref,
+        root,
+        budget,
+    )
+}
+fn member_interaction_observation(
+    request: crate::delegation_service::MemberCleanupObservation<'_>,
+    source: &crate::snapshot::MemberRunObservation,
+    budget: &mut crate::ledger::ObservationBudget,
+) -> Result<(bool, crate::domain::ProjectionStamp), MachineError> {
+    let ledger = source.complete_ledger(request.state_root, budget)?;
+    let (manifest, projection, controller, epoch, writer_revision) =
+        source.interaction_context()?;
+    let (pending, revision) = crate::interaction::complete_pending(
+        &ledger,
+        manifest,
+        projection,
+        controller,
+        epoch,
+        budget,
+        crate::interaction_payload::validate,
+    )?;
+    Ok((
+        pending,
+        crate::domain::ProjectionStamp {
+            run_state_revision: projection.ledger_head.sequence,
+            interaction_state_revision: revision,
+            writer_state_revision: writer_revision,
+            captured_head_cursor: projection.ledger_head.sequence.to_string(),
+        },
+    ))
+}
+
 /// Whether one member Run owes an owned writer cleanup.
 ///
 /// A caller-policy member's write dispatch acquires the workspace writer and an
@@ -15038,9 +16736,9 @@ fn writer_fingerprint(writer: &crate::writer::WriterRecord) -> Result<String, Ma
 
 /// Release the writer guard this member Run left behind.
 ///
-/// Only the next authorized mutation of the same member runs this, and only for a
-/// guard it still owns and can release; a blocked-unknown guard is left to
-/// recovery.
+/// A writable first dispatch retains its initial Active Writer; acquire replay
+/// still verifies current policy. A guard left by a prior Turn is released by
+/// the next authorized dispatch, while blocked-unknown stays for recovery.
 #[cfg_attr(not(test), allow(dead_code))]
 fn release_stale_member_writer(
     view: &WorkspaceView,
@@ -15048,6 +16746,7 @@ fn release_stale_member_writer(
     member_ref: Uuid,
     owner: SettlementOwner,
     carrier: &CredentialCarrier,
+    write: bool,
 ) -> Result<(), MachineError> {
     use crate::writer::WriterAuthorityState;
     let link =
@@ -15070,6 +16769,12 @@ fn release_stale_member_writer(
         )
     {
         return Ok(());
+    }
+    if write && writer.state == WriterAuthorityState::Active {
+        let (projection, _) = observe_run_ledger(state_root, member_ref, true)?;
+        if projection.latest_turn_id.is_none() {
+            return Ok(());
+        }
     }
     release_member_writer(view, state_root, member_ref, owner, carrier)
 }
@@ -16894,6 +18599,255 @@ mod tests {
         };
         assert_eq!(status["state"], "closed");
         assert!(fixture.membership_released());
+    }
+
+    #[test]
+    fn historical_member_start_checks_the_executable_before_profile_launch() {
+        const CHILD: &str = "DOLGORAE_RETAINED_START_FIXTURE";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let manifest: RunManifest =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let workspace = manifest.canonical_workspace.to_path_buf().unwrap();
+            let view = WorkspaceService::system()
+                .unwrap()
+                .discover_for_run_start(Some(&workspace))
+                .unwrap();
+            let state_root = workspace_state_root(&view).unwrap();
+            std::fs::create_dir_all(state_root.join("runs")).unwrap();
+            std::fs::set_permissions(
+                state_root.join("runs"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            let home = DolgoraeHome::system().unwrap();
+            let carrier =
+                CredentialCarrier::open_path(&home.root().parent().unwrap().join("owner")).unwrap();
+            let binding = manifest.global_profile_binding.as_ref().unwrap();
+            assert!(
+                !Path::new(&binding.launch_snapshot.executable_identity.resolved_path).exists()
+            );
+            let key = "historical-start-preflight";
+            let has_reservation = std::env::var_os("DOLGORAE_RETAINED_START_RESERVED").is_some();
+            let original = has_reservation.then(|| {
+                fixture_caller_member_reservation(&view, &state_root, &manifest, &carrier, key)
+            });
+            let error = start_caller_member_run(CallerMemberStart {
+                view: &view,
+                state_root: &state_root,
+                configuration: &manifest.agent_configuration,
+                global_profile_binding: binding,
+                run_id: manifest.run_id,
+                aggregate: manifest.aggregate_binding.as_ref().unwrap(),
+                carrier: &carrier,
+                access: CallerWorkspaceAccess::ReadOnly,
+                idempotency_key: key.to_owned(),
+                reviewer_plan: None,
+            })
+            .err()
+            .expect("a missing original executable must refuse before Profile launch");
+            assert_eq!(error.code, "REVIEW_EXECUTABLE_DRIFT");
+            assert!(!home.root().join("profiles.yaml").exists());
+            assert!(!crate::run::run_root(&state_root, manifest.run_id).exists());
+            let request = caller_member_request::<crate::instructions::InstructionSnapshot>(
+                &view,
+                &manifest.agent_configuration,
+                &binding.selected_name,
+                manifest.aggregate_binding.as_ref().unwrap(),
+                CallerWorkspaceAccess::ReadOnly,
+                key,
+            )
+            .unwrap();
+            let controller = presented_controller_from_carrier(&carrier, 1).unwrap();
+            let digest = crate::run::caller_start_request_digest(
+                &request,
+                &view.canonical_path,
+                &controller.binding,
+            )
+            .unwrap();
+            assert_eq!(
+                StartReservationStore::new(SystemWorkspacePlatform, &state_root)
+                    .load_caller(key, &digest)
+                    .unwrap(),
+                original
+            );
+            return;
+        }
+        let fixture = super::successor_fixture::SuccessorMember::historical();
+        let legacy = fixture.legacy_member("historical-start-preflight");
+        let home = DolgoraeHome::from_canonical_home(fixture.root.clone()).unwrap();
+        WorkspaceService::new(
+            SystemWorkspacePlatform,
+            crate::workspace::SystemGitRunner,
+            home.root().to_path_buf(),
+        )
+        .initialize(
+            Some(&fixture.view.canonical_path.to_path_buf().unwrap()),
+            fixture.view.mode,
+        )
+        .unwrap();
+        let manifest_path = fixture.root.join("retained-start.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&legacy.manifest).unwrap(),
+        )
+        .unwrap();
+        for reserved in [false, true] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "semantic::tests::historical_member_start_checks_the_executable_before_profile_launch",
+                    "--test-threads=1",
+                ])
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .env("HOME", &fixture.root)
+                .env("CODEX_HOME", fixture.root.join("codex-home"))
+                .env(CHILD, &manifest_path);
+            if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+                command.env("TMPDIR", tmpdir);
+            }
+            if reserved {
+                command.env("DOLGORAE_RETAINED_START_RESERVED", "1");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "reserved={reserved}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn historical_restart_checks_the_original_executable_before_any_server_launch() {
+        for purpose in [PurposeKind::Implementation, PurposeKind::Review] {
+            let fixture = super::release_fixture::ClosedMemberRun::historical();
+            let mut manifest = fixture.manifest.clone();
+            manifest.purpose.kind = purpose;
+            let projection_path =
+                crate::run::run_root(&fixture.state_root, fixture.run_id).join("state.json");
+            let mut projection: crate::projection::RunStateProjection =
+                serde_json::from_slice(&std::fs::read(&projection_path).unwrap()).unwrap();
+            projection.lifecycle = RunLifecycle::Idle;
+            std::fs::write(&projection_path, serde_json::to_vec(&projection).unwrap()).unwrap();
+            let binding = manifest.global_profile_binding.as_ref().unwrap();
+            assert!(
+                !Path::new(&binding.launch_snapshot.executable_identity.resolved_path).exists()
+            );
+            let before = serde_json::to_vec(binding).unwrap();
+            let mut startup =
+                Some(RunStartupLock::open(&fixture.state_root, fixture.run_id).unwrap());
+            startup.as_ref().unwrap().acquire().unwrap();
+            let error = ensure_run_worker_locked(
+                &fixture.view,
+                &fixture.state_root,
+                fixture.run_id,
+                manifest,
+                &mut startup,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                if purpose == PurposeKind::Review {
+                    "REVIEW_EXECUTABLE_DRIFT"
+                } else {
+                    "TRANSPORT_FAILURE"
+                }
+            );
+            let retained = RunStore::new(SystemWorkspacePlatform, &fixture.state_root)
+                .load_manifest(fixture.run_id)
+                .unwrap();
+            assert_eq!(
+                serde_json::to_vec(retained.global_profile_binding.as_ref().unwrap()).unwrap(),
+                before
+            );
+            assert!(
+                !crate::worker::runtime_record_path(
+                    &crate::worker::runtime_root(&fixture.state_root),
+                    fixture.run_id
+                )
+                .unwrap()
+                .exists()
+            );
+        }
+    }
+
+    #[test]
+    fn historical_member_release_and_close_preserve_the_accepted_binding() {
+        let fixture = super::release_fixture::ClosedMemberRun::historical();
+        let path = crate::run::run_root(&fixture.state_root, fixture.run_id).join("manifest.json");
+        let before = std::fs::read(&path).unwrap();
+        let binding = fixture.manifest.global_profile_binding.as_ref().unwrap();
+        assert!(!binding.caller_workspace_supported());
+        assert!(binding.accepted_caller_workspace_supported());
+        let runtime_runs = crate::worker::runtime_root(&fixture.state_root).join("runs");
+        std::fs::create_dir_all(&runtime_runs).unwrap();
+        std::fs::set_permissions(&runtime_runs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (locator, _) = super::release_fixture::write_absent_worker_locator(
+            &fixture.state_root,
+            &fixture.workspace_id,
+            fixture.run_id,
+        );
+        crate::worker::remove_verified_absent_runtime(&locator, DarwinSystem.current_uid())
+            .unwrap();
+        let writer = crate::writer::WriterStore::new(
+            &fixture.state_root,
+            &fixture.workspace_id,
+            DarwinSystem.current_uid(),
+        );
+        let transaction = Uuid::now_v7();
+        writer
+            .transact(|record| {
+                let holder = crate::writer::WriterStore::holder(
+                    fixture.run_id,
+                    fixture.manifest.profile.profile_name.clone(),
+                    &fixture.manifest.controller,
+                    1,
+                    fixture
+                        .manifest
+                        .profile_capability_snapshot
+                        .server_key
+                        .clone(),
+                    fixture.manifest.profile_capability_snapshot.server_epoch,
+                    None,
+                    RunLifecycle::Idle,
+                );
+                let (_, generation) =
+                    record.prepare_acquire(fixture.run_id, holder, transaction)?;
+                record.commit_acquire(transaction, generation)
+            })
+            .unwrap();
+        release_external_writer(
+            &fixture.view,
+            &fixture.state_root,
+            fixture.run_id,
+            fixture.engagement_id,
+            &fixture.owner,
+        )
+        .unwrap();
+        let result = successor_close_run(
+            &fixture.view,
+            &fixture.state_root,
+            fixture.run_id,
+            &fixture.owner,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(result, SemanticResult::Run(_)));
+        verify_external_owned_cleanup(
+            &fixture.view,
+            &fixture.state_root,
+            fixture.run_id,
+            fixture.engagement_id,
+            &fixture.owner,
+        )
+        .unwrap();
+        release_global_run_membership(&fixture.state_root, &fixture.manifest, fixture.run_id)
+            .unwrap();
+        assert!(fixture.membership_released());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     /// The non-retiring close used by the successor release stops at the
@@ -19709,9 +21663,9 @@ mod tests {
             "server_epoch": epoch,
             "kind": "command_execution_approval",
             "status": "pending",
-            "payload": {},
-            "available_decisions": [],
-            "response_schema": "dolgorae.interaction.command-execution/v1",
+            "payload": {"title":"Command approval","message":"Inspect the command.","command":["true"],"cwd":"/fixture","reason":null},
+            "available_decisions": ["accept_once","decline","cancel"],
+            "response_schema": "dolgorae.interaction.command-approval/v1",
             "opened_at": "2026-10-23T00:00:00.000000Z",
             "resolved_at": null,
             "resolution": null
@@ -19720,10 +21674,10 @@ mod tests {
         let decided = json!({
             "request_id": "1",
             "idempotency_key": "release-fixture-decision",
-            "response_sha256": format!("sha256:{}", "d".repeat(64)),
+            "response_sha256": sha256_hex(br#"{"decision":"accept_once"}"#),
             "resolution_receipt_id": Uuid::now_v7(),
             "resolved_at": "2026-10-23T00:00:01.000000Z",
-            "resolution": {"outcome": "approved"}
+            "resolution": {"outcome": "approval", "decision": "accept_once"}
         });
         // Publish records and materialize the run-state projection the way the
         // fixture's own terminal publisher does, preserving the scene's facts.
@@ -20211,6 +22165,7 @@ mod tests {
         // The new Controller takes over and converges.
         let port = scene.port();
         let scope = crate::delegation_service::DelegationScope {
+            trusted_invocation: None,
             view: &scene.view,
             state_root: &scene.state_root,
             controller: &new_controller,
@@ -21013,224 +22968,258 @@ mod tests {
     fn caller_start_reuses_published_manifest_after_each_pre_worker_checkpoint() {
         use crate::writer::{WriterAuthorityState, WriterStore};
 
-        for checkpoint in 0..3 {
-            let root = std::env::temp_dir().join(format!("caller-start-retry-{}", Uuid::now_v7()));
-            for path in [
-                &root,
-                &root.join("runs"),
-                &root.join("runtime"),
-                &root.join("runtime/locks"),
-            ] {
-                std::fs::create_dir(path).unwrap();
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
-            }
-            let credential = root.join("controller");
-            crate::controller::create_controller_credential(
-                &credential,
-                crate::domain::ControllerKind::Automation,
-                "caller-start-retry-test".to_owned(),
-                None,
-                None,
-            )
-            .unwrap();
-            let carrier = CredentialCarrier::open_path(&credential).unwrap();
-            let mut intent =
-                serde_json::from_str::<crate::run::CallerStartReservation>(include_str!(
-                    "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
-                ))
-                .unwrap()
-                .accepted_intent;
-            intent.run_id = Uuid::now_v7();
-            intent.controller = presented_controller_from_carrier(&carrier, 1)
-                .unwrap()
-                .binding;
-            intent
-                .global_profile_binding
-                .launch_snapshot
-                .launch_contract_sha256 =
-                run_profile_snapshot(&intent.global_profile_binding.launch_snapshot)
+        for (version, sha) in [
+            (
+                "0.159.3",
+                "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878",
+            ),
+            (
+                "0.164.0",
+                "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf",
+            ),
+        ] {
+            for checkpoint in 0..3 {
+                let root =
+                    std::env::temp_dir().join(format!("caller-start-retry-{}", Uuid::now_v7()));
+                for path in [
+                    &root,
+                    &root.join("runs"),
+                    &root.join("runtime"),
+                    &root.join("runtime/locks"),
+                ] {
+                    std::fs::create_dir(path).unwrap();
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                let credential = root.join("controller");
+                crate::controller::create_controller_credential(
+                    &credential,
+                    crate::domain::ControllerKind::Automation,
+                    "caller-start-retry-test".to_owned(),
+                    None,
+                    None,
+                )
+                .unwrap();
+                let carrier = CredentialCarrier::open_path(&credential).unwrap();
+                let mut intent =
+                    serde_json::from_str::<crate::run::CallerStartReservation>(include_str!(
+                        "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+                    ))
                     .unwrap()
-                    .launch_contract_sha256;
-            let encoded =
-                serde_json::to_string(&intent.global_profile_binding.launch_snapshot).unwrap();
-            intent.global_profile_binding.launch_snapshot_sha256 =
-                sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
-            let reservation = crate::run::CallerStartReservation::new(intent.clone()).unwrap();
-            let reservations = StartReservationStore::new(SystemWorkspacePlatform, &root);
-            reservations.reserve_caller(&reservation).unwrap();
-            let uid = DarwinSystem.current_uid();
-            WriterStore::initialize_layout(&root, &intent.workspace_id, uid).unwrap();
-            let writers = WriterStore::new(&root, &intent.workspace_id, uid);
-            let state = ServerState {
-                schema_version: 2,
-                server_key: intent.global_profile_binding.server_key.clone(),
-                lifecycle: "ready".to_owned(),
-                server_epoch: 1,
-                epoch_id: Uuid::now_v7(),
-                boot_session_uuid: Uuid::now_v7(),
-                pid: 10,
-                pgid: 10,
-                uid,
-                process_fingerprint: "fixture-server".to_owned(),
-                drainer_pid: 11,
-                drainer_pgid: 11,
-                drainer_uid: uid,
-                drainer_fingerprint: "fixture-drainer".to_owned(),
-                socket_path: "/fixture/profile.sock".to_owned(),
-                socket_device: 1,
-                socket_inode: 1,
-                membership_revision: 0,
-                default_model: intent.readiness.model.clone(),
-                models: vec![intent.readiness.model.clone()],
-                capabilities: BTreeMap::new(),
-                snapshot: intent.global_profile_binding.launch_snapshot.clone(),
-            };
-            let view = WorkspaceView {
-                workspace_id: intent.workspace_id.clone(),
-                canonical_path: intent.canonical_workspace.clone(),
-                mode: intent.workspace_mode,
-                created: false,
-            };
-            let store = RunStore::new(SystemWorkspacePlatform, &root);
-            let manifest = {
+                    .accepted_intent;
+                intent.global_profile_binding.launch_snapshot.codex_version = version.to_owned();
+                intent
+                    .readiness
+                    .profile_capability_snapshot
+                    .app_server_version = version.to_owned();
+                intent
+                    .global_profile_binding
+                    .launch_snapshot
+                    .executable_identity
+                    .sha256 = sha.to_owned();
+                intent.run_id = Uuid::now_v7();
+                intent.controller = presented_controller_from_carrier(&carrier, 1)
+                    .unwrap()
+                    .binding;
+                intent
+                    .global_profile_binding
+                    .launch_snapshot
+                    .launch_contract_sha256 =
+                    run_profile_snapshot(&intent.global_profile_binding.launch_snapshot)
+                        .unwrap()
+                        .launch_contract_sha256;
+                let encoded =
+                    serde_json::to_string(&intent.global_profile_binding.launch_snapshot).unwrap();
+                intent.global_profile_binding.launch_snapshot_sha256 =
+                    sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
+                assert!(
+                    intent
+                        .global_profile_binding
+                        .accepted_caller_workspace_supported()
+                );
+                // Retained pre-policy bindings are recovery-only.
+                assert!(!intent.global_profile_binding.caller_workspace_supported());
+                let reservation = crate::run::CallerStartReservation::new(intent.clone()).unwrap();
+                let reservations = StartReservationStore::new(SystemWorkspacePlatform, &root);
+                reservations.reserve_caller(&reservation).unwrap();
+                let uid = DarwinSystem.current_uid();
+                WriterStore::initialize_layout(&root, &intent.workspace_id, uid).unwrap();
+                let writers = WriterStore::new(&root, &intent.workspace_id, uid);
+                let state = ServerState {
+                    schema_version: 2,
+                    server_key: intent.global_profile_binding.server_key.clone(),
+                    lifecycle: "ready".to_owned(),
+                    server_epoch: 1,
+                    epoch_id: Uuid::now_v7(),
+                    boot_session_uuid: Uuid::now_v7(),
+                    pid: 10,
+                    pgid: 10,
+                    uid,
+                    process_fingerprint: "fixture-server".to_owned(),
+                    drainer_pid: 11,
+                    drainer_pgid: 11,
+                    drainer_uid: uid,
+                    drainer_fingerprint: "fixture-drainer".to_owned(),
+                    socket_path: "/fixture/profile.sock".to_owned(),
+                    socket_device: 1,
+                    socket_inode: 1,
+                    membership_revision: 0,
+                    default_model: intent.readiness.model.clone(),
+                    models: vec![intent.readiness.model.clone()],
+                    capabilities: BTreeMap::new(),
+                    snapshot: intent.global_profile_binding.launch_snapshot.clone(),
+                };
+                let view = WorkspaceView {
+                    workspace_id: intent.workspace_id.clone(),
+                    canonical_path: intent.canonical_workspace.clone(),
+                    mode: intent.workspace_mode,
+                    created: false,
+                };
+                let store = RunStore::new(SystemWorkspacePlatform, &root);
+                let manifest = {
+                    let _allocation = reservations
+                        .lock_allocation("run-start", &reservation.idempotency_key)
+                        .unwrap();
+                    let _startup = ProcessRunStartup::acquire(&root, intent.run_id).unwrap();
+                    let manifest =
+                        load_or_publish_caller_manifest(&store, &intent, &view, &state, None)
+                            .unwrap();
+                    if checkpoint > 0 {
+                        ensure_caller_bootstrap(&root, &manifest, &reservation).unwrap();
+                    }
+                    if checkpoint == 2 {
+                        writers
+                            .transact(|record| {
+                                record.prepare_acquire(
+                                    intent.run_id,
+                                    WriterStore::holder(
+                                        intent.run_id,
+                                        manifest.profile.profile_name.clone(),
+                                        &manifest.controller,
+                                        1,
+                                        manifest.profile_capability_snapshot.server_key.clone(),
+                                        manifest.profile_capability_snapshot.server_epoch,
+                                        None,
+                                        RunLifecycle::Starting,
+                                    ),
+                                    intent.run_id,
+                                )
+                            })
+                            .unwrap();
+                    }
+                    manifest
+                };
+                assert_eq!(
+                    store
+                        .load_state_projection(intent.run_id)
+                        .unwrap()
+                        .lifecycle,
+                    RunLifecycle::Starting
+                );
+                let run = run_root(&root, intent.run_id);
+                let manifest_bytes = std::fs::read(run.join("manifest.json")).unwrap();
+                let audit_bytes = std::fs::read(run.join("audit.jsonl")).unwrap();
+                let writer_before = serde_json::to_value(writers.load().unwrap()).unwrap();
+
+                // A modern holder must not make the unchanged workspace Writer
+                // status carrier unreadable to either adapter.
+                let observed_run = writer_run_status(&root, intent.run_id).unwrap();
+                assert_eq!(observed_run["run_id"], json!(intent.run_id));
+                if checkpoint == 2 {
+                    let observed_writer = writers.status_value().unwrap();
+                    assert_eq!(observed_writer["writer_run_id"], json!(intent.run_id));
+                    assert_eq!(observed_writer["authority_state"], "reserved");
+                    assert!(observed_writer.get("instructions").is_none());
+                    assert!(observed_writer.get("selected_role").is_none());
+                }
+
+                // Re-enter the same production publication boundary after losing
+                // the original callers and locks. New Profile defaults must not
+                // rebuild the accepted manifest or erase the original reservation.
+                let mut current_state = state.clone();
+                current_state.default_model = "a-later-default".to_owned();
                 let _allocation = reservations
                     .lock_allocation("run-start", &reservation.idempotency_key)
                     .unwrap();
                 let _startup = ProcessRunStartup::acquire(&root, intent.run_id).unwrap();
-                let manifest =
-                    load_or_publish_caller_manifest(&store, &intent, &view, &state, None).unwrap();
-                if checkpoint > 0 {
-                    ensure_caller_bootstrap(&root, &manifest, &reservation).unwrap();
-                }
-                if checkpoint == 2 {
-                    writers
-                        .transact(|record| {
-                            record.prepare_acquire(
-                                intent.run_id,
-                                WriterStore::holder(
-                                    intent.run_id,
-                                    manifest.profile.profile_name.clone(),
-                                    &manifest.controller,
-                                    1,
-                                    manifest.profile_capability_snapshot.server_key.clone(),
-                                    manifest.profile_capability_snapshot.server_epoch,
-                                    None,
-                                    RunLifecycle::Starting,
-                                ),
-                                intent.run_id,
-                            )
-                        })
-                        .unwrap();
-                }
-                manifest
-            };
-            assert_eq!(
-                store
-                    .load_state_projection(intent.run_id)
+                let restored = reservations
+                    .load_caller(&reservation.idempotency_key, &reservation.request_sha256)
                     .unwrap()
-                    .lifecycle,
-                RunLifecycle::Starting
-            );
-            let run = run_root(&root, intent.run_id);
-            let manifest_bytes = std::fs::read(run.join("manifest.json")).unwrap();
-            let audit_bytes = std::fs::read(run.join("audit.jsonl")).unwrap();
-            let writer_before = serde_json::to_value(writers.load().unwrap()).unwrap();
+                    .unwrap();
+                let replay = load_or_publish_caller_manifest(
+                    &store,
+                    &restored.accepted_intent,
+                    &view,
+                    &current_state,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(
+                    serde_json::to_value(&replay).unwrap(),
+                    serde_json::to_value(&manifest).unwrap()
+                );
+                assert_eq!(
+                    std::fs::read(run.join("manifest.json")).unwrap(),
+                    manifest_bytes
+                );
+                assert_eq!(std::fs::read(run.join("audit.jsonl")).unwrap(), audit_bytes);
+                assert_eq!(
+                    serde_json::to_value(writers.load().unwrap()).unwrap(),
+                    writer_before
+                );
+                require_caller_runtime(&replay).unwrap();
+                ensure_caller_bootstrap(&root, &replay, &restored).unwrap();
+                assert!(
+                    replay_published_caller_start(&root, &view, &restored, &replay, &carrier)
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(
+                    store
+                        .load_state_projection(intent.run_id)
+                        .unwrap()
+                        .lifecycle,
+                    RunLifecycle::Starting
+                );
+                assert!(
+                    store
+                        .load_caller_start_receipt(
+                            intent.run_id,
+                            &restored.normalized_identity_sha256
+                        )
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(
+                    serde_json::to_value(writers.load().unwrap()).unwrap(),
+                    writer_before
+                );
+                assert_eq!(
+                    writers.load().unwrap().state,
+                    if checkpoint == 2 {
+                        WriterAuthorityState::Reserved
+                    } else {
+                        WriterAuthorityState::None
+                    }
+                );
+                assert_eq!(std::fs::read_dir(root.join("runs")).unwrap().count(), 1);
 
-            // A modern holder must not make the unchanged workspace Writer
-            // status carrier unreadable to either adapter.
-            let observed_run = writer_run_status(&root, intent.run_id).unwrap();
-            assert_eq!(observed_run["run_id"], json!(intent.run_id));
-            if checkpoint == 2 {
-                let observed_writer = writers.status_value().unwrap();
-                assert_eq!(observed_writer["writer_run_id"], json!(intent.run_id));
-                assert_eq!(observed_writer["authority_state"], "reserved");
-                assert!(observed_writer.get("instructions").is_none());
-                assert!(observed_writer.get("selected_role").is_none());
+                let mut changed = intent.clone();
+                changed.request.role = "different-role".to_owned();
+                assert_eq!(
+                    load_or_publish_caller_manifest(&store, &changed, &view, &state, None)
+                        .unwrap_err()
+                        .code,
+                    "INTERNAL_ERROR"
+                );
+                assert_eq!(
+                    std::fs::read(run.join("manifest.json")).unwrap(),
+                    manifest_bytes
+                );
+                drop(_startup);
+                drop(_allocation);
+                drop(carrier);
+                std::fs::remove_dir_all(root).unwrap();
             }
-
-            // Re-enter the same production publication boundary after losing
-            // the original callers and locks. New Profile defaults must not
-            // rebuild the accepted manifest or erase the original reservation.
-            let mut current_state = state.clone();
-            current_state.default_model = "a-later-default".to_owned();
-            let _allocation = reservations
-                .lock_allocation("run-start", &reservation.idempotency_key)
-                .unwrap();
-            let _startup = ProcessRunStartup::acquire(&root, intent.run_id).unwrap();
-            let restored = reservations
-                .load_caller(&reservation.idempotency_key, &reservation.request_sha256)
-                .unwrap()
-                .unwrap();
-            let replay = load_or_publish_caller_manifest(
-                &store,
-                &restored.accepted_intent,
-                &view,
-                &current_state,
-                None,
-            )
-            .unwrap();
-            assert_eq!(
-                serde_json::to_value(&replay).unwrap(),
-                serde_json::to_value(&manifest).unwrap()
-            );
-            assert_eq!(
-                std::fs::read(run.join("manifest.json")).unwrap(),
-                manifest_bytes
-            );
-            assert_eq!(std::fs::read(run.join("audit.jsonl")).unwrap(), audit_bytes);
-            assert_eq!(
-                serde_json::to_value(writers.load().unwrap()).unwrap(),
-                writer_before
-            );
-            ensure_caller_bootstrap(&root, &replay, &restored).unwrap();
-            assert!(
-                replay_published_caller_start(&root, &view, &restored, &replay, &carrier)
-                    .unwrap()
-                    .is_none()
-            );
-            assert_eq!(
-                store
-                    .load_state_projection(intent.run_id)
-                    .unwrap()
-                    .lifecycle,
-                RunLifecycle::Starting
-            );
-            assert!(
-                store
-                    .load_caller_start_receipt(intent.run_id, &restored.normalized_identity_sha256)
-                    .unwrap()
-                    .is_none()
-            );
-            assert_eq!(
-                serde_json::to_value(writers.load().unwrap()).unwrap(),
-                writer_before
-            );
-            assert_eq!(
-                writers.load().unwrap().state,
-                if checkpoint == 2 {
-                    WriterAuthorityState::Reserved
-                } else {
-                    WriterAuthorityState::None
-                }
-            );
-            assert_eq!(std::fs::read_dir(root.join("runs")).unwrap().count(), 1);
-
-            let mut changed = intent.clone();
-            changed.request.role = "different-role".to_owned();
-            assert_eq!(
-                load_or_publish_caller_manifest(&store, &changed, &view, &state, None)
-                    .unwrap_err()
-                    .code,
-                "INTERNAL_ERROR"
-            );
-            assert_eq!(
-                std::fs::read(run.join("manifest.json")).unwrap(),
-                manifest_bytes
-            );
-            drop(_startup);
-            drop(_allocation);
-            drop(carrier);
-            std::fs::remove_dir_all(root).unwrap();
         }
     }
 
@@ -23690,13 +25679,19 @@ mod delegated_member_start_tests {
                 sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
         };
         resealed(&mut binding);
+        binding.launch_snapshot.codex_version = "0.164.0".to_owned();
         binding.launch_snapshot.executable_identity.sha256 = if unqualified {
             "0".repeat(64)
         } else {
-            "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878".to_owned()
+            "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf".to_owned()
         };
         resealed(&mut binding);
         binding.validate_for_recovery().unwrap();
+        let binding = if unqualified {
+            binding
+        } else {
+            crate::profile::qualified_test_binding(&binding)
+        };
         let state_root = root.join("state");
         std::fs::create_dir(&state_root).unwrap();
         std::fs::set_permissions(&state_root, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -23898,7 +25893,14 @@ pub(crate) mod release_fixture {
 
     impl ClosedMemberRun {
         pub(crate) fn new() -> Self {
-            let base = super::successor_fixture::SuccessorMember::new();
+            Self::with_base(super::successor_fixture::SuccessorMember::new())
+        }
+
+        pub(crate) fn historical() -> Self {
+            Self::with_base(super::successor_fixture::SuccessorMember::historical())
+        }
+
+        fn with_base(base: super::successor_fixture::SuccessorMember) -> Self {
             let workspace_id = base.manifest.workspace_id.clone();
             let home_root = base.root.join("home");
             let state_root = home_root.join("workspaces").join(&workspace_id);
@@ -24308,7 +26310,13 @@ pub(crate) mod release_fixture {
     impl ReleasableMember {
         /// One external successor member a release can settle end to end.
         pub(crate) fn external(scene: ReleaseScene) -> Self {
-            let fixture = super::successor_fixture::SuccessorMember::new();
+            Self::external_from(scene, super::successor_fixture::SuccessorMember::new())
+        }
+
+        pub(crate) fn external_from(
+            scene: ReleaseScene,
+            fixture: super::successor_fixture::SuccessorMember,
+        ) -> Self {
             let owner = crate::delegation_service::SettlementOwner::External {
                 engagement_id: fixture.engagement_id,
             };
@@ -24593,6 +26601,7 @@ pub(crate) mod release_fixture {
         /// The successor service scope of this scene.
         pub(crate) fn scope(&self) -> crate::delegation_service::DelegationScope<'_> {
             crate::delegation_service::DelegationScope {
+                trusted_invocation: None,
                 view: &self.view,
                 state_root: &self.state_root,
                 controller: &self.controller,
@@ -25467,6 +27476,21 @@ pub(crate) mod successor_fixture {
     pub(crate) struct AcceptingPort;
 
     impl crate::delegation_service::RunSettlementPort for AcceptingPort {
+        fn member_run_observation(
+            &self,
+            request: crate::delegation_service::MemberCleanupObservation<'_>,
+            budget: &mut crate::ledger::ObservationBudget,
+        ) -> Result<crate::snapshot::MemberRunObservation, MachineError> {
+            super::member_run_observation(request, budget)
+        }
+        fn member_interaction_observation(
+            &self,
+            request: crate::delegation_service::MemberCleanupObservation<'_>,
+            source: &crate::snapshot::MemberRunObservation,
+            budget: &mut crate::ledger::ObservationBudget,
+        ) -> Result<(bool, crate::domain::ProjectionStamp), MachineError> {
+            super::member_interaction_observation(request, source, budget)
+        }
         fn member_writer_observation(
             &self,
             _request: crate::delegation_service::MemberCleanupObservation<'_>,
@@ -25573,7 +27597,15 @@ pub(crate) mod successor_fixture {
             Self::with_options(access, "review", true)
         }
 
+        pub(crate) fn historical() -> Self {
+            Self::with_runtime("read_only", "review", true, true)
+        }
+
         fn with_options(access: &str, purpose: &str, qualified: bool) -> Self {
+            Self::with_runtime(access, purpose, qualified, false)
+        }
+
+        fn with_runtime(access: &str, purpose: &str, qualified: bool, historical: bool) -> Self {
             let root = std::env::temp_dir().join(format!("dolgorae-successor-{}", Uuid::now_v7()));
             for directory in [
                 root.clone(),
@@ -25607,8 +27639,14 @@ pub(crate) mod successor_fixture {
                 codex_home.to_str().unwrap().to_owned();
             // The qualified caller-workspace runtime: the record must be one the
             // lane actually admits, or the gate would refuse the fixture itself.
-            profile_binding.launch_snapshot.executable_identity.sha256 =
-                "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878".to_owned();
+            profile_binding.launch_snapshot.codex_version =
+                if historical { "0.159.3" } else { "0.164.0" }.to_owned();
+            profile_binding.launch_snapshot.executable_identity.sha256 = if historical {
+                "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878"
+            } else {
+                "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
+            }
+            .to_owned();
             if !qualified {
                 profile_binding
                     .launch_snapshot
@@ -25619,6 +27657,17 @@ pub(crate) mod successor_fixture {
             profile_binding.launch_snapshot_sha256 =
                 sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
             profile_binding.validate_for_recovery().unwrap();
+            let profile_binding = if historical {
+                profile_binding
+            } else {
+                if !qualified {
+                    profile_binding
+                        .launch_snapshot
+                        .process_static_configuration
+                        .insert("mcp_servers".into(), json!({"unqualified-tool":{}}));
+                }
+                crate::profile::qualified_test_binding(&profile_binding)
+            };
             let state_root = root.join("state");
             let sources = crate::provisioning::ProvisioningSources {
                 instruct: &store_sources,
@@ -26756,6 +28805,7 @@ pub(crate) mod successor_fixture {
 
         pub(crate) fn scope(&self) -> crate::delegation_service::DelegationScope<'_> {
             crate::delegation_service::DelegationScope {
+                trusted_invocation: None,
                 view: &self.view,
                 state_root: &self.state_root,
                 controller: &self.owner_binding,
@@ -26810,12 +28860,9 @@ pub(crate) mod successor_fixture {
                 1,
             )
             .unwrap();
-        let head = ledger.head().unwrap();
+        let projection = ledger.projection().unwrap();
         drop(ledger);
-        let mut projection = crate::projection::RunStateProjection::starting(run_id);
-        projection.lifecycle = RunLifecycle::Idle;
-        projection.latest_turn_id = Some(turn_id.to_owned());
-        projection.ledger_head = head;
+
         let text = serde_json::to_string(&projection).unwrap();
         let canonical = canonicalize(&parse(&text).unwrap()).unwrap();
         let path = run_root.join("state.json");
@@ -26877,7 +28924,16 @@ pub(crate) mod successor_fixture {
         ledger
             .append_required_payload(crate::audit::AuditKind::TurnTerminal, &payload, 1)
             .unwrap();
-        let head = ledger.head().unwrap();
+        if ledger.projection().unwrap().lifecycle != lifecycle {
+            ledger
+                .append_conformance_payload(
+                    crate::audit::AuditKind::LifecycleTransition,
+                    &json!({"current": lifecycle.as_str()}),
+                    1,
+                )
+                .unwrap();
+        }
+        let projection = ledger.projection().unwrap();
         drop(ledger);
         // The worker records the resolved terminal before it settles, so a
         // published terminal Turn also publishes its resolution record.
@@ -26894,10 +28950,7 @@ pub(crate) mod successor_fixture {
             usage: Some(json!({"inputTokens": 1, "outputTokens": 1})),
         };
         super::record_resolved_terminal(state_root, run_id, &resolved).unwrap();
-        let mut projection = crate::projection::RunStateProjection::starting(run_id);
-        projection.lifecycle = lifecycle;
-        projection.latest_turn_id = Some(turn_id.to_owned());
-        projection.ledger_head = head;
+
         let text = serde_json::to_string(&projection).unwrap();
         let canonical = canonicalize(&parse(&text).unwrap()).unwrap();
         let path = run_root.join("state.json");
@@ -26929,6 +28982,10 @@ pub(crate) mod successor_fixture {
             Self::with_access("canonical_workspace_write")
         }
 
+        pub(crate) fn historical_writable() -> Self {
+            Self::with_runtime("canonical_workspace_write", "review", true, true)
+        }
+
         pub(crate) fn unqualified_review(case: usize) -> Self {
             match case {
                 0 => Self::with_options("read_only", "interactive", true),
@@ -26941,7 +28998,15 @@ pub(crate) mod successor_fixture {
             Self::with_options(access, "review", true)
         }
 
+        pub(crate) fn historical() -> Self {
+            Self::with_runtime("read_only", "review", true, true)
+        }
+
         fn with_options(access: &str, purpose: &str, qualified: bool) -> Self {
+            Self::with_runtime(access, purpose, qualified, false)
+        }
+
+        fn with_runtime(access: &str, purpose: &str, qualified: bool, historical: bool) -> Self {
             use crate::specialist_policy::{
                 InstalledSpecialistPolicy, InstalledSpecialistRole, RoleSource,
                 RoleSourceReference, RoleSourceScope,
@@ -26978,8 +29043,14 @@ pub(crate) mod successor_fixture {
             };
             profile_binding.launch_snapshot.canonical_codex_home =
                 codex_home.to_str().unwrap().to_owned();
-            profile_binding.launch_snapshot.executable_identity.sha256 =
-                "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878".to_owned();
+            profile_binding.launch_snapshot.codex_version =
+                if historical { "0.159.3" } else { "0.164.0" }.to_owned();
+            profile_binding.launch_snapshot.executable_identity.sha256 = if historical {
+                "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878"
+            } else {
+                "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
+            }
+            .to_owned();
             if !qualified {
                 profile_binding
                     .launch_snapshot
@@ -26990,6 +29061,17 @@ pub(crate) mod successor_fixture {
             profile_binding.launch_snapshot_sha256 =
                 sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
             profile_binding.validate_for_recovery().unwrap();
+            let profile_binding = if historical {
+                profile_binding
+            } else {
+                if !qualified {
+                    profile_binding
+                        .launch_snapshot
+                        .process_static_configuration
+                        .insert("mcp_servers".into(), json!({"unqualified-tool":{}}));
+                }
+                crate::profile::qualified_test_binding(&profile_binding)
+            };
             let state_root = root.join("state");
             let sources = crate::provisioning::ProvisioningSources {
                 instruct: &store_sources,
@@ -27342,6 +29424,76 @@ pub(crate) mod successor_fixture {
             self.accept_task(key, 600, "canonical_workspace_write", None)
         }
 
+        pub(crate) fn accept_recovery_task(
+            &self,
+            key: &str,
+            intent: &str,
+        ) -> AcceptedSuccessorTask {
+            crate::engagement::ensure_delegation_namespace(&self.state_root).unwrap();
+            let controller = RunStore::new(SystemWorkspacePlatform, &self.state_root)
+                .load_controller_binding(self.session_id)
+                .unwrap();
+            let scope = crate::delegation_service::DelegationScope {
+                trusted_invocation: None,
+                view: &self.view,
+                state_root: &self.state_root,
+                controller: &controller,
+            };
+            let context = crate::delegation_service::ManagedCallContext {
+                session_id: self.session_id,
+                source_run_id: self.session_id,
+                source_turn_id: "primary-turn",
+                source_tool_call_id: "primary-tool",
+                idempotency_key: key,
+            };
+            let (observation, _) = crate::delegation_service::assign_specialist_task(
+                &scope,
+                &context,
+                &crate::caller_scope::fixture(3),
+                &AcceptingPort,
+                crate::delegation_service::AssignSpecialistTask {
+                    member_ref: self.member_ref,
+                    task: Self::plain_task(),
+                    execution_intent: intent,
+                    target: None,
+                    deadline_seconds: 600,
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+            let task_ref = Uuid::parse_str(&observation.task_ref).unwrap();
+            let mut store = self.store();
+            store
+                .transact(|tx| {
+                    crate::orchestration::mark_successor_task_dispatching(
+                        tx,
+                        self.session_id,
+                        task_ref,
+                        unix_time_ms_semantic().unwrap(),
+                    )
+                })
+                .unwrap();
+            let facts =
+                crate::orchestration::successor_task(store.connection(), self.session_id, task_ref)
+                    .unwrap()
+                    .unwrap();
+            let accepted =
+                crate::successor_capture::retained_accepted_task(&facts.accepted_request_json)
+                    .unwrap();
+            let (task_body, contexts, target) =
+                crate::engagement::accepted_task_content(store.connection(), task_ref)
+                    .unwrap()
+                    .unwrap();
+            let prompt = crate::successor_capture::AcceptedTaskContents {
+                task_body,
+                contexts,
+                target,
+            }
+            .prompt(&accepted, intent, 600)
+            .unwrap();
+            AcceptedSuccessorTask { task_ref, prompt }
+        }
+
         pub(crate) fn accept_checked_task(
             &self,
             key: &str,
@@ -27354,6 +29506,7 @@ pub(crate) mod successor_fixture {
                 .load_controller_binding(self.session_id)
                 .unwrap();
             let scope = crate::delegation_service::DelegationScope {
+                trusted_invocation: None,
                 view: &self.view,
                 state_root: &self.state_root,
                 controller: &controller,
@@ -27962,8 +30115,757 @@ pub(crate) mod successor_review_tests {
         AcceptedSuccessorTask, AcceptingPort, ManagedMember, SuccessorMember,
     };
     use super::*;
+    use crate::caller_scope;
     use crate::delegation_service::{self as service, RunSettlementPort as _};
+    use crate::ledger::Ledger;
     use std::os::unix::fs::PermissionsExt as _;
+
+    // Acceptance is real; this port stops before any executor reservation.
+    struct HeldCancellation<'a> {
+        scene: &'a Scene,
+        effect: bool,
+        cancel_dispatch: bool,
+        calls: std::cell::Cell<u32>,
+    }
+    impl service::RunSettlementPort for HeldCancellation<'_> {
+        fn settle_member_task(
+            &self,
+            r: service::MemberTaskSettlement<'_>,
+        ) -> Result<service::MemberSettlement, MachineError> {
+            AcceptingPort.settle_member_task(r)
+        }
+        fn settle_member_release(
+            &self,
+            r: service::MemberReleaseRequest<'_>,
+        ) -> Result<service::MemberReleaseOutcome, service::MemberReleaseFailure> {
+            AcceptingPort.settle_member_release(r)
+        }
+        fn member_writer_observation(
+            &self,
+            r: service::MemberCleanupObservation<'_>,
+        ) -> Result<service::MemberWriterObservation, MachineError> {
+            AcceptingPort.member_writer_observation(r)
+        }
+        fn start_member_run(
+            &self,
+            r: service::AdmittedMemberStart<'_>,
+        ) -> Result<service::MemberRunStart, MachineError> {
+            AcceptingPort.start_member_run(r)
+        }
+        fn dispatch_member_task(
+            &self,
+            r: service::MemberTaskDispatch<'_>,
+        ) -> Result<service::MemberDispatchOutcome, MachineError> {
+            if self.cancel_dispatch {
+                return self.cancel_then_reserve(r.task_ref);
+            }
+            Err(reconciliation_error("fixture_before_submit"))
+        }
+        fn dispatch_managed_task(
+            &self,
+            r: service::ManagedTaskDispatch<'_>,
+        ) -> Result<service::MemberDispatchOutcome, MachineError> {
+            if self.cancel_dispatch {
+                return self.cancel_then_reserve(r.task_ref);
+            }
+            Err(reconciliation_error("fixture_before_submit"))
+        }
+        fn cancel_member_task(
+            &self,
+            r: service::MemberTaskSettlement<'_>,
+        ) -> Result<(), MachineError> {
+            self.calls.set(self.calls.get() + 1);
+            if self.effect {
+                SemanticRunSettlementPort {
+                    carrier: self.scene.carrier(),
+                }
+                .cancel_member_task(r)?;
+            }
+            Err(reconciliation_error("fixture_lost_cancel_ack"))
+        }
+    }
+
+    impl HeldCancellation<'_> {
+        fn cancel_then_reserve(
+            &self,
+            task: Uuid,
+        ) -> Result<service::MemberDispatchOutcome, MachineError> {
+            let scene = self.scene;
+            nondispatch_cancel(
+                scene,
+                task,
+                &SemanticRunSettlementPort {
+                    carrier: scene.carrier(),
+                },
+            )?;
+            let mut store = scene.store();
+            let result = store.transact(|tx| {
+                crate::storage_observation::put_content(
+                    tx,
+                    "dispatch_index",
+                    &task.to_string(),
+                    "index",
+                    b"staged",
+                )?;
+                match scene.owner() {
+                    service::SettlementOwner::Managed { session_id } => {
+                        crate::orchestration::mark_successor_task_dispatching(
+                            tx, session_id, task, 1,
+                        )
+                    }
+                    service::SettlementOwner::External { engagement_id } => {
+                        crate::engagement::mark_external_task_dispatching_in(
+                            tx,
+                            engagement_id,
+                            task,
+                            1,
+                        )
+                        .map(|_| ())
+                    }
+                }
+            });
+            assert!(result.is_err(), "cancelled task must never reach Submit");
+            Ok(service::MemberDispatchOutcome::Refused {
+                code: "STATE_CONFLICT".into(),
+                message: "cancellation won reservation".into(),
+            })
+        }
+    }
+    fn nondispatch_assignment(scene: &Scene, key: &str, cancel_dispatch: bool) -> (Uuid, String) {
+        // A complete retained Run history, including an unrelated older Turn.
+        // No record for the new assignment's Submit key exists yet.
+        scene.publish("earlier-task-turn", "earlier result");
+        if let service::SettlementOwner::External { engagement_id } = scene.owner() {
+            // This local cancellation case needs the successor hire marker;
+            // historical Scene defaults remain unchanged.
+            scene.store().connection().execute(
+                "INSERT OR IGNORE INTO delegation_operations(operation_ref,schema_version,state,workspace_ref,
+                 controller_principal,controller_generation,scope_kind,scope_ref,operation_kind,idempotency_key,
+                 mutation_envelope_json,mutation_envelope_digest,expected_revision,trusted_invocation_json,
+                 accepted_subjects_json,receipt_json,created_at_ms,updated_at_ms)
+                 VALUES(?1,2,'accepted',?2,'controller:fixture',1,'external_engagement',?3,
+                 'hire_external_specialist','cancel-fixture-hire','{}','fixture',NULL,NULL,?4,'{}',1,1)",
+                rusqlite::params![scene.manifest().aggregate_binding.as_ref().unwrap().operation_id.to_string(),
+                    scene.view().workspace_id, engagement_id.to_string(),
+                    serde_json::to_string(&crate::delegation_identity::AcceptedSubjects {
+                        member_ref: Some(scene.manifest().run_id.to_string()), ..Default::default()
+                    }).unwrap()]).unwrap();
+        }
+        let hold = HeldCancellation {
+            scene,
+            effect: false,
+            cancel_dispatch,
+            calls: std::cell::Cell::new(0),
+        };
+        let mut task = service::fixture_task();
+        task.expected_output = "complete_result".into();
+        let result = match scene.owner() {
+            service::SettlementOwner::External { engagement_id } => {
+                service::assign_external_specialist_task(
+                    &scene.scope(),
+                    &caller_scope::fixture(3),
+                    &hold,
+                    service::AssignExternalSpecialistTask {
+                        engagement_id,
+                        member_ref: scene.manifest().run_id,
+                        task,
+                        execution_intent: "read_only",
+                        target: None,
+                        deadline_seconds: 600,
+                        idempotency_key: key,
+                        expected_revision: None,
+                    },
+                )
+            }
+            service::SettlementOwner::Managed { .. } => service::assign_specialist_task(
+                &scene.scope(),
+                &scene.context(key),
+                &caller_scope::fixture(3),
+                &hold,
+                service::AssignSpecialistTask {
+                    member_ref: scene.manifest().run_id,
+                    task,
+                    execution_intent: "read_only",
+                    target: None,
+                    deadline_seconds: 600,
+                    expected_revision: None,
+                },
+            ),
+        };
+        if cancel_dispatch {
+            assert_eq!(result.unwrap().0.state, "cancelled");
+        } else {
+            assert!(result.is_err());
+        }
+        let (task, receipt): (String, String) = scene
+            .store()
+            .connection()
+            .query_row(
+                "SELECT json_extract(accepted_subjects_json,'$.task_ref'),receipt_json
+             FROM delegation_operations WHERE idempotency_key=?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        (Uuid::parse_str(&task).unwrap(), receipt)
+    }
+    fn nondispatch_cancel(
+        scene: &Scene,
+        task: Uuid,
+        port: &dyn service::RunSettlementPort,
+    ) -> Result<Value, MachineError> {
+        let revision = scene
+            .store()
+            .scope_membership_revision(
+                &scene.view().workspace_id,
+                scene.owner().scope_kind(),
+                &scene.owner().scope_ref().to_string(),
+            )
+            .unwrap();
+        service::cancel_specialist_task(
+            &scene.scope(),
+            scene.owner(),
+            matches!(scene.owner(), service::SettlementOwner::Managed { .. })
+                .then(|| scene.context("cancel"))
+                .as_ref(),
+            port,
+            scene.manifest().run_id,
+            task,
+            revision,
+            "fixture cleanup",
+        )
+    }
+    fn nondispatch_facts(scene: &Scene, task: Uuid) -> (String, u64, u64) {
+        let store = scene.store();
+        let accounting = store
+            .connection()
+            .query_row(
+                "SELECT accounting_state FROM caller_scope_assignments WHERE assignment_id=?1",
+                [task.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let revision = crate::engagement::member_workload_revision(
+            store.connection(),
+            &scene.view().workspace_id,
+            scene.owner().scope_kind(),
+            &scene.owner().scope_ref().to_string(),
+            &scene.manifest().run_id.to_string(),
+        )
+        .unwrap();
+        let query = if matches!(scene.owner(), service::SettlementOwner::Managed { .. }) {
+            "SELECT COUNT(*) FROM orchestration_events WHERE kind='specialist_task_controlled'"
+        } else {
+            "SELECT COUNT(*) FROM events WHERE kind='external_task_cancelled'"
+        };
+        let events = store
+            .connection()
+            .query_row(query, [], |r| r.get(0))
+            .unwrap();
+        (accounting, revision, events)
+    }
+
+    #[test]
+    fn nondispatch_cancel_both_owners_commit_once_and_keep_original_receipt() {
+        for managed in [false, true] {
+            let scene = Scene::new(managed);
+            let (task, receipt) = nondispatch_assignment(&scene, "pending-cancel", false);
+            let before = nondispatch_facts(&scene, task);
+            let port = SemanticRunSettlementPort {
+                carrier: scene.carrier(),
+            };
+            let cancelled = nondispatch_cancel(&scene, task, &port).unwrap();
+            assert_eq!(cancelled["task"]["state"], "cancelled");
+            assert_eq!(
+                nondispatch_facts(&scene, task),
+                ("proved_nondispatch".into(), before.1 + 1, before.2 + 1)
+            );
+            // A port which would return an error must not be invoked by repeat.
+            let hold = HeldCancellation {
+                scene: &scene,
+                effect: false,
+                cancel_dispatch: false,
+                calls: std::cell::Cell::new(0),
+            };
+            assert_eq!(nondispatch_cancel(&scene, task, &hold).unwrap(), cancelled);
+            assert_eq!(hold.calls.get(), 0);
+            let revision = scene
+                .store()
+                .scope_membership_revision(
+                    &scene.view().workspace_id,
+                    scene.owner().scope_kind(),
+                    &scene.owner().scope_ref().to_string(),
+                )
+                .unwrap();
+            assert!(
+                service::cancel_specialist_task(
+                    &scene.scope(),
+                    scene.owner(),
+                    managed.then(|| scene.context("cancel")).as_ref(),
+                    &hold,
+                    scene.manifest().run_id,
+                    task,
+                    revision,
+                    "changed cancellation reason"
+                )
+                .is_err()
+            );
+            assert_eq!(hold.calls.get(), 0);
+            let retained: String = scene.store().connection().query_row(
+                "SELECT receipt_json FROM delegation_operations WHERE idempotency_key='pending-cancel'", [], |r|r.get(0)).unwrap();
+            assert_eq!(receipt, retained);
+            scene
+                .store()
+                .transact(|tx| {
+                    caller_scope::require_member_settled(
+                        tx,
+                        if managed { "managed" } else { "external" },
+                        &scene.owner().scope_ref().to_string(),
+                        scene.manifest().run_id,
+                    )
+                })
+                .unwrap();
+            let table = if managed { "brokered_tasks" } else { "tasks" };
+            let turn = if managed { "target_turn_id" } else { "turn_id" };
+            assert!(scene.store().connection().query_row(&format!("SELECT {turn} IS NULL AND result_sha256 IS NULL FROM {table} WHERE task_id=?1"),
+                [task.to_string()], |r|r.get::<_,bool>(0)).unwrap());
+            // The real dispatcher cannot reserve the cancelled task. A staged
+            // content write in that transaction must roll back with its claim.
+            let mut store = scene.store();
+            assert!(
+                store
+                    .transact(|tx| {
+                        crate::storage_observation::put_content(
+                            tx,
+                            "dispatch_index",
+                            &task.to_string(),
+                            "index",
+                            b"staged",
+                        )?;
+                        if managed {
+                            crate::orchestration::mark_successor_task_dispatching(
+                                tx,
+                                scene.owner().scope_ref(),
+                                task,
+                                1,
+                            )
+                        } else {
+                            crate::engagement::mark_external_task_dispatching_in(
+                                tx,
+                                scene.owner().scope_ref(),
+                                task,
+                                1,
+                            )
+                            .map(|_| ())
+                        }
+                    })
+                    .is_err()
+            );
+            assert_eq!(store.connection().query_row("SELECT COUNT(*) FROM result_content_refs WHERE owner_id=?1 AND owner_kind='dispatch_index'", [task.to_string()], |r|r.get::<_,u64>(0)).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn nondispatch_cancel_refuses_ambiguous_or_inconsistent_boundaries_atomically() {
+        for managed in [false, true] {
+            for case in [
+                "dispatching",
+                "claimed",
+                "queued",
+                "unknown",
+                "index",
+                "content",
+                "counted",
+                "acceptance",
+                "event_failure",
+                "native_request",
+            ] {
+                let scene = Scene::new(managed);
+                let (task, _) = nondispatch_assignment(&scene, "ambiguous-cancel", false);
+                let mut store = scene.store();
+                let table = if managed { "brokered_tasks" } else { "tasks" };
+                match case {
+                    "dispatching" => {
+                        store
+                            .transact(|tx| match scene.owner() {
+                                service::SettlementOwner::Managed { session_id } => {
+                                    crate::orchestration::mark_successor_task_dispatching(
+                                        tx, session_id, task, 1,
+                                    )
+                                }
+                                service::SettlementOwner::External { engagement_id } => {
+                                    crate::engagement::mark_external_task_dispatching_in(
+                                        tx,
+                                        engagement_id,
+                                        task,
+                                        1,
+                                    )
+                                    .map(|_| ())
+                                }
+                            })
+                            .unwrap();
+                    }
+                    "native_request" => {
+                        let key = if managed {
+                            format!("successor-task:{task}")
+                        } else {
+                            "ambiguous-cancel".into()
+                        };
+                        let root = run_root(scene.state_root(), scene.manifest().run_id);
+                        let mut ledger = Ledger::open(&root, scene.manifest().run_id).unwrap();
+                        ledger.append_required_payload(AuditKind::IdempotencyReserved,
+                            &json!({"operation_id":Uuid::now_v7(),"idempotency_key":key,"request_sha256":"a".repeat(64),
+                                "run_generation":1,"server_key":scene.manifest().profile_capability_snapshot.server_key,
+                                "server_epoch":1,"provisional_thread":false}), 1).unwrap();
+                        std::fs::write(
+                            root.join("state.json"),
+                            serde_json::to_vec(&ledger.projection().unwrap()).unwrap(),
+                        )
+                        .unwrap();
+                    }
+                    "index" => {
+                        let capture = crate::successor_capture::capture_dispatch_index(
+                            &scene.workspace(),
+                            task,
+                        )
+                        .unwrap();
+                        store
+                            .transact(|tx| {
+                                crate::engagement::record_dispatch_index_with_content(
+                                    tx,
+                                    crate::engagement::DispatchIndexRecord {
+                                        task_id: task,
+                                        workspace_ref: &scene.view().workspace_id,
+                                        run_ref: scene.manifest().run_id,
+                                        head_commit: capture.head.as_deref(),
+                                        index_sha256: &capture.sha256,
+                                        index_byte_length: capture.canonical.len() as u64,
+                                        file_count: capture.file_count,
+                                        baseline_bytes: capture.baseline_bytes,
+                                    },
+                                    &capture.canonical,
+                                    &capture.baseline,
+                                    1,
+                                )
+                            })
+                            .unwrap();
+                    }
+                    "content" => store
+                        .transact(|tx| {
+                            crate::storage_observation::put_content(
+                                tx,
+                                "dispatch_index",
+                                &task.to_string(),
+                                "index",
+                                b"ambiguous",
+                            )
+                            .map(|_| ())
+                        })
+                        .unwrap(),
+                    "counted" => store
+                        .transact(|tx| caller_scope::accepted(tx, task))
+                        .unwrap(),
+                    "acceptance" => {
+                        let query = if managed {
+                            "UPDATE brokered_task_acceptances SET accepted_request_sha256='bad' WHERE task_id=?1"
+                        } else {
+                            "UPDATE tasks SET objective_sha256='bad' WHERE task_id=?1"
+                        };
+                        store
+                            .connection()
+                            .execute(query, [task.to_string()])
+                            .unwrap();
+                    }
+                    "event_failure" => {
+                        let table = if managed {
+                            "orchestration_events"
+                        } else {
+                            "events"
+                        };
+                        store.connection().execute_batch(&format!("CREATE TRIGGER refuse_cancel_event BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'fixture event failure'); END")).unwrap();
+                    }
+                    state => {
+                        store
+                            .connection()
+                            .execute(
+                                &format!("UPDATE {table} SET state=?2 WHERE task_id=?1"),
+                                rusqlite::params![task.to_string(), state],
+                            )
+                            .unwrap();
+                    }
+                }
+                let before = nondispatch_facts(&scene, task);
+                let state = scene.state(task);
+                let port = SemanticRunSettlementPort {
+                    carrier: scene.carrier(),
+                };
+                assert!(
+                    nondispatch_cancel(&scene, task, &port).is_err(),
+                    "{managed}/{case}"
+                );
+                assert_eq!(scene.state(task), state, "{managed}/{case}");
+                assert_eq!(nondispatch_facts(&scene, task), before, "{managed}/{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn nondispatch_cancel_lost_ack_and_unperformed_admission_repeat_are_observations() {
+        for managed in [false, true] {
+            for effect in [false, true] {
+                let scene = Scene::new(managed);
+                let (task, _) = nondispatch_assignment(&scene, "lost-cancel", false);
+                let hold = HeldCancellation {
+                    scene: &scene,
+                    effect,
+                    cancel_dispatch: false,
+                    calls: std::cell::Cell::new(0),
+                };
+                let error = nondispatch_cancel(&scene, task, &hold).unwrap_err();
+                assert_eq!(hold.calls.get(), 1);
+                let repeated = nondispatch_cancel(&scene, task, &hold).unwrap();
+                assert_eq!(hold.calls.get(), 1);
+                assert_eq!(repeated["operation_ref"], error.details["operation_ref"]);
+                assert_eq!(
+                    repeated["task"]["state"],
+                    if effect { "cancelled" } else { "queued" }
+                );
+                assert_eq!(
+                    nondispatch_facts(&scene, task).0,
+                    if effect {
+                        "proved_nondispatch"
+                    } else {
+                        "counted_unresolved"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nondispatch_cancel_winning_dispatch_returns_original_accepted_assignment() {
+        for managed in [false, true] {
+            let scene = Scene::new(managed);
+            let (task, receipt) = nondispatch_assignment(&scene, "cancel-during-dispatch", true);
+            assert_eq!(scene.state(task), "cancelled");
+            assert_eq!(nondispatch_facts(&scene, task).0, "proved_nondispatch");
+            let row: String = scene.store().connection().query_row(
+                "SELECT receipt_json FROM delegation_operations WHERE idempotency_key='cancel-during-dispatch'",
+                [], |r|r.get(0)).unwrap();
+            assert_eq!(row, receipt);
+            assert_eq!(scene.store().connection().query_row(
+                "SELECT COUNT(*) FROM result_content_refs WHERE owner_id=?1 AND owner_kind='dispatch_index'",
+                [task.to_string()], |r|r.get::<_,u64>(0)).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn nondispatch_cancel_checks_current_carrier_and_first_revision_before_effect() {
+        for managed in [false, true] {
+            let scene = Scene::new(managed);
+            let (task, _) = nondispatch_assignment(&scene, "cancel-auth", false);
+            let before = nondispatch_facts(&scene, task);
+            let port = SemanticRunSettlementPort {
+                carrier: scene.carrier(),
+            };
+            assert!(
+                port.cancel_member_task(service::MemberTaskSettlement {
+                    view: scene.view(),
+                    state_root: scene.state_root(),
+                    owner: scene.owner(),
+                    member_ref: scene.manifest().run_id,
+                    task_ref: task,
+                    execution_intent: "read_only",
+                })
+                .is_err(),
+                "no effect without an original cancellation admission"
+            );
+            assert!(
+                service::cancel_specialist_task(
+                    &scene.scope(),
+                    scene.owner(),
+                    managed.then(|| scene.context("cancel")).as_ref(),
+                    &port,
+                    scene.manifest().run_id,
+                    task,
+                    u64::MAX,
+                    "fixture cleanup"
+                )
+                .is_err()
+            );
+            let foreign = Scene::new(managed);
+            let wrong = SemanticRunSettlementPort {
+                carrier: foreign.carrier(),
+            };
+            assert!(nondispatch_cancel(&scene, task, &wrong).is_err());
+            assert_eq!(scene.state(task), "accepted");
+            assert_eq!(nondispatch_facts(&scene, task), before);
+            // The failed effect owns this cancellation; a repeat cannot retry
+            // it even with the correct current carrier.
+            assert_eq!(
+                nondispatch_cancel(&scene, task, &port).unwrap()["task"]["state"],
+                "queued"
+            );
+        }
+    }
+
+    #[test]
+    fn nondispatch_cancel_preserves_completed_result_and_final_counting() {
+        for managed in [false, true] {
+            let scene = Scene::new(managed);
+            let (task, receipt) = nondispatch_assignment(&scene, "completed-before-cancel", false);
+            scene.mark_running(task, "completed-task-turn");
+            scene.publish("completed-task-turn", "original final response");
+            scene.settle(task).unwrap();
+            let result = |store: &EngagementStore| match scene.owner() {
+                service::SettlementOwner::External { engagement_id } => {
+                    store
+                        .task_complete_result(engagement_id, task)
+                        .unwrap()
+                        .unwrap()
+                        .1
+                }
+                service::SettlementOwner::Managed { .. } => {
+                    crate::orchestration::successor_task_result(store.connection(), task)
+                        .unwrap()
+                        .unwrap()
+                }
+            };
+            let bytes = result(&scene.store());
+            let before = nondispatch_facts(&scene, task);
+            let hold = HeldCancellation {
+                scene: &scene,
+                effect: false,
+                cancel_dispatch: false,
+                calls: std::cell::Cell::new(0),
+            };
+            let observed = nondispatch_cancel(&scene, task, &hold).unwrap();
+            assert_eq!(observed["task"]["state"], "completed");
+            assert_eq!(hold.calls.get(), 0);
+            assert_eq!(nondispatch_facts(&scene, task), before);
+            assert_eq!(before.0, "counted_accepted");
+            assert_eq!(result(&scene.store()), bytes);
+            let retained: String = scene.store().connection().query_row(
+                "SELECT receipt_json FROM delegation_operations WHERE idempotency_key='completed-before-cancel'", [], |r|r.get(0)).unwrap();
+            assert_eq!(receipt, retained);
+        }
+    }
+
+    #[test]
+    fn cancellation_port_checks_actual_member_owner_and_workspace_before_worker_contact() {
+        for managed in [false, true] {
+            let scene = Scene::new(managed);
+            let task = scene.accept_generic_task("cancel-authority");
+            scene.mark_running(task.task_ref, "original-task-turn");
+            let port = SemanticRunSettlementPort {
+                carrier: scene.carrier(),
+            };
+            let invoke = |view: &WorkspaceView, owner| {
+                port.cancel_member_task(service::MemberTaskSettlement {
+                    view,
+                    state_root: scene.state_root(),
+                    owner,
+                    member_ref: scene.manifest().run_id,
+                    task_ref: task.task_ref,
+                    execution_intent: "read_only",
+                })
+            };
+            let original = invoke(scene.view(), scene.owner()).unwrap_err();
+            assert_ne!(original.details["reason"], "foreign_member", "{original:?}");
+            assert_ne!(original.details["reason"], "foreign_task", "{original:?}");
+            assert_ne!(
+                original.details["reason"], "task_turn_unrecorded",
+                "{original:?}"
+            );
+            let mut foreign = scene.view().clone();
+            foreign.workspace_id = "foreign-workspace".into();
+            assert_eq!(
+                invoke(&foreign, scene.owner()).unwrap_err().details["reason"],
+                "foreign_member"
+            );
+            for owner in [
+                service::SettlementOwner::External {
+                    engagement_id: Uuid::now_v7(),
+                },
+                service::SettlementOwner::Managed {
+                    session_id: Uuid::now_v7(),
+                },
+            ] {
+                assert_eq!(
+                    invoke(scene.view(), owner).unwrap_err().details["reason"],
+                    "foreign_member"
+                );
+            }
+            let same_ref_other_kind = if managed {
+                service::SettlementOwner::External {
+                    engagement_id: scene.owner().scope_ref(),
+                }
+            } else {
+                service::SettlementOwner::Managed {
+                    session_id: scene.owner().scope_ref(),
+                }
+            };
+            assert_eq!(
+                invoke(scene.view(), same_ref_other_kind)
+                    .unwrap_err()
+                    .details["reason"],
+                "foreign_member"
+            );
+            assert_eq!(scene.state(task.task_ref), "running");
+        }
+    }
+
+    #[test]
+    fn historical_checked_reader_reopens_with_its_original_qualification() {
+        for managed in [false, true] {
+            let scene = Scene::historical(managed);
+            let manifest = scene.manifest();
+            let binding = manifest.global_profile_binding.as_ref().unwrap();
+            assert!(!binding.checked_review_supported());
+            assert!(service::qualified_successor_review(manifest));
+            let before =
+                std::fs::read(run_root(scene.state_root(), manifest.run_id).join("manifest.json"))
+                    .unwrap();
+            let review = Uuid::now_v7();
+            let target = crate::direct_review_target::DirectTarget::admit(
+                &scene.workspace(),
+                manifest.workspace_mode,
+                "head",
+                None,
+                review,
+            )
+            .unwrap();
+            let reader = crate::direct_review_target::DirectTargetReader::create(
+                scene.state_root(),
+                &scene.workspace(),
+                manifest.workspace_mode,
+                review,
+                manifest.run_id,
+                target,
+            )
+            .unwrap();
+            let identity = reader.target().clone();
+            drop(reader);
+            let recovered = crate::direct_review_target::DirectTargetReader::open(
+                scene.state_root(),
+                review,
+                manifest.run_id,
+            )
+            .unwrap();
+            assert_eq!(recovered.target(), &identity);
+            let bootstrap = scene.worker_bootstrap(4, false, true);
+            assert_eq!(
+                bootstrap.safety_policy,
+                crate::turn::SessionSafetyPolicy::CallerWorkspace
+            );
+            assert!(binding.accepted_checked_review_supported());
+            assert_eq!(
+                std::fs::read(run_root(scene.state_root(), manifest.run_id).join("manifest.json"))
+                    .unwrap(),
+                before
+            );
+        }
+    }
 
     enum Member {
         External(Box<SuccessorMember>),
@@ -28006,9 +30908,24 @@ pub(crate) mod successor_review_tests {
         fn with_case(managed: bool, case: Option<usize>) -> Self {
             Self::with_access(managed, case, false)
         }
+        pub(crate) fn historical(managed: bool) -> Self {
+            Self::with_runtime(managed, None, false, true)
+        }
+
         fn with_access(managed: bool, case: Option<usize>, writable: bool) -> Self {
+            Self::with_runtime(managed, case, writable, false)
+        }
+
+        fn with_runtime(
+            managed: bool,
+            case: Option<usize>,
+            writable: bool,
+            historical: bool,
+        ) -> Self {
             let member = if managed {
-                let member = if writable {
+                let member = if historical {
+                    ManagedMember::historical()
+                } else if writable {
                     ManagedMember::writable()
                 } else {
                     case.map_or_else(ManagedMember::new, ManagedMember::unqualified_review)
@@ -28036,7 +30953,9 @@ pub(crate) mod successor_review_tests {
 
                 Member::Managed(Box::new((member, controller, carrier)))
             } else {
-                Member::External(Box::new(if writable {
+                Member::External(Box::new(if historical {
+                    SuccessorMember::historical()
+                } else if writable {
                     SuccessorMember::new()
                 } else {
                     case.map_or_else(
@@ -28046,6 +30965,80 @@ pub(crate) mod successor_review_tests {
                 }))
             };
             Self { member }
+        }
+        pub(crate) fn administrative_fixture(&mut self) -> crate::trusted_host::tests::Fixture {
+            let base = self.state_root().parent().unwrap().to_path_buf();
+            let home = DolgoraeHome::from_canonical_home(base).unwrap();
+            std::fs::rename(
+                home.root(),
+                home.root().with_file_name("retained-source-home"),
+            )
+            .unwrap();
+            crate::global_profile::initialize_generation(&home).unwrap();
+
+            let view = WorkspaceService::new(
+                SystemWorkspacePlatform,
+                crate::workspace::SystemGitRunner,
+                home.root().to_path_buf(),
+            )
+            .initialize(Some(&self.workspace()), self.view().mode)
+            .unwrap();
+            assert_eq!(view.workspace_id, self.view().workspace_id);
+            let target = home.workspace_root(&view.workspace_id);
+            fn move_entries(source: &Path, target: &Path) {
+                for entry in std::fs::read_dir(source).unwrap() {
+                    let entry = entry.unwrap();
+                    let destination = target.join(entry.file_name());
+                    if entry.path().is_dir() && destination.is_dir() {
+                        move_entries(&entry.path(), &destination);
+                    } else {
+                        std::fs::rename(entry.path(), destination).unwrap();
+                    }
+                }
+            }
+            move_entries(self.state_root(), &target);
+            match &mut self.member {
+                Member::External(m) => m.state_root = target,
+                Member::Managed(m) => m.0.state_root = target,
+            }
+            if let service::SettlementOwner::Managed { session_id } = self.owner() {
+                let store = RunStore::new(SystemWorkspacePlatform, self.state_root());
+                let session =
+                    crate::orchestration::OrchestrationStore::open_observer(self.state_root())
+                        .unwrap()
+                        .session(session_id)
+                        .unwrap();
+                let mut root = store.load_manifest(session_id).unwrap();
+                let binding = root.aggregate_binding.as_mut().unwrap();
+                binding.operation_id = session.bootstrap_operation_id;
+                binding.policy_sha256 = Some(session.specialist_policy_sha256);
+                std::fs::write(
+                    run_root(self.state_root(), session_id).join("manifest.json"),
+                    serde_json::to_vec(&root).unwrap(),
+                )
+                .unwrap();
+            }
+            crate::trusted_host::tests::Fixture::for_recovery(
+                home,
+                self.workspace(),
+                self.carrier(),
+                self.owner(),
+            )
+        }
+        pub(crate) fn accept_administrative_task(
+            &self,
+            key: &str,
+            write: bool,
+        ) -> AcceptedSuccessorTask {
+            let intent = if write {
+                "canonical_workspace_write"
+            } else {
+                "read_only"
+            };
+            match &self.member {
+                Member::External(m) => m.accept_and_dispatch_task(key, intent, 600),
+                Member::Managed(m) => m.0.accept_recovery_task(key, intent),
+            }
         }
         pub(crate) fn state_root(&self) -> &Path {
             match &self.member {
@@ -28153,6 +31146,37 @@ pub(crate) mod successor_review_tests {
             )
             .unwrap();
             let mut journal = LedgerTurnJournal::new(&mut ledger, 1);
+            let writer_generation = if write {
+                let store = crate::writer::WriterStore::new(
+                    self.state_root(),
+                    &manifest.workspace_id,
+                    DarwinSystem.current_uid(),
+                );
+                let (_, generation) = store
+                    .transact(|record| {
+                        let transaction = Uuid::now_v7();
+                        let (_, generation) = record.prepare_acquire(
+                            manifest.run_id,
+                            crate::writer::WriterStore::holder(
+                                manifest.run_id,
+                                manifest.profile.profile_name.clone(),
+                                &manifest.controller,
+                                1,
+                                manifest.profile_capability_snapshot.server_key.clone(),
+                                1,
+                                Some("thread-1".to_owned()),
+                                crate::domain::RunLifecycle::Idle,
+                            ),
+                            transaction,
+                        )?;
+                        record.commit_acquire(transaction, generation)?;
+                        Ok(generation)
+                    })
+                    .unwrap();
+                Some(generation)
+            } else {
+                None
+            };
             let policy = crate::domain::EffectivePolicy {
                 access: if write {
                     crate::domain::Access::Write
@@ -28163,7 +31187,7 @@ pub(crate) mod successor_review_tests {
                 policy_epoch: crate::domain::PolicyEpoch(1),
                 thread_generation: Some(1),
                 server_epoch: Some(1),
-                writer_generation: write.then_some(1),
+                writer_generation,
             };
             let request = crate::turn::TurnRequest {
                 write,
@@ -28407,6 +31431,7 @@ pub(crate) mod successor_review_tests {
             match &self.member {
                 Member::External(m) => m.scope(),
                 Member::Managed(m) => service::DelegationScope {
+                    trusted_invocation: None,
                     view: &m.0.view,
                     state_root: &m.0.state_root,
                     controller: &m.1,
@@ -28509,9 +31534,28 @@ pub(crate) mod successor_review_tests {
             AcceptedSuccessorTask,
             crate::direct_review_target::DirectTargetReader,
         ) {
-            let accepted = match &self.member {
-                Member::External(m) => m.accept_checked_task(key, task(), kind, revision),
-                Member::Managed(m) => m.0.accept_checked_task(key, task(), kind, revision),
+            let binding = self.manifest().global_profile_binding.as_ref().unwrap();
+            let accepted = if binding.accepted_checked_review_supported()
+                && !binding.caller_workspace_supported()
+            {
+                let (task_ref, prompt) = service::seed_retained_checked_assignment(
+                    &self.scope(),
+                    self.owner(),
+                    &self.manifest().agent_configuration,
+                    self.manifest().run_id,
+                    key,
+                    &task(),
+                    &crate::review::ReviewTargetRequest {
+                        kind: kind.to_owned(),
+                        revision: revision.map(str::to_owned),
+                    },
+                );
+                AcceptedSuccessorTask { task_ref, prompt }
+            } else {
+                match &self.member {
+                    Member::External(m) => m.accept_checked_task(key, task(), kind, revision),
+                    Member::Managed(m) => m.0.accept_checked_task(key, task(), kind, revision),
+                }
             };
             let reader = crate::worker::fixture_bind_checked_task(
                 self.state_root(),
@@ -29388,6 +32432,32 @@ mod managed_write_tests {
     use crate::run::ControllerBinding;
     use std::os::unix::fs::PermissionsExt as _;
 
+    #[derive(Debug)]
+    enum ScriptedReadFailure {
+        Io(std::io::Error),
+        Frame(crate::worker::WorkerProtocolError),
+    }
+
+    fn prepare_scripted_stream(stream: &std::os::unix::net::UnixStream) -> std::io::Result<()> {
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))
+    }
+
+    fn scripted_control_frame<T: serde::de::DeserializeOwned>(
+        stream: &std::os::unix::net::UnixStream,
+    ) -> Result<(T, Option<std::os::fd::OwnedFd>), ScriptedReadFailure> {
+        use std::io::Read as _;
+        let (leading, credential) = DarwinSystem
+            .receive_byte_with_optional_fd(stream)
+            .map_err(ScriptedReadFailure::Io)?;
+        let rest = stream.try_clone().map_err(ScriptedReadFailure::Io)?;
+        crate::worker::read_frame(&mut std::io::BufReader::new(
+            std::io::Cursor::new([leading]).chain(rest),
+        ))
+        .map(|frame| (frame, credential))
+        .map_err(ScriptedReadFailure::Frame)
+    }
+
     /// Scripted Submit acknowledgements and Reader refusals with a real worker identity.
     /// The semantic service still performs its real census, credential, revision,
     /// durable-policy and socket-identity checks.
@@ -29397,6 +32467,8 @@ mod managed_write_tests {
         thread: Option<std::thread::JoinHandle<()>>,
         sockets: Vec<PathBuf>,
         calls: Arc<Mutex<Vec<String>>>,
+        connection_errors: Arc<Mutex<Vec<ScriptedReadFailure>>>,
+        connection_changed: Arc<std::sync::Condvar>,
     }
 
     fn spawn_identity(
@@ -29489,6 +32561,8 @@ mod managed_write_tests {
                 thread: None,
                 sockets: Vec::new(),
                 calls: Arc::new(Mutex::new(Vec::new())),
+                connection_errors: Arc::new(Mutex::new(Vec::new())),
+                connection_changed: Arc::new(std::sync::Condvar::new()),
             };
             let server_identity = identity.clone();
             let dedicated: crate::worker::DedicatedServerIdentity = serde_json::from_value({
@@ -29621,6 +32695,8 @@ mod managed_write_tests {
             let state_root = state_root.to_path_buf();
             let manifest = manifest.clone();
             let proof_socket = socket_id(&app_socket);
+            let errors = Arc::clone(&fixture.connection_errors);
+            let changed = Arc::clone(&fixture.connection_changed);
             let thread = std::thread::spawn({
                 let children = Arc::clone(&children);
                 let stop = Arc::clone(&stop);
@@ -29636,13 +32712,20 @@ mod managed_write_tests {
                             }
                             Err(error) => panic!("scripted control: {error}"),
                         };
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(5)))
-                            .unwrap();
-                        let mut request: ControlRequestV1 = crate::worker::read_frame(
-                            &mut std::io::BufReader::new(stream.try_clone().unwrap()),
-                        )
-                        .unwrap();
+                        if let Err(error) = prepare_scripted_stream(&stream) {
+                            errors.lock().unwrap().push(ScriptedReadFailure::Io(error));
+                            changed.notify_all();
+                            continue;
+                        }
+                        let (mut request, _credential): (ControlRequestV1, _) =
+                            match scripted_control_frame(&stream) {
+                                Ok(frame) => frame,
+                                Err(error) => {
+                                    errors.lock().unwrap().push(error);
+                                    changed.notify_all();
+                                    continue;
+                                }
+                            };
                         loop {
                             request = match request {
                                 ControlRequestV1::ControllerChecked { request, .. }
@@ -29811,11 +32894,25 @@ mod managed_write_tests {
                 let _ = child.kill();
                 let _ = child.wait();
             }
-            if let Some(thread) = self.thread.take() {
-                thread.join().unwrap();
-            }
+            let joined = self.thread.take().map(|thread| thread.join());
             for socket in &self.sockets {
                 let _ = std::fs::remove_file(socket);
+            }
+            let errors = self.connection_errors.lock().unwrap();
+            if std::thread::panicking() {
+                eprintln!(
+                    "scripted connection failures during test unwind: {errors:?}; listener_failed={}",
+                    joined.as_ref().is_some_and(Result::is_err)
+                );
+            } else {
+                assert!(
+                    joined.is_none_or(|result| result.is_ok()),
+                    "scripted listener panicked"
+                );
+                assert!(
+                    errors.is_empty(),
+                    "unexpected scripted connection failures: {errors:?}"
+                );
             }
         }
     }
@@ -29828,7 +32925,10 @@ mod managed_write_tests {
 
     impl Assignment {
         fn new() -> Self {
-            let member = ManagedMember::writable();
+            Self::with_member(ManagedMember::writable())
+        }
+
+        fn with_member(member: ManagedMember) -> Self {
             let root_run = run_root(&member.state_root, member.session_id);
             std::fs::remove_dir(root_run.join("artifacts")).unwrap();
             std::fs::remove_dir(root_run).unwrap();
@@ -29912,6 +33012,7 @@ mod managed_write_tests {
 
         fn scope(&self) -> crate::delegation_service::DelegationScope<'_> {
             crate::delegation_service::DelegationScope {
+                trusted_invocation: None,
                 view: &self.member.view,
                 state_root: &self.member.state_root,
                 controller: &self.controller,
@@ -30102,17 +33203,7 @@ mod managed_write_tests {
         lifecycle: RunLifecycle,
     ) -> Result<(), MachineError> {
         let member = &scene.member;
-        let prior = RunStore::new(SystemWorkspacePlatform, &member.state_root)
-            .load_state_projection(member.member_ref)?;
         member.publish_terminal_turn("write-turn", "completed", "complete answer", lifecycle);
-        if prior.thread_id.is_some() {
-            let path = run_root(&member.state_root, member.member_ref).join("state.json");
-            let mut projection = RunStore::new(SystemWorkspacePlatform, &member.state_root)
-                .load_state_projection(member.member_ref)?;
-            projection.thread_id = prior.thread_id;
-            projection.run_generation = prior.run_generation;
-            std::fs::write(path, serde_json::to_vec(&projection).unwrap()).unwrap();
-        }
         Ok(())
     }
 
@@ -30140,6 +33231,23 @@ mod managed_write_tests {
     struct FixtureWriteDispatch<'a>(&'a Assignment);
 
     impl crate::delegation_service::RunSettlementPort for FixtureWriteDispatch<'_> {
+        fn member_run_observation(
+            &self,
+            request: crate::delegation_service::MemberCleanupObservation<'_>,
+            budget: &mut crate::ledger::ObservationBudget,
+        ) -> Result<crate::snapshot::MemberRunObservation, MachineError> {
+            self.0.port().member_run_observation(request, budget)
+        }
+        fn member_interaction_observation(
+            &self,
+            request: crate::delegation_service::MemberCleanupObservation<'_>,
+            source: &crate::snapshot::MemberRunObservation,
+            budget: &mut crate::ledger::ObservationBudget,
+        ) -> Result<(bool, crate::domain::ProjectionStamp), MachineError> {
+            self.0
+                .port()
+                .member_interaction_observation(request, source, budget)
+        }
         fn start_member_run(
             &self,
             _request: crate::delegation_service::AdmittedMemberStart<'_>,
@@ -30932,6 +34040,68 @@ mod managed_write_tests {
     }
 
     #[test]
+    fn initial_writer_reuse_keeps_read_terminal_and_transition_cleanup() {
+        let scene = Assignment::new();
+        let worker = ScriptedWorker::start(&scene, 0);
+        let carrier = broker(&scene.member);
+        hold(
+            &scene.member,
+            scene.member.member_ref,
+            &scene.member.manifest.controller,
+        );
+        let writer = writers(&scene.member);
+        let initial = writer.load().unwrap();
+        append_policy(
+            &scene.member.state_root,
+            scene.member.member_ref,
+            AuditKind::WriterAcquired,
+            Uuid::now_v7(),
+            true,
+            initial.writer_generation,
+        );
+        let cleanup = |write| {
+            release_stale_member_writer(
+                &scene.member.view,
+                &scene.member.state_root,
+                scene.member.member_ref,
+                scene.member.owner(),
+                &carrier,
+                write,
+            )
+        };
+        cleanup(true).unwrap();
+        assert_eq!(writer.load().unwrap(), initial);
+        assert!(worker.calls.lock().unwrap().is_empty());
+
+        // Read-only dispatch and pending or terminal cleanup still require release.
+        assert_eq!(cleanup(false).unwrap_err().code, "RUNTIME_PATH_COLLISION");
+        assert_eq!(writer.load().unwrap(), initial);
+        let transaction = Uuid::now_v7();
+        writer
+            .transact(|record| record.prepare_release(scene.member.member_ref, transaction))
+            .unwrap();
+        let releasing = writer.load().unwrap();
+        assert_eq!(cleanup(true).unwrap_err().code, "RUNTIME_PATH_COLLISION");
+        assert_eq!(writer.load().unwrap(), releasing);
+        writer
+            .transact(|record| {
+                record.rollback_release(transaction);
+                Ok(())
+            })
+            .unwrap();
+        scene.member.publish_terminal_turn(
+            "prior-turn",
+            "completed",
+            "prior result",
+            RunLifecycle::Idle,
+        );
+        let retained = writer.load().unwrap();
+        assert_eq!(cleanup(true).unwrap_err().code, "RUNTIME_PATH_COLLISION");
+        assert_eq!(writer.load().unwrap(), retained);
+        assert!(worker.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn managed_release_failure_after_publication_does_not_resettle() {
         let scene = Assignment::new();
         let task = running(&scene);
@@ -30957,13 +34127,13 @@ mod managed_write_tests {
                 Some(&carrier),
             )
         };
+        let before = writers(&scene.member).load().unwrap();
+        assert!(before.generation_release.is_none());
+        // Direct terminal publication leaves no native Thread binding in this fixture.
         assert!(settle().is_err());
         let bytes = scene.member.complete_result_bytes(task).unwrap();
         assert_eq!(scene.member.workload_revision(), 1);
-        assert_eq!(
-            writers(&scene.member).load().unwrap().state,
-            crate::writer::WriterAuthorityState::BlockedUnknown
-        );
+        assert_eq!(writers(&scene.member).load().unwrap(), before);
         assert!(scene.collect(task).unwrap().disposition.cleanup_pending);
         assert_eq!(
             settle().unwrap(),
@@ -30977,6 +34147,78 @@ mod managed_write_tests {
         .unwrap();
         assert_eq!(scene.member.complete_result_bytes(task).unwrap(), bytes);
         assert_eq!(scene.member.workload_revision(), 1);
+    }
+
+    #[test]
+    fn current_unwitnessed_and_historical_unqualified_release_preserve_their_guards() {
+        for historical in [false, true] {
+            let scene = if historical {
+                Assignment::with_member(ManagedMember::historical_writable())
+            } else {
+                Assignment::new()
+            };
+            let path =
+                run_root(&scene.member.state_root, scene.member.member_ref).join("manifest.json");
+            let before = std::fs::read(&path).unwrap();
+            let binding = scene
+                .member
+                .manifest
+                .global_profile_binding
+                .as_ref()
+                .unwrap();
+            assert_eq!(binding.caller_workspace_supported(), !historical);
+            let worker = ScriptedWorker::start(&scene, 0);
+            let carrier = broker(&scene.member);
+            hold(
+                &scene.member,
+                scene.member.member_ref,
+                &scene.member.manifest.controller,
+            );
+            let generation = writers(&scene.member).load().unwrap().writer_generation;
+            append_policy(
+                &scene.member.state_root,
+                scene.member.member_ref,
+                AuditKind::WriterAcquired,
+                Uuid::now_v7(),
+                true,
+                generation,
+            );
+            let head = durable_head(&scene.member.state_root, scene.member.member_ref).unwrap();
+            let writer_before = writers(&scene.member).load().unwrap();
+            assert!(writer_before.generation_release.is_none());
+            let error = release_writer_authorized(
+                &scene.member.view,
+                &scene.member.state_root,
+                scene.member.member_ref,
+                &carrier,
+                None,
+                Some(head),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "RUNTIME_PATH_COLLISION");
+            let (_, ledger) =
+                observe_caller_ledger(&scene.member.state_root, scene.member.member_ref).unwrap();
+            let writer_after = writers(&scene.member).load().unwrap();
+            let calls = worker.calls.lock().unwrap();
+            let released = ledger
+                .records()
+                .iter()
+                .any(|record| record.kind() == AuditKind::WriterReleased);
+            if historical {
+                assert_eq!(
+                    writer_after.state,
+                    crate::writer::WriterAuthorityState::BlockedUnknown
+                );
+                assert!(calls.iter().any(|call| call == "run.release_write"));
+                assert!(released);
+            } else {
+                assert_eq!(writer_after, writer_before);
+                assert!(writer_after.generation_release.is_none());
+                assert!(calls.is_empty());
+                assert!(!released);
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
     }
 
     #[test]
@@ -31028,9 +34270,9 @@ mod managed_write_tests {
     }
 
     #[test]
-    fn managed_live_close_reader_refusal_or_mismatched_proof_preserves_the_guard() {
+    fn managed_legacy_close_reader_refusal_or_unqualified_proof_preserves_the_guard() {
         for failure in 1..=2 {
-            let scene = Assignment::new();
+            let scene = Assignment::with_member(ManagedMember::historical_writable());
             let worker = ScriptedWorker::start(&scene, failure);
             let carrier = broker(&scene.member);
             hold(
@@ -31083,6 +34325,14 @@ mod managed_write_tests {
                     .iter()
                     .any(|call| call == "run.close")
             );
+            assert!(
+                worker
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|call| call == "run.release_write")
+            );
             assert_eq!(
                 scene
                     .member
@@ -31100,11 +34350,176 @@ mod managed_write_tests {
     }
 
     #[test]
-    fn external_live_release_verifies_reader_before_close_and_preserves_failed_guard() {
+    fn scripted_control_accepted_mode_reproduces_old_would_block_before_send() {
+        use std::io::Write as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let directory = Path::new("/tmp").join(format!("dg-control-mode-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).unwrap();
+        let socket = directory.canonicalize().unwrap().join("control.sock");
+        let listener = UnixListener::bind(socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut client =
+            UnixStream::connect(listener.local_addr().unwrap().as_pathname().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        let (old_flags, old_nonblocking) = crate::darwin::socket_status_flags(&accepted).unwrap();
+        assert!(
+            old_nonblocking,
+            "selected Darwin listener inheritance premise changed: {old_flags}"
+        );
+        accepted
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        // No writer thread or request bytes exist in this phase.
+        let raw_error =
+            std::io::Read::read(&mut accepted.try_clone().unwrap(), &mut [0]).unwrap_err();
+        assert_eq!(raw_error.kind(), std::io::ErrorKind::WouldBlock);
+        let original: Result<serde_json::Value, _> =
+            crate::worker::read_frame(&mut std::io::BufReader::new(accepted.try_clone().unwrap()));
+        assert!(matches!(
+            original,
+            Err(crate::worker::WorkerProtocolError::Io)
+        ));
+        let old = scripted_control_frame::<serde_json::Value>(&accepted).unwrap_err();
+        assert!(matches!(
+            old,
+            ScriptedReadFailure::Io(ref error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        prepare_scripted_stream(&accepted).unwrap();
+        let (new_flags, new_nonblocking) = crate::darwin::socket_status_flags(&accepted).unwrap();
+        assert!(
+            !new_nonblocking,
+            "accepted stream still nonblocking: {new_flags}"
+        );
+        let (ready, started) = std::sync::mpsc::channel();
+        let (done, result) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            done.send(scripted_control_frame::<serde_json::Value>(&accepted))
+                .unwrap();
+        });
+        started.recv().unwrap();
+        assert!(matches!(
+            result.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        let descriptor = std::fs::File::open("/dev/null").unwrap();
+        DarwinSystem
+            .send_byte_with_optional_fd(&client, b'{', Some(descriptor.as_raw_fd()))
+            .unwrap();
+        client.write_all(b"\"ok\":true}\n").unwrap();
+        let (frame, received) = result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame, json!({"ok":true}));
+        assert!(received.is_some());
+        reader.join().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn scripted_control_receiver_preserves_descriptor_first_byte_and_error_classes() {
+        use std::io::Write as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::UnixStream;
+        let credential = std::fs::File::open("/dev/null").unwrap();
+        for attached in [false, true] {
+            let (mut sender, receiver) = UnixStream::pair().unwrap();
+            DarwinSystem
+                .send_byte_with_optional_fd(
+                    &sender,
+                    b'{',
+                    attached.then_some(credential.as_raw_fd()),
+                )
+                .unwrap();
+            sender.write_all(b"\"ok\":true}\n").unwrap();
+            let (frame, received): (serde_json::Value, _) =
+                scripted_control_frame(&receiver).unwrap();
+            assert_eq!(frame, json!({"ok":true}));
+            assert_eq!(received.is_some(), attached);
+        }
+        for bytes in [b"".as_slice(), b"{", b"invalid\n"] {
+            let (mut sender, receiver) = UnixStream::pair().unwrap();
+            sender.write_all(bytes).unwrap();
+            sender.shutdown(std::net::Shutdown::Write).unwrap();
+            let error = scripted_control_frame::<serde_json::Value>(&receiver).unwrap_err();
+            if bytes.is_empty() {
+                assert!(matches!(error, ScriptedReadFailure::Io(_)));
+            } else {
+                assert!(matches!(
+                    error,
+                    ScriptedReadFailure::Frame(crate::worker::WorkerProtocolError::MalformedFrame)
+                ));
+            }
+        }
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        sender.write_all(b"{").unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let error = scripted_control_frame::<serde_json::Value>(&receiver).unwrap_err();
+        assert!(matches!(
+            error,
+            ScriptedReadFailure::Frame(crate::worker::WorkerProtocolError::Io)
+        ));
+    }
+
+    #[test]
+    fn scripted_control_isolates_declared_partial_connection_without_losing_next_call() {
+        use std::io::Write as _;
+        let scene = Assignment::new();
+        let worker = ScriptedWorker::start(&scene, 0);
+        let record_path = crate::worker::runtime_record_path(
+            &crate::worker::runtime_root(&scene.member.state_root),
+            scene.member.member_ref,
+        )
+        .unwrap();
+        let record =
+            crate::worker::read_runtime_record(&record_path, DarwinSystem.current_uid()).unwrap();
+        let mut peer = std::os::unix::net::UnixStream::connect(&record.socket_path).unwrap();
+        peer.write_all(b"{").unwrap();
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut errors = worker.connection_errors.lock().unwrap();
+        while errors.is_empty() {
+            let (state, timeout) = worker
+                .connection_changed
+                .wait_timeout(errors, Duration::from_secs(5))
+                .unwrap();
+            errors = state;
+            assert!(!timeout.timed_out(), "partial caller was not classified");
+        }
+        let observed = errors.remove(0);
+        assert!(errors.is_empty());
+        drop(errors);
+        assert!(matches!(
+            observed,
+            ScriptedReadFailure::Frame(crate::worker::WorkerProtocolError::MalformedFrame)
+        ));
+        let response = crate::worker::call_run_worker(
+            &scene.member.state_root,
+            scene.member.member_ref,
+            DarwinSystem.current_uid(),
+            None,
+            |expected| ControlRequestV1::Shutdown { expected },
+        )
+        .unwrap();
+        assert!(matches!(response, ControlResponseV1::Shutdown { .. }));
+        assert_eq!(
+            worker.calls.lock().unwrap().len(),
+            1,
+            "one distinct next control call"
+        );
+        assert!(worker.connection_errors.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn external_legacy_release_verifies_reader_before_close_and_preserves_failed_guard() {
         use crate::delegation_service::MemberReleaseFailure;
         for failure in 1..=2 {
-            let scene = super::release_fixture::ReleasableMember::external(
+            let scene = super::release_fixture::ReleasableMember::external_from(
                 super::release_fixture::ReleaseScene::CloseSettlement,
+                super::successor_fixture::SuccessorMember::historical(),
             );
             let worker = ScriptedWorker::start_member(
                 &scene.view,
@@ -31923,8 +35338,8 @@ mod caller_lane_gate_tests {
         assert!(quiescence.idle());
     }
 
-    /// A failed writer release after terminal publication is surfaced as
-    /// an accepted effect with recovery, never hidden.
+    /// An unwitnessed Writer release refuses before PREPARE after the task's
+    /// terminal publication, preserving the original Writer authority.
     #[test]
     fn a_writer_release_failure_is_surfaced_after_settlement() {
         let fixture = super::successor_fixture::SuccessorMember::new();
@@ -31932,12 +35347,13 @@ mod caller_lane_gate_tests {
         let accepted =
             fixture.accept_and_dispatch_task("settle-release", "canonical_workspace_write", 600);
         fixture.mark_task_running(accepted.task_ref, "turn-1");
-        // An idle member Run with no runtime record cannot complete the release
-        // without a worker: the failure must be surfaced.
+        // Direct terminal publication leaves no native Thread binding or runtime.
+        // Release must surface its pre-effect refusal after publishing the task.
         fixture.publish_terminal_turn("turn-1", "completed", "wrote the files", RunLifecycle::Idle);
+        let before = fixture.writer_record();
+        assert!(before.generation_release.is_none());
         let port = settlement_port(&fixture);
-        // The execution side surfaces the failed release; the R calls below stay
-        // read-only and therefore never report it.
+        // The execution path must report the release refusal.
         let refused = port
             .settle_member_task(crate::delegation_service::MemberTaskSettlement {
                 view: &fixture.view,
@@ -31955,12 +35371,9 @@ mod caller_lane_gate_tests {
             .external_task(fixture.engagement_id, accepted.task_ref)
             .unwrap();
         assert_eq!(settled.state, "completed_not_delivered");
-        // A caller-policy member keeps the unknown-effect guard: cleanup is
-        // pending until recovery resolves the release.
-        assert_eq!(
-            fixture.writer_record().state,
-            crate::writer::WriterAuthorityState::BlockedUnknown
-        );
+        // No release effect started, so the original authority remains intact.
+        assert_eq!(fixture.writer_record(), before);
+        assert!(fixture.writer_record().generation_release.is_none());
     }
 
     /// Checked findings are validated before publication; invalid output is
@@ -35014,5 +38427,1618 @@ mod caller_lane_gate_tests {
             Some("TURN_INTERRUPTED")
         );
         assert!(result.final_response.is_none());
+    }
+    fn observation_call(
+        target: &super::release_fixture::ReleasableMember,
+        task: Uuid,
+        identity: bool,
+    ) -> Result<Value, MachineError> {
+        let caller = crate::caller_scope::fixture(3);
+        match target.owner {
+            SettlementOwner::External { engagement_id } => {
+                let request = crate::delegation_service::CollectExternalSpecialistTask {
+                    engagement_id,
+                    member_ref: target.member_ref,
+                    task_ref: task,
+                    adapter_id: "fixture-adapter",
+                    adapter_version: "unpublished-contract-fixture",
+                };
+                if identity {
+                    crate::delegation_service::get_external_delegation_identity(
+                        &target.scope(),
+                        &caller,
+                        &target.port(),
+                        request,
+                    )
+                    .map(|v| serde_json::to_value(v.identity).unwrap())
+                } else {
+                    crate::delegation_service::collect_external_specialist_task(&target.scope(),&target.port(),request).map(|v| json!({"state":v.disposition.state,"result_digest":v.task.result_digest,"complete_result":v.complete_result}))
+                }
+            }
+            SettlementOwner::Managed { .. } => {
+                let context = target.managed_context("observation");
+                let request = crate::delegation_service::CollectSpecialistTask {
+                    member_ref: target.member_ref,
+                    task_ref: task,
+                    adapter_id: "fixture-adapter",
+                    adapter_version: "unpublished-contract-fixture",
+                };
+                if identity {
+                    crate::delegation_service::get_managed_delegation_identity(
+                        &target.scope(),
+                        &context,
+                        &caller,
+                        &target.port(),
+                        request,
+                    )
+                    .map(|v| serde_json::to_value(v.identity).unwrap())
+                } else {
+                    crate::delegation_service::collect_specialist_task(&target.scope(),&context,&target.port(),request).map(|v| json!({"state":v.disposition.state,"result_digest":v.task.result_digest,"complete_result":v.complete_result}))
+                }
+            }
+        }
+    }
+    fn observation_target(managed: bool) -> (super::release_fixture::ReleasableMember, Uuid) {
+        use super::release_fixture::{ReleasableMember, ReleaseScene};
+        if managed {
+            ReleasableMember::managed_with_settled_task(
+                ReleaseScene::CloseSettlement,
+                "observation",
+            )
+        } else {
+            ReleasableMember::external_with_settled_task(
+                ReleaseScene::CloseSettlement,
+                "observation",
+            )
+        }
+    }
+    fn append_observation_motion(state_root: &Path, run_id: Uuid) {
+        let mut ledger =
+            crate::ledger::Ledger::open(crate::run::run_root(state_root, run_id), run_id).unwrap();
+        ledger
+            .append_required_payload(
+                crate::audit::AuditKind::ProfileObserved,
+                &json!({"observation":"motion"}),
+                1,
+            )
+            .unwrap();
+    }
+    #[test]
+    fn complete_observation_retries_each_real_source_interleaving_for_both_exports() {
+        for managed in [false, true] {
+            for identity in [false, true] {
+                for stage in ["A0", "W0", "fold", "A1", "before_D", "D", "W1", "A2"] {
+                    let (target, task) = observation_target(managed);
+                    let baseline = observation_call(&target, task, identity).unwrap();
+                    let root = target.state_root.clone();
+                    let member = target.member_ref;
+                    let motions = std::rc::Rc::new(std::cell::Cell::new(0));
+                    let count = motions.clone();
+                    let captures = std::rc::Rc::new(std::cell::Cell::new(0));
+                    let attempts = captures.clone();
+                    let _probe =
+                        crate::delegation_service::set_member_observation_probe(move |at| {
+                            if at == "A0" {
+                                attempts.set(attempts.get() + 1);
+                            }
+                            if at == stage && count.get() == 0 {
+                                append_observation_motion(&root, member);
+                                count.set(1);
+                            }
+                        });
+                    let after = observation_call(&target, task, identity).unwrap();
+                    assert_eq!(
+                        after, baseline,
+                        "owner={managed} identity={identity} stage={stage}"
+                    );
+                    assert_eq!(motions.get(), 1);
+                    assert_eq!(
+                        captures.get(),
+                        if stage == "A2" { 1 } else { 2 },
+                        "writer equality cannot hide Run/history motion at {stage}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn complete_observation_refuses_exactly_three_motions_without_writing_product_state() {
+        for managed in [false, true] {
+            for identity in [false, true] {
+                let (target, task) = observation_target(managed);
+                observation_call(&target, task, identity).unwrap();
+                let database = EngagementStore::workspace_database_path(&target.state_root);
+                let before = std::fs::read(&database).unwrap();
+                let root = target.state_root.clone();
+                let member = target.member_ref;
+                let motions = std::rc::Rc::new(std::cell::Cell::new(0));
+                let count = motions.clone();
+                let _probe = crate::delegation_service::set_member_observation_probe(move |at| {
+                    if at == "A1" {
+                        append_observation_motion(&root, member);
+                        count.set(count.get() + 1);
+                    }
+                });
+                let error = observation_call(&target, task, identity).unwrap_err();
+                assert_eq!(error.code, "RECOVERY_REQUIRED");
+                assert_eq!(error.details["classification"], "RecoveryNeeded");
+                assert_eq!(error.details["required_action"], "restore_state");
+                assert_eq!(motions.get(), 3);
+                assert_eq!(std::fs::read(database).unwrap(), before);
+            }
+        }
+    }
+    #[test]
+    fn complete_observation_recaptures_a_publication_after_equal_run_sources() {
+        for managed in [false, true] {
+            for identity in [false, true] {
+                let (target, task) = observation_target(managed);
+                observation_call(&target, task, identity).unwrap();
+                let root = crate::run::run_root(&target.state_root, target.member_ref);
+                let state = root.join("state.json");
+                let before = std::fs::read(&state).unwrap();
+                append_observation_motion(&target.state_root, target.member_ref);
+                let published = std::fs::read(&state).unwrap();
+                std::fs::write(&state, before).unwrap();
+                let database = EngagementStore::workspace_database_path(&target.state_root);
+                let database_before = std::fs::read(&database).unwrap();
+                let (publish, publication) = std::sync::mpsc::sync_channel(0);
+                let publisher = std::thread::spawn(move || {
+                    publication.recv().unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::ledger::GROUP_COMMIT_MILLIS / 4,
+                    ));
+                    std::fs::write(state, published).unwrap();
+                });
+                let captures = std::rc::Rc::new(std::cell::Cell::new(0));
+                let attempts = captures.clone();
+                let fences = std::rc::Rc::new(std::cell::Cell::new(0));
+                let equal_sources = fences.clone();
+                let _probe = crate::delegation_service::set_member_observation_probe(move |at| {
+                    if at == "A0" {
+                        attempts.set(attempts.get() + 1);
+                    }
+                    if at == "A1" {
+                        equal_sources.set(equal_sources.get() + 1);
+                        if equal_sources.get() == 1 {
+                            // A0 and A1 matched before the delayed publisher
+                            // made the real appended record authoritative.
+                            publish.send(()).unwrap();
+                        }
+                    }
+                });
+                let result = observation_call(&target, task, identity);
+                drop(_probe);
+                publisher.join().unwrap();
+                let result = result.unwrap();
+                assert_eq!(
+                    result[if identity {
+                        "worker_disposition"
+                    } else {
+                        "state"
+                    }],
+                    "idle"
+                );
+                assert!((2..=3).contains(&captures.get()));
+                assert_eq!(fences.get(), captures.get());
+                assert_eq!(std::fs::read(database).unwrap(), database_before);
+            }
+        }
+    }
+
+    #[test]
+    fn complete_observation_never_uses_an_unpublished_or_damaged_history_as_idle() {
+        for managed in [false, true] {
+            for identity in [false, true] {
+                for damage in ["valid_suffix", "suffix", "torn", "replace", "missing"] {
+                    let (target, task) = observation_target(managed);
+                    observation_call(&target, task, identity).unwrap();
+                    let path = crate::run::run_root(&target.state_root, target.member_ref)
+                        .join("audit.jsonl");
+                    match damage {
+                        "valid_suffix" => {
+                            let state = path.with_file_name("state.json");
+                            let published = std::fs::read(&state).unwrap();
+                            append_observation_motion(&target.state_root, target.member_ref);
+                            std::fs::write(state, published).unwrap();
+                        }
+                        "suffix" => {
+                            use std::io::Write as _;
+                            std::fs::OpenOptions::new()
+                                .append(true)
+                                .open(&path)
+                                .unwrap()
+                                .write_all(b"{}\n")
+                                .unwrap();
+                        }
+                        "torn" => {
+                            use std::io::Write as _;
+                            std::fs::OpenOptions::new()
+                                .append(true)
+                                .open(&path)
+                                .unwrap()
+                                .write_all(b"{")
+                                .unwrap();
+                        }
+                        "replace" => {
+                            let mut bytes = std::fs::read(&path).unwrap();
+                            bytes[0] = b'!';
+                            std::fs::write(&path, bytes).unwrap();
+                        }
+                        "missing" => std::fs::remove_file(&path).unwrap(),
+                        _ => unreachable!(),
+                    }
+                    let database = EngagementStore::workspace_database_path(&target.state_root);
+                    let before = std::fs::read(&database).unwrap();
+                    let history_before = std::fs::read(&path).ok();
+                    let captures = std::rc::Rc::new(std::cell::Cell::new(0));
+                    let attempts = captures.clone();
+                    let facts = std::rc::Rc::new(std::cell::Cell::new(0));
+                    let database_facts = facts.clone();
+                    let _probe =
+                        crate::delegation_service::set_member_observation_probe(move |at| {
+                            if at == "A0" {
+                                attempts.set(attempts.get() + 1);
+                            }
+                            if at == "D" {
+                                database_facts.set(database_facts.get() + 1);
+                            }
+                        });
+                    let error = observation_call(&target, task, identity).unwrap_err();
+                    assert_eq!(
+                        error.code, "RECOVERY_REQUIRED",
+                        "{managed}/{identity}/{damage}"
+                    );
+                    assert_eq!(error.details["classification"], "RecoveryNeeded");
+                    assert_eq!(error.details["required_action"], "restore_state");
+                    assert_eq!(
+                        captures.get(),
+                        match damage {
+                            "valid_suffix" | "suffix" | "torn" => 3,
+                            "replace" => 1,
+                            "missing" => 0,
+                            _ => unreachable!(),
+                        }
+                    );
+                    assert_eq!(facts.get(), 0);
+                    assert_eq!(std::fs::read(&path).ok(), history_before);
+                    assert_eq!(std::fs::read(database).unwrap(), before);
+                }
+            }
+        }
+    }
+
+    fn observation_decision(id: u64, resolution: Value) -> Value {
+        let receipt = if resolution["outcome"] == "stale" {
+            Value::Null
+        } else if resolution["outcome"] == "answered" {
+            resolution["resolution_receipt_id"].clone()
+        } else {
+            json!(Uuid::now_v7())
+        };
+        let digest = if resolution["outcome"] == "stale" {
+            Value::Null
+        } else if resolution["outcome"] == "answered" {
+            resolution["answer_digest"].clone()
+        } else {
+            json!(sha256_hex(
+                &canonicalize(
+                    &parse(&json!({"decision":resolution["decision"]}).to_string()).unwrap()
+                )
+                .unwrap()
+            ))
+        };
+        json!({"request_id":id.to_string(),"idempotency_key":if resolution["outcome"] == "stale" {""} else {"observation-decision"},"response_sha256":digest,"resolution_receipt_id":receipt,"resolved_at":"2026-10-26T00:00:01.000000Z","resolution":resolution})
+    }
+
+    fn publish_observation_interactions(
+        state_root: &Path,
+        member: Uuid,
+        resolved: usize,
+        pending: usize,
+    ) {
+        publish_observation_interactions_using(state_root, member, resolved, pending, None);
+    }
+    fn publish_observation_interactions_using(
+        state_root: &Path,
+        member: Uuid,
+        resolved: usize,
+        pending: usize,
+        variant: Option<&str>,
+    ) {
+        let store = RunStore::new(SystemWorkspacePlatform, state_root);
+        let manifest = store.load_manifest(member).unwrap();
+        let projection = store.load_state_projection(member).unwrap();
+        let mut ledger =
+            crate::ledger::Ledger::open(crate::run::run_root(state_root, member), member).unwrap();
+        ledger
+            .append_required_payload(
+                crate::audit::AuditKind::TurnStarted,
+                &json!({"turn_id":"turn-observation"}),
+                projection.run_generation.max(1),
+            )
+            .unwrap();
+        for id in 0..resolved + pending {
+            let mut interaction = json!({"schema_version":1,"request_id":Uuid::now_v7(),"run_id":member,"controller_id":manifest.controller.identity.controller_id,"control_mode":manifest.control_mode,"thread_id":"thread-observation","turn_id":"turn-observation","item_id":null,"run_generation":projection.run_generation.max(1),"server_epoch":1,"kind":"command_execution_approval","status":"pending","payload":{"title":"Command approval","message":"x".repeat(1024),"command":["true"],"cwd":"/fixture","reason":null},"available_decisions":["accept_once","decline","cancel"],"response_schema":"dolgorae.interaction.command-approval/v1","opened_at":"2026-10-26T00:00:00.000000Z","resolved_at":null,"resolution":null});
+            match variant {
+                Some("file") => {
+                    interaction["kind"] = json!("file_change_approval");
+                    interaction["response_schema"] =
+                        json!("dolgorae.interaction.file-change-approval/v1");
+                    interaction["payload"] = json!({"title":"File approval","message":"Review the change.","reason":null,"snapshot_sha256":"a".repeat(64),"snapshot_revision":0,"truncated":false,"changes":[{"path":"/fixture/file","kind":"update","diff":"+line","move_path":null}],"change_artifact":null});
+                }
+                Some("user" | "user_nonsecret") => {
+                    interaction["kind"] = json!("user_input");
+                    interaction["response_schema"] = json!("dolgorae.interaction.user-input/v1");
+                    interaction["available_decisions"] = json!([]);
+                    interaction["payload"] = json!({"is_blocking":true,"questions":[{"id":"q","header":"Question","question":"protected-question-fixture","is_other":false,"is_secret":variant != Some("user_nonsecret"),"options":null}]});
+                }
+                Some("unsupported") => {
+                    interaction["kind"] = json!("unsupported_request");
+                    interaction["response_schema"] = json!("dolgorae.interaction.unsupported/v1");
+                    interaction["available_decisions"] = json!([]);
+                    interaction["payload"] = json!({"method":"mcpServer/elicitation/request","reason":"recognized_unsupported"});
+                    interaction["status"] = json!("resolved");
+                    interaction["resolved_at"] = json!("2026-10-26T00:00:01.000000Z");
+                    interaction["resolution"] =
+                        json!({"outcome":"method_not_found","reply_code":-32601});
+                }
+                Some("payload") => interaction["payload"] = json!({}),
+                Some("generation") => {
+                    interaction["run_generation"] = json!(projection.run_generation.max(1) + 1)
+                }
+                Some("response_schema") => interaction["response_schema"] = json!("other"),
+                Some("nullable") => {
+                    interaction.as_object_mut().unwrap().remove("item_id");
+                }
+                Some("controller_encoding") => {
+                    interaction["controller_id"] = json!(
+                        manifest
+                            .controller
+                            .identity
+                            .controller_id
+                            .to_string()
+                            .replace('-', "")
+                    )
+                }
+                None => {}
+                Some(_) => unreachable!(),
+            }
+            ledger
+                .append_required_payload(
+                    crate::audit::AuditKind::ApprovalRequested,
+                    &json!({"upstream_request_id":id as u64,"interaction":interaction}),
+                    projection.run_generation.max(1),
+                )
+                .unwrap();
+            if id < resolved && variant != Some("unsupported") {
+                ledger.append_required_payload(crate::audit::AuditKind::ApprovalDecided,&observation_decision(id as u64, if variant==Some("user") {json!({"outcome":"answered","contained_secret":true,"answer_digest":null,"answer_count":1,"resolution_receipt_id":Uuid::now_v7()})} else {json!({"outcome":"approval","decision":"accept_once"})}),projection.run_generation.max(1)).unwrap();
+            }
+        }
+    }
+    #[test]
+    fn complete_observation_folds_large_resolved_and_pending_history_for_both_owners() {
+        for managed in [false, true] {
+            for pending in [0, 1, 11] {
+                let (target, task) = observation_target(managed);
+                super::release_fixture::write_absent_worker_locator(
+                    &target.state_root,
+                    &target.view.workspace_id,
+                    target.member_ref,
+                );
+                publish_observation_interactions(
+                    &target.state_root,
+                    target.member_ref,
+                    if pending == 1 { 1 } else { 256 },
+                    pending,
+                );
+                let before =
+                    std::fs::read(EngagementStore::workspace_database_path(&target.state_root))
+                        .unwrap();
+                let collected = observation_call(&target, task, false).unwrap();
+                assert_eq!(
+                    collected["state"],
+                    if pending == 0 { "idle" } else { "active" }
+                );
+                let identity = observation_call(&target, task, true);
+                if pending == 0 {
+                    assert_eq!(identity.unwrap()["worker_disposition"], "idle");
+                } else {
+                    let error = identity.unwrap_err();
+                    assert_eq!(error.code, "DISPOSITION_NOT_IDLE");
+                }
+                assert_eq!(
+                    std::fs::read(EngagementStore::workspace_database_path(&target.state_root))
+                        .unwrap(),
+                    before
+                );
+            }
+        }
+    }
+    #[test]
+    fn complete_observation_unknown_epoch_and_open_resolve_aba_never_default_to_idle() {
+        for managed in [false, true] {
+            let (target, task) = observation_target(managed);
+            publish_observation_interactions(&target.state_root, target.member_ref, 0, 1);
+            let error = observation_call(&target, task, true).unwrap_err();
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            super::release_fixture::write_absent_worker_locator(
+                &target.state_root,
+                &target.view.workspace_id,
+                target.member_ref,
+            );
+            let error = observation_call(&target, task, true).unwrap_err();
+            assert_eq!(error.code, "DISPOSITION_NOT_IDLE");
+            // Resolving the outstanding request permits a fresh complete proof.
+            let mut ledger = crate::ledger::Ledger::open(
+                crate::run::run_root(&target.state_root, target.member_ref),
+                target.member_ref,
+            )
+            .unwrap();
+            ledger
+                .append_required_payload(
+                    crate::audit::AuditKind::ApprovalDecided,
+                    &observation_decision(
+                        0,
+                        json!({"outcome":"approval","decision":"accept_once"}),
+                    ),
+                    1,
+                )
+                .unwrap();
+            drop(ledger);
+            let baseline = observation_call(&target, task, true).unwrap();
+            let root = target.state_root.clone();
+            let member = target.member_ref;
+            let once = std::rc::Rc::new(std::cell::Cell::new(false));
+            let done = once.clone();
+            let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
+            let count = attempts.clone();
+            let _probe = crate::delegation_service::set_member_observation_probe(move |at| {
+                if at == "A0" {
+                    count.set(count.get() + 1);
+                }
+                if at == "D" && !done.replace(true) {
+                    publish_observation_interactions(&root, member, 1, 0);
+                }
+            });
+            let after = observation_call(&target, task, true).unwrap();
+            assert_eq!(after, baseline);
+            assert_eq!(
+                attempts.get(),
+                2,
+                "resolved ABA still changes the interaction revision/head"
+            );
+        }
+    }
+    #[test]
+    fn complete_observation_open_during_every_capture_boundary_blocks_export() {
+        for managed in [false, true] {
+            for stage in ["A0", "W0", "fold", "A1", "before_D", "D", "W1"] {
+                let (target, task) = observation_target(managed);
+                append_observation_motion(&target.state_root, target.member_ref);
+                super::release_fixture::write_absent_worker_locator(
+                    &target.state_root,
+                    &target.view.workspace_id,
+                    target.member_ref,
+                );
+                observation_call(&target, task, true).unwrap();
+                let root = target.state_root.clone();
+                let member = target.member_ref;
+                let mut done = false;
+                let _probe = crate::delegation_service::set_member_observation_probe(move |at| {
+                    if at == stage && !done {
+                        done = true;
+                        publish_observation_interactions(&root, member, 0, 1);
+                    }
+                });
+                let error = observation_call(&target, task, true).unwrap_err();
+                assert_eq!(error.code, "DISPOSITION_NOT_IDLE", "{managed}/{stage}");
+            }
+        }
+    }
+
+    #[test]
+    fn complete_observation_detects_same_size_replacement_and_generation_selection() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for managed in [false, true] {
+            for replacement in [false, true] {
+                let (target, task) = observation_target(managed);
+                let baseline = observation_call(&target, task, true).unwrap();
+                let root = crate::run::run_root(&target.state_root, target.member_ref);
+                let member = target.member_ref;
+                let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
+                let count = attempts.clone();
+                let mut done = false;
+                let _probe = crate::delegation_service::set_member_observation_probe(move |at| {
+                    if at == "A0" {
+                        count.set(count.get() + 1);
+                    }
+                    if at == "D" && !done {
+                        done = true;
+                        if replacement {
+                            let path = root.join("audit.jsonl");
+                            let bytes = std::fs::read(&path).unwrap();
+                            let temporary = root.join("replacement.fixture");
+                            std::fs::write(&temporary, &bytes).unwrap();
+                            std::fs::set_permissions(
+                                &temporary,
+                                std::fs::Permissions::from_mode(0o600),
+                            )
+                            .unwrap();
+                            std::fs::rename(temporary, path).unwrap();
+                        } else {
+                            let store = RunStore::new(
+                                SystemWorkspacePlatform,
+                                root.parent().unwrap().parent().unwrap(),
+                            );
+                            let projection = store.load_state_projection(member).unwrap();
+                            let history = crate::ledger::ObservedLedger::open_complete(
+                                &root,
+                                member,
+                                projection.ledger_head.sequence,
+                            )
+                            .unwrap();
+                            let pin = crate::ledger_generation::pin(&root, member).unwrap();
+                            crate::ledger_generation::rollover(
+                                &root,
+                                member,
+                                Uuid::now_v7(),
+                                &pin,
+                                history.records(),
+                                &projection,
+                                &mut |_| Ok(()),
+                            )
+                            .unwrap();
+                        }
+                    }
+                });
+                assert_eq!(observation_call(&target, task, true).unwrap(), baseline);
+                assert_eq!(
+                    attempts.get(),
+                    2,
+                    "same head/hash cannot hide a replaced source/selection"
+                );
+            }
+        }
+    }
+    #[test]
+    fn complete_observation_rechecks_owner_member_and_accepted_task_authority_inside_d() {
+        for managed in [false, true] {
+            for identity in [false, true] {
+                for field in ["workspace", "member", "accepted"] {
+                    let (target, task) = observation_target(managed);
+                    observation_call(&target, task, identity).unwrap();
+                    let path = EngagementStore::workspace_database_path(&target.state_root);
+                    let owner = target.owner.scope_ref().to_string();
+                    let mut done = false;
+                    let _probe = crate::delegation_service::set_member_observation_probe(
+                        move |at| {
+                            if at != "before_D" || done {
+                                return;
+                            }
+                            done = true;
+                            let db = rusqlite::Connection::open(&path).unwrap();
+                            let changed = match field {
+                            "workspace" => db.execute(if managed {
+                                "UPDATE orchestrated_sessions SET workspace_id=?1 WHERE session_id=?2"
+                            } else { "UPDATE engagements SET workspace_id=?1 WHERE engagement_id=?2" },
+                                rusqlite::params!["f".repeat(64),owner]).unwrap(),
+                            "member" => {
+                                let table = if managed { "brokered_members" } else { "members" };
+                                let id_column = if managed { "run_id" } else { "specialist_run_id" };
+                                let operation_column = if managed { "spawn_operation_id" } else { "hire_operation_id" };
+                                let task_table = if managed { "brokered_tasks" } else { "tasks" };
+                                let member_column = if managed { "target_run_id" } else { "specialist_run_id" };
+                                let columns = db.prepare(&format!("PRAGMA table_info({table})")).unwrap()
+                                    .query_map([], |r| r.get::<_, String>(1)).unwrap()
+                                    .collect::<Result<Vec<_>,_>>().unwrap();
+                                let values = columns.iter().map(|column| if column == id_column { "?1" }
+                                    else if column == operation_column { "?2" } else { column.as_str() }).collect::<Vec<_>>();
+                                let other = Uuid::now_v7().to_string();
+                                assert_eq!(db.execute(&format!("INSERT INTO {table}({}) SELECT {} FROM {table} WHERE {id_column}=(SELECT {member_column} FROM {task_table} WHERE task_id=?3)",columns.join(","),values.join(",")),
+                                    rusqlite::params![other,Uuid::now_v7().to_string(),task.to_string()]).unwrap(), 1);
+                                db.execute(&format!("UPDATE {task_table} SET {member_column}=?1 WHERE task_id=?2"),
+                                    rusqlite::params![other,task.to_string()]).unwrap()
+                            },
+                            "accepted" => {
+                                let select = if managed { "SELECT accepted_request_json FROM brokered_task_acceptances WHERE task_id=?1" }
+                                    else { "SELECT request_json FROM tasks WHERE task_id=?1" };
+                                let raw: String = db.query_row(select,[task.to_string()],|r|r.get(0)).unwrap();
+                                let mut value: Value = serde_json::from_str(&raw).unwrap();
+                                assert_ne!(value["admitted_effort"], "medium");
+                                value["admitted_effort"] = json!("medium");
+                                let candidate: crate::delegation_identity::AcceptedTask = serde_json::from_value(value.clone()).unwrap();
+                                candidate.digest().unwrap();
+                                assert_ne!(raw, value.to_string());
+                                db.execute(if managed { "UPDATE brokered_task_acceptances SET accepted_request_json=?1 WHERE task_id=?2" }
+                                    else { "UPDATE tasks SET request_json=?1 WHERE task_id=?2" },
+                                    rusqlite::params![value.to_string(),task.to_string()]).unwrap()
+                            }
+                            _ => unreachable!(),
+                        };
+                            assert_eq!(changed, 1);
+                        },
+                    );
+                    let error = observation_call(&target, task, identity).unwrap_err();
+                    assert_eq!(error.details["schema"], "dolgorae.successor-error/v1");
+                    assert!(
+                        matches!(
+                            error.details["classification"].as_str(),
+                            Some("Rejected" | "RecoveryNeeded")
+                        ),
+                        "{managed}/{identity}/{field}: {error:?}"
+                    );
+                    assert_eq!(error.details["effect"], "none");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complete_observation_rechecks_task_and_result_linkage_inside_the_database_snapshot() {
+        for managed in [false, true] {
+            for identity in [false, true] {
+                for field in ["state", "result_sha256"] {
+                    let (target, task) = observation_target(managed);
+                    observation_call(&target, task, identity).unwrap();
+                    let path = EngagementStore::workspace_database_path(&target.state_root);
+                    let mut done = false;
+                    let _probe =
+                        crate::delegation_service::set_member_observation_probe(move |at| {
+                            if at == "before_D" && !done {
+                                done = true;
+                                let connection = rusqlite::Connection::open(&path).unwrap();
+                                let table = if managed { "brokered_tasks" } else { "tasks" };
+                                let value = if field == "state" {
+                                    "running".to_owned()
+                                } else {
+                                    "a".repeat(64)
+                                };
+                                assert_eq!(
+                                    connection
+                                        .execute(
+                                            &format!(
+                                                "UPDATE {table} SET {field}=?1 WHERE task_id=?2"
+                                            ),
+                                            rusqlite::params![value, task.to_string()]
+                                        )
+                                        .unwrap(),
+                                    1
+                                );
+                            }
+                        });
+                    let error = observation_call(&target, task, identity).unwrap_err();
+                    assert!(
+                        matches!(
+                            error.code.as_str(),
+                            "COMPLETE_RESULT_MISMATCH"
+                                | "COMPLETE_RESULT_UNAVAILABLE"
+                                | "INTERNAL_ERROR"
+                        ),
+                        "{managed}/{identity}/{field}: {error:?}"
+                    );
+                    if error.code == "INTERNAL_ERROR" {
+                        assert_eq!(error.details["classification"], "RecoveryNeeded");
+                    }
+                    assert_eq!(
+                        error.details["operation_kind"],
+                        match (managed, identity) {
+                            (false, false) => "collect_external_specialist_task",
+                            (false, true) => "get_external_delegation_identity",
+                            (true, false) => "collect_specialist_task",
+                            (true, true) => "get_managed_delegation_identity",
+                        }
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn complete_observation_uses_one_pinned_database_when_a_later_result_changes() {
+        for managed in [false, true] {
+            for identity in [false, true] {
+                let (target, task) = observation_target(managed);
+                let baseline = observation_call(&target, task, identity).unwrap();
+                let path = EngagementStore::workspace_database_path(&target.state_root);
+                let mut done = false;
+                let probe = crate::delegation_service::set_member_observation_probe(move |at| {
+                    if at == "D" && !done {
+                        done = true;
+                        let connection = rusqlite::Connection::open(&path).unwrap();
+                        let table = if managed { "brokered_tasks" } else { "tasks" };
+                        assert_eq!(
+                            connection
+                                .execute(
+                                    &format!(
+                                        "UPDATE {table} SET result_sha256=?1 WHERE task_id=?2"
+                                    ),
+                                    rusqlite::params!["a".repeat(64), task.to_string()]
+                                )
+                                .unwrap(),
+                            1
+                        );
+                    }
+                });
+                assert_eq!(
+                    observation_call(&target, task, identity).unwrap(),
+                    baseline,
+                    "the common instant is the already pinned D"
+                );
+                drop(probe);
+                assert!(
+                    observation_call(&target, task, identity).is_err(),
+                    "a later read must see the changed result linkage"
+                );
+            }
+        }
+    }
+    #[test]
+    fn complete_observation_rejects_a_stable_head_hash_mismatch_without_repair() {
+        for managed in [false, true] {
+            for identity in [false, true] {
+                let (target, task) = observation_target(managed);
+                observation_call(&target, task, identity).unwrap();
+                let state =
+                    crate::run::run_root(&target.state_root, target.member_ref).join("state.json");
+                let mut value: Value =
+                    serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+                assert_ne!(value["ledger_head"]["hash"], "f".repeat(64));
+                value["ledger_head"]["hash"] = json!("f".repeat(64));
+                let corrupted =
+                    crate::jcs::canonicalize(&crate::jcs::parse(&value.to_string()).unwrap())
+                        .unwrap();
+                std::fs::write(&state, &corrupted).unwrap();
+                let database = EngagementStore::workspace_database_path(&target.state_root);
+                let before = std::fs::read(&database).unwrap();
+                let error = observation_call(&target, task, identity).unwrap_err();
+                assert_eq!(error.code, "RECOVERY_REQUIRED");
+                assert_eq!(error.details["classification"], "RecoveryNeeded");
+                assert_eq!(error.details["required_action"], "restore_state");
+                assert_eq!(std::fs::read(&state).unwrap(), corrupted);
+                assert_eq!(std::fs::read(&database).unwrap(), before);
+            }
+        }
+    }
+
+    fn resolution_proof_case(
+        (managed, initial): (bool, bool),
+        kind: &str,
+        resolution: Value,
+        status: &str,
+        date: Value,
+        expected_valid: bool,
+        decision_edit: Option<(&str, Option<Value>)>,
+    ) {
+        let (target, task) = observation_target(managed);
+        let variant = match kind {
+            "command_execution_approval" => None,
+            "file_change_approval" => Some("file"),
+            "user_input" if resolution["contained_secret"] == false => Some("user_nonsecret"),
+            "user_input" => Some("user"),
+            "unsupported_request" => Some("unsupported"),
+            _ => unreachable!(),
+        };
+        let (runtime_path, _) = super::release_fixture::write_absent_worker_locator(
+            &target.state_root,
+            &target.view.workspace_id,
+            target.member_ref,
+        );
+        publish_observation_interactions_using(
+            &target.state_root,
+            target.member_ref,
+            0,
+            1,
+            variant,
+        );
+        let state = RunStore::new(SystemWorkspacePlatform, &target.state_root)
+            .load_state_projection(target.member_ref)
+            .unwrap();
+        let run_root = crate::run::run_root(&target.state_root, target.member_ref);
+        let (audit_kind, record) = if initial {
+            let interactions = crate::interaction::durable_interactions_at(
+                &target.state_root,
+                target.member_ref,
+                state.ledger_head.sequence,
+            )
+            .unwrap();
+            let mut normalized = interactions[0].0.clone();
+            normalized["status"] = json!(status);
+            normalized["resolved_at"] = date;
+            normalized["resolution"] = resolution;
+            if let Some((field, value)) = decision_edit {
+                if let Some(value) = value {
+                    normalized[field] = value;
+                } else {
+                    normalized.as_object_mut().unwrap().remove(field);
+                }
+            }
+            (
+                crate::audit::AuditKind::ApprovalRequested,
+                json!({"upstream_request_id":0,"interaction":normalized}),
+            )
+        } else {
+            let mut record = observation_decision(0, resolution);
+            record["resolved_at"] = date;
+            if let Some((field, value)) = decision_edit {
+                if let Some(value) = value {
+                    record[field] = value;
+                } else {
+                    record.as_object_mut().unwrap().remove(field);
+                }
+            }
+            (crate::audit::AuditKind::ApprovalDecided, record)
+        };
+        {
+            let mut ledger = crate::ledger::Ledger::open(&run_root, target.member_ref).unwrap();
+            ledger
+                .append_required_payload(audit_kind, &record, 1)
+                .unwrap();
+        }
+        let sources = [
+            EngagementStore::workspace_database_path(&target.state_root),
+            run_root.join("audit.jsonl"),
+            run_root.join("state.json"),
+            run_root.join("manifest.json"),
+            runtime_path,
+        ];
+        let before: Vec<_> = sources.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        for identity in [false, true] {
+            let result = observation_call(&target, task, identity);
+            if expected_valid {
+                let value = result.unwrap_or_else(|e| panic!("owner={managed} identity={identity} initial={initial} {kind}/{record}: {e:?}"));
+                assert_eq!(
+                    value[if identity {
+                        "worker_disposition"
+                    } else {
+                        "state"
+                    }],
+                    "idle",
+                    "{record}"
+                );
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, "RECOVERY_REQUIRED", "{record}");
+                assert_eq!(error.details["classification"], "RecoveryNeeded");
+                assert_eq!(error.details["required_action"], "restore_state");
+            }
+            assert_eq!(
+                sources
+                    .iter()
+                    .map(|p| std::fs::read(p).unwrap())
+                    .collect::<Vec<_>>(),
+                before,
+                "proof reads must preserve database and journal/source bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_observation_resolution_call_sites_require_valid_metadata() {
+        for managed in [false, true] {
+            for initial in [false, true] {
+                for (resolution, valid) in [
+                    (json!({"outcome":"approval","decision":"accept_once"}), true),
+                    (json!({"outcome":"approval"}), false),
+                ] {
+                    resolution_proof_case(
+                        (managed, initial),
+                        "command_execution_approval",
+                        resolution,
+                        "resolved",
+                        json!("2026-10-26T00:00:01.000000Z"),
+                        valid,
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complete_observation_resolution_producer_forms_and_malformed_arms_for_both_owners() {
+        for managed in [false, true] {
+            for initial in [false, true] {
+                let mut swept = std::collections::BTreeSet::new();
+                for (kind, status, resolution) in
+                    crate::interaction::proof_fixtures::resolutions(!initial)
+                {
+                    resolution_proof_case(
+                        (managed, initial),
+                        kind,
+                        resolution.clone(),
+                        status,
+                        json!("2026-10-26T00:00:01.000000Z"),
+                        true,
+                        None,
+                    );
+                    let shape = (
+                        kind,
+                        resolution["outcome"].to_string(),
+                        resolution.get("contained_secret").map(Value::to_string),
+                    );
+                    if swept.insert(shape) {
+                        // The owning validator covers the exhaustive malformed corpus.
+                        let mut extra = resolution.clone();
+                        extra["extra"] = json!(true);
+                        let mut invalid = resolution.clone();
+                        let (field, value) = match resolution["outcome"].as_str().unwrap() {
+                            "approval" => ("decision", json!("accept")),
+                            "stale" => ("reason", json!("other")),
+                            "answered" => (
+                                "answer_digest",
+                                if resolution["contained_secret"] == true {
+                                    json!("a".repeat(64))
+                                } else {
+                                    Value::Null
+                                },
+                            ),
+                            "method_not_found" => ("reply_code", json!(-32600)),
+                            _ => unreachable!(),
+                        };
+                        invalid[field] = value;
+                        for bad in [extra, invalid] {
+                            resolution_proof_case(
+                                (managed, initial),
+                                kind,
+                                bad,
+                                status,
+                                json!("2026-10-26T00:00:01.000000Z"),
+                                false,
+                                None,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complete_observation_resolution_dates_kind_status_and_raw_receipts_are_proofs() {
+        let approval = json!({"outcome":"approval","decision":"accept_once"});
+        for managed in [false, true] {
+            for initial in [false, true] {
+                resolution_proof_case(
+                    (managed, initial),
+                    "command_execution_approval",
+                    approval.clone(),
+                    "resolved",
+                    json!("2017-01-01T08:59:60.123456+09:00"),
+                    true,
+                    None,
+                );
+                for bad in [
+                    Value::Null,
+                    json!("not-a-date"),
+                    json!("2016-12-31T23:59:60+01:00"),
+                ] {
+                    resolution_proof_case(
+                        (managed, initial),
+                        "command_execution_approval",
+                        approval.clone(),
+                        "resolved",
+                        bad,
+                        false,
+                        None,
+                    );
+                }
+                for (kind, status, resolution) in [
+                    ("user_input", "resolved", approval.clone()),
+                    (
+                        "command_execution_approval",
+                        "resolved",
+                        json!({"outcome":"answered","contained_secret":false,"answer_digest":"a".repeat(64),"answer_count":1,"resolution_receipt_id":null}),
+                    ),
+                    ("unsupported_request", "resolved", approval.clone()),
+                ] {
+                    resolution_proof_case(
+                        (managed, initial),
+                        kind,
+                        resolution,
+                        status,
+                        json!("2026-10-26T00:00:01Z"),
+                        false,
+                        None,
+                    );
+                }
+            }
+            for bad in [
+                Value::Null,
+                json!("not-a-date"),
+                json!("2016-12-31T23:59:60+01:00"),
+            ] {
+                resolution_proof_case(
+                    (managed, true),
+                    "command_execution_approval",
+                    approval.clone(),
+                    "resolved",
+                    json!("2026-10-26T00:00:01Z"),
+                    false,
+                    Some(("opened_at", Some(bad))),
+                );
+            }
+            for (status, resolution, date) in [
+                ("pending", approval.clone(), json!("2026-10-26T00:00:01Z")),
+                (
+                    "resolved",
+                    json!({"outcome":"stale","reason":"turn_terminal"}),
+                    json!("2026-10-26T00:00:01Z"),
+                ),
+                ("stale", approval.clone(), json!("2026-10-26T00:00:01Z")),
+                ("stale", Value::Null, Value::Null),
+                ("resolved", Value::Null, Value::Null),
+            ] {
+                resolution_proof_case(
+                    (managed, true),
+                    "command_execution_approval",
+                    resolution,
+                    status,
+                    date,
+                    false,
+                    None,
+                );
+            }
+            // Early v2 nonsecret receipt omission/null is supported without minting one.
+            for receipt in [None, Some(Value::Null)] {
+                resolution_proof_case(
+                    (managed, false),
+                    "command_execution_approval",
+                    approval.clone(),
+                    "resolved",
+                    json!("2026-10-26T09:00:01.123+09:00"),
+                    true,
+                    Some(("resolution_receipt_id", receipt)),
+                );
+            }
+            for (field, bad) in [
+                ("resolution_receipt_id", Some(json!("bad-uuid"))),
+                ("response_sha256", Some(json!("sha256:invalid"))),
+                ("response_sha256", Some(Value::Null)),
+                ("idempotency_key", Some(json!(3))),
+                ("idempotency_key", None),
+                ("resolved_at", None),
+            ] {
+                resolution_proof_case(
+                    (managed, false),
+                    "command_execution_approval",
+                    approval.clone(),
+                    "resolved",
+                    json!("2026-10-26T00:00:01Z"),
+                    false,
+                    Some((field, bad)),
+                );
+            }
+            let answered = json!({"outcome":"answered","contained_secret":false,"answer_digest":"a".repeat(64),"answer_count":1,"resolution_receipt_id":"018faaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee"});
+            for (field, bad) in [
+                ("response_sha256", json!("b".repeat(64))),
+                ("resolution_receipt_id", json!(Uuid::now_v7())),
+            ] {
+                resolution_proof_case(
+                    (managed, false),
+                    "user_input",
+                    answered.clone(),
+                    "resolved",
+                    json!("2026-10-26T00:00:01Z"),
+                    false,
+                    Some((field, Some(bad))),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn complete_observation_rejects_stable_projection_and_resolution_corruption() {
+        for managed in [false, true] {
+            for corruption in ["projection", "null_resolution", "null_resolved_at"] {
+                let (target, task) = observation_target(managed);
+                publish_observation_interactions(&target.state_root, target.member_ref, 0, 1);
+                super::release_fixture::write_absent_worker_locator(
+                    &target.state_root,
+                    &target.view.workspace_id,
+                    target.member_ref,
+                );
+                assert_eq!(
+                    observation_call(&target, task, true).unwrap_err().code,
+                    "DISPOSITION_NOT_IDLE"
+                );
+                if corruption == "projection" {
+                    let path = crate::run::run_root(&target.state_root, target.member_ref)
+                        .join("state.json");
+                    let mut value: Value =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    value["active_turn_id"] = Value::Null;
+                    value["lifecycle"] = json!("idle");
+                    std::fs::write(
+                        path,
+                        crate::jcs::canonicalize(&crate::jcs::parse(&value.to_string()).unwrap())
+                            .unwrap(),
+                    )
+                    .unwrap();
+                } else {
+                    let mut decision = observation_decision(
+                        0,
+                        json!({"outcome":"approval","decision":"accept_once"}),
+                    );
+                    decision[if corruption == "null_resolution" {
+                        "resolution"
+                    } else {
+                        "resolved_at"
+                    }] = Value::Null;
+                    let mut ledger = crate::ledger::Ledger::open(
+                        crate::run::run_root(&target.state_root, target.member_ref),
+                        target.member_ref,
+                    )
+                    .unwrap();
+                    ledger
+                        .append_required_payload(
+                            crate::audit::AuditKind::ApprovalDecided,
+                            &decision,
+                            1,
+                        )
+                        .unwrap();
+                }
+                let error = observation_call(&target, task, true).unwrap_err();
+                assert_eq!(error.code, "RECOVERY_REQUIRED", "{managed}/{corruption}");
+            }
+        }
+    }
+
+    #[test]
+    fn complete_observation_compares_each_source_component_and_derives_exact_revision() {
+        for managed in [false, true] {
+            let (target, _) = observation_target(managed);
+            append_observation_motion(&target.state_root, target.member_ref);
+            super::release_fixture::write_absent_worker_locator(
+                &target.state_root,
+                &target.view.workspace_id,
+                target.member_ref,
+            );
+            let request = crate::delegation_service::MemberCleanupObservation {
+                view: &target.view,
+                state_root: &target.state_root,
+                owner: target.owner,
+                member_ref: target.member_ref,
+            };
+            let mut budget = crate::ledger::ObservationBudget::default();
+            let original = target
+                .port()
+                .member_run_observation(request, &mut budget)
+                .unwrap();
+            assert_eq!(
+                original,
+                target
+                    .port()
+                    .member_run_observation(request, &mut budget)
+                    .unwrap()
+            );
+            let variants = original.differing_components();
+            assert_eq!(variants.len(), if managed { 21 } else { 19 });
+            for (field, changed) in variants {
+                assert_ne!(original, changed, "source equality dropped {field}");
+            }
+            let (pending, stamp) = target
+                .port()
+                .member_interaction_observation(request, &original, &mut budget)
+                .unwrap();
+            assert!(!pending);
+            assert_eq!(stamp.interaction_state_revision, 0);
+            assert!(original.matches_stamp(&stamp));
+            for field in 0..4 {
+                let mut changed = stamp.clone();
+                match field {
+                    0 => changed.run_state_revision += 1,
+                    1 => changed.writer_state_revision += 1,
+                    2 => changed.captured_head_cursor = (stamp.run_state_revision + 1).to_string(),
+                    _ => changed.interaction_state_revision = stamp.run_state_revision + 1,
+                };
+                assert!(!original.matches_stamp(&changed));
+            }
+            publish_observation_interactions(&target.state_root, target.member_ref, 1, 0);
+            let after = target
+                .port()
+                .member_run_observation(request, &mut budget)
+                .unwrap();
+            let (pending, stamp) = target
+                .port()
+                .member_interaction_observation(request, &after, &mut budget)
+                .unwrap();
+            assert!(!pending);
+            assert_eq!(
+                stamp.interaction_state_revision, stamp.run_state_revision,
+                "last approval decision determines this interaction revision"
+            );
+            let interaction_revision = stamp.interaction_state_revision;
+            append_observation_motion(&target.state_root, target.member_ref);
+            let after = target
+                .port()
+                .member_run_observation(request, &mut budget)
+                .unwrap();
+            let (_, stamp) = target
+                .port()
+                .member_interaction_observation(request, &after, &mut budget)
+                .unwrap();
+            assert_eq!(stamp.interaction_state_revision, interaction_revision);
+            assert!(stamp.run_state_revision > interaction_revision);
+        }
+    }
+
+    #[test]
+    fn complete_observation_refuses_invalid_normalized_proof_before_idle_for_both_owners() {
+        for managed in [false, true] {
+            for corruption in [
+                "payload",
+                "response_schema",
+                "nullable",
+                "controller_encoding",
+                "generation",
+            ] {
+                let (target, task) = observation_target(managed);
+                append_observation_motion(&target.state_root, target.member_ref);
+                super::release_fixture::write_absent_worker_locator(
+                    &target.state_root,
+                    &target.view.workspace_id,
+                    target.member_ref,
+                );
+                observation_call(&target, task, true).unwrap();
+                publish_observation_interactions_using(
+                    &target.state_root,
+                    target.member_ref,
+                    1,
+                    0,
+                    Some(corruption),
+                );
+                let before =
+                    std::fs::read(EngagementStore::workspace_database_path(&target.state_root))
+                        .unwrap();
+                for identity in [false, true] {
+                    let error = observation_call(&target, task, identity).unwrap_err();
+                    assert_eq!(
+                        error.code, "RECOVERY_REQUIRED",
+                        "{managed}/{identity}/{corruption}"
+                    );
+                    assert_eq!(error.details["classification"], "RecoveryNeeded");
+                }
+                assert_eq!(
+                    std::fs::read(EngagementStore::workspace_database_path(&target.state_root))
+                        .unwrap(),
+                    before
+                );
+            }
+        }
+    }
+    #[test]
+    fn complete_observation_runtime_must_belong_to_the_current_workspace_generation() {
+        for managed in [false, true] {
+            for mismatch in ["generation", "workspace", "recovery"] {
+                let (target, task) = observation_target(managed);
+                append_observation_motion(&target.state_root, target.member_ref);
+                let (path, mut record) = super::release_fixture::write_absent_worker_locator(
+                    &target.state_root,
+                    &target.view.workspace_id,
+                    target.member_ref,
+                );
+                observation_call(&target, task, true).unwrap();
+                match mismatch {
+                    "generation" => record.identity.run_generation += 1,
+                    "workspace" => {
+                        record.identity.workspace_id = "e".repeat(64);
+                        record.socket_path = crate::worker::worker_socket_path(
+                            record.identity.uid,
+                            &record.identity.workspace_id,
+                            record.identity.run_id,
+                        )
+                        .unwrap();
+                    }
+                    "recovery" => record.control_recovery_required = true,
+                    _ => unreachable!(),
+                }
+                crate::worker::write_runtime_record(&path, &record).unwrap();
+                for identity in [false, true] {
+                    let error = observation_call(&target, task, identity).unwrap_err();
+                    assert_eq!(
+                        error.code, "RECOVERY_REQUIRED",
+                        "{managed}/{identity}/{mismatch}"
+                    );
+                    assert_eq!(error.details["required_action"], "restore_state");
+                }
+            }
+        }
+    }
+    #[test]
+    fn complete_observation_closing_fences_run_inside_the_actual_pinned_database() {
+        for managed in [false, true] {
+            for identity in [false, true] {
+                use super::release_fixture::{ReleasableMember, ReleaseScene};
+                let (target, task) = if managed {
+                    ReleasableMember::managed_with_running_task(
+                        ReleaseScene::CloseSettlement,
+                        "observation",
+                    )
+                } else {
+                    ReleasableMember::external_with_running_task(
+                        ReleaseScene::CloseSettlement,
+                        "observation",
+                    )
+                };
+                let target = std::rc::Rc::new(target);
+                let publisher = target.clone();
+                let database = EngagementStore::workspace_database_path(&target.state_root);
+                let state_root = target.state_root.clone();
+                let workspace = target.view.workspace_id.clone();
+                let owner = target.owner;
+                let member = target.member_ref;
+                let busy = std::rc::Rc::new(std::cell::Cell::new(None));
+                let observed = busy.clone();
+                let captures = std::rc::Rc::new(std::cell::Cell::new(0));
+                let attempts = captures.clone();
+                let mut written = false;
+                let probe = crate::delegation_service::set_member_observation_probe(move |at| {
+                    if at == "A0" {
+                        attempts.set(attempts.get() + 1);
+                        if attempts.get() == 1 {
+                            publisher.settle_task_terminal(
+                                if managed {
+                                    "turn-managed-race"
+                                } else {
+                                    "turn-recovery"
+                                },
+                                "completed",
+                                "completed during observation",
+                            );
+                        }
+                    }
+                    if at == "D" && !written {
+                        written = true;
+                        let mut store = EngagementStore::open(
+                            &EngagementStore::workspace_database_path(&state_root),
+                        )
+                        .unwrap();
+                        store
+                            .transact(|tx| {
+                                crate::engagement::advance_member_workload_revision(
+                                    tx,
+                                    &workspace,
+                                    owner.scope_kind(),
+                                    &owner.scope_ref().to_string(),
+                                    &member.to_string(),
+                                )
+                                .map(|_| ())
+                            })
+                            .unwrap();
+                    }
+                    if at == "W1" {
+                        let connection = rusqlite::Connection::open(&database).unwrap();
+                        connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+                        let result = connection
+                            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                                row.get::<_, u32>(0)
+                            })
+                            .unwrap();
+                        observed.set(Some(result));
+                    }
+                });
+                let baseline = observation_call(&target, task, identity).unwrap();
+                assert_eq!(
+                    captures.get(),
+                    2,
+                    "completion invalidates the first capture"
+                );
+                assert_eq!(
+                    baseline[if identity {
+                        "worker_disposition"
+                    } else {
+                        "state"
+                    }],
+                    "idle"
+                );
+                assert!(baseline["result_digest"].is_string());
+                assert_eq!(baseline["complete_result"]["terminal_outcome"], "completed");
+                assert_eq!(
+                    baseline["complete_result"]["source"]["task_ref"],
+                    task.to_string()
+                );
+                assert_eq!(
+                    baseline["complete_result"]["final_response"]["byte_length"],
+                    "completed during observation".len()
+                );
+                assert_eq!(
+                    busy.get(),
+                    Some(1),
+                    "W1/A2 must execute while D still pins its pre-write WAL snapshot"
+                );
+                drop(probe);
+                let connection = rusqlite::Connection::open(
+                    EngagementStore::workspace_database_path(&target.state_root),
+                )
+                .unwrap();
+                connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+                assert_eq!(
+                    connection
+                        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row
+                            .get::<_, u32>(0))
+                        .unwrap(),
+                    0,
+                    "D must release after the closing checks"
+                );
+                if identity {
+                    let later = observation_call(&target, task, true).unwrap();
+                    assert!(
+                        later["disposition_proof"]["workload_revision"]
+                            .as_u64()
+                            .unwrap()
+                            > baseline["disposition_proof"]["workload_revision"]
+                                .as_u64()
+                                .unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complete_observation_reused_native_ids_and_raw_publication_cuts_never_prove_idle() {
+        for managed in [false, true] {
+            let (target, task) = observation_target(managed);
+            publish_observation_interactions(&target.state_root, target.member_ref, 1, 0);
+            let (path, mut runtime) = super::release_fixture::write_absent_worker_locator(
+                &target.state_root,
+                &target.view.workspace_id,
+                target.member_ref,
+            );
+            observation_call(&target, task, true).unwrap();
+            {
+                let mut ledger = crate::ledger::Ledger::open(
+                    crate::run::run_root(&target.state_root, target.member_ref),
+                    target.member_ref,
+                )
+                .unwrap();
+                ledger
+                    .append_required_payload(
+                        crate::audit::AuditKind::RunGenerationStarted,
+                        &json!({}),
+                        2,
+                    )
+                    .unwrap();
+            }
+            runtime.identity.run_generation = 2;
+            crate::worker::write_runtime_record(&path, &runtime).unwrap();
+            publish_observation_interactions(&target.state_root, target.member_ref, 0, 1);
+            assert_eq!(
+                observation_call(&target, task, false).unwrap()["state"],
+                "active"
+            );
+            assert_eq!(
+                observation_call(&target, task, true).unwrap_err().code,
+                "DISPOSITION_NOT_IDLE"
+            );
+            let projection = RunStore::new(SystemWorkspacePlatform, &target.state_root)
+                .load_state_projection(target.member_ref)
+                .unwrap();
+            let interactions = crate::interaction::durable_interactions_at(
+                &target.state_root,
+                target.member_ref,
+                projection.ledger_head.sequence,
+            )
+            .unwrap();
+            assert_eq!(interactions.len(), 2);
+            assert_eq!(interactions[0].0["status"], "resolved");
+            assert_eq!(
+                interactions[1].0["status"], "pending",
+                "public/release readers must not project an earlier generation's decision onto a new request"
+            );
+            {
+                let mut ledger = crate::ledger::Ledger::open(
+                    crate::run::run_root(&target.state_root, target.member_ref),
+                    target.member_ref,
+                )
+                .unwrap();
+                ledger
+                    .append_required_payload(
+                        crate::audit::AuditKind::ApprovalDecided,
+                        &observation_decision(
+                            0,
+                            json!({"outcome":"approval","decision":"accept_once"}),
+                        ),
+                        2,
+                    )
+                    .unwrap();
+                ledger
+                    .append_required_payload(
+                        crate::audit::AuditKind::InteractionOpened,
+                        &json!({"request_id":"9","method":"item/commandExecution/requestApproval"}),
+                        2,
+                    )
+                    .unwrap();
+            }
+            // The actual automatic-refusal producer publishes open before resolve,
+            // without normalized metadata; its interrupted cut is never idle.
+            assert_eq!(
+                observation_call(&target, task, false).unwrap()["state"],
+                "active"
+            );
+            assert_eq!(
+                observation_call(&target, task, true).unwrap_err().code,
+                "DISPOSITION_NOT_IDLE"
+            );
+            {
+                let mut ledger = crate::ledger::Ledger::open(
+                    crate::run::run_root(&target.state_root, target.member_ref),
+                    target.member_ref,
+                )
+                .unwrap();
+                ledger
+                    .append_required_payload(
+                        crate::audit::AuditKind::InteractionResolved,
+                        &json!({"request_id":"9"}),
+                        2,
+                    )
+                    .unwrap();
+            }
+            let head = RunStore::new(SystemWorkspacePlatform, &target.state_root)
+                .load_state_projection(target.member_ref)
+                .unwrap()
+                .ledger_head
+                .sequence;
+            let interactions = crate::interaction::durable_interactions_at(
+                &target.state_root,
+                target.member_ref,
+                head,
+            )
+            .unwrap();
+            assert_eq!(interactions[0].0["resolution"]["outcome"], "approval");
+            assert_eq!(interactions[1].0["status"], "resolved");
+            assert_eq!(
+                observation_call(&target, task, true).unwrap()["worker_disposition"],
+                "idle"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_observation_preserves_every_normalized_interaction_family_without_payload_disclosure()
+     {
+        for managed in [false, true] {
+            for variant in [None, Some("file"), Some("user"), Some("unsupported")] {
+                let (target, task) = observation_target(managed);
+                append_observation_motion(&target.state_root, target.member_ref);
+                super::release_fixture::write_absent_worker_locator(
+                    &target.state_root,
+                    &target.view.workspace_id,
+                    target.member_ref,
+                );
+                observation_call(&target, task, true).unwrap();
+                publish_observation_interactions_using(
+                    &target.state_root,
+                    target.member_ref,
+                    1,
+                    0,
+                    variant,
+                );
+                let resolved = observation_call(&target, task, true).unwrap();
+                assert_eq!(resolved["worker_disposition"], "idle");
+                assert!(!resolved.to_string().contains("protected-question-fixture"));
+                if variant == Some("unsupported") {
+                    continue;
+                }
+                publish_observation_interactions_using(
+                    &target.state_root,
+                    target.member_ref,
+                    0,
+                    1,
+                    variant,
+                );
+                assert_eq!(
+                    observation_call(&target, task, false).unwrap()["state"],
+                    "active"
+                );
+                let error = observation_call(&target, task, true).unwrap_err();
+                assert_eq!(error.code, "DISPOSITION_NOT_IDLE");
+                assert!(
+                    !serde_json::to_string(&error)
+                        .unwrap_or_default()
+                        .contains("protected-question-fixture")
+                );
+            }
+        }
     }
 }

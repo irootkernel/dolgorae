@@ -188,15 +188,17 @@ pub(crate) fn selected_terminal_record_path(
     }
 }
 
-fn checked_manifest(
+fn checked_manifest_using(
     root: &Path,
     run_id: Uuid,
     selection: &Selection,
+    budget: Option<&mut crate::ledger::ObservationBudget>,
 ) -> Result<Manifest, LedgerError> {
     if selection.schema != "dolgorae.native-ledger-selection/v1" {
         return Err(integrity("unsupported ledger selection"));
     }
-    let manifest: Manifest = read_content_json(root, &selection.manifest, MAX_METADATA_BYTES)?;
+    let manifest: Manifest =
+        read_content_json_using(root, &selection.manifest, MAX_METADATA_BYTES, budget)?;
     if manifest.schema != "dolgorae.native-ledger-generation/v1"
         || manifest.run_id != run_id
         || manifest.generation < 2
@@ -211,13 +213,23 @@ fn selected_manifest(
     root: &Path,
     run_id: Uuid,
 ) -> Result<Option<(Selection, Manifest)>, LedgerError> {
-    let selection =
-        match read_json::<Selection>(&root.join("ledger-selection.json"), MAX_METADATA_BYTES) {
-            Err(LedgerError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
-            other => Some(other?),
-        };
+    selected_manifest_using(root, run_id, None)
+}
+fn selected_manifest_using(
+    root: &Path,
+    run_id: Uuid,
+    mut budget: Option<&mut crate::ledger::ObservationBudget>,
+) -> Result<Option<(Selection, Manifest)>, LedgerError> {
+    let selection = match read_json_using::<Selection>(
+        &root.join("ledger-selection.json"),
+        MAX_METADATA_BYTES,
+        budget.as_deref_mut(),
+    ) {
+        Err(LedgerError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+        other => Some(other?),
+    };
     let selected = selection
-        .map(|s| checked_manifest(root, run_id, &s).map(|m| (s, m)))
+        .map(|s| checked_manifest_using(root, run_id, &s, budget.as_deref_mut()).map(|m| (s, m)))
         .transpose()?;
     let generations = root.join("ledger-generations");
     let entries = match fs::read_dir(&generations) {
@@ -233,9 +245,14 @@ fn selected_manifest(
         let path = entry?.path();
         verify_secure_directory(&path, DarwinSystem.current_uid())
             .map_err(LedgerError::SecurityPolicy)?;
-        match read_json::<Selection>(&path.join("selection.json"), MAX_METADATA_BYTES) {
+        match read_json_using::<Selection>(
+            &path.join("selection.json"),
+            MAX_METADATA_BYTES,
+            budget.as_deref_mut(),
+        ) {
             Ok(witness) => {
-                let activated = checked_manifest(root, run_id, &witness)?;
+                let activated =
+                    checked_manifest_using(root, run_id, &witness, budget.as_deref_mut())?;
                 if selected.as_ref().is_none_or(|(s, m)| {
                     m.generation < activated.generation
                         || (m.generation == activated.generation && *s != witness)
@@ -278,41 +295,53 @@ pub(crate) struct ObservationFileIdentity {
     pub changed: (i64, i64),
 }
 
+pub(crate) fn observation_file_identity(
+    path: &Path,
+) -> Result<ObservationFileIdentity, LedgerError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_dir() {
+        verify_secure_directory(path, DarwinSystem.current_uid())
+            .map_err(LedgerError::SecurityPolicy)?;
+    } else {
+        verify_secure_file(path, DarwinSystem.current_uid())
+            .map_err(LedgerError::SecurityPolicy)?;
+    }
+    Ok(ObservationFileIdentity {
+        path: path.to_owned(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mode: metadata.mode(),
+        uid: metadata.uid(),
+        links: metadata.nlink(),
+        length: if metadata.is_dir() { 0 } else { metadata.len() },
+        modified: if metadata.is_dir() {
+            (0, 0)
+        } else {
+            (metadata.mtime(), metadata.mtime_nsec())
+        },
+        changed: if metadata.is_dir() {
+            (0, 0)
+        } else {
+            (metadata.ctime(), metadata.ctime_nsec())
+        },
+    })
+}
 pub(crate) fn observation_identity(
     root: &Path,
     referenced: &[PathBuf],
 ) -> Result<Vec<ObservationFileIdentity>, LedgerError> {
-    fn inspect(path: &Path) -> Result<ObservationFileIdentity, LedgerError> {
-        let metadata = fs::symlink_metadata(path)?;
-        if metadata.is_dir() {
-            verify_secure_directory(path, DarwinSystem.current_uid())
-                .map_err(LedgerError::SecurityPolicy)?;
-        } else {
-            verify_secure_file(path, DarwinSystem.current_uid())
-                .map_err(LedgerError::SecurityPolicy)?;
-        }
-        Ok(ObservationFileIdentity {
-            path: path.to_owned(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            mode: metadata.mode(),
-            uid: metadata.uid(),
-            links: metadata.nlink(),
-            length: if metadata.is_dir() { 0 } else { metadata.len() },
-            modified: if metadata.is_dir() {
-                (0, 0)
-            } else {
-                (metadata.mtime(), metadata.mtime_nsec())
-            },
-            changed: if metadata.is_dir() {
-                (0, 0)
-            } else {
-                (metadata.ctime(), metadata.ctime_nsec())
-            },
-        })
-    }
-    let mut sources = vec![inspect(root)?, inspect(&root.join("audit.jsonl"))?];
-    match inspect(&root.join("ledger-selection.json")) {
+    observation_identity_using(root, referenced, None)
+}
+pub(crate) fn observation_identity_using(
+    root: &Path,
+    referenced: &[PathBuf],
+    mut budget: Option<&mut crate::ledger::ObservationBudget>,
+) -> Result<Vec<ObservationFileIdentity>, LedgerError> {
+    let mut sources = vec![
+        observation_file_identity(root)?,
+        observation_file_identity(&root.join("audit.jsonl"))?,
+    ];
+    match observation_file_identity(&root.join("ledger-selection.json")) {
         Ok(source) => sources.push(source),
         Err(LedgerError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
@@ -322,7 +351,7 @@ pub(crate) fn observation_identity(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
         Ok(entries) => {
-            sources.push(inspect(&namespace)?);
+            sources.push(observation_file_identity(&namespace)?);
             for (index, entry) in entries.enumerate() {
                 if index >= MAX_SEGMENTS {
                     return Err(integrity("retained generation namespace exceeds its bound"));
@@ -330,12 +359,16 @@ pub(crate) fn observation_identity(
                 let directory = entry?.path();
                 verify_secure_directory(&directory, DarwinSystem.current_uid())
                     .map_err(LedgerError::SecurityPolicy)?;
-                sources.push(inspect(&directory)?);
-                match read_json::<Selection>(&directory.join("selection.json"), MAX_METADATA_BYTES)
-                {
-                    Ok(witness) => {
-                        sources.push(inspect(&checked_path(root, &witness.manifest.path)?)?)
-                    }
+                sources.push(observation_file_identity(&directory)?);
+                match read_json_using::<Selection>(
+                    &directory.join("selection.json"),
+                    MAX_METADATA_BYTES,
+                    budget.as_deref_mut(),
+                ) {
+                    Ok(witness) => sources.push(observation_file_identity(&checked_path(
+                        root,
+                        &witness.manifest.path,
+                    )?)?),
                     Err(LedgerError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error),
                 }
@@ -343,18 +376,18 @@ pub(crate) fn observation_identity(
                     if index >= 16 {
                         return Err(integrity("generation file namespace exceeds its bound"));
                     }
-                    sources.push(inspect(&file?.path())?);
+                    sources.push(observation_file_identity(&file?.path())?);
                 }
             }
         }
     }
     for path in referenced {
-        sources.push(inspect(path)?);
+        sources.push(observation_file_identity(path)?);
         let mut ancestor = path.parent();
         while let Some(directory) = ancestor {
             verify_secure_directory(directory, DarwinSystem.current_uid())
                 .map_err(LedgerError::SecurityPolicy)?;
-            sources.push(inspect(directory)?);
+            sources.push(observation_file_identity(directory)?);
             if directory == root {
                 break;
             }
@@ -388,8 +421,50 @@ pub(crate) fn observed_generation(root: &Path, run_id: Uuid) -> Result<u64, Ledg
     Ok(selected_manifest(root, run_id)?.map_or(1, |(_, manifest)| manifest.generation))
 }
 
+pub(crate) fn observation_selection(
+    root: &Path,
+    run_id: Uuid,
+    budget: &mut crate::ledger::ObservationBudget,
+) -> Result<(u64, String, Vec<ObservationFileIdentity>), LedgerError> {
+    let selected = selected_manifest_using(root, run_id, Some(budget))?;
+    let generation = selected
+        .as_ref()
+        .map_or(1, |(_, manifest)| manifest.generation);
+    let identity =
+        sha256_hex(&serde_json::to_vec(&selected).map_err(|e| integrity(e.to_string()))?);
+    let mut referenced = Vec::new();
+    if let Some((selection, manifest)) = &selected {
+        referenced.extend([
+            checked_path(root, &selection.manifest.path)?,
+            checked_path(root, &manifest.checkpoint.path)?,
+            checked_path(root, &manifest.receipt_index.path)?,
+            checked_path(root, &manifest.append_path)?,
+        ]);
+        let checkpoint: Checkpoint =
+            read_content_json_using(root, &manifest.checkpoint, MAX_METADATA_BYTES, Some(budget))?;
+        referenced.extend(
+            checkpoint
+                .segments
+                .iter()
+                .map(|segment| checked_path(root, &segment.content.path))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
+    let sources = observation_identity_using(root, &referenced, Some(budget))?;
+    budget.check()?;
+    Ok((generation, identity, sources))
+}
+
 pub(crate) fn pin(root: &Path, run_id: Uuid) -> Result<PinnedGeneration, LedgerError> {
-    let Some((selection, manifest)) = selected_manifest(root, run_id)? else {
+    pin_using(root, run_id, None)
+}
+pub(crate) fn pin_using(
+    root: &Path,
+    run_id: Uuid,
+    mut budget: Option<&mut crate::ledger::ObservationBudget>,
+) -> Result<PinnedGeneration, LedgerError> {
+    let Some((selection, manifest)) = selected_manifest_using(root, run_id, budget.as_deref_mut())?
+    else {
         return Ok(PinnedGeneration {
             manifest: None,
             historical: Vec::new(),
@@ -400,7 +475,12 @@ pub(crate) fn pin(root: &Path, run_id: Uuid) -> Result<PinnedGeneration, LedgerE
             observation_paths: Vec::new(),
         });
     };
-    let checkpoint: Checkpoint = read_content_json(root, &manifest.checkpoint, MAX_METADATA_BYTES)?;
+    let checkpoint: Checkpoint = read_content_json_using(
+        root,
+        &manifest.checkpoint,
+        MAX_METADATA_BYTES,
+        budget.as_deref_mut(),
+    )?;
     if checkpoint.schema != "dolgorae.native-ledger-checkpoint/v1"
         || checkpoint.run_id != run_id
         || checkpoint.segments.len() > MAX_SEGMENTS
@@ -409,8 +489,12 @@ pub(crate) fn pin(root: &Path, run_id: Uuid) -> Result<PinnedGeneration, LedgerE
     {
         return Err(integrity("checkpoint does not match the selected manifest"));
     }
-    let index: Vec<ReceiptIndexEntry> =
-        read_content_json(root, &manifest.receipt_index, MAX_LEDGER_BYTES)?;
+    let index: Vec<ReceiptIndexEntry> = read_content_json_using(
+        root,
+        &manifest.receipt_index,
+        MAX_LEDGER_BYTES,
+        budget.as_deref_mut(),
+    )?;
     let mut expected_sequence = 1;
     let mut previous = GENESIS_PREVIOUS_HASH.to_owned();
     let mut historical = Vec::new();
@@ -422,12 +506,20 @@ pub(crate) fn pin(root: &Path, run_id: Uuid) -> Result<PinnedGeneration, LedgerE
         {
             return Err(integrity("checkpoint segment chain is discontinuous"));
         }
-        let mut file = open_content(root, &segment.content, MAX_LEDGER_BYTES)?;
+        let mut file = open_content_using(
+            root,
+            &segment.content,
+            MAX_LEDGER_BYTES,
+            budget.as_deref_mut(),
+        )?;
         if segment.content.byte_length == 0 {
             return Err(integrity("empty immutable history segment"));
         }
         file.seek(SeekFrom::End(-1))?;
         let mut final_byte = [0];
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.charge_bytes(1)?;
+        }
         file.read_exact(&mut final_byte)?;
         if final_byte[0] != b'\n' {
             return Err(integrity("immutable history segment has a torn tail"));
@@ -526,6 +618,14 @@ pub(crate) fn validate_checkpoint(
     pin: &PinnedGeneration,
     records: &[AuditRecord],
 ) -> Result<(), LedgerError> {
+    validate_checkpoint_using(root, pin, records, None)
+}
+pub(crate) fn validate_checkpoint_using(
+    root: &Path,
+    pin: &PinnedGeneration,
+    records: &[AuditRecord],
+    budget: Option<&mut crate::ledger::ObservationBudget>,
+) -> Result<(), LedgerError> {
     let Some(manifest) = &pin.manifest else {
         return Ok(());
     };
@@ -549,14 +649,18 @@ pub(crate) fn validate_checkpoint(
             ));
         }
     }
-    let projected = crate::ledger::project(manifest.run_id, prefix)?;
+    let projected = if let Some(budget) = budget.as_deref() {
+        crate::ledger::project_observation(manifest.run_id, prefix, budget)?
+    } else {
+        crate::ledger::project(manifest.run_id, prefix)?
+    };
     if Some(&projected) != pin.checkpoint_projection.as_ref() {
         return Err(integrity(
             "checkpoint projection disagrees with chain replay",
         ));
     }
     let index: Vec<ReceiptIndexEntry> =
-        read_content_json(root, &manifest.receipt_index, MAX_LEDGER_BYTES)?;
+        read_content_json_using(root, &manifest.receipt_index, MAX_LEDGER_BYTES, budget)?;
     if index != receipt_index(prefix) {
         return Err(integrity(
             "retained receipt index disagrees with accepted history",
@@ -751,13 +855,23 @@ fn secure_open(path: &Path) -> Result<File, LedgerError> {
     verify_secure_file(path, DarwinSystem.current_uid()).map_err(LedgerError::SecurityPolicy)?;
     Ok(file)
 }
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path, maximum: u64) -> Result<T, LedgerError> {
+fn read_json_using<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    maximum: u64,
+    mut budget: Option<&mut crate::ledger::ObservationBudget>,
+) -> Result<T, LedgerError> {
     let file = secure_open(path)?;
     if file.metadata()?.len() > maximum {
         return Err(integrity("generation metadata exceeds its bound"));
     }
-    let mut bytes = Vec::new();
-    file.take(maximum + 1).read_to_end(&mut bytes)?;
+    let reserved = if let Some(budget) = budget.as_deref_mut() {
+        let length = file.metadata()?.len();
+        budget.charge_bytes(length)?;
+        length
+    } else {
+        maximum + 1
+    };
+    let bytes = read_reserved(&mut file.take(reserved), budget)?;
     if bytes.len() as u64 > maximum {
         return Err(integrity("generation metadata exceeds its bound"));
     }
@@ -766,15 +880,34 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path, maximum: u64) -> Resul
     serde_json::from_slice(&bytes).map_err(|e| integrity(e.to_string()))
 }
 fn open_content(root: &Path, content: &Content, maximum: u64) -> Result<File, LedgerError> {
+    open_content_using(root, content, maximum, None)
+}
+fn open_content_using(
+    root: &Path,
+    content: &Content,
+    maximum: u64,
+    mut budget: Option<&mut crate::ledger::ObservationBudget>,
+) -> Result<File, LedgerError> {
     let mut file = secure_open(&checked_path(root, &content.path)?)?;
     if content.byte_length > maximum || file.metadata()?.len() != content.byte_length {
         return Err(integrity("generation content length mismatch"));
     }
+    if let Some(budget) = budget.as_deref_mut() {
+        budget.charge_bytes(content.byte_length)?;
+    }
+    let mut reserved_reader = (&mut file).take(if budget.is_some() {
+        content.byte_length
+    } else {
+        maximum.saturating_add(1)
+    });
     let mut digest = Sha256::new();
     let mut buffer = [0; 64 * 1024];
     let mut length = 0_u64;
     loop {
-        let n = file.read(&mut buffer)?;
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.check()?;
+        }
+        let n = reserved_reader.read(&mut buffer)?;
         if n == 0 {
             break;
         }
@@ -795,12 +928,52 @@ fn read_content_json<T: serde::de::DeserializeOwned>(
     content: &Content,
     maximum: u64,
 ) -> Result<T, LedgerError> {
-    let mut file = open_content(root, content, maximum)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    read_content_json_using::<T>(root, content, maximum, None)
+}
+fn read_content_json_using<T: serde::de::DeserializeOwned>(
+    root: &Path,
+    content: &Content,
+    maximum: u64,
+    mut budget: Option<&mut crate::ledger::ObservationBudget>,
+) -> Result<T, LedgerError> {
+    let file = open_content_using(root, content, maximum, budget.as_deref_mut())?;
+    if let Some(budget) = budget.as_deref_mut() {
+        budget.charge_bytes(content.byte_length)?;
+    }
+    let bytes = read_reserved(
+        &mut file.take(if budget.is_some() {
+            content.byte_length
+        } else {
+            maximum.saturating_add(1)
+        }),
+        budget,
+    )?;
+    if bytes.len() as u64 != content.byte_length {
+        return Err(integrity(
+            "generation content changed during its reserved read",
+        ));
+    }
     crate::jcs::parse(std::str::from_utf8(&bytes).map_err(|e| integrity(e.to_string()))?)
         .map_err(|e| integrity(e.to_string()))?;
     serde_json::from_slice(&bytes).map_err(|e| integrity(e.to_string()))
+}
+fn read_reserved(
+    reader: &mut impl std::io::Read,
+    mut budget: Option<&mut crate::ledger::ObservationBudget>,
+) -> Result<Vec<u8>, LedgerError> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.check()?;
+        }
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..n]);
+    }
+    Ok(bytes)
 }
 fn create_json(root: &Path, path: String, value: &impl Serialize) -> Result<Content, LedgerError> {
     let bytes = serde_json::to_vec(value).map_err(|e| integrity(e.to_string()))?;
@@ -1199,5 +1372,112 @@ mod tests {
         drop(maintenance);
         WorkspaceLease::acquire(&root, false).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn complete_observation_reserved_read_checks_deadline_between_chunks() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+        struct Clock(Arc<AtomicU64>);
+        impl crate::ledger::LedgerClock for Clock {
+            fn monotonic_millis(&self) -> u64 {
+                self.0.load(Ordering::Relaxed)
+            }
+            fn timestamp(&self) -> String {
+                "2026-10-26T00:00:00.000000Z".to_owned()
+            }
+        }
+        struct ReadCut {
+            clock: Arc<AtomicU64>,
+            first: bool,
+        }
+        impl std::io::Read for ReadCut {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                if !self.first {
+                    return Ok(0);
+                }
+                self.first = false;
+                bytes[0] = b'x';
+                self.clock
+                    .store(crate::ledger::REPLAY_BUDGET_MILLIS, Ordering::Relaxed);
+                Ok(1)
+            }
+        }
+        let clock = Arc::new(AtomicU64::new(0));
+        let mut budget = crate::ledger::ObservationBudget::new(
+            Box::new(Clock(clock.clone())),
+            crate::ledger::MAX_LEDGER_BYTES,
+            crate::ledger::MAX_LEDGER_RECORDS,
+        );
+        let mut reader = ReadCut { clock, first: true };
+        assert!(matches!(
+            read_reserved(&mut reader, Some(&mut budget)),
+            Err(LedgerError::OperationTimeout(_))
+        ));
+    }
+
+    #[test]
+    fn complete_observation_accounts_immutable_prefix_before_replaying_it() {
+        let tree = Tree::new();
+        let (mut records, _) = tree.seed();
+        let mut previous = records.last().unwrap().hash().to_owned();
+        for _ in 0..256 {
+            let record = AuditRecord::new(
+                records.len() as u64 + 1,
+                "2026-10-26T00:00:00.000000Z",
+                tree.run_id,
+                1,
+                AuditKind::ProfileObserved,
+                crate::jcs::parse(&serde_json::json!({"body":"x".repeat(2048)}).to_string())
+                    .unwrap(),
+                &previous,
+            )
+            .unwrap();
+            previous = record.hash().to_owned();
+            records.push(record);
+        }
+        let bytes = records
+            .iter()
+            .flat_map(|r| r.canonical_line().unwrap())
+            .collect::<Vec<_>>();
+        fs::write(tree.root.join("audit.jsonl"), &bytes).unwrap();
+        let projection = crate::ledger::project(tree.run_id, &records).unwrap();
+        let old = pin(&tree.root, tree.run_id).unwrap();
+        rollover(
+            &tree.root,
+            tree.run_id,
+            Uuid::now_v7(),
+            &old,
+            &records,
+            &projection,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        let mut ordinary = crate::ledger::ObservationBudget::default();
+        let captured = ObservedLedger::open_complete_bounded(
+            &tree.root,
+            tree.run_id,
+            records.len() as u64,
+            &mut ordinary,
+        )
+        .unwrap();
+        assert_eq!(captured.records(), records);
+        // One history scan fits this allowance; verification plus replay does not.
+        // No prefix hashing/metadata pass can occur outside the enclosing budget.
+        let mut bounded = crate::ledger::ObservationBudget::new(
+            Box::new(crate::ledger::SystemLedgerClock::default()),
+            2 * bytes.len() as u64 - 1,
+            crate::ledger::MAX_LEDGER_RECORDS,
+        );
+        assert!(matches!(
+            ObservedLedger::open_complete_bounded(
+                &tree.root,
+                tree.run_id,
+                records.len() as u64,
+                &mut bounded
+            ),
+            Err(LedgerError::Capacity(_))
+        ));
     }
 }

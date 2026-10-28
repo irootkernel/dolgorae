@@ -26,11 +26,12 @@ pub(crate) fn inspect(path: &Path, uid: u32) -> io::Result<Metadata> {
     if !entry.file_type().is_symlink() || entry.uid() != uid {
         return Err(invalid_socket());
     }
-    let root = verified_root(uid)?;
+    let root = protected_root(uid)?;
     let target = expected_target(path, &root)?;
     if fs::read_link(path)? != target {
         return Err(invalid_socket());
     }
+    verified_root(uid)?;
     let socket = fs::symlink_metadata(target)?;
     if !socket.file_type().is_socket() || socket.uid() != uid || socket.mode() & 0o777 != 0o600 {
         return Err(invalid_socket());
@@ -92,6 +93,40 @@ pub(crate) fn remove_unpublished(path: &Path, uid: u32) -> io::Result<()> {
 /// An exact dangling alias and a matching physical socket without its alias
 /// are both recoverable; an unrelated entry is never removed.
 pub(crate) fn remove_recorded(path: &Path, uid: u32, device: u64, inode: u64) -> io::Result<()> {
+    match inspect_recorded(path, uid, device, inode)? {
+        RecordedSocket::Direct => fs::remove_file(path),
+        RecordedSocket::Rendezvous { alias, target } => {
+            if let Some(target) = target {
+                fs::remove_file(target)?;
+            }
+            if alias {
+                fs::remove_file(path)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// A retiring process may withdraw either rendezvous path before exiting.
+/// Any surviving entry must still belong to the captured socket identity.
+pub(crate) fn verify_recorded_or_absent(
+    path: &Path,
+    uid: u32,
+    device: u64,
+    inode: u64,
+) -> io::Result<()> {
+    inspect_recorded(path, uid, device, inode).map(|_| ())
+}
+
+enum RecordedSocket {
+    Direct,
+    Rendezvous {
+        alias: bool,
+        target: Option<PathBuf>,
+    },
+}
+
+fn inspect_recorded(path: &Path, uid: u32, device: u64, inode: u64) -> io::Result<RecordedSocket> {
     let entry = match fs::symlink_metadata(path) {
         Ok(metadata) => Some(metadata),
         Err(error) if error.kind() == ErrorKind::NotFound => None,
@@ -103,7 +138,7 @@ pub(crate) fn remove_recorded(path: &Path, uid: u32, device: u64, inode: u64) ->
         if metadata.uid() != uid || metadata.dev() != device || metadata.ino() != inode {
             return Err(invalid_socket());
         }
-        return fs::remove_file(path);
+        return Ok(RecordedSocket::Direct);
     }
     if let Some(metadata) = entry.as_ref()
         && (!metadata.file_type().is_symlink() || metadata.uid() != uid)
@@ -118,13 +153,15 @@ pub(crate) fn remove_recorded(path: &Path, uid: u32, device: u64, inode: u64) ->
     match fs::symlink_metadata(&root) {
         Ok(metadata)
             if metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o777 == 0o700 => {}
-        Err(error) if error.kind() == ErrorKind::NotFound && entry.is_none() => return Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return fs::remove_file(path);
+            return Ok(RecordedSocket::Rendezvous {
+                alias: entry.is_some(),
+                target: None,
+            });
         }
         _ => return Err(invalid_socket()),
     }
-    match fs::symlink_metadata(&target) {
+    let retained_target = match fs::symlink_metadata(&target) {
         Ok(metadata) => {
             if !metadata.file_type().is_socket()
                 || metadata.uid() != uid
@@ -134,15 +171,15 @@ pub(crate) fn remove_recorded(path: &Path, uid: u32, device: u64, inode: u64) ->
             {
                 return Err(invalid_socket());
             }
-            fs::remove_file(&target)?;
+            Some(target)
         }
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(error),
-    }
-    if entry.is_some() {
-        fs::remove_file(path)?;
-    }
-    Ok(())
+    };
+    Ok(RecordedSocket::Rendezvous {
+        alias: entry.is_some(),
+        target: retained_target,
+    })
 }
 
 fn protected_root(uid: u32) -> io::Result<PathBuf> {
@@ -196,9 +233,18 @@ mod tests {
         let other = root.join("other.sock");
         let _other_listener = UnixListener::bind(&other).unwrap();
         symlink(&other, &rendezvous).unwrap();
-        assert!(inspect(&rendezvous, uid).is_err());
+        assert_eq!(
+            inspect(&rendezvous, uid).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
         drop(listener);
-        fs::remove_file(target).unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::remove_file(&rendezvous).unwrap();
+        symlink(&target, &rendezvous).unwrap();
+        assert_eq!(
+            inspect(&rendezvous, uid).unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
         fs::remove_file(rendezvous).unwrap();
         fs::remove_file(other).unwrap();
         fs::remove_dir(root).unwrap();
@@ -233,6 +279,7 @@ mod tests {
         symlink(&target, &rendezvous).unwrap();
         drop(listener);
         fs::remove_file(&target).unwrap();
+        verify_recorded_or_absent(&rendezvous, uid, recorded.dev(), recorded.ino()).unwrap();
         remove_recorded(&rendezvous, uid, recorded.dev(), recorded.ino()).unwrap();
         assert!(fs::symlink_metadata(&rendezvous).is_err());
 
@@ -242,6 +289,17 @@ mod tests {
         symlink(&target, &rendezvous).unwrap();
         drop(listener);
         fs::remove_file(&rendezvous).unwrap();
+        verify_recorded_or_absent(&rendezvous, uid, recorded.dev(), recorded.ino()).unwrap();
+        assert!(
+            verify_recorded_or_absent(
+                &rendezvous,
+                uid,
+                recorded.dev(),
+                recorded.ino().wrapping_add(1)
+            )
+            .is_err()
+        );
+        assert!(fs::symlink_metadata(&target).is_ok());
         remove_recorded(&rendezvous, uid, recorded.dev(), recorded.ino()).unwrap();
         assert!(fs::symlink_metadata(&target).is_err());
 
@@ -265,6 +323,7 @@ mod tests {
         let other_listener = UnixListener::bind(&other).unwrap();
         symlink(&other, &rendezvous).unwrap();
         let current = fs::symlink_metadata(&target).unwrap();
+        assert!(verify_recorded_or_absent(&rendezvous, uid, current.dev(), current.ino()).is_err());
         assert!(remove_recorded(&rendezvous, uid, current.dev(), current.ino()).is_err());
         assert!(fs::symlink_metadata(&target).is_ok());
         assert_eq!(fs::read_link(&rendezvous).unwrap(), other);

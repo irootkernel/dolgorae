@@ -36,7 +36,7 @@ use data_encoding::{BASE32_NOPAD, HEXLOWER};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, Write};
 use std::os::fd::RawFd;
@@ -228,6 +228,213 @@ pub struct EventStreamEnd {
 pub struct StartedWorker {
     pub child: Child,
     pub record: WorkerRuntimeRecord,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WorkerChildWaitTag {
+    Ready(WorkerIdentity),
+    Unqualified {
+        run_id: Uuid,
+        run_generation: u64,
+        pid: u32,
+        startup_error: WorkerProtocolError,
+    },
+}
+
+impl WorkerChildWaitTag {
+    fn launch_context(&self) -> (Uuid, u64, u32) {
+        match self {
+            Self::Ready(identity) => (identity.run_id, identity.run_generation, identity.pid),
+            Self::Unqualified {
+                run_id,
+                run_generation,
+                pid,
+                ..
+            } => (*run_id, *run_generation, *pid),
+        }
+    }
+}
+
+struct OwnedWorkerChild {
+    tag: WorkerChildWaitTag,
+    state: Arc<Mutex<WorkerChildWaitState>>,
+}
+
+struct WorkerChildWaitState {
+    // Present before transfer, or retained after a failed transfer/wait.
+    child: Option<Child>,
+    outcome: Result<WorkerChildReap, WorkerProtocolError>,
+}
+
+fn owned_worker_children() -> &'static Mutex<BTreeMap<u32, OwnedWorkerChild>> {
+    static CHILDREN: std::sync::OnceLock<Mutex<BTreeMap<u32, OwnedWorkerChild>>> =
+        std::sync::OnceLock::new();
+    CHILDREN.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn prepare_worker_child_wait(
+    tag: &WorkerChildWaitTag,
+    child: Child,
+) -> Result<Arc<Mutex<WorkerChildWaitState>>, WorkerProtocolError> {
+    if let WorkerChildWaitTag::Ready(identity) = tag {
+        identity.validate()?;
+    }
+    let (_, _, pid) = tag.launch_context();
+    if child.id() != pid {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    let state = Arc::new(Mutex::new(WorkerChildWaitState {
+        child: Some(child),
+        outcome: Ok(WorkerChildReap::Pending),
+    }));
+    let mut children = owned_worker_children()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    children.insert(
+        pid,
+        OwnedWorkerChild {
+            tag: tag.clone(),
+            state: Arc::clone(&state),
+        },
+    );
+    if owned_worker_children().is_poisoned() {
+        state.lock().unwrap().outcome = Err(WorkerProtocolError::Io);
+        return Err(WorkerProtocolError::Io);
+    }
+    Ok(state)
+}
+
+fn finish_worker_child_wait(
+    tag: &WorkerChildWaitTag,
+    state: &Arc<Mutex<WorkerChildWaitState>>,
+    outcome: WorkerChildReap,
+) {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .outcome = Ok(outcome);
+    let mut children = owned_worker_children()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (_, _, pid) = tag.launch_context();
+    if children
+        .get(&pid)
+        .is_some_and(|owner| owner.tag == *tag && Arc::ptr_eq(&owner.state, state))
+    {
+        children.remove(&pid);
+    }
+}
+
+fn fail_worker_child_wait(
+    tag: &WorkerChildWaitTag,
+    state: &Arc<Mutex<WorkerChildWaitState>>,
+    child: Option<Child>,
+    site: &'static str,
+    error: &std::io::Error,
+    log: &Path,
+) {
+    let mut retained = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if child.is_some() {
+        retained.child = child;
+    }
+    retained.outcome = Err(WorkerProtocolError::Io);
+    drop(retained);
+    let (run_id, run_generation, pid) = tag.launch_context();
+    let startup_error = match tag {
+        WorkerChildWaitTag::Unqualified { startup_error, .. } => Some(startup_error.code()),
+        WorkerChildWaitTag::Ready(_) => None,
+    };
+    append_private_diagnostic(
+        log,
+        &serde_json::json!({
+            "schema": "dolgorae.worker-child-wait-failure/v1",
+            "site": site,
+            "pid": pid,
+            "run_id": run_id,
+            "run_generation": run_generation,
+            "original_startup_error_code": startup_error,
+            "errno": error.raw_os_error(),
+            "error_kind": format!("{:?}", error.kind()),
+        }),
+    );
+}
+
+fn wait_owned_worker_child(
+    tag: &WorkerChildWaitTag,
+    state: &Arc<Mutex<WorkerChildWaitState>>,
+    log: &Path,
+) {
+    let mut retained = match state.lock() {
+        Ok(retained) => retained,
+        Err(poisoned) => {
+            poisoned.into_inner().outcome = Err(WorkerProtocolError::Io);
+            return;
+        }
+    };
+    if retained.outcome != Ok(WorkerChildReap::Pending) {
+        return;
+    }
+    let Some(mut child) = retained.child.take() else {
+        retained.outcome = Err(WorkerProtocolError::Io);
+        return;
+    };
+    drop(retained);
+    // This thread is the sole wait owner. No process-local registry or startup
+    // lock is held, and observers never call try_wait against this Child.
+    match child.wait() {
+        Ok(_) => finish_worker_child_wait(tag, state, WorkerChildReap::Reaped),
+        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+            finish_worker_child_wait(tag, state, WorkerChildReap::NotOwned);
+        }
+        Err(error) => fail_worker_child_wait(tag, state, Some(child), "wait", &error, log),
+    }
+}
+
+fn retain_worker_child(
+    tag: WorkerChildWaitTag,
+    child: Child,
+    log: PathBuf,
+) -> Result<(), WorkerProtocolError> {
+    let state = prepare_worker_child_wait(&tag, child)?;
+    let waiting = Arc::clone(&state);
+    let waiting_tag = tag.clone();
+    let waiting_log = log.clone();
+    if let Err(error) = thread::Builder::new()
+        .name("dolgorae-worker-exit".to_owned())
+        .spawn(move || wait_owned_worker_child(&waiting_tag, &waiting, &waiting_log))
+    {
+        // The closure carries only the Arc. On spawn failure the actual Child
+        // remains in the registered transfer slot, never silently detached.
+        fail_worker_child_wait(&tag, &state, None, "spawn", &error, &log);
+        return Err(WorkerProtocolError::Io);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkerChildReap {
+    Pending,
+    Reaped,
+    NotOwned,
+}
+
+pub(crate) fn observe_owned_worker_child(
+    identity: &WorkerIdentity,
+) -> Result<WorkerChildReap, WorkerProtocolError> {
+    let state = {
+        let children = owned_worker_children()
+            .lock()
+            .map_err(|_| WorkerProtocolError::Io)?;
+        let Some(owner) = children.get(&identity.pid).filter(
+            |owner| matches!(&owner.tag, WorkerChildWaitTag::Ready(owned) if owned == identity),
+        ) else {
+            return Ok(WorkerChildReap::NotOwned);
+        };
+        Arc::clone(&owner.state)
+    };
+    state.lock().map_err(|_| WorkerProtocolError::Io)?.outcome
 }
 
 impl WorkerIdentity {
@@ -543,6 +750,7 @@ pub enum CallerPolicyPhase {
     Committed,
     Recovery,
     RecoverAcquire,
+    GenerationRelease,
 }
 
 /// Worker-owned evidence, deliberately without a wire or persisted constructor.
@@ -567,6 +775,19 @@ fn record_session_startup_failure(
     let Some(server) = &session.dedicated_server else {
         return;
     };
+    // Early replay/preparation can fail before the server creates this log.
+    // Never truncate, replace, follow or repair an existing pathname.
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&server.log_path)
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return,
+    }
     append_private_diagnostic(
         &server.log_path,
         &serde_json::json!({
@@ -578,7 +799,7 @@ fn record_session_startup_failure(
     );
 }
 
-fn append_private_diagnostic(path: &Path, diagnostic: &Value) {
+pub(crate) fn append_private_diagnostic(path: &Path, diagnostic: &Value) {
     let Ok(mut log) = OpenOptions::new()
         .append(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
@@ -627,7 +848,174 @@ fn caller_workspace_session(schema_version: u32, session: &WorkerSessionBootstra
         && session.safety_policy == SessionSafetyPolicy::CallerWorkspace
 }
 
+/// Successful original native registration, never reconstructed from defaults.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ThreadRegistration {
+    pub schema_version: u32,
+    pub run_id: Uuid,
+    pub thread_id: String,
+    pub binding_sha256: String,
+    pub executable_sha256: String,
+    pub model: String,
+    pub default_effort: String,
+    pub catalog_sha256: String,
+    pub catalog_empty: bool,
+}
+
+pub(crate) fn read_thread_registration(
+    state_root: &Path,
+    manifest: &crate::run::RunManifest,
+    thread: &str,
+) -> Result<ThreadRegistration, WorkerProtocolError> {
+    let run_root = state_root.join("runs").join(manifest.run_id.to_string());
+    let root = run_root.join("thread-registrations");
+    let uid = DarwinSystem.current_uid();
+    crate::workspace::verify_secure_directory(&run_root, uid)
+        .and_then(|()| crate::workspace::verify_secure_directory(&root, uid))
+        .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+    let path = root.join(format!(
+        "thread-registration-{}.json",
+        crate::jcs::sha256_hex(thread.as_bytes())
+    ));
+    crate::workspace::verify_secure_file(&path, uid)
+        .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+    if fs::symlink_metadata(&path)
+        .map_err(|_| WorkerProtocolError::Io)?
+        .len()
+        > 8192
+    {
+        return Err(WorkerProtocolError::InvalidRuntimeRecord);
+    }
+    let bytes = fs::read(&path).map_err(|_| WorkerProtocolError::Io)?;
+    let witness: ThreadRegistration =
+        serde_json::from_slice(&bytes).map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+    let binding = manifest
+        .global_profile_binding
+        .as_ref()
+        .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+    if bytes.len() > 8192
+        || witness.schema_version != 1
+        || witness.run_id != manifest.run_id
+        || witness.thread_id != thread
+        || witness.binding_sha256
+            != binding
+                .digest()
+                .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?
+        || witness.executable_sha256 != binding.launch_snapshot.executable_identity.sha256
+        || witness.model != manifest.model
+        || decode_sha256(&witness.catalog_sha256).is_none()
+    {
+        return Err(WorkerProtocolError::InvalidRuntimeRecord);
+    }
+    Ok(witness)
+}
+
 impl QualifiedCallerRuntime {
+    pub(crate) fn is_pending_generation_reader(&self, operation_id: Uuid) -> bool {
+        let Some(state_root) = self
+            .runtime_path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        else {
+            return false;
+        };
+        crate::writer::WriterStore::new(
+            state_root,
+            &self.runtime.identity.workspace_id,
+            self.runtime.identity.uid,
+        )
+        .load()
+        .ok()
+        .and_then(|writer| {
+            writer
+                .pending_generation_release(self.runtime.identity.run_id)
+                .cloned()
+        })
+        .is_some_and(|release| {
+            release.transaction_id == operation_id
+                && matches!(
+                    release.phase,
+                    crate::writer::GenerationReleasePhase::ReaderStarting
+                        | crate::writer::GenerationReleasePhase::ReaderVerified
+                )
+                && release
+                    .successor
+                    .as_ref()
+                    .is_some_and(|r| r.run_generation == self.runtime.identity.run_generation)
+        })
+    }
+
+    pub(crate) fn retain_registration(
+        &self,
+        thread: &str,
+        model: &str,
+        effort: &str,
+        catalog: &[Value],
+    ) -> Result<(), WorkerProtocolError> {
+        let current = self.current_runtime()?;
+        let state_root = self
+            .runtime_path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+        let manifest =
+            crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, state_root)
+                .load_manifest(current.identity.run_id)
+                .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+        let binding = manifest
+            .global_profile_binding
+            .as_ref()
+            .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+        if !binding.caller_workspace_supported() {
+            return Ok(());
+        }
+        let catalog_bytes =
+            serde_json::to_vec(catalog).map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+        let witness = ThreadRegistration {
+            schema_version: 1,
+            run_id: current.identity.run_id,
+            thread_id: thread.to_owned(),
+            binding_sha256: self.binding_sha256.clone(),
+            executable_sha256: binding.launch_snapshot.executable_identity.sha256.clone(),
+            model: model.to_owned(),
+            default_effort: effort.to_owned(),
+            catalog_sha256: crate::jcs::sha256_hex(&catalog_bytes),
+            catalog_empty: catalog.is_empty(),
+        };
+        let bytes =
+            serde_json::to_vec(&witness).map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+        if bytes.len() > 8192 {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+        let run_root = state_root
+            .join("runs")
+            .join(current.identity.run_id.to_string());
+        let root = run_root.join("thread-registrations");
+        crate::workspace::verify_secure_directory(&run_root, current.identity.uid)
+            .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+        match crate::workspace::create_directory(&root, 0o700) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(WorkerProtocolError::Io),
+        }
+        crate::workspace::verify_secure_directory(&root, current.identity.uid)
+            .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+        let path = root.join(format!(
+            "thread-registration-{}.json",
+            crate::jcs::sha256_hex(thread.as_bytes())
+        ));
+        crate::writer::publish_immutable_release_file(&root, &path, &bytes)
+            .map_err(|_| WorkerProtocolError::Io)?;
+        if read_thread_registration(state_root, &manifest, thread)? != witness {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+
+        Ok(())
+    }
+
     fn from_owned_server(
         manifest: &crate::run::RunManifest,
         session: &WorkerSessionBootstrap,
@@ -644,7 +1032,7 @@ impl QualifiedCallerRuntime {
             .agent_configuration
             .normalized_instructions
             .as_str();
-        if !binding.caller_workspace_supported()
+        if !binding.accepted_caller_workspace_supported()
             || !caller_workspace_session(manifest.schema_version, session)
             || manifest.execution_lane != crate::domain::ExecutionLane::Dedicated
             || session
@@ -745,21 +1133,16 @@ impl QualifiedCallerRuntime {
                 Value::Null,
             ));
         }
-        if Instant::now() >= self.startup_deadline {
-            return Err(proof_refusal(
-                &mut diagnostic,
-                "startup_commit_timeout",
-                Value::Null,
-            ));
-        }
+        let before = Instant::now();
+        startup_commit_deadline_observed(self.startup_deadline, before, None, &mut diagnostic)?;
         self.prove_quiescence_observed(diagnostic.as_deref_mut())?;
-        if Instant::now() >= self.startup_deadline {
-            return Err(proof_refusal(
-                &mut diagnostic,
-                "startup_commit_timeout",
-                Value::Null,
-            ));
-        }
+        let after = Instant::now();
+        startup_commit_deadline_observed(
+            self.startup_deadline,
+            before,
+            Some(after),
+            &mut diagnostic,
+        )?;
         update_runtime_record(&self.runtime_path, self.runtime.identity.uid, |record| {
             if record.identity != self.runtime.identity
                 || record.dedicated_server_identity != self.runtime.dedicated_server_identity
@@ -935,7 +1318,45 @@ impl CallerPolicyProof {
                     .holder
                     .as_ref()
                     .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
-                let state = if expected.phase == CallerPolicyPhase::RecoverAcquire {
+                let release_join = if expected.phase == CallerPolicyPhase::GenerationRelease {
+                    let release = writer
+                        .pending_generation_release(manifest.run_id)
+                        .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+                    let reservation = release
+                        .successor
+                        .as_ref()
+                        .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+                    if expected.access != Access::Read
+                        || !reservation.attempt_started
+                        || release.transaction_id != self.operation_id
+                        || release.source != *holder
+                        || !matches!(
+                            release.phase,
+                            crate::writer::GenerationReleasePhase::ReaderStarting
+                                | crate::writer::GenerationReleasePhase::ReaderVerified
+                        )
+                        || reservation.run_generation != self.identity.run_generation
+                        || reservation.server_epoch != self.server_epoch
+                        || reservation.control_socket_epoch != self.control_socket_epoch
+                        || release.absence_sha256.is_none()
+                    {
+                        return Err(WorkerProtocolError::InvalidRuntimeRecord);
+                    }
+                    true
+                } else {
+                    false
+                };
+                let state = if release_join {
+                    if writer.state == crate::writer::WriterAuthorityState::BlockedUnknown {
+                        writer.state
+                    } else {
+                        writer
+                            .pending_generation_release(manifest.run_id)
+                            .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?
+                            .purpose
+                            .guarded_state()
+                    }
+                } else if expected.phase == CallerPolicyPhase::RecoverAcquire {
                     if expected.access != Access::Write {
                         return Err(WorkerProtocolError::InvalidRuntimeRecord);
                     }
@@ -973,13 +1394,16 @@ impl CallerPolicyProof {
                     || policy.writer_generation
                         != (expected.access == Access::Write).then_some(writer.writer_generation)
                     || holder.run_id != manifest.run_id
-                    || holder.controller_id != expected.controller.identity.controller_id
-                    || holder.controller_generation != expected.controller.identity.generation
+                    || (!release_join
+                        && (holder.controller_id != expected.controller.identity.controller_id
+                            || holder.controller_generation
+                                != expected.controller.identity.generation))
                     || holder.profile != binding.selected_name
-                    || holder.run_generation != self.identity.run_generation
-                    || holder.worker_generation != self.identity.run_generation
+                    || (!release_join
+                        && (holder.run_generation != self.identity.run_generation
+                            || holder.worker_generation != self.identity.run_generation))
                     || holder.profile_server_key != self.server_key
-                    || holder.profile_server_epoch != self.server_epoch
+                    || (!release_join && holder.profile_server_epoch != self.server_epoch)
                     || holder
                         .thread_id
                         .as_deref()
@@ -1011,6 +1435,952 @@ impl DedicatedServerIdentity {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetirementProcess {
+    identity: crate::darwin::ProcessCensusEntry,
+    ancestry: Vec<crate::darwin::ProcessCensusEntry>,
+    executable: PathBuf,
+    device: u64,
+    inode: u64,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GenerationScope {
+    schema_version: u32,
+    pub runtime: WorkerRuntimeRecord,
+    app_server_socket: SocketIdentity,
+    revision: u64,
+    processes: Vec<RetirementProcess>,
+    pub history: crate::turn::GenerationHistory,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GenerationSample {
+    Complete,
+    Dirty {
+        predicate: &'static str,
+        expected: crate::darwin::ProcessCensusEntry,
+        fresh: Option<crate::darwin::BsdProcessIdentity>,
+    },
+}
+
+impl GenerationSample {
+    fn is_dirty(&self) -> bool {
+        matches!(self, Self::Dirty { .. })
+    }
+
+    fn merge(&mut self, other: Self) {
+        if !self.is_dirty() {
+            *self = other;
+        }
+    }
+}
+
+impl GenerationScope {
+    fn census(&self) -> Result<Vec<crate::darwin::ProcessCensusEntry>, WorkerProtocolError> {
+        self.census_observed(&mut None)
+    }
+
+    fn census_observed(
+        &self,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<Vec<crate::darwin::ProcessCensusEntry>, WorkerProtocolError> {
+        self.census_sample(false, diagnostic)
+            .map(|(census, _)| census)
+    }
+
+    fn census_sample(
+        &self,
+        stopping: bool,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<(Vec<crate::darwin::ProcessCensusEntry>, GenerationSample), WorkerProtocolError>
+    {
+        let census = DarwinSystem.all_process_identities().map_err(|error| {
+            proof_refusal(
+                diagnostic,
+                "generation_global_census",
+                serde_json::json!({
+                    "os_error": error.raw_os_error(), "io_kind": format!("{:?}", error.kind()),
+                }),
+            )
+        })?;
+        let mut sample = GenerationSample::Complete;
+        let groups = self
+            .processes
+            .iter()
+            .map(|p| p.identity.process_group_id)
+            .collect::<BTreeSet<_>>();
+        for group in groups {
+            let mut observed = DarwinSystem.process_group_pids(group).map_err(|error| {
+                proof_refusal(
+                    diagnostic,
+                    "generation_group_census",
+                    serde_json::json!({
+                        "group": group, "os_error": error.raw_os_error(),
+                        "io_kind": format!("{:?}", error.kind()),
+                    }),
+                )
+            })?;
+            let mut enumerated = census
+                .iter()
+                .filter(|p| p.process_group_id == group)
+                .map(|p| p.pid)
+                .collect::<Vec<_>>();
+            observed.sort_unstable();
+            enumerated.sort_unstable();
+            if observed != enumerated {
+                if stopping {
+                    sample.merge(self.stop_group_observation(
+                        group,
+                        &observed,
+                        &enumerated,
+                        &census,
+                        diagnostic,
+                    )?);
+                    continue;
+                }
+                return Err(proof_refusal(
+                    diagnostic,
+                    "generation_group_agreement",
+                    serde_json::json!({
+                        "group": group, "observed": group_observation(&observed, &enumerated),
+                    }),
+                ));
+            }
+        }
+        Ok((census, sample))
+    }
+
+    fn stop_group_observation(
+        &self,
+        group: u32,
+        members: &[u32],
+        enumerated: &[u32],
+        census: &[crate::darwin::ProcessCensusEntry],
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<GenerationSample, WorkerProtocolError> {
+        let member_set = members.iter().copied().collect::<BTreeSet<_>>();
+        let enumerated_set = enumerated.iter().copied().collect::<BTreeSet<_>>();
+        let differences = member_set
+            .symmetric_difference(&enumerated_set)
+            .copied()
+            .collect::<Vec<_>>();
+        if differences.is_empty()
+            || member_set.len() != members.len()
+            || enumerated_set.len() != enumerated.len()
+        {
+            return Err(proof_refusal(
+                diagnostic,
+                "generation_group_agreement",
+                group_observation(members, enumerated),
+            ));
+        }
+        // Reject every unknown or drifting entry before considering exit.
+        for pid in &differences {
+            let retained = self.processes.iter().find(|p| p.identity.pid == *pid && p.identity.process_group_id == group)
+                .ok_or_else(|| proof_refusal(diagnostic, "generation_group_unretained", serde_json::json!({"group":group,"pid":pid,"observed":group_observation(members,enumerated)})))?;
+            if let Some(current) = census.iter().find(|p| p.pid == *pid)
+                && !same_owned_child(&retained.identity, current)
+            {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "generation_process_identity",
+                    serde_json::json!({"expected":scope_observation(&retained.identity),"observed":scope_observation(current)}),
+                ));
+            }
+        }
+        let mut sample = GenerationSample::Complete;
+        for pid in differences {
+            let retained = self
+                .processes
+                .iter()
+                .find(|p| p.identity.pid == pid)
+                .expect("checked retained group member");
+            sample.merge(Self::verify_stop_exit(
+                &retained.identity,
+                census.iter().find(|p| p.pid == pid),
+                "generation_group_agreement",
+                diagnostic,
+            )?);
+        }
+        Ok(sample)
+    }
+
+    fn verify_stop_exit(
+        expected: &crate::darwin::ProcessCensusEntry,
+        sampled: Option<&crate::darwin::ProcessCensusEntry>,
+        predicate: &'static str,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<GenerationSample, WorkerProtocolError> {
+        if expected.birth.is_none()
+            || sampled.is_some_and(|current| !same_owned_child(expected, current))
+        {
+            return Err(proof_refusal(
+                diagnostic,
+                "generation_process_identity",
+                serde_json::json!({"expected":scope_observation(expected),"observed":sampled.map(scope_observation)}),
+            ));
+        }
+        Self::classify_stop_exit(
+            expected,
+            DarwinSystem.bsd_process_identity(expected.pid),
+            predicate,
+            diagnostic,
+        )
+    }
+
+    fn classify_stop_exit(
+        expected: &crate::darwin::ProcessCensusEntry,
+        fresh: Result<crate::darwin::BsdProcessIdentity, std::io::Error>,
+        predicate: &'static str,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<GenerationSample, WorkerProtocolError> {
+        let fresh = match fresh {
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => None,
+            Ok(fresh) => {
+                let current = crate::darwin::ProcessCensusEntry {
+                    pid: fresh.pid,
+                    parent_pid: fresh.parent_pid,
+                    uid: fresh.uid,
+                    process_group_id: fresh.process_group_id,
+                    session_id: fresh.session_id,
+                    birth: Some((fresh.start_tvsec, fresh.start_tvusec)),
+                    zombie: fresh.zombie,
+                };
+                if !fresh.zombie || !same_owned_child(expected, &current) {
+                    return Err(proof_refusal(
+                        diagnostic,
+                        "generation_stop_exit_unverified",
+                        serde_json::json!({"site":predicate,"expected":scope_observation(expected),"observed":scope_observation(&current)}),
+                    ));
+                }
+                Some(fresh)
+            }
+            Err(error) => {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "generation_stop_exit_unverified",
+                    serde_json::json!({"site":predicate,"expected":scope_observation(expected),"os_error":error.raw_os_error(),"io_kind":format!("{:?}",error.kind())}),
+                ));
+            }
+        };
+        Ok(GenerationSample::Dirty {
+            predicate,
+            expected: *expected,
+            fresh,
+        })
+    }
+
+    fn in_old_scope(
+        &self,
+        process: &crate::darwin::ProcessCensusEntry,
+        parents: &BTreeMap<u32, u32>,
+    ) -> bool {
+        self.processes.iter().any(|p| {
+            process.pid == p.identity.pid
+                || process_is_in_scope(
+                    process,
+                    p.identity.pid,
+                    p.identity.process_group_id,
+                    p.identity.session_id,
+                    parents,
+                )
+        })
+    }
+
+    fn verify_process(
+        process: &RetirementProcess,
+        current: &crate::darwin::ProcessCensusEntry,
+    ) -> Result<(), WorkerProtocolError> {
+        Self::verify_process_observed(process, current, &mut None)
+    }
+
+    fn verify_process_observed(
+        process: &RetirementProcess,
+        current: &crate::darwin::ProcessCensusEntry,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<(), WorkerProtocolError> {
+        Self::verify_process_sample(process, current, false, diagnostic).map(|_| ())
+    }
+
+    fn verify_process_sample(
+        process: &RetirementProcess,
+        current: &crate::darwin::ProcessCensusEntry,
+        stopping: bool,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<GenerationSample, WorkerProtocolError> {
+        if !same_owned_child(&process.identity, current) {
+            return Err(proof_refusal(
+                diagnostic,
+                "generation_process_identity",
+                serde_json::json!({
+                    "expected": scope_observation(&process.identity), "observed": scope_observation(current),
+                }),
+            ));
+        }
+        if !current.zombie {
+            let path = match DarwinSystem.live_process_path(current.pid) {
+                Some(path) => path,
+                None if stopping => {
+                    return Self::verify_stop_exit(
+                        &process.identity,
+                        Some(current),
+                        "generation_process_path",
+                        diagnostic,
+                    );
+                }
+                None => {
+                    return Err({
+                        proof_refusal(
+                            diagnostic,
+                            "generation_process_path",
+                            scope_observation(current),
+                        )
+                    });
+                }
+            };
+            let image = fs::metadata(&path).map_err(|error| {
+                proof_refusal(diagnostic, "generation_process_image", serde_json::json!({
+                    "pid": current.pid, "os_error": error.raw_os_error(), "io_kind": format!("{:?}", error.kind()),
+                }))
+            })?;
+            if path != process.executable
+                || image.dev() != process.device
+                || image.ino() != process.inode
+            {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "generation_executable_identity",
+                    serde_json::json!({
+                        "pid": current.pid, "path_matches": path == process.executable,
+                        "expected_device": process.device, "expected_inode": process.inode,
+                        "observed_device": image.dev(), "observed_inode": image.ino(),
+                    }),
+                ));
+            }
+            let digest = file_sha256(&path).inspect_err(|_| {
+                proof_refusal(
+                    diagnostic,
+                    "generation_executable_hash_read",
+                    serde_json::json!({"pid":current.pid}),
+                );
+            })?;
+            if digest != process.sha256 {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "generation_executable_digest",
+                    serde_json::json!({
+                        "pid":current.pid, "expected_sha256":process.sha256,"observed_sha256":digest,
+                    }),
+                ));
+            }
+        }
+        Ok(GenerationSample::Complete)
+    }
+
+    fn observe_owned(
+        &mut self,
+        census: &[crate::darwin::ProcessCensusEntry],
+        initial: bool,
+    ) -> Result<bool, WorkerProtocolError> {
+        self.observe_owned_observed(census, initial, &mut None)
+    }
+
+    fn observe_owned_observed(
+        &mut self,
+        census: &[crate::darwin::ProcessCensusEntry],
+        initial: bool,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<bool, WorkerProtocolError> {
+        self.observe_owned_sample(census, initial, false, diagnostic)
+            .map(|(changed, _)| changed)
+    }
+
+    fn observe_owned_sample(
+        &mut self,
+        census: &[crate::darwin::ProcessCensusEntry],
+        initial: bool,
+        stopping: bool,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<(bool, GenerationSample), WorkerProtocolError> {
+        // One parent index per complete sample, as in the existing workload
+        // census. Rebuilding it for every global PID made this quadratic.
+        let parents = census
+            .iter()
+            .map(|p| (p.pid, p.parent_pid))
+            .collect::<BTreeMap<_, _>>();
+        let retained_count = self.processes.len();
+        let mut changed = false;
+        let mut sample = GenerationSample::Complete;
+        for process in census
+            .iter()
+            .filter(|p| self.in_old_scope(p, &parents))
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            if let Some(index) = self
+                .processes
+                .iter()
+                .position(|p| p.identity.pid == process.pid)
+            {
+                sample.merge(Self::verify_process_sample(
+                    &self.processes[index],
+                    &process,
+                    stopping && index < retained_count,
+                    diagnostic,
+                )?);
+                continue;
+            }
+            if process.uid != self.runtime.identity.uid
+                || process.birth.is_none()
+                || process.zombie
+                || self.processes.len() >= 4096
+            {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "generation_child_admission",
+                    serde_json::json!({
+                        "observed":scope_observation(&process),"expected_uid":self.runtime.identity.uid,
+                        "retained_count":self.processes.len(),
+                    }),
+                ));
+            }
+            let mut ancestry = vec![process];
+            let mut next = process;
+            while !self
+                .processes
+                .iter()
+                .any(|p| same_owned_child(&p.identity, &next))
+            {
+                next = *census
+                    .iter()
+                    .find(|p| p.pid == next.parent_pid)
+                    .ok_or_else(|| proof_refusal(diagnostic, "generation_ancestry_parent", serde_json::json!({
+                        "observed":scope_observation(&process),"missing_parent_pid":next.parent_pid,
+                        "ancestry_count":ancestry.len(),"ancestry":ancestry.iter().take(4).map(scope_observation).collect::<Vec<_>>(),
+                    })))?;
+                if next.uid != process.uid
+                    || next.birth.is_none()
+                    || ancestry.len() >= 32
+                    || ancestry.iter().any(|p| p.pid == next.pid)
+                {
+                    return Err(proof_refusal(
+                        diagnostic,
+                        "generation_ancestry_identity",
+                        serde_json::json!({
+                            "observed":scope_observation(&process),"ancestor":scope_observation(&next),
+                            "ancestry_count":ancestry.len(),"cycle":ancestry.iter().any(|p|p.pid==next.pid),
+                        }),
+                    ));
+                }
+                ancestry.push(next);
+            }
+            // After stop intent, only a child with a fresh complete ancestry
+            // reaching an already retained live actor may extend this scope.
+            if !initial && ancestry.len() < 2 {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "generation_ancestry_retained_actor",
+                    serde_json::json!({
+                        "observed":scope_observation(&process),"ancestry_count":ancestry.len(),
+                    }),
+                ));
+            }
+            self.processes
+                .push(retirement_process_observed(process, ancestry, diagnostic)?);
+            changed = true;
+        }
+        crate::process_inventory::require_retirement_ownership(
+            self.runtime.identity.run_id,
+            &self
+                .processes
+                .iter()
+                .map(|p| p.identity)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| proof_refusal(diagnostic, "generation_inventory_ownership", serde_json::json!({
+            "code":error.code,"retained_count":self.processes.len(),
+            "retained":self.processes.iter().take(4).map(|p|scope_observation(&p.identity)).collect::<Vec<_>>(),
+        })))?;
+        if changed {
+            self.revision = self.revision.checked_add(1).ok_or_else(|| {
+                proof_refusal(
+                    diagnostic,
+                    "generation_scope_revision",
+                    serde_json::json!({"revision":self.revision}),
+                )
+            })?;
+        }
+        Ok((changed, sample))
+    }
+
+    fn observe_stop_sample(
+        &mut self,
+        census: &[crate::darwin::ProcessCensusEntry],
+        mut sample: GenerationSample,
+        diagnostic: &mut Option<&mut Value>,
+    ) -> Result<(bool, GenerationSample), WorkerProtocolError> {
+        let mut candidate = self.clone();
+        let (changed, ownership_sample) =
+            candidate.observe_owned_sample(census, false, true, diagnostic)?;
+        sample.merge(ownership_sample);
+        if !sample.is_dirty() {
+            *self = candidate;
+        }
+        Ok((changed, sample))
+    }
+
+    pub(crate) fn capture(
+        runtime: WorkerRuntimeRecord,
+        history: crate::turn::GenerationHistory,
+    ) -> Result<Self, WorkerProtocolError> {
+        runtime.validate()?;
+        if runtime.schema_version != 2 || runtime.startup_scope.as_ref().is_none_or(|s| !s.complete)
+        {
+            return Err(WorkerProtocolError::InvalidRuntimeRecord);
+        }
+
+        if runtime.control_recovery_required
+            || classify_worker_identity(&runtime) != ProcessIdentityVerdict::Match
+        {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        let server = runtime
+            .dedicated_server_identity
+            .as_ref()
+            .ok_or(WorkerProtocolError::InvalidIdentity)?;
+        if classify_dedicated_server_identity(server) != ProcessIdentityVerdict::Match {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        let socket_path = dedicated_server_socket_path(
+            runtime.identity.uid,
+            runtime.identity.run_id,
+            runtime.identity.run_generation,
+        )?;
+        let socket = crate::codex_socket::inspect(&socket_path, runtime.identity.uid)
+            .map_err(|_| WorkerProtocolError::SocketIdentityMismatch)?;
+        let census = DarwinSystem
+            .all_process_identities()
+            .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+        let worker = *census
+            .iter()
+            .find(|p| p.pid == runtime.identity.pid)
+            .ok_or(WorkerProtocolError::InvalidIdentity)?;
+        let server_process = *census
+            .iter()
+            .find(|p| p.pid == server.pid)
+            .ok_or(WorkerProtocolError::InvalidIdentity)?;
+        let mut scope = Self {
+            schema_version: 1,
+            runtime: runtime.clone(),
+            app_server_socket: SocketIdentity {
+                device: socket.dev(),
+                inode: socket.ino(),
+            },
+            revision: 1,
+            processes: vec![
+                retirement_process(worker, vec![worker])?,
+                retirement_process(server_process, vec![server_process])?,
+            ],
+            history,
+        };
+        if let Some(startup) = &runtime.startup_scope {
+            if !startup.complete {
+                return Err(WorkerProtocolError::InvalidIdentity);
+            }
+            for child in &startup.children {
+                if let Some(current) = census.iter().find(|p| p.pid == child.identity.pid) {
+                    if !same_owned_child(current, &child.identity) {
+                        return Err(WorkerProtocolError::InvalidIdentity);
+                    }
+                    if !scope
+                        .processes
+                        .iter()
+                        .any(|p| p.identity.pid == current.pid)
+                    {
+                        scope
+                            .processes
+                            .push(retirement_process(*current, child.ancestry.clone())?);
+                    }
+                }
+            }
+        }
+        let census = scope.census()?;
+        scope.observe_owned(&census, true)?;
+        Ok(scope)
+    }
+}
+
+pub(crate) fn prove_retained_generation_absent(
+    scope: &GenerationScope,
+) -> Result<(), WorkerProtocolError> {
+    scope.runtime.validate()?;
+    if scope.schema_version != 1 || scope.processes.len() < 2 || scope.revision == 0 {
+        return Err(WorkerProtocolError::InvalidRuntimeRecord);
+    }
+    for sample in 0..5 {
+        let census = scope.census()?;
+        let parents = census
+            .iter()
+            .map(|p| (p.pid, p.parent_pid))
+            .collect::<BTreeMap<_, _>>();
+        for current in census.iter().filter(|p| scope.in_old_scope(p, &parents)) {
+            let retained = scope
+                .processes
+                .iter()
+                .find(|p| p.identity.pid == current.pid)
+                .ok_or(WorkerProtocolError::InvalidIdentity)?;
+            GenerationScope::verify_process(retained, current)?;
+            if !current.zombie {
+                return Err(WorkerProtocolError::InvalidIdentity);
+            }
+        }
+        if sample < 4 {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    Ok(())
+}
+
+fn retirement_process(
+    identity: crate::darwin::ProcessCensusEntry,
+    ancestry: Vec<crate::darwin::ProcessCensusEntry>,
+) -> Result<RetirementProcess, WorkerProtocolError> {
+    retirement_process_observed(identity, ancestry, &mut None)
+}
+
+fn retirement_process_observed(
+    identity: crate::darwin::ProcessCensusEntry,
+    ancestry: Vec<crate::darwin::ProcessCensusEntry>,
+    diagnostic: &mut Option<&mut Value>,
+) -> Result<RetirementProcess, WorkerProtocolError> {
+    let executable = DarwinSystem
+        .live_process_path(identity.pid)
+        .ok_or_else(|| {
+            proof_refusal(
+                diagnostic,
+                "generation_child_path",
+                scope_observation(&identity),
+            )
+        })?;
+    let image = fs::metadata(&executable).map_err(|error| proof_refusal(diagnostic, "generation_child_image", serde_json::json!({
+        "observed":scope_observation(&identity),"os_error":error.raw_os_error(),"io_kind":format!("{:?}",error.kind()),
+    })))?;
+    Ok(RetirementProcess {
+        identity,
+        ancestry,
+        sha256: file_sha256(&executable).inspect_err(|_| {
+            proof_refusal(
+                diagnostic,
+                "generation_child_hash_read",
+                scope_observation(&identity),
+            );
+        })?,
+        executable,
+        device: image.dev(),
+        inode: image.ino(),
+    })
+}
+
+/// The Worker and its recovery coordinator share this exact retained scope.
+/// No fresh actor is signalled before its ownership is durably registered.
+pub(crate) fn stop_generation_scope(
+    state_root: &Path,
+    writer: &crate::writer::WriterStore,
+    scope: GenerationScope,
+    allow_worker: bool,
+) -> Result<GenerationScope, WorkerProtocolError> {
+    stop_generation_scope_reaping(state_root, writer, scope, allow_worker, || Ok(()))
+}
+
+/// Reaping belongs to the actual parent holding the original Child. It runs
+/// before observation; a group/all-PID disagreement is never counted as empty.
+fn stop_generation_scope_reaping(
+    state_root: &Path,
+    writer: &crate::writer::WriterStore,
+    mut scope: GenerationScope,
+    allow_worker: bool,
+    mut reap: impl FnMut() -> Result<(), WorkerProtocolError>,
+) -> Result<GenerationScope, WorkerProtocolError> {
+    let started = Instant::now();
+    let term_deadline = started + Duration::from_secs(5);
+    let deadline = started + Duration::from_secs(10);
+    let log = state_root
+        .join("runs")
+        .join(scope.runtime.identity.run_id.to_string())
+        .join(format!(
+            "dedicated-server-{}.log",
+            scope.runtime.identity.run_generation
+        ));
+    let mut empty = 0;
+    let mut sampled_count = 0_u64;
+    let mut discard_logged = false;
+    let mut site = "reap";
+    let mut details = Value::Null;
+    let mut diagnostic = Some(&mut details);
+    let result = (|| -> Result<(), WorkerProtocolError> {
+        loop {
+            site = "reap";
+            reap()
+                .and_then(|()| observe_owned_worker_child(&scope.runtime.identity).map(|_| ()))
+                .inspect_err(|_| {
+                    proof_refusal(&mut diagnostic, "generation_parent_reap", Value::Null);
+                })?;
+            site = "census";
+            sampled_count = sampled_count.saturating_add(1);
+            let (census, sample) = scope.census_sample(true, &mut diagnostic)?;
+            site = "socket_identity";
+            if let Some(server) = scope.runtime.dedicated_server_identity.as_ref()
+                && classify_dedicated_server_identity(server) == ProcessIdentityVerdict::Match
+            {
+                let path = dedicated_server_socket_path(
+                    scope.runtime.identity.uid,
+                    scope.runtime.identity.run_id,
+                    scope.runtime.identity.run_generation,
+                )?;
+                let socket = match crate::codex_socket::inspect(&path, scope.runtime.identity.uid) {
+                    Ok(socket) => Some(socket),
+                    // A server may withdraw its endpoint before its process exits.
+                    // Only the retained scope and fresh process census authorize
+                    // signals and prove absence below.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        crate::codex_socket::verify_recorded_or_absent(
+                            &path,
+                            scope.runtime.identity.uid,
+                            scope.app_server_socket.device,
+                            scope.app_server_socket.inode,
+                        )
+                        .map_err(|error| {
+                            append_private_diagnostic(
+                                &log,
+                                &serde_json::json!({
+                                    "stage": "generation_stop_withdrawn_socket_inspect",
+                                    "worker_shutdown": allow_worker,
+                                    "error": "SocketIdentityMismatch",
+                                    "path": path,
+                                    "expected_identity": scope.app_server_socket,
+                                    "errno": error.raw_os_error(),
+                                    "io_kind": format!("{:?}", error.kind()),
+                                    "server_pid": server.pid,
+                                }),
+                            );
+                            WorkerProtocolError::SocketIdentityMismatch
+                        })?;
+                        None
+                    }
+                    Err(error) => {
+                        append_private_diagnostic(
+                            &log,
+                            &serde_json::json!({
+                                "stage": "generation_stop_socket_inspect",
+                                "worker_shutdown": allow_worker,
+                                "error": "SocketIdentityMismatch",
+                                "path": path,
+                                "expected_identity": scope.app_server_socket,
+                                "errno": error.raw_os_error(),
+                                "io_kind": format!("{:?}", error.kind()),
+                                "server_pid": server.pid,
+                            }),
+                        );
+                        return Err(WorkerProtocolError::SocketIdentityMismatch);
+                    }
+                };
+                if let Some(socket) = socket
+                    && (socket.dev() != scope.app_server_socket.device
+                        || socket.ino() != scope.app_server_socket.inode)
+                {
+                    append_private_diagnostic(
+                        &log,
+                        &serde_json::json!({
+                            "stage": "generation_stop_socket_identity",
+                            "worker_shutdown": allow_worker,
+                            "error": "SocketIdentityMismatch",
+                            "path": path,
+                            "expected_identity": scope.app_server_socket,
+                            "observed_identity": {"device": socket.dev(), "inode": socket.ino()},
+                            "server_pid": server.pid,
+                        }),
+                    );
+                    return Err(WorkerProtocolError::SocketIdentityMismatch);
+                }
+            }
+            site = "observe_owned";
+            let (changed, sample) = scope.observe_stop_sample(&census, sample, &mut diagnostic)?;
+            if !sample.is_dirty() && changed {
+                site = "scope_evidence_publication";
+                let digest = crate::writer::retain_release_evidence(
+                    state_root,
+                    scope.runtime.identity.run_id,
+                    &serde_json::to_value(&scope).map_err(|_| {
+                        proof_refusal(&mut diagnostic, "generation_scope_encoding", Value::Null);
+                        WorkerProtocolError::InvalidRuntimeRecord
+                    })?,
+                )
+                .map_err(|error| {
+                    proof_refusal(
+                        &mut diagnostic,
+                        "generation_scope_evidence_publication",
+                        serde_json::json!({"code":error.code}),
+                    );
+                    WorkerProtocolError::Io
+                })?;
+                site = "scope_checkpoint_publication";
+                writer
+                    .transact(|record| {
+                        let release = record.generation_release.as_mut().ok_or_else(|| {
+                            MachineError::invalid_argument("release", "release owner missing")
+                        })?;
+                        if release.source.run_id != scope.runtime.identity.run_id
+                            || release.source.run_generation
+                                != scope.runtime.identity.run_generation
+                            || release.phase != crate::writer::GenerationReleasePhase::StopStarted
+                        {
+                            return Err(MachineError::invalid_argument(
+                                "release",
+                                "release scope changed",
+                            ));
+                        }
+                        release.scope_sha256 = Some(digest);
+                        Ok(())
+                    })
+                    .map_err(|error| {
+                        proof_refusal(
+                            &mut diagnostic,
+                            "generation_scope_checkpoint_publication",
+                            serde_json::json!({"code":error.code}),
+                        );
+                        WorkerProtocolError::InvalidRuntimeRecord
+                    })?;
+            }
+            if let GenerationSample::Dirty {
+                predicate,
+                expected,
+                fresh,
+            } = sample
+                && !discard_logged
+            {
+                append_private_diagnostic(
+                    &log,
+                    &serde_json::json!({
+                        "stage":"generation_stop_discarded_sample","worker_shutdown":allow_worker,
+                        "sampled_count":sampled_count,"predicate":predicate,
+                        "expected":scope_observation(&expected),"fresh":fresh,
+                        "os_error":if fresh.is_none() {Some(libc::ESRCH)} else {None},
+                        "scope_revision":scope.revision,"consecutive_empty_samples":0,
+                    }),
+                );
+                discard_logged = true;
+            }
+            site = "empty_samples";
+            let mut live = Vec::new();
+            for retained in scope.processes.iter().filter(|_| !sample.is_dirty()) {
+                let Some(current) = census.iter().find(|p| p.pid == retained.identity.pid) else {
+                    continue;
+                };
+                // observe_owned just verified every retained identity against this
+                // exact census. Each signal below performs its own fresh recheck.
+                if allow_worker && current.pid == scope.runtime.identity.pid {
+                    continue;
+                }
+                if !current.zombie {
+                    live.push(retained);
+                }
+            }
+            if !sample.is_dirty() && live.is_empty() {
+                empty += 1;
+            } else {
+                empty = 0;
+            }
+            if empty == 5 {
+                return Ok(());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(proof_refusal(
+                    &mut diagnostic,
+                    "generation_stop_deadline",
+                    serde_json::json!({
+                        "site":"after_sample","consecutive_empty_samples":empty,"live_count":live.len(),
+                        "live":live.iter().take(4).map(|p|scope_observation(&p.identity)).collect::<Vec<_>>(),
+                        "deadline_overrun_ms":now.saturating_duration_since(deadline).as_millis().min(u64::MAX as u128) as u64,
+                    }),
+                ));
+            }
+            if !sample.is_dirty() {
+                live.sort_by_key(|p| std::cmp::Reverse(p.ancestry.len()));
+                for process in live {
+                    // Exact-PID signals require fresh exact kernel and executable
+                    // identity; whole group agreement was checked in this sample.
+                    site = "fresh_signal_identity";
+                    let kernel = match DarwinSystem.bsd_process_identity(process.identity.pid) {
+                        Ok(kernel) => kernel,
+                        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => continue,
+                        Err(error) => {
+                            return Err(proof_refusal(
+                                &mut diagnostic,
+                                "generation_signal_kernel_identity",
+                                serde_json::json!({
+                                    "expected":scope_observation(&process.identity),"os_error":error.raw_os_error(),"io_kind":format!("{:?}",error.kind()),
+                                }),
+                            ));
+                        }
+                    };
+                    let current = &crate::darwin::ProcessCensusEntry {
+                        pid: kernel.pid,
+                        parent_pid: kernel.parent_pid,
+                        uid: kernel.uid,
+                        process_group_id: kernel.process_group_id,
+                        session_id: kernel.session_id,
+                        birth: Some((kernel.start_tvsec, kernel.start_tvusec)),
+                        zombie: kernel.zombie,
+                    };
+                    GenerationScope::verify_process_observed(process, current, &mut diagnostic)?;
+                    if !current.zombie {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            return Err(proof_refusal(
+                                &mut diagnostic,
+                                "generation_stop_deadline",
+                                serde_json::json!({
+                                    "site":"before_signal","consecutive_empty_samples":empty,"observed":scope_observation(current),
+                                    "deadline_overrun_ms":now.saturating_duration_since(deadline).as_millis().min(u64::MAX as u128) as u64,
+                                }),
+                            ));
+                        }
+                        let signal = if Instant::now() < term_deadline {
+                            libc::SIGTERM
+                        } else {
+                            libc::SIGKILL
+                        };
+                        site = "signal_exact_process";
+                        DarwinSystem
+                    .signal_exact_process(current, signal)
+                    .map_err(|error| proof_refusal(&mut diagnostic, "generation_signal_exact_process", serde_json::json!({
+                        "observed":scope_observation(current),"signal":signal,"os_error":error.raw_os_error(),"io_kind":format!("{:?}",error.kind()),
+                    })))?;
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    })();
+    if let Err(error) = &result {
+        append_private_diagnostic(
+            &log,
+            &serde_json::json!({
+                "stage":"generation_stop","failure_site":site,"worker_shutdown":allow_worker,
+                "error":format!("{error:?}"),"sampled_count":sampled_count,
+                "consecutive_empty_samples":empty,"retained_count":scope.processes.len(),
+                "scope_revision":scope.revision,"details":details,
+            }),
+        );
+    }
+    result.map(|()| scope)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1094,6 +2464,34 @@ fn record_socket_refusal(diagnostic: Option<&mut Value>, expected: &SocketIdenti
             "observation": {"expected_identity": expected},
         });
     }
+}
+
+fn startup_commit_deadline_observed(
+    deadline: Instant,
+    before: Instant,
+    after: Option<Instant>,
+    diagnostic: &mut Option<&mut Value>,
+) -> Result<(), WorkerProtocolError> {
+    let observed = after.unwrap_or(before);
+    if observed >= deadline {
+        return Err(proof_refusal(
+            diagnostic,
+            "startup_commit_timeout",
+            serde_json::json!({
+                "site": if after.is_some() { "after_final_proof" } else { "before_final_proof" },
+                "remaining_budget_before_final_proof_ms": u64::try_from(
+                    deadline.saturating_duration_since(before).as_millis()
+                ).unwrap_or(u64::MAX),
+                "final_proof_elapsed_ms": after.map(|after| u64::try_from(
+                    after.saturating_duration_since(before).as_millis()
+                ).unwrap_or(u64::MAX)),
+                "deadline_overrun_ms": u64::try_from(
+                    observed.saturating_duration_since(deadline).as_millis()
+                ).unwrap_or(u64::MAX),
+            }),
+        ));
+    }
+    Ok(())
 }
 
 fn proof_refusal(
@@ -1183,7 +2581,7 @@ impl StartupWorkload {
         uid: u32,
     ) -> Self {
         Self {
-            deadline: Instant::now() + budget.min(Duration::from_secs(10)),
+            deadline: Instant::now() + budget.min(Duration::from_secs(30)),
             children: BTreeMap::new(),
             socket_path,
             socket_identity,
@@ -1524,15 +2922,38 @@ fn prove_group_empty_samples(
         ProcessIdentityVerdict::Absent
     };
     let mut empty_samples = 0_u8;
+    let mut sampled_count = 0_u32;
+    let mut last_sample = Value::Null;
+    let mut proof_entry_remaining_ms = None;
     loop {
+        let mut sample_started = None;
         if let Some(wait) = startup.as_deref_mut() {
-            if Instant::now() >= wait.deadline {
+            let now = Instant::now();
+            let remaining = u64::try_from(wait.deadline.saturating_duration_since(now).as_millis())
+                .unwrap_or(u64::MAX);
+            proof_entry_remaining_ms.get_or_insert(remaining);
+            if now >= wait.deadline {
                 return Err(proof_refusal(
                     &mut diagnostic,
                     "startup_quiescence_timeout",
-                    Value::Null,
+                    serde_json::json!({
+                        "site": "before_sample",
+                        "proof_entry_remaining_ms": proof_entry_remaining_ms,
+                        "sampled_count": sampled_count,
+                        "consecutive_empty_samples": empty_samples,
+                        "deadline_overrun_ms": u64::try_from(
+                            now.saturating_duration_since(wait.deadline).as_millis()
+                        ).unwrap_or(u64::MAX),
+                        "remaining_budget_at_sample_start_ms": 0,
+                        "sample_elapsed_ms": Value::Null,
+                        "retained_child_count": wait.children.len(),
+                        "retained_child_sample": wait.children.values()
+                            .take(4).map(scope_observation).collect::<Vec<_>>(),
+                        "last_sample": last_sample,
+                    }),
                 ));
             }
+            sample_started = Some(now);
             if let Err(error) = wait.verify_socket() {
                 record_socket_refusal(diagnostic.as_deref_mut(), &wait.socket_identity);
                 return Err(error);
@@ -1767,6 +3188,8 @@ fn prove_group_empty_samples(
             }
         }
         let mut recorded_absent = true;
+        let mut present_child_count = 0_usize;
+        let mut present_child_sample = Vec::new();
         for child in tracked.values() {
             match DarwinSystem.bsd_process_identity(child.pid) {
                 Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
@@ -1776,7 +3199,17 @@ fn prove_group_empty_samples(
                         && current.process_group_id == child.process_group_id
                         && current.session_id == child.session_id =>
                 {
-                    recorded_absent = false
+                    recorded_absent = false;
+                    present_child_count += 1;
+                    if diagnostic.is_some() && present_child_sample.len() < 4 {
+                        present_child_sample.push(scope_observation(
+                            &crate::darwin::ProcessCensusEntry {
+                                parent_pid: current.parent_pid,
+                                zombie: current.zombie,
+                                ..*child
+                            },
+                        ));
+                    }
                 }
                 current => {
                     return Err(proof_refusal(
@@ -1795,11 +3228,50 @@ fn prove_group_empty_samples(
             ));
         }
         if let Some(wait) = startup.as_deref_mut() {
-            if Instant::now() >= wait.deadline {
+            sampled_count += 1;
+            last_sample = serde_json::json!({
+                "tracked_child_count": tracked.len(),
+                "all_tracked_children_absent": recorded_absent,
+                "dirty_sample": wait.dirty_sample,
+                "kernel_present_child_count": present_child_count,
+                "kernel_present_child_sample": present_child_sample,
+            });
+            let now = Instant::now();
+            let sample_started = sample_started.expect("startup sample has a starting instant");
+            let start_remaining_ms = u64::try_from(
+                wait.deadline
+                    .saturating_duration_since(sample_started)
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX);
+            let sample_elapsed_ms =
+                u64::try_from(now.saturating_duration_since(sample_started).as_millis())
+                    .unwrap_or(u64::MAX);
+            last_sample["remaining_budget_at_sample_start_ms"] = start_remaining_ms.into();
+            last_sample["sample_elapsed_ms"] = sample_elapsed_ms.into();
+            if now >= wait.deadline {
                 return Err(proof_refusal(
                     &mut diagnostic,
                     "startup_quiescence_timeout",
-                    Value::Null,
+                    serde_json::json!({
+                        "site": "after_sample",
+                        "proof_entry_remaining_ms": proof_entry_remaining_ms,
+                        "sampled_count": sampled_count,
+                        "consecutive_empty_samples": empty_samples,
+                        "deadline_overrun_ms": u64::try_from(
+                            now.saturating_duration_since(wait.deadline).as_millis()
+                        ).unwrap_or(u64::MAX),
+                        "remaining_budget_at_sample_start_ms": u64::try_from(
+                            wait.deadline.saturating_duration_since(sample_started).as_millis()
+                        ).unwrap_or(u64::MAX),
+                        "sample_elapsed_ms": u64::try_from(
+                            now.saturating_duration_since(sample_started).as_millis()
+                        ).unwrap_or(u64::MAX),
+                        "retained_child_count": wait.children.len(),
+                        "retained_child_sample": wait.children.values()
+                            .take(4).map(scope_observation).collect::<Vec<_>>(),
+                        "last_sample": last_sample,
+                    }),
                 ));
             }
             if !recorded_absent || !wait.children_absent(&mut diagnostic)? || wait.dirty_sample {
@@ -2954,6 +4426,14 @@ pub enum ControlRequestV1 {
         #[serde(default)]
         caller: Option<ExecutingBuild>,
     },
+    /// Successor cancellation addresses an original task Turn, never whichever Turn is live.
+    InterruptTask {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        engagement_id: Option<Uuid>,
+        turn_id: String,
+    },
     ExternalInterrupt {
         expected: WorkerIdentity,
         #[serde(default)]
@@ -3008,11 +4488,22 @@ pub enum ControlRequestV1 {
         writer_generation: u64,
         transaction_id: Uuid,
     },
+    PrepareGenerationRetirement {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        engagement_id: Option<Uuid>,
+        transaction_id: Uuid,
+        writer_revision: u64,
+        source_revision: u64,
+    },
     VerifyCallerPolicy {
         expected: WorkerIdentity,
         #[serde(default)]
         caller: Option<ExecutingBuild>,
         operation_id: Uuid,
+        #[serde(default)]
+        engagement_id: Option<Uuid>,
     },
     ExternalSetWriterAccess {
         expected: WorkerIdentity,
@@ -3065,6 +4556,7 @@ impl ControlRequestV1 {
             | Self::Respond { expected, .. }
             | Self::Interrupt { expected, .. }
             | Self::ExternalInterrupt { expected, .. }
+            | Self::InterruptTask { expected, .. }
             | Self::Pause { expected, .. }
             | Self::Resume { expected, .. }
             | Self::Reconcile { expected, .. }
@@ -3072,6 +4564,7 @@ impl ControlRequestV1 {
             | Self::Close { expected, .. }
             | Self::ExternalClose { expected, .. }
             | Self::SetWriterAccess { expected, .. }
+            | Self::PrepareGenerationRetirement { expected, .. }
             | Self::VerifyCallerPolicy { expected, .. }
             | Self::ExternalSetWriterAccess { expected, .. }
             | Self::ResetFence { expected, .. } => expected,
@@ -3116,6 +4609,7 @@ impl ControlRequestV1 {
                 | Self::SettleLifecycleTimeout { .. }
                 | Self::Close { .. }
                 | Self::SetWriterAccess { .. }
+                | Self::PrepareGenerationRetirement { .. }
         )
     }
 
@@ -3139,6 +4633,7 @@ impl ControlRequestV1 {
             | Self::Respond { caller, .. }
             | Self::Interrupt { caller, .. }
             | Self::ExternalInterrupt { caller, .. }
+            | Self::InterruptTask { caller, .. }
             | Self::Pause { caller, .. }
             | Self::Resume { caller, .. }
             | Self::Reconcile { caller, .. }
@@ -3146,6 +4641,7 @@ impl ControlRequestV1 {
             | Self::Close { caller, .. }
             | Self::ExternalClose { caller, .. }
             | Self::SetWriterAccess { caller, .. }
+            | Self::PrepareGenerationRetirement { caller, .. }
             | Self::VerifyCallerPolicy { caller, .. }
             | Self::ExternalSetWriterAccess { caller, .. }
             | Self::ResetFence { caller, .. } => caller.as_ref(),
@@ -3174,6 +4670,7 @@ impl ControlRequestV1 {
             | Self::Respond { caller, .. }
             | Self::Interrupt { caller, .. }
             | Self::ExternalInterrupt { caller, .. }
+            | Self::InterruptTask { caller, .. }
             | Self::Pause { caller, .. }
             | Self::Resume { caller, .. }
             | Self::Reconcile { caller, .. }
@@ -3181,6 +4678,7 @@ impl ControlRequestV1 {
             | Self::Close { caller, .. }
             | Self::ExternalClose { caller, .. }
             | Self::SetWriterAccess { caller, .. }
+            | Self::PrepareGenerationRetirement { caller, .. }
             | Self::VerifyCallerPolicy { caller, .. }
             | Self::ExternalSetWriterAccess { caller, .. }
             | Self::ResetFence { caller, .. } => *caller = Some(build),
@@ -3223,6 +4721,7 @@ impl ControlRequestV1 {
                 | Self::Respond { .. }
                 | Self::Interrupt { .. }
                 | Self::ExternalInterrupt { .. }
+                | Self::InterruptTask { .. }
                 | Self::Pause { .. }
                 | Self::Resume { .. }
                 | Self::Reconcile { .. }
@@ -3230,6 +4729,7 @@ impl ControlRequestV1 {
                 | Self::Close { .. }
                 | Self::ExternalClose { .. }
                 | Self::SetWriterAccess { .. }
+                | Self::PrepareGenerationRetirement { .. }
                 | Self::VerifyCallerPolicy { .. }
                 | Self::ExternalSetWriterAccess { .. }
         )
@@ -3271,6 +4771,7 @@ impl ControlRequestV1 {
             Self::Respond { .. } => "run.respond",
             Self::Interrupt { .. } => "run.interrupt",
             Self::ExternalInterrupt { .. } => "engagement.cancel",
+            Self::InterruptTask { .. } => "run.interrupt",
             Self::Pause { .. } => "run.pause",
             Self::Resume { .. } => "run.resume",
             Self::Reconcile { .. } => "run.reconcile",
@@ -3278,8 +4779,17 @@ impl ControlRequestV1 {
             Self::SettleLifecycleTimeout { close: false, .. } => "run.pause",
             Self::Close { .. } => "run.close",
             Self::ExternalClose { .. } => "engagement.release",
+            Self::PrepareGenerationRetirement {
+                engagement_id: Some(_),
+                ..
+            } => "engagement.release_write",
+            Self::PrepareGenerationRetirement { .. } => "run.release_write",
             Self::SetWriterAccess { write: true, .. } => "run.acquire_write",
             Self::SetWriterAccess { write: false, .. } => "run.release_write",
+            Self::VerifyCallerPolicy {
+                engagement_id: Some(_),
+                ..
+            } => "engagement.release_write",
             Self::VerifyCallerPolicy { .. } => "run.verify_caller_policy",
             Self::ExternalSetWriterAccess { write: true, .. } => "engagement.acquire_write",
             Self::ExternalSetWriterAccess { write: false, .. } => "engagement.release_write",
@@ -3290,6 +4800,9 @@ impl ControlRequestV1 {
     #[must_use]
     pub const fn external_engagement(&self) -> Option<Uuid> {
         match self {
+            Self::InterruptTask { engagement_id, .. }
+            | Self::PrepareGenerationRetirement { engagement_id, .. }
+            | Self::VerifyCallerPolicy { engagement_id, .. } => *engagement_id,
             Self::ExternalSubmit { engagement_id, .. }
             | Self::ExternalInterrupt { engagement_id, .. }
             | Self::ExternalClose { engagement_id, .. }
@@ -3680,6 +5193,9 @@ pub enum ControlResponseV1 {
     },
     CallerPolicyVerified {
         proof: Box<CallerPolicyProof>,
+    },
+    GenerationRetirementPrepared {
+        scope_sha256: String,
     },
     /// A refusal the caller reads as a machine error.
     ///
@@ -4293,8 +5809,18 @@ pub struct WorkerSessionBootstrap {
     #[serde(default)]
     pub eager_thread_operation_id: Option<Uuid>,
     pub transport_timeout_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) generation_reader: Option<GenerationReaderBootstrap>,
     #[serde(default)]
     pub dedicated_server: Option<DedicatedServerBootstrap>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GenerationReaderBootstrap {
+    pub transaction_id: Uuid,
+    pub scope_sha256: String,
+    pub registration_sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -4547,6 +6073,11 @@ enum SessionCommand {
         ledger: Option<Arc<Mutex<Ledger>>>,
         accept: bool,
     },
+    PrepareGenerationRetirement {
+        transaction_id: Uuid,
+        writer_revision: u64,
+        source_revision: u64,
+    },
     VerifyCallerPolicy {
         operation_id: Uuid,
     },
@@ -4560,6 +6091,9 @@ enum SessionCommand {
         response: Value,
     },
     Interrupt,
+    InterruptTask {
+        turn_id: String,
+    },
     Pause {
         interrupt: bool,
     },
@@ -4738,6 +6272,7 @@ struct SessionMailbox {
     facts: RunFacts,
     failure: Arc<AtomicBool>,
     connection: Mutex<Option<UnixStream>>,
+    dispatch: Mutex<()>,
     state: Mutex<MailboxState>,
     changed: Condvar,
     #[cfg(test)]
@@ -4749,6 +6284,7 @@ struct SessionMailbox {
 #[derive(Default)]
 struct MailboxState {
     thread_failed: bool,
+    streamed: bool,
     /// A message the reader has read and the drain has not taken yet.
     delivered: Option<Result<Value, TurnError>>,
     /// Messages read out of turn while a request awaited its own reply.
@@ -4781,6 +6317,7 @@ impl SessionMailbox {
             facts,
             failure,
             connection: Mutex::new(None),
+            dispatch: Mutex::new(()),
             state: Mutex::new(MailboxState::default()),
             changed: Condvar::new(),
             #[cfg(test)]
@@ -4815,7 +6352,7 @@ impl SessionMailbox {
             if state.stopping {
                 return false;
             }
-            if state.reading {
+            if state.reading && !state.streamed {
                 return true;
             }
             let Ok(guard) = self.changed.wait(state) else {
@@ -4823,6 +6360,43 @@ impl SessionMailbox {
             };
             state = guard;
         }
+    }
+
+    fn begin_stream(self: &Arc<Self>) -> Result<MailboxStream, TurnError> {
+        let mut state = self.state.lock().map_err(|_| Self::lost())?;
+        if state.streamed
+            || state.stopping
+            || state.thread_failed
+            || self.failure.load(Ordering::Acquire)
+        {
+            return Err(Self::lost());
+        }
+        state.streamed = true;
+        Ok(MailboxStream(Arc::clone(self)))
+    }
+
+    fn return_read_grant(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.reading = false;
+        }
+        self.changed.notify_all();
+    }
+
+    /// Called after the wire ACK, when the old reader can no longer deliver.
+    fn retain_stream_prefix(&self) -> Result<(), TurnError> {
+        let mut state = self.state.lock().map_err(|_| Self::lost())?;
+        if let Some(message) = state.delivered.take() {
+            let value = message?;
+            // A prior bare response has no outstanding drain request. Do not
+            // turn it into a notification or consume it as the new response.
+            if value.get("method").and_then(Value::as_str).is_none()
+                || state.carried.len() >= MAX_CARRIED_MESSAGES
+            {
+                return Err(TurnError::CorrelationMismatch);
+            }
+            state.carried.push_back(value);
+        }
+        Ok(())
     }
 
     /// Reader: hand over one message and give the grant back.
@@ -4870,7 +6444,7 @@ impl SessionMailbox {
             if let Some(error) = state.lost.clone() {
                 return Err(error);
             }
-            if !state.reading {
+            if !state.reading && !state.streamed {
                 state.reading = true;
                 self.changed.notify_all();
             }
@@ -4934,7 +6508,7 @@ impl SessionMailbox {
             if let Some(error) = state.lost.clone() {
                 return SessionWork::Message(Err(error));
             }
-            if !state.reading {
+            if !state.reading && !state.streamed {
                 state.reading = true;
                 self.changed.notify_all();
             }
@@ -5054,6 +6628,7 @@ impl SessionMailbox {
         {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
+        let _dispatch = self.dispatch.lock();
         let refused = match self.state.lock() {
             Ok(mut state) => {
                 state.thread_failed = true;
@@ -5067,7 +6642,19 @@ impl SessionMailbox {
     }
 }
 
+struct MailboxStream(Arc<SessionMailbox>);
+impl Drop for MailboxStream {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.state.lock() {
+            state.streamed = false;
+        }
+        self.0.changed.notify_all();
+    }
+}
+
 struct WorkerPrimaryToolDispatcher {
+    run_generation: u64,
+    workspace_id: String,
     state_root: PathBuf,
     mailbox: Arc<SessionMailbox>,
 }
@@ -5106,13 +6693,29 @@ impl PrimaryToolDispatcher for WorkerPrimaryToolDispatcher {
     fn dispatch(&self, call: PrimaryToolCall) -> Result<(), MachineError> {
         self.mailbox.reserve_primary_tool()?;
         let state_root = self.state_root.clone();
+        let run_generation = self.run_generation;
+        let workspace = self.workspace_id.clone();
         let mailbox = Arc::clone(&self.mailbox);
         let spawned = thread::Builder::new()
             .name("dolgorae-primary-tool".to_owned())
             .spawn(move || {
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     dispatch_reserved_primary_tool(&mailbox, call, |call| {
-                        crate::primary_bridge::dispatch(&state_root, &call.context, &call.payload)
+                        if crate::native_consumer::managed_tool(&call.tool_name) {
+                            Ok(crate::managed_specialist::dispatch(
+                                &state_root,
+                                call,
+                                mailbox.facts.run_id,
+                                run_generation,
+                                &workspace,
+                            ))
+                        } else {
+                            crate::primary_bridge::dispatch(
+                                &state_root,
+                                &call.context,
+                                &call.payload,
+                            )
+                        }
                     });
                 }))
                 .is_err()
@@ -5509,13 +7112,20 @@ impl SessionServer {
     ) -> Result<(), TurnError> {
         // Serialize dispatch with the reader's failure fence. A mutation
         // already popped by the drain must not send after that fence either.
-        let state = self
+        let _dispatch = self
             .mailbox
-            .state
+            .dispatch
             .lock()
             .map_err(|_| TurnError::OutcomeUnknown)?;
-        if state.thread_failed || self.mailbox.failure.load(Ordering::Acquire) {
-            return Err(TurnError::OutcomeUnknown);
+        {
+            let state = self
+                .mailbox
+                .state
+                .lock()
+                .map_err(|_| TurnError::OutcomeUnknown)?;
+            if state.thread_failed || self.mailbox.failure.load(Ordering::Acquire) {
+                return Err(TurnError::OutcomeUnknown);
+            }
         }
         send()
     }
@@ -5588,14 +7198,30 @@ impl AppServer for SessionServer {
         params: Value,
         sink: &mut dyn SolicitedSink,
     ) -> Result<(), TurnError> {
+        let deadline = if crate::app_server::history_exception(method, &params) {
+            Instant::now() + self.budget.min(Duration::from_secs(120))
+        } else {
+            self.deadline()
+        };
+        let _stream = self.mailbox.begin_stream()?;
+        let wire = Arc::clone(&self.wire);
+        let lease = wire.lease(deadline).map_err(TurnError::from)?;
+        if let Err(error) = self.mailbox.retain_stream_prefix() {
+            self.wire.shutdown();
+            return Err(error);
+        }
         let id = self.allocate()?;
-        self.send(&serde_json::json!({"id": id, "method": method, "params": params}))?;
-        // Only the drain reaches here, and only while folding in a message it
-        // has already taken, so no read grant is outstanding and taking the
-        // socket over cannot race the reader for the next frame.
-        let outcome = self.wire.receive_solicited(id, &mut StreamedSink(sink));
+        self.with_dispatch_fence(|| {
+            lease
+                .send(&serde_json::json!({"id": id, "method": method, "params": params}))
+                .map_err(TurnError::from)
+        })?;
+        let outcome = lease.receive(id, &mut StreamedSink(sink));
         while let Some(queued) = self.wire.take_queued() {
-            self.mailbox.carry(queued)?;
+            if let Err(error) = self.mailbox.carry(queued) {
+                self.wire.shutdown();
+                return Err(error);
+            }
         }
         outcome.map(|_| ()).map_err(TurnError::from)
     }
@@ -5619,6 +7245,7 @@ impl SolicitedSink for StreamedSink<'_> {
 /// the drain, which revalidates its Controller credential and performs it, and
 /// an outcome is read from published Run state.
 pub struct WorkerSession {
+    retirement_state_root: PathBuf,
     facts: RunFacts,
     wire: Arc<DuplexConnection>,
     mailbox: Arc<SessionMailbox>,
@@ -5722,7 +7349,21 @@ impl WorkerSession {
         // Resolve durable authorities before starting an owned server.
         let manifest = RunStore::new(SystemWorkspacePlatform, state_root)
             .load_manifest(facts.run_id)
-            .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+            .map_err(|error| {
+                record_session_startup_failure(
+                    session,
+                    "manifest_load",
+                    WorkerProtocolError::LedgerReplay,
+                    Some(&serde_json::json!({
+                        "cause_kind": "MachineError", "code": error.code,
+                        "reason": error.details.get("reason").and_then(Value::as_str)
+                            .unwrap_or(&error.message).chars().take(1024).collect::<String>(),
+                        "path": error.details.get("path").and_then(Value::as_str)
+                            .map(|v| v.chars().take(4096).collect::<String>()),
+                    })),
+                );
+                WorkerProtocolError::LedgerReplay
+            })?;
         let primary_session_id = manifest.aggregate_binding.as_ref().and_then(|binding| {
             (binding.aggregate_kind == AggregateKind::OrchestratedSession
                 && binding.member_kind == AggregateMemberKind::Primary
@@ -5734,8 +7375,11 @@ impl WorkerSession {
                 Ok(PrimaryToolConfig {
                     session_id,
                     contract: crate::primary_tool::PrimaryToolContract::load()
-                        .map_err(|_| WorkerProtocolError::LedgerReplay)?,
+                        .map_err(|_| WorkerProtocolError::LedgerReplay)?
+                        .with_specialists(),
                     dispatcher: Arc::new(WorkerPrimaryToolDispatcher {
+                        run_generation,
+                        workspace_id: workspace_id.to_owned(),
                         state_root: state_root.to_path_buf(),
                         mailbox: Arc::clone(&mailbox),
                     }),
@@ -5746,13 +7390,37 @@ impl WorkerSession {
         let mut candidate_reader = if manifest.schema_version == 4 {
             if member_owner_for(&manifest).is_some() {
                 crate::delegation_service::successor_restart_reader(state_root, &manifest)
-                    .map_err(|_| WorkerProtocolError::LedgerReplay)?
+                    .map_err(|error| {
+                        record_session_startup_failure(session, "task_reader_preparation", WorkerProtocolError::LedgerReplay,
+                            Some(&serde_json::json!({
+                                "cause_kind": "MachineError", "code": error.code,
+                                "reason": error.details.get("reason").and_then(Value::as_str)
+                                    .unwrap_or(&error.message).chars().take(1024).collect::<String>(),
+                                "path": error.details.get("path").and_then(Value::as_str)
+                                    .map(|v| v.chars().take(4096).collect::<String>()),
+                            })));
+                        WorkerProtocolError::LedgerReplay
+                    })?
             } else {
                 None
             }
         } else {
             crate::direct_review_target::DirectTargetReader::for_run(state_root, facts.run_id)
-                .map_err(|_| WorkerProtocolError::LedgerReplay)?
+                .map_err(|error| {
+                    record_session_startup_failure(
+                        session,
+                        "task_reader_preparation",
+                        WorkerProtocolError::LedgerReplay,
+                        Some(&serde_json::json!({
+                            "cause_kind": "MachineError", "code": error.code,
+                            "reason": error.details.get("reason").and_then(Value::as_str)
+                                .unwrap_or(&error.message).chars().take(1024).collect::<String>(),
+                            "path": error.details.get("path").and_then(Value::as_str)
+                                .map(|v| v.chars().take(4096).collect::<String>()),
+                        })),
+                    );
+                    WorkerProtocolError::LedgerReplay
+                })?
         };
         let mut reusable_reviewer = false;
         let external_reviewer = manifest.schema_version == 3
@@ -5823,7 +7491,7 @@ impl WorkerSession {
                 || manifest
                     .global_profile_binding
                     .as_ref()
-                    .is_none_or(|binding| !binding.checked_review_supported()))
+                    .is_none_or(|binding| !binding.accepted_checked_review_supported()))
         {
             return Err(WorkerProtocolError::InvalidRuntimeRecord);
         }
@@ -5842,10 +7510,82 @@ impl WorkerSession {
                 || manifest
                     .global_profile_binding
                     .as_ref()
-                    .is_none_or(|binding| !binding.checked_review_supported()))
+                    .is_none_or(|binding| !binding.accepted_checked_review_supported()))
         {
             return Err(WorkerProtocolError::InvalidRuntimeRecord);
         }
+        let generation_history = if let Some(purpose) = &session.generation_reader {
+            let writer = crate::writer::WriterStore::new(state_root, &manifest.workspace_id, uid)
+                .load()
+                .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+            let release = writer
+                .pending_generation_release(manifest.run_id)
+                .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+            let reservation = release
+                .successor
+                .as_ref()
+                .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+            let catalog = if candidate_tools {
+                vec![crate::direct_review::candidate_tool_spec()]
+            } else {
+                primary_tool
+                    .as_ref()
+                    .map_or_else(Vec::new, |tool| tool.contract.tool_specs())
+            };
+            let registration: ThreadRegistration = serde_json::from_value(
+                crate::writer::read_release_evidence(
+                    state_root,
+                    manifest.run_id,
+                    &purpose.registration_sha256,
+                )
+                .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?,
+            )
+            .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+            if release.transaction_id != purpose.transaction_id
+                || !reservation.attempt_started
+                || release.phase != crate::writer::GenerationReleasePhase::ReaderStarting
+                || release.scope_sha256.as_deref() != Some(&purpose.scope_sha256)
+                || release.registration_sha256 != purpose.registration_sha256
+                || reservation.run_generation != run_generation
+                || reservation.server_epoch != session.server_epoch
+                || session.sandbox != "read-only"
+                || session.approval_policy != "never"
+                || session.eager_thread_operation_id != Some(purpose.transaction_id)
+                || registration.catalog_sha256
+                    != crate::jcs::sha256_hex(
+                        &serde_json::to_vec(&catalog)
+                            .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?,
+                    )
+                || registration.catalog_empty != catalog.is_empty()
+                || manifest
+                    .global_profile_binding
+                    .as_ref()
+                    .is_none_or(|b| !b.caller_workspace_supported())
+            {
+                return Err(WorkerProtocolError::InvalidRuntimeRecord);
+            }
+            let scope: GenerationScope = serde_json::from_value(
+                crate::writer::read_release_evidence(
+                    state_root,
+                    manifest.run_id,
+                    &purpose.scope_sha256,
+                )
+                .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?,
+            )
+            .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+            if scope.runtime.identity.run_id != manifest.run_id
+                || scope.history.thread_id != registration.thread_id
+                || session.attach
+                    != (SessionAttach::Resume {
+                        thread_id: registration.thread_id.clone(),
+                    })
+            {
+                return Err(WorkerProtocolError::InvalidRuntimeRecord);
+            }
+            Some(scope.history)
+        } else {
+            None
+        };
         let mut dedicated_server = session
             .dedicated_server
             .as_ref()
@@ -6076,7 +7816,20 @@ impl WorkerSession {
                         .map_err(|_| WorkerProtocolError::LedgerReplay)?;
                 }
             }
-            if let Err(error) = coordinator.complete_connection_startup(replayed.lifecycle) {
+            let connection_startup = if let Some(history) = &generation_history {
+                coordinator.start_generation_reader(
+                    history,
+                    replayed.lifecycle == crate::domain::RunLifecycle::Paused,
+                    session
+                        .generation_reader
+                        .as_ref()
+                        .expect("reader purpose")
+                        .transaction_id,
+                )
+            } else {
+                coordinator.complete_connection_startup(replayed.lifecycle)
+            };
+            if let Err(error) = connection_startup {
                 if successor_history_recovery
                     && coordinator.pending_terminal_history().is_some()
                     && coordinator.candidate_history_failure().is_some_and(|e| {
@@ -6109,6 +7862,7 @@ impl WorkerSession {
                 coordinator.clear_pending_terminal_history();
             }
             if let Some(operation_id) = session.eager_thread_operation_id
+                && session.generation_reader.is_none()
                 && *coordinator.state() != CoordinatorState::OutcomeUnknown
                 && !matches!(
                     replayed.lifecycle,
@@ -6164,6 +7918,7 @@ impl WorkerSession {
             Vec::new(),
         );
         Ok(Self {
+            retirement_state_root: state_root.to_owned(),
             facts,
             wire,
             mailbox,
@@ -6675,7 +8430,116 @@ impl WorkerSession {
         for worker in workers {
             let _ = worker.join();
         }
-        if let Ok(mut owned) = self.dedicated_server.lock() {
+        let mut retirement_log = None;
+        let mut retirement_stage = "release_owner";
+        let retirement = (|| -> Result<bool, WorkerProtocolError> {
+            let manifest = RunStore::new(SystemWorkspacePlatform, &self.retirement_state_root)
+                .load_manifest(self.facts.run_id)
+                .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+            let writer = crate::writer::WriterStore::new(
+                &self.retirement_state_root,
+                &manifest.workspace_id,
+                DarwinSystem.current_uid(),
+            );
+            let record = writer
+                .load()
+                .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+            let Some(release) = record.pending_generation_release(self.facts.run_id) else {
+                return Ok(false);
+            };
+            retirement_log = Some(
+                self.retirement_state_root
+                    .join("runs")
+                    .join(self.facts.run_id.to_string())
+                    .join(format!(
+                        "dedicated-server-{}.log",
+                        release.source.run_generation
+                    )),
+            );
+            retirement_stage = "reader_binding";
+            if matches!(
+                release.phase,
+                crate::writer::GenerationReleasePhase::ReaderStarting
+                    | crate::writer::GenerationReleasePhase::ReaderVerified
+            ) {
+                let path = runtime_record_path(
+                    &runtime_root(&self.retirement_state_root),
+                    self.facts.run_id,
+                )?;
+                let runtime = read_runtime_record(&path, DarwinSystem.current_uid())?;
+                let owned = self
+                    .dedicated_server
+                    .lock()
+                    .map_err(|_| WorkerProtocolError::Io)?;
+                if runtime.identity.pid == std::process::id()
+                    && release.successor.as_ref().is_some_and(|r| {
+                        r.run_generation == runtime.identity.run_generation
+                            && Some(r.server_epoch) == runtime.app_server_epoch
+                            && r.control_socket_epoch == runtime.control_socket_epoch
+                    })
+                    && owned.as_ref().is_some_and(|server| {
+                        runtime.dedicated_server_identity.as_ref() == Some(&server.identity)
+                    })
+                {
+                    return Ok(false);
+                }
+                return Err(WorkerProtocolError::InvalidIdentity);
+            }
+            if release.phase != crate::writer::GenerationReleasePhase::StopStarted {
+                return Err(WorkerProtocolError::InvalidRuntimeRecord);
+            }
+            retirement_stage = "release_scope";
+            let value = crate::writer::read_release_evidence(
+                &self.retirement_state_root,
+                self.facts.run_id,
+                release
+                    .scope_sha256
+                    .as_deref()
+                    .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?,
+            )
+            .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+            let scope: GenerationScope = serde_json::from_value(value)
+                .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?;
+            let mut owned = self
+                .dedicated_server
+                .lock()
+                .map_err(|_| WorkerProtocolError::Io)?;
+            retirement_stage = "scope_stop";
+            stop_generation_scope_reaping(
+                &self.retirement_state_root,
+                &writer,
+                scope,
+                true,
+                || {
+                    if let Some(server) = owned.as_mut() {
+                        server
+                            .child
+                            .try_wait()
+                            .map_err(|_| WorkerProtocolError::Io)?;
+                    }
+                    Ok(())
+                },
+            )?;
+            Ok(true)
+        })();
+        if let Err(error) = &retirement
+            && let Some(log) = &retirement_log
+        {
+            append_private_diagnostic(
+                log,
+                &serde_json::json!({
+                    "stage": "worker_retirement",
+                    "failure_site": retirement_stage,
+                    "error": format!("{error:?}"),
+                    "run_id": self.facts.run_id,
+                }),
+            );
+        }
+        // A pending generation owner always dominates ordinary group cleanup.
+        // Recovery will inspect the same retained scope on any refusal.
+        if matches!(retirement, Ok(false) | Ok(true))
+            && let Ok(mut owned) = self.dedicated_server.lock()
+        {
             let _ = stop_dedicated_server(&mut owned);
         }
     }
@@ -6692,6 +8556,74 @@ impl WorkerSession {
                 .settle(failed(&TurnError::OutcomeUnknown, &self.facts.bare()));
         }
         self.wire.shutdown();
+    }
+}
+
+/// A retained binding never substitutes the current executable during restart.
+pub(crate) fn verify_binding_executable(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+) -> Result<(), WorkerProtocolError> {
+    let expected = &binding.launch_snapshot.executable_identity;
+    let path = Path::new(&expected.resolved_path);
+    let canonical = fs::canonicalize(path).map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    let metadata = fs::metadata(&canonical).map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    if canonical != path
+        || metadata.dev() != expected.device
+        || metadata.ino() != expected.inode
+        || file_sha256(&canonical).map_err(|_| WorkerProtocolError::InvalidIdentity)?
+            != expected.sha256
+    {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod retained_executable_tests {
+    use super::*;
+
+    #[test]
+    fn missing_changed_and_replaced_executables_refuse_without_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-retained-executable-{}", Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let path = root.join("codex");
+        fs::write(&path, b"original retained fixture executable").unwrap();
+        let reservation: crate::run::CallerStartReservation = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"
+        ))
+        .unwrap();
+        let mut binding = reservation.accepted_intent.global_profile_binding;
+        // Keep the original inode allocated while testing a same-byte replacement.
+        let original = File::open(&path).unwrap();
+        let metadata = original.metadata().unwrap();
+        binding.launch_snapshot.executable_identity.resolved_path =
+            path.to_str().unwrap().to_owned();
+        binding.launch_snapshot.executable_identity.device = metadata.dev();
+        binding.launch_snapshot.executable_identity.inode = metadata.ino();
+        binding.launch_snapshot.executable_identity.sha256 = file_sha256(&path).unwrap();
+        verify_binding_executable(&binding).unwrap();
+        fs::write(&path, b"changed bytes in the same file").unwrap();
+        assert_eq!(
+            verify_binding_executable(&binding).unwrap_err().code(),
+            "TRANSPORT_FAILURE"
+        );
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            verify_binding_executable(&binding).unwrap_err().code(),
+            "TRANSPORT_FAILURE"
+        );
+        fs::write(&path, b"original retained fixture executable").unwrap();
+        assert_eq!(
+            verify_binding_executable(&binding).unwrap_err().code(),
+            "TRANSPORT_FAILURE"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"original retained fixture executable"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -7059,9 +8991,14 @@ fn read_app_server(wire: &DuplexConnection, mailbox: &SessionMailbox, thread_fai
             if mailbox.panic_next_read.swap(false, Ordering::AcqRel) {
                 panic!("injected reader failure");
             }
-            match wire.receive() {
-                Ok(message) => mailbox.deliver(Ok(message)),
-                Err(_) => return true,
+            if wire
+                .receive_background(|message| match message {
+                    Some(message) => mailbox.deliver(Ok(message)),
+                    None => mailbox.return_read_grant(),
+                })
+                .is_err()
+            {
+                return true;
             }
         }
         false
@@ -7742,11 +9679,67 @@ fn perform(
             _ => interrupt_active(coordinator, &context),
         };
     }
-    let authorization = authority.authorize_mutation(
-        mutation.operation,
-        mutation.credential.as_ref(),
-        mutation.external_engagement,
-    );
+    let retirement_operation = match &mutation.command {
+        SessionCommand::PrepareGenerationRetirement { transaction_id, .. } => Some(*transaction_id),
+        SessionCommand::VerifyCallerPolicy { operation_id } => Some(*operation_id),
+        _ => None,
+    };
+    let authorization = (|| {
+        if let Some(operation) = retirement_operation {
+            let manifest = RunStore::new(SystemWorkspacePlatform, &authority.state_root)
+                .load_manifest(identity.run_id)?;
+            let writer = crate::writer::WriterStore::new(
+                &authority.state_root,
+                &identity.workspace_id,
+                identity.uid,
+            )
+            .load()?;
+            if let Some(retirement) = writer.pending_generation_release(identity.run_id)
+                && retirement.transaction_id == operation
+                && retirement.purpose == crate::writer::GenerationRetirementPurpose::Acquire
+            {
+                let carrier = mutation
+                    .credential
+                    .as_ref()
+                    .ok_or_else(|| admission_internal("acquire retirement credential missing"))?;
+                if let Some(external) = mutation.external_engagement {
+                    let store = EngagementStore::open(&EngagementStore::workspace_database_path(
+                        &authority.state_root,
+                    ))?;
+                    if store.external_member_state(external, identity.run_id)?.0 == "releasing" {
+                        // An existing S owner may finish only the Reader retirement.
+                        // No failed acquire authorization falls back to this branch.
+                        if !authority.owns_successor_external_release(
+                            &store,
+                            &manifest,
+                            external,
+                            "engagement.release_write",
+                        )? {
+                            return Err(admission_internal(
+                                "acquire retirement recovery owner missing",
+                            ));
+                        }
+                        return authority.authorize_external(
+                            external,
+                            "engagement.release_write",
+                            carrier,
+                        );
+                    }
+                    return authority.authorize_external(
+                        external,
+                        "engagement.acquire_write",
+                        carrier,
+                    );
+                }
+                return authority.authorize("run.acquire_write", carrier);
+            }
+        }
+        authority.authorize_mutation(
+            mutation.operation,
+            mutation.credential.as_ref(),
+            mutation.external_engagement,
+        )
+    })();
     if let Err(error) = authorization {
         return refusal_from(error);
     }
@@ -7762,7 +9755,7 @@ fn perform(
     {
         return controller_refused(identity.run_id, mutation.operation);
     }
-    coordinator.set_acceptance_controller(controller);
+    coordinator.set_acceptance_controller(controller.clone());
     let operation = mutation.operation;
     let context = progress.facts.context(
         coordinator.thread_id().map(str::to_owned),
@@ -8089,6 +10082,7 @@ fn perform(
                 && !matches!(
                     mutation.command,
                     SessionCommand::SetWriterAccess { .. }
+                        | SessionCommand::PrepareGenerationRetirement { .. }
                         | SessionCommand::VerifyCallerPolicy { .. }
                         | SessionCommand::Reconcile
                         | SessionCommand::Resume
@@ -8100,6 +10094,34 @@ fn perform(
                     operation,
                     "caller Writer transition is still guarded".to_owned(),
                 )));
+            }
+            if let Some(release) = writer.pending_generation_release(identity.run_id)
+                && let SessionCommand::VerifyCallerPolicy { operation_id } = mutation.command
+                && (operation_id != release.transaction_id
+                    || !matches!(
+                        release.phase,
+                        crate::writer::GenerationReleasePhase::ReaderStarting
+                            | crate::writer::GenerationReleasePhase::ReaderVerified
+                    )
+                    || release
+                        .successor
+                        .as_ref()
+                        .is_none_or(|r| r.run_generation != identity.run_generation))
+            {
+                return Err(admission_internal(
+                    "Reader verification does not name the reserved release owner",
+                ));
+            }
+            if writer.pending_generation_release(identity.run_id).is_some()
+                && !matches!(
+                    mutation.command,
+                    SessionCommand::PrepareGenerationRetirement { .. }
+                        | SessionCommand::VerifyCallerPolicy { .. }
+                )
+            {
+                return Err(admission_internal(
+                    "original generation release owns the transition",
+                ));
             }
             if let SessionCommand::SetWriterAccess {
                 writer_generation,
@@ -8167,7 +10189,23 @@ fn perform(
                     Ok(None)
                 }
                 None => {
-                    if active_mutation_admission(ledger)?.is_some()
+                    let active = active_mutation_admission(ledger)?;
+                    let retirement_preparation = if let Some(active) = active.as_ref() {
+                        retirement_prepares_original_write(
+                            &mutation.command,
+                            writer,
+                            active,
+                            binding.identity.controller_id,
+                            binding.identity.generation,
+                            ledger
+                                .durable_records()
+                                .map_err(|error| admission_internal(&error.to_string()))?,
+                        )?
+                    } else {
+                        false
+                    };
+                    if active.is_some()
+                        && !retirement_preparation
                         && !matches!(mutation.command, SessionCommand::Reconcile)
                     {
                         let state =
@@ -8228,6 +10266,25 @@ fn perform(
             Ok(false) => {}
             Err(error) => return refusal_from(error),
         }
+    }
+    if let SessionCommand::PrepareGenerationRetirement {
+        transaction_id,
+        writer_revision,
+        source_revision,
+    } = mutation.command
+    {
+        if mutation.preconditions.admission.is_some() {
+            return internal_invariant("release preparation cannot borrow a Submit admission");
+        }
+        return prepare_generation_retirement_control(
+            coordinator,
+            identity,
+            authority,
+            context,
+            transaction_id,
+            writer_revision,
+            source_revision,
+        );
     }
     let policy_verification = matches!(mutation.command, SessionCommand::VerifyCallerPolicy { .. });
     let reconciled = if matches!(mutation.command, SessionCommand::Reconcile) {
@@ -8290,6 +10347,96 @@ fn perform(
         return refusal_from(error);
     }
     response
+}
+
+fn prepare_generation_retirement_control(
+    coordinator: &mut SessionCoordinator,
+    identity: &WorkerIdentity,
+    authority: &RunControllerAuthority,
+    context: TurnFailureContext,
+    transaction_id: Uuid,
+    writer_revision: u64,
+    source_revision: u64,
+) -> ControlResponseV1 {
+    let prepared = (|| -> Result<String, MachineError> {
+        let state_root = &authority.state_root;
+        let writer =
+            crate::writer::WriterStore::new(state_root, &identity.workspace_id, identity.uid);
+        let before = writer.load()?;
+        let release = before
+            .pending_generation_release(identity.run_id)
+            .cloned()
+            .ok_or_else(|| admission_internal("release owner missing"))?;
+        if before.authority_revision != writer_revision
+            || release.transaction_id != transaction_id
+            || release.source_revision != source_revision
+            || release.phase != crate::writer::GenerationReleasePhase::Prepared
+            || release.source.run_generation != identity.run_generation
+        {
+            return Err(admission_internal("release preparation binding changed"));
+        }
+        let history = coordinator
+            .prepare_generation_retirement()
+            .map_err(|e| e.into_machine_error(&context))?;
+        {
+            let ledger = coordinator
+                .journal()
+                .ledger()
+                .lock()
+                .map_err(|_| admission_internal("ledger poisoned"))?;
+            release.verify_ledger_prefix(
+                ledger
+                    .durable_records()
+                    .map_err(|e| admission_internal(&e.to_string()))?,
+            )?;
+            if !crate::turn::submit_audit_history_is_quiescent(
+                ledger
+                    .durable_records()
+                    .map_err(|e| admission_internal(&e.to_string()))?,
+            )
+            .map_err(|e| e.into_machine_error(&context))?
+            {
+                return Err(admission_internal(
+                    "release source head or Submit evidence changed",
+                ));
+            }
+        }
+        let runtime_path = runtime_record_path(&runtime_root(state_root), identity.run_id)
+            .map_err(|e| e.machine_error(identity.run_id, state_root))?;
+        let runtime = read_runtime_record(&runtime_path, identity.uid)
+            .map_err(|e| e.machine_error(identity.run_id, &runtime_path))?;
+        let captured = crate::writer::read_release_evidence(
+            state_root,
+            identity.run_id,
+            &release.source_runtime_sha256,
+        )?;
+        if serde_json::to_value(&runtime).map_err(|_| admission_internal("runtime encoding"))?
+            != captured
+        {
+            return Err(admission_internal("release runtime changed"));
+        }
+        let scope = GenerationScope::capture(runtime, history)
+            .map_err(|e| e.machine_error(identity.run_id, &runtime_path))?;
+        let digest = crate::writer::retain_release_evidence(
+            state_root,
+            identity.run_id,
+            &serde_json::to_value(scope).map_err(|_| admission_internal("scope encoding"))?,
+        )?;
+        let mut next = release.clone();
+        next.scope_sha256 = Some(digest.clone());
+        next.phase = crate::writer::GenerationReleasePhase::StopStarted;
+        writer.transact(|current| {
+            if current.authority_revision != writer_revision {
+                return Err(admission_internal("release revision changed"));
+            }
+            current.advance_generation_release(&release, next)
+        })?;
+        Ok(digest)
+    })();
+    match prepared {
+        Ok(scope_sha256) => ControlResponseV1::GenerationRetirementPrepared { scope_sha256 },
+        Err(error) => refusal_from(error),
+    }
 }
 
 fn perform_command(
@@ -8357,6 +10504,12 @@ fn perform_command(
             Err(error) => failed(&error, &context),
         },
         SessionCommand::Interrupt => interrupt_active(coordinator, &context),
+        SessionCommand::InterruptTask { turn_id } => {
+            if coordinator.active_turn_id() != Some(turn_id.as_str()) {
+                return internal_invariant("the original task Turn is no longer active");
+            }
+            interrupt_active(coordinator, &context)
+        }
         SessionCommand::Pause { interrupt } => {
             let live = coordinator.active_turn_id().is_some()
                 || !coordinator.pending_interactions().is_empty();
@@ -8474,6 +10627,9 @@ fn perform_command(
                 thread_id,
             }
         }
+        SessionCommand::PrepareGenerationRetirement { .. } => {
+            internal_invariant("release preparation bypassed its owner")
+        }
         SessionCommand::SetWriterAccess {
             write,
             writer_generation,
@@ -8555,6 +10711,69 @@ fn admission_internal(message: &str) -> MachineError {
         false,
         serde_json::json!({"invariant": message}),
     )
+}
+
+fn retirement_prepares_original_write(
+    command: &SessionCommand,
+    writer: &crate::writer::WriterRecord,
+    admission: &crate::mutation_admission::MutationAdmission,
+    controller: Uuid,
+    controller_generation: u64,
+    records: &[crate::audit::AuditRecord],
+) -> Result<bool, MachineError> {
+    use crate::writer::{GenerationReleasePhase as P, GenerationRetirementPurpose as Purpose};
+    let Some(owner) = writer.generation_release.as_ref().filter(|owner| {
+        owner.purpose == Purpose::Acquire
+            && owner.pending()
+            && writer.transaction_id == Some(owner.transaction_id)
+            && writer.holder.as_ref() == Some(&owner.source)
+            && owner.source.controller_id == controller
+            && owner.source.controller_generation == controller_generation
+            && writer.writer_generation == owner.writer_generation
+            && (writer.state == owner.purpose.guarded_state()
+                || writer.state == crate::writer::WriterAuthorityState::BlockedUnknown)
+            && admission.controller_id == controller
+            && admission.allow_writer_acquire
+            && matches!(admission.operation.as_str(), "run.send" | "run.submit")
+    }) else {
+        return Ok(false);
+    };
+    let preparation = match command {
+        SessionCommand::PrepareGenerationRetirement {
+            transaction_id,
+            source_revision,
+            writer_revision,
+        } => {
+            *transaction_id == owner.transaction_id
+                && *writer_revision == writer.authority_revision
+                && *source_revision == owner.source_revision
+                && owner.phase == P::Prepared
+        }
+        SessionCommand::VerifyCallerPolicy { operation_id } => {
+            *operation_id == owner.transaction_id
+                && matches!(owner.phase, P::ReaderStarting | P::ReaderVerified)
+        }
+        _ => false,
+    };
+    if !preparation {
+        return Ok(false);
+    }
+    owner.verify_ledger_prefix(records)?;
+    let Some(record) = records.iter().rev().find(|record| {
+        record.sequence() <= owner.source_revision
+            && record.kind() == crate::audit::AuditKind::MutationAdmitted
+    }) else {
+        return Ok(false);
+    };
+    let captured: crate::mutation_admission::MutationAdmission = serde_json::from_slice(
+        &crate::jcs::canonicalize(record.payload())
+            .map_err(|_| admission_internal("admission source encoding"))?,
+    )
+    .map_err(|_| admission_internal("admission source invalid"))?;
+    Ok(serde_json::to_value(captured)
+        .map_err(|_| admission_internal("admission source encoding"))?
+        == serde_json::to_value(admission)
+            .map_err(|_| admission_internal("admission source encoding"))?)
 }
 
 fn with_admission_ledger<T>(
@@ -9453,6 +11672,8 @@ fn spawn_hidden_worker_inner(
     held_startup_range: StartupLockFile,
 ) -> Result<StartedWorker, WorkerProtocolError> {
     let uid = DarwinSystem.current_uid();
+    let mut child = None;
+    let mut launch = None;
     let startup_result = (|| {
         if !executable.is_absolute() || !bootstrap_path.is_absolute() {
             return Err(WorkerProtocolError::InvalidRuntimeRecord);
@@ -9466,55 +11687,87 @@ fn spawn_hidden_worker_inner(
             .arg("__worker")
             .arg("--bootstrap")
             .arg(bootstrap_path);
-        let (child, startup) = DarwinSystem
+        let (spawned, startup) = DarwinSystem
             .spawn_detached_with_fd3(&mut command)
             .map_err(|_| WorkerProtocolError::Io)?;
+        // Keep the actual Child outside every fallible handoff/read/validation
+        // path. An error transfers it to the same parent waiter as ready starts.
+        child = Some(spawned);
+        launch = Some((
+            bootstrap.run_id,
+            bootstrap.run_generation,
+            bootstrap.ledger_root.clone(),
+        ));
         let (reader, bound) = read_bound_handoff(startup)?;
-        Ok((child, reader, bound, bootstrap))
+        Ok((reader, bound, bootstrap))
     })();
     let release = held_startup_range.release_startup_range();
-    let (mut child, mut reader, bound, bootstrap) = startup_result?;
-    release?;
-    if bound.identity.workspace_id != bootstrap.workspace_id
-        || bound.identity.run_id != bootstrap.run_id
-        || bound.identity.run_generation != bootstrap.run_generation
-        || bound.identity.boot_uuid != bootstrap.boot_uuid
-        || bound.identity.uid != uid
-        || bound.identity.executable_sha256 != bootstrap.executable_sha256
-    {
-        return Err(WorkerProtocolError::ProtocolMismatch {
-            expected_protocol: WORKER_PROTOCOL_VERSION,
-            actual_protocol: WORKER_PROTOCOL_VERSION,
-        });
+    let ready_result = (|| {
+        let (mut reader, bound, bootstrap) = startup_result?;
+        release?;
+        if bound.identity.workspace_id != bootstrap.workspace_id
+            || bound.identity.run_id != bootstrap.run_id
+            || bound.identity.run_generation != bootstrap.run_generation
+            || bound.identity.boot_uuid != bootstrap.boot_uuid
+            || bound.identity.uid != uid
+            || bound.identity.executable_sha256 != bootstrap.executable_sha256
+        {
+            return Err(WorkerProtocolError::ProtocolMismatch {
+                expected_protocol: WORKER_PROTOCOL_VERSION,
+                actual_protocol: WORKER_PROTOCOL_VERSION,
+            });
+        }
+        let ready = read_ready_handoff(&mut reader)?;
+        if bound.identity != ready.identity
+            || bound.socket_path != ready.socket_path
+            || bound.socket_identity != ready.socket_identity
+            || bound.control_socket_epoch != ready.control_socket_epoch
+            || bound.app_server_epoch != ready.app_server_epoch
+            || bound.dolgorae_version != ready.dolgorae_version
+            || bound.mutation_protocol_version != ready.mutation_protocol_version
+            || bound.binary_sha256 != ready.binary_sha256
+            || ready.identity.pid != child.as_ref().expect("spawned Worker Child").id()
+            || ready.identity.process_group_id != child.as_ref().expect("spawned Worker Child").id()
+        {
+            return Err(WorkerProtocolError::ProtocolMismatch {
+                expected_protocol: WORKER_PROTOCOL_VERSION,
+                actual_protocol: WORKER_PROTOCOL_VERSION,
+            });
+        }
+        if child
+            .as_mut()
+            .expect("spawned Worker Child")
+            .try_wait()
+            .map_err(|_| WorkerProtocolError::Io)?
+            .is_some()
+        {
+            return Err(WorkerProtocolError::WorkerStartFailed);
+        }
+        Ok(ready)
+    })();
+    match ready_result {
+        Ok(ready) => Ok(StartedWorker {
+            child: child.take().expect("ready Worker Child"),
+            record: ready,
+        }),
+        Err(error) => {
+            if let Some(child) = child.take() {
+                let (run_id, run_generation, ledger_root) = launch.expect("spawned launch context");
+                let tag = WorkerChildWaitTag::Unqualified {
+                    run_id,
+                    run_generation,
+                    pid: child.id(),
+                    startup_error: error,
+                };
+                retain_worker_child(
+                    tag,
+                    child,
+                    ledger_root.join(format!("dedicated-server-{run_generation}.log")),
+                )?;
+            }
+            Err(error)
+        }
     }
-    let ready = read_ready_handoff(&mut reader)?;
-    if bound.identity != ready.identity
-        || bound.socket_path != ready.socket_path
-        || bound.socket_identity != ready.socket_identity
-        || bound.control_socket_epoch != ready.control_socket_epoch
-        || bound.app_server_epoch != ready.app_server_epoch
-        || bound.dolgorae_version != ready.dolgorae_version
-        || bound.mutation_protocol_version != ready.mutation_protocol_version
-        || bound.binary_sha256 != ready.binary_sha256
-        || ready.identity.pid != child.id()
-        || ready.identity.process_group_id != child.id()
-    {
-        return Err(WorkerProtocolError::ProtocolMismatch {
-            expected_protocol: WORKER_PROTOCOL_VERSION,
-            actual_protocol: WORKER_PROTOCOL_VERSION,
-        });
-    }
-    if child
-        .try_wait()
-        .map_err(|_| WorkerProtocolError::Io)?
-        .is_some()
-    {
-        return Err(WorkerProtocolError::WorkerStartFailed);
-    }
-    Ok(StartedWorker {
-        child,
-        record: ready,
-    })
 }
 
 #[cfg(target_os = "macos")]
@@ -9635,11 +11888,35 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
             // file admits exactly one writer at a time.
             let replayed = {
                 let conformant = ConformantLedger::open(&bootstrap.ledger_root, bootstrap.run_id)
-                    .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+                    .map_err(|error| {
+                        if let Some(session) = &bootstrap.session {
+                            let kind = match &error {
+                                crate::conformance::ConformanceError::Ledger(cause) => format!("Ledger::{}", format!("{cause:?}").split(['(', '{']).next().unwrap_or("LedgerError").trim()),
+                                _ => format!("{error:?}").split(['(', '{']).next().unwrap_or("ConformanceError").trim().to_owned(),
+                            };
+                            record_session_startup_failure(session, "conformant_ledger_open", WorkerProtocolError::LedgerReplay,
+                                Some(&serde_json::json!({
+                                    "cause_kind": kind,
+                                    "reason": error.to_string().chars().take(1024).collect::<String>(),
+                                    "path": bootstrap.ledger_root.to_string_lossy().chars().take(4096).collect::<String>(),
+                                })));
+                        }
+                        WorkerProtocolError::LedgerReplay
+                    })?;
                 conformant
                     .inner()
                     .projection()
-                    .map_err(|_| WorkerProtocolError::LedgerReplay)?
+                    .map_err(|error| {
+                        if let Some(session) = &bootstrap.session {
+                            record_session_startup_failure(session, "conformant_ledger_projection", WorkerProtocolError::LedgerReplay,
+                                Some(&serde_json::json!({
+                                    "cause_kind": format!("{error:?}").split(['(', '{']).next().unwrap_or("LedgerError").trim(),
+                                    "reason": error.to_string().chars().take(1024).collect::<String>(),
+                                    "path": bootstrap.ledger_root.to_string_lossy().chars().take(4096).collect::<String>(),
+                                })));
+                        }
+                        WorkerProtocolError::LedgerReplay
+                    })?
             };
             if control.is_stopping() {
                 return Err(WorkerProtocolError::WorkerStartFailed);
@@ -9654,7 +11931,17 @@ pub fn run_hidden_worker(bootstrap_path: &Path) -> Result<(), WorkerProtocolErro
             })?;
             let ledger = Arc::new(Mutex::new(
                 Ledger::open(&bootstrap.ledger_root, bootstrap.run_id)
-                    .map_err(|_| WorkerProtocolError::LedgerReplay)?,
+                    .map_err(|error| {
+                        if let Some(session) = &bootstrap.session {
+                            record_session_startup_failure(session, "ledger_open", WorkerProtocolError::LedgerReplay,
+                                Some(&serde_json::json!({
+                                    "cause_kind": format!("{error:?}").split(['(', '{']).next().unwrap_or("LedgerError").trim(),
+                                    "reason": error.to_string().chars().take(1024).collect::<String>(),
+                                    "path": bootstrap.ledger_root.to_string_lossy().chars().take(4096).collect::<String>(),
+                                })));
+                        }
+                        WorkerProtocolError::LedgerReplay
+                    })?,
             ));
             let owned = bootstrap
                 .session
@@ -9910,11 +12197,19 @@ fn start_run_worker_inner(
     let _ = fs::remove_file(&path);
     write_worker_bootstrap(&path, &bootstrap, uid)?;
     let started = spawn_hidden_worker_inner(&executable, &path, startup_range)?;
-    Ok(StartedRun {
+    let result = StartedRun {
         run_id: start.run_id,
         socket_path: started.record.socket_path.clone(),
         pid: started.record.identity.pid,
-    })
+    };
+    retain_worker_child(
+        WorkerChildWaitTag::Ready(started.record.identity),
+        started.child,
+        start
+            .ledger_root
+            .join(format!("dedicated-server-{}.log", start.run_generation)),
+    )?;
+    Ok(result)
 }
 
 /// Send one control request to a Run's worker and read its single reply.
@@ -11270,6 +13565,17 @@ fn serve_run_operation(
         ControlRequestV1::ExternalInterrupt { engagement_id, .. } => {
             session.external_interrupt(credential, engagement_id)
         }
+        ControlRequestV1::InterruptTask {
+            engagement_id,
+            turn_id,
+            ..
+        } => {
+            let command = SessionCommand::InterruptTask { turn_id };
+            match engagement_id {
+                Some(id) => session.dispatch_external("engagement.cancel", credential, id, command),
+                None => session.dispatch(operation, credential, command),
+            }
+        }
         ControlRequestV1::Pause { interrupt, .. } => {
             session.pause(operation, credential, interrupt)
         }
@@ -11311,11 +13617,44 @@ fn serve_run_operation(
             writer_generation,
             transaction_id,
         ),
-        ControlRequestV1::VerifyCallerPolicy { operation_id, .. } => session.dispatch(
-            operation,
-            credential,
-            SessionCommand::VerifyCallerPolicy { operation_id },
-        ),
+        ControlRequestV1::PrepareGenerationRetirement {
+            engagement_id,
+            transaction_id,
+            writer_revision,
+            source_revision,
+            ..
+        } => {
+            let command = SessionCommand::PrepareGenerationRetirement {
+                transaction_id,
+                writer_revision,
+                source_revision,
+            };
+            if let Some(engagement_id) = engagement_id {
+                session.dispatch_external(operation, credential, engagement_id, command)
+            } else {
+                session.dispatch(operation, credential, command)
+            }
+        }
+        ControlRequestV1::VerifyCallerPolicy {
+            operation_id,
+            engagement_id,
+            ..
+        } => {
+            if let Some(engagement_id) = engagement_id {
+                session.dispatch_external(
+                    operation,
+                    credential,
+                    engagement_id,
+                    SessionCommand::VerifyCallerPolicy { operation_id },
+                )
+            } else {
+                session.dispatch(
+                    operation,
+                    credential,
+                    SessionCommand::VerifyCallerPolicy { operation_id },
+                )
+            }
+        }
         ControlRequestV1::Hello { .. }
         | ControlRequestV1::Status { .. }
         | ControlRequestV1::RunStatus { .. }
@@ -11332,7 +13671,7 @@ fn serve_run_operation(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{BufReader, Cursor};
     #[cfg(target_os = "macos")]
@@ -11490,6 +13829,37 @@ mod tests {
         let diagnostic = serde_json::json!({"predicate": "worker_scope"});
         append_private_diagnostic(&path, &diagnostic);
         assert!(!path.exists());
+        let early = root.join("early.log");
+        let mut session = reviewer_bootstrap();
+        session.dedicated_server = Some(DedicatedServerBootstrap {
+            socket_path: session.app_server_socket.clone(),
+            argv: vec!["/bin/false".to_owned()],
+            cwd: root.clone(),
+            environment: BTreeMap::new(),
+            log_path: early.clone(),
+            executable_device: 1,
+            executable_inode: 2,
+            executable_sha256: "11".repeat(32),
+            server_epoch: 1,
+        });
+        record_session_startup_failure(
+            &session,
+            "ledger_open",
+            WorkerProtocolError::LedgerReplay,
+            Some(&serde_json::json!({"cause_kind":"WriterBusy","reason":"owned ledger"})),
+        );
+        let first = fs::read(&early).unwrap();
+        let entry: Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(entry["phase"], "ledger_open");
+        assert_eq!(entry["details"]["cause_kind"], "WriterBusy");
+        assert_eq!(fs::metadata(&early).unwrap().mode() & 0o777, 0o600);
+        record_session_startup_failure(
+            &session,
+            "ledger_open",
+            WorkerProtocolError::LedgerReplay,
+            None,
+        );
+        assert!(fs::read(&early).unwrap().starts_with(&first));
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -11502,13 +13872,76 @@ mod tests {
         assert_eq!(accepted, b"existing\n{\"predicate\":\"worker_scope\"}\n");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         append_private_diagnostic(&path, &diagnostic);
+        session.dedicated_server.as_mut().unwrap().log_path = path.clone();
+        record_session_startup_failure(
+            &session,
+            "ledger_open",
+            WorkerProtocolError::LedgerReplay,
+            None,
+        );
         assert_eq!(fs::read(&path).unwrap(), accepted);
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o644);
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let link = root.join("link");
         std::os::unix::fs::symlink(&path, &link).unwrap();
         append_private_diagnostic(&link, &diagnostic);
+        session.dedicated_server.as_mut().unwrap().log_path = link.clone();
+        record_session_startup_failure(
+            &session,
+            "ledger_open",
+            WorkerProtocolError::LedgerReplay,
+            None,
+        );
         assert_eq!(fs::read(&path).unwrap(), accepted);
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    pub(crate) struct PrimaryWorkerFixture {
+        pub dispatcher: Arc<dyn PrimaryToolDispatcher>,
+        mailbox: Arc<SessionMailbox>,
+    }
+    impl PrimaryWorkerFixture {
+        pub(crate) fn new(state_root: &Path, root: Uuid, workspace: &str) -> Self {
+            let mailbox = Arc::new(SessionMailbox::new(RunFacts {
+                run_id: root,
+                profile: "fixture".into(),
+            }));
+            let dispatcher = Arc::new(WorkerPrimaryToolDispatcher {
+                run_generation: 1,
+                workspace_id: workspace.into(),
+                state_root: state_root.into(),
+                mailbox: Arc::clone(&mailbox),
+            });
+            Self {
+                dispatcher,
+                mailbox,
+            }
+        }
+        pub(crate) fn completion(&self) -> PrimaryToolCompletion {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut state = self.mailbox.state.lock().unwrap();
+            loop {
+                if let Some(completion) = state.primary_tool_completions.pop_front() {
+                    assert_eq!(state.primary_tools_in_flight, 0);
+                    return completion;
+                }
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .expect("native Primary completion exceeded fixture bound");
+                state = self
+                    .mailbox
+                    .changed
+                    .wait_timeout(state, remaining)
+                    .unwrap()
+                    .0;
+            }
+        }
     }
 
     struct PanicFixture {
@@ -11868,6 +14301,233 @@ mod tests {
     }
 
     #[test]
+    fn streamed_read_preserves_untaken_and_carried_prefix_and_returned_grants() {
+        for state in 0..4 {
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            let mailbox = Arc::new(SessionMailbox::new(RunFacts {
+                run_id: Uuid::now_v7(),
+                profile: "default".into(),
+            }));
+            let wire = Arc::new(DuplexConnection::attach(socket).unwrap());
+            let mut reader = None;
+            if state == 1 {
+                mailbox.state.lock().unwrap().reading = true;
+                let progress = wire.observe_reads();
+                let background = Arc::clone(&wire);
+                let inbox = Arc::clone(&mailbox);
+                reader = Some(thread::spawn(move || {
+                    background
+                        .receive_background(|value| match value {
+                            Some(value) => inbox.deliver(Ok(value)),
+                            None => inbox.return_read_grant(),
+                        })
+                        .unwrap()
+                }));
+                while progress.recv_timeout(Duration::from_secs(5)).unwrap() != 0 {}
+            }
+            if state >= 2 {
+                mailbox
+                    .carry(serde_json::json!({"method":"carried"}))
+                    .unwrap();
+                mailbox.deliver(Ok(
+                    serde_json::json!({"method":"before","id":1,"params":{}}),
+                ));
+            }
+            let peer_thread = thread::spawn(move || {
+                let request = crate::app_server::tests::read_masked_client_frame(&mut peer);
+                assert_eq!(serde_json::from_slice::<Value>(&request).unwrap()["id"], 1);
+                for message in [
+                    br#"{"method":"during"}"#.as_slice(),
+                    br#"{"id":1,"result":{}}"#,
+                ] {
+                    peer.write_all(&[0x81, message.len() as u8]).unwrap();
+                    peer.write_all(message).unwrap();
+                }
+            });
+            let mut server = SessionServer::new(
+                Arc::clone(&wire),
+                Arc::clone(&mailbox),
+                Duration::from_secs(5),
+            );
+            let mut sink = Vec::new();
+            server
+                .request_streamed("thread/read", serde_json::json!({}), &mut sink)
+                .unwrap();
+            assert_eq!(sink, b"{}");
+            let actual: Vec<_> = mailbox
+                .state
+                .lock()
+                .unwrap()
+                .carried
+                .iter()
+                .map(|v| v["method"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(
+                actual,
+                if state >= 2 {
+                    vec!["carried", "before", "during"]
+                } else {
+                    vec!["during"]
+                }
+            );
+            assert!(mailbox.state.lock().unwrap().delivered.is_none());
+            assert!(!mailbox.state.lock().unwrap().streamed);
+            if let Some(reader) = reader {
+                reader.join().unwrap();
+            }
+            peer_thread.join().unwrap();
+            // A grant issued but not acquired is retained through a pre-send cancellation.
+            if state == 3 {
+                mailbox.state.lock().unwrap().reading = true;
+                let stream = mailbox.begin_stream().unwrap();
+                let lease = wire.lease(Instant::now() + Duration::from_secs(5)).unwrap();
+                drop(lease);
+                drop(stream);
+                assert!(mailbox.state.lock().unwrap().reading);
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_history_arms_the_wire_with_the_production_budget_cap() {
+        for (seconds, method, include_turns, maximum) in [
+            (900, "thread/read", serde_json::json!(true), 120),
+            (86_400, "thread/read", serde_json::json!(true), 120),
+            (60, "thread/read", serde_json::json!(true), 60),
+            (900, "thread/read", serde_json::json!(false), 900),
+            (900, "thread/read", serde_json::json!("true"), 900),
+            (900, "other", serde_json::json!(true), 900),
+        ] {
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let wire = Arc::new(DuplexConnection::attach(socket).unwrap());
+            let observed = Arc::clone(&wire);
+            let reader = thread::spawn(move || {
+                let request = crate::app_server::tests::read_masked_client_frame(&mut peer);
+                assert_eq!(serde_json::from_slice::<Value>(&request).unwrap()["id"], 1);
+                let remaining = observed
+                    .active_read_deadline()
+                    .unwrap()
+                    .saturating_duration_since(Instant::now());
+                let response = br#"{"id":1,"result":{}}"#;
+                peer.write_all(&[0x81, response.len() as u8]).unwrap();
+                peer.write_all(response).unwrap();
+                remaining
+            });
+            let mailbox = Arc::new(SessionMailbox::new(RunFacts {
+                run_id: Uuid::now_v7(),
+                profile: "default".into(),
+            }));
+            let mut server = SessionServer::new(wire, mailbox, Duration::from_secs(seconds));
+            server
+                .request_streamed(
+                    method,
+                    serde_json::json!({"includeTurns":include_turns}),
+                    &mut Vec::new(),
+                )
+                .unwrap();
+            let remaining = reader.join().unwrap();
+            assert!(remaining <= Duration::from_secs(maximum));
+            assert!(remaining > Duration::from_secs(maximum - 5));
+        }
+    }
+
+    #[test]
+    fn streamed_read_refuses_unclaimed_response_and_existing_loss_before_dispatch() {
+        use std::io::Read as _;
+        for lost in [false, true] {
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            let mailbox = Arc::new(SessionMailbox::new(RunFacts {
+                run_id: Uuid::now_v7(),
+                profile: "default".into(),
+            }));
+            let wire = Arc::new(DuplexConnection::attach(socket).unwrap());
+            if lost {
+                mailbox.fail_thread();
+            } else {
+                mailbox.deliver(Ok(serde_json::json!({"id":99,"result":{}})));
+            }
+            let mut server = SessionServer::new(Arc::clone(&wire), mailbox, Duration::from_secs(1));
+            assert!(
+                server
+                    .request_streamed("thread/read", serde_json::json!({}), &mut Vec::new())
+                    .is_err()
+            );
+            wire.shutdown();
+            let mut bytes = Vec::new();
+            peer.read_to_end(&mut bytes).unwrap();
+            assert!(bytes.is_empty());
+            assert_eq!(
+                server.next_request_id, 1,
+                "refusal allocated a request before acknowledged prefix validation"
+            );
+        }
+    }
+
+    #[test]
+    fn streamed_dispatch_fence_never_holds_mailbox_over_send() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let mailbox = Arc::new(SessionMailbox::new(RunFacts {
+            run_id: Uuid::now_v7(),
+            profile: "default".into(),
+        }));
+        let server = SessionServer::new(
+            Arc::new(DuplexConnection::attach(socket).unwrap()),
+            Arc::clone(&mailbox),
+            Duration::from_secs(1),
+        );
+        server
+            .with_dispatch_fence(|| {
+                assert!(mailbox.state.try_lock().is_ok(), "send holds mailbox mutex");
+                Ok(())
+            })
+            .unwrap();
+        mailbox.failure.store(true, Ordering::Release);
+        assert!(
+            server
+                .with_dispatch_fence(|| panic!("failure latch admitted a send"))
+                .is_err()
+        );
+        mailbox.failure.store(false, Ordering::Release);
+        mailbox.state.lock().unwrap().thread_failed = true;
+        assert!(
+            server
+                .with_dispatch_fence(|| panic!("failed thread admitted a send"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn streamed_prefix_overflow_and_grant_exclusion_fail_without_dropping_messages() {
+        let mailbox = Arc::new(SessionMailbox::new(RunFacts {
+            run_id: Uuid::now_v7(),
+            profile: "default".into(),
+        }));
+        for index in 0..MAX_CARRIED_MESSAGES {
+            mailbox
+                .carry(serde_json::json!({"method":"prior","params":index}))
+                .unwrap();
+        }
+        mailbox.deliver(Ok(serde_json::json!({"method":"new"})));
+        let stream = mailbox.begin_stream().unwrap();
+        assert!(mailbox.begin_stream().is_err());
+        assert!(matches!(
+            mailbox.retain_stream_prefix(),
+            Err(TurnError::CorrelationMismatch)
+        ));
+        let state = mailbox.state.lock().unwrap();
+        assert_eq!(state.carried.len(), MAX_CARRIED_MESSAGES);
+        assert_eq!(state.carried.front().unwrap()["params"], 0);
+        assert_eq!(
+            state.carried.back().unwrap()["params"],
+            MAX_CARRIED_MESSAGES - 1
+        );
+        drop(state);
+        drop(stream);
+        assert!(!mailbox.state.lock().unwrap().streamed);
+    }
+
+    #[test]
     fn reader_failures_fence_queued_and_popped_dispatch() {
         use std::io::Read;
         for panic in [false, true] {
@@ -12195,8 +14855,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn successor_cancel_drain_targets_only_original_active_turn() {
+        let mut fixture = PanicFixture::new();
+        let mut coordinator = fixture.coordinator.take().unwrap();
+        let original = coordinator.active_turn_id().unwrap().to_owned();
+        let before = fs::read(fixture.root.join("requests.jsonl")).unwrap();
+        let refused = perform_command(
+            &mut coordinator,
+            &fixture.identity,
+            &fixture.progress,
+            "run.interrupt",
+            fixture.progress.facts.bare(),
+            SessionCommand::InterruptTask {
+                turn_id: "foreign-turn".into(),
+            },
+            false,
+        );
+        assert!(matches!(refused, ControlResponseV1::Failed { .. }));
+        assert_eq!(
+            fs::read(fixture.root.join("requests.jsonl")).unwrap(),
+            before
+        );
+        assert_eq!(coordinator.active_turn_id(), Some(original.as_str()));
+        let interrupted = perform_command(
+            &mut coordinator,
+            &fixture.identity,
+            &fixture.progress,
+            "run.interrupt",
+            fixture.progress.facts.bare(),
+            SessionCommand::InterruptTask {
+                turn_id: original.clone(),
+            },
+            false,
+        );
+        assert!(
+            matches!(interrupted,ControlResponseV1::Interrupted{turn_id,..} if turn_id==original)
+        );
+        let text = fs::read_to_string(fixture.root.join("requests.jsonl")).unwrap();
+        let calls = text
+            .lines()
+            .map(|s| serde_json::from_str::<Value>(s).unwrap())
+            .filter(|v| v["method"] == "turn/interrupt")
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["params"]["turnId"], original);
+        fixture.coordinator = Some(coordinator);
+    }
+
     fn primary_fixture_call(run_id: Uuid) -> PrimaryToolCall {
         PrimaryToolCall {
+            tool_name: crate::primary_tool::PRIMARY_TOOL_NAME.into(),
+            source_thread_id: "thread-1".into(),
             request_id: 1,
             run_generation: 1,
             context: crate::primary_tool::PrimaryCallContext {
@@ -12284,6 +14994,7 @@ mod tests {
         for (control_panic, late_join_failure) in [(false, false), (true, false), (false, true)] {
             let mut fixture = PanicFixture::new();
             let session = Arc::new(WorkerSession {
+                retirement_state_root: fixture.root.clone(),
                 facts: fixture.progress.facts.clone(),
                 wire: Arc::clone(&fixture.wire),
                 mailbox: Arc::clone(&fixture.mailbox),
@@ -12431,6 +15142,7 @@ mod tests {
             let mut fixture = PanicFixture::new();
             let before = fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap();
             let session = Arc::new(WorkerSession {
+                retirement_state_root: fixture.root.clone(),
                 facts: fixture.progress.facts.clone(),
                 wire: Arc::clone(&fixture.wire),
                 mailbox: Arc::clone(&fixture.mailbox),
@@ -12476,10 +15188,14 @@ mod tests {
                     .panic_next_primary
                     .store(true, Ordering::Release);
                 WorkerPrimaryToolDispatcher {
+                    run_generation: 1,
+                    workspace_id: fixture.identity.workspace_id.clone(),
                     state_root: fixture.root.clone(),
                     mailbox: Arc::clone(&fixture.mailbox),
                 }
                 .dispatch(PrimaryToolCall {
+                    tool_name: crate::primary_tool::PRIMARY_TOOL_NAME.into(),
+                    source_thread_id: "thread-1".into(),
                     request_id: 1,
                     run_generation: 1,
                     context: crate::primary_tool::PrimaryCallContext {
@@ -12576,6 +15292,117 @@ mod tests {
             executable_device: 1,
             executable_inode: 1,
             executable_sha256: "22".repeat(32),
+        }
+    }
+
+    #[test]
+    fn retained_owned_server_keeps_qualification_until_physical_proof() {
+        for historical in [false, true] {
+            let scene = if historical {
+                crate::semantic::successor_review_tests::Scene::historical(false)
+            } else {
+                crate::semantic::successor_review_tests::Scene::new(false)
+            };
+            let manifest = scene.manifest();
+            let binding = manifest.global_profile_binding.as_ref().unwrap();
+            let mut session = scene.worker_bootstrap(4, false, true);
+            session.app_server_socket = scene.state_root().join("absent-app.sock");
+            let executable = &binding.launch_snapshot.executable_identity;
+            session.dedicated_server = Some(DedicatedServerBootstrap {
+                socket_path: session.app_server_socket.clone(),
+                argv: caller_workspace_argv(manifest),
+                cwd: session.cwd.clone(),
+                environment: binding.launch_snapshot.sanitized_environment.clone(),
+                log_path: scene.state_root().join("startup-refusal.log"),
+                executable_device: executable.device,
+                executable_inode: executable.inode,
+                executable_sha256: executable.sha256.clone(),
+                server_epoch: 1,
+            });
+            assert!(!session.app_server_socket.exists());
+            let mut worker = identity();
+            worker.run_id = manifest.run_id;
+            worker.workspace_id = manifest.workspace_id.clone();
+            worker.run_generation = 1;
+            worker.uid = DarwinSystem.current_uid();
+            let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+            let pid = child.id();
+            child.wait().unwrap();
+            // The owned process is already reaped and the socket is absent.
+            // This tests the admission cut before physical proof, never grants it.
+            let owned = OwnedDedicatedServer {
+                child,
+                identity: DedicatedServerIdentity {
+                    pid,
+                    process_group_id: pid,
+                    session_id: pid,
+                    uid: worker.uid,
+                    start_tvsec: 1,
+                    start_tvusec: 0,
+                    executable_path: PathBuf::from(&executable.resolved_path),
+                    executable_device: executable.device,
+                    executable_inode: executable.inode,
+                    executable_sha256: executable.sha256.clone(),
+                },
+                socket_path: session.app_server_socket.clone(),
+                socket_identity: SocketIdentity {
+                    device: 1,
+                    inode: 1,
+                },
+            };
+            let build = current_dolgorae_build().unwrap();
+            let record = WorkerRuntimeRecord {
+                schema_version: 2,
+                identity: worker.clone(),
+                socket_path: worker_socket_path(worker.uid, &worker.workspace_id, worker.run_id)
+                    .unwrap(),
+                socket_identity: SocketIdentity {
+                    device: 1,
+                    inode: 1,
+                },
+                control_socket_epoch: 1,
+                app_server_epoch: Some(1),
+                control_recovery_required: false,
+                startup_scope: Some(StartupScopeWitness {
+                    worker_identity: worker,
+                    app_server_epoch: 1,
+                    dedicated_server_identity: None,
+                    app_server_socket_identity: None,
+                    revision: 1,
+                    complete: false,
+                    children: vec![],
+                }),
+                dedicated_server_identity: None,
+                dolgorae_version: build.version,
+                mutation_protocol_version: build.mutation_protocol_version,
+                binary_sha256: build.binary_sha256,
+            };
+            let path =
+                runtime_record_path(&runtime_root(scene.state_root()), manifest.run_id).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+            let error = QualifiedCallerRuntime::from_owned_server(
+                manifest,
+                &session,
+                &owned,
+                record,
+                path.clone(),
+            )
+            .err()
+            .expect("absent socket must refuse physical qualification");
+            assert!(
+                matches!(error, WorkerProtocolError::SocketIdentityMismatch),
+                "{error:?}"
+            );
+            let retained = read_runtime_record(&path, DarwinSystem.current_uid()).unwrap();
+            assert_eq!(
+                retained
+                    .dedicated_server_identity
+                    .unwrap()
+                    .executable_sha256,
+                executable.sha256
+            );
+            assert!(!retained.startup_scope.unwrap().complete);
         }
     }
 
@@ -12759,6 +15586,7 @@ mod tests {
             .unwrap();
         let controller = Uuid::now_v7();
         let proof = ControlRequestV1::VerifyCallerPolicy {
+            engagement_id: None,
             expected: expected.clone(),
             caller: None,
             operation_id: Uuid::now_v7(),
@@ -12815,9 +15643,140 @@ mod tests {
                     .admission_id,
                 admission.admission_id
             );
+            let operation = Uuid::now_v7();
+            let head = ledger.head().unwrap();
+            let source_generation = ledger.projection().unwrap().run_generation.max(1);
+            let holder = crate::writer::WriterHolder {
+                run_id: expected.run_id,
+                profile: "fixture".to_owned(),
+                controller_id: controller,
+                controller_generation: 1,
+                run_generation: source_generation,
+                worker_generation: source_generation,
+                profile_server_key: "a".repeat(64),
+                profile_server_epoch: 1,
+                thread_id: Some("original".to_owned()),
+                lifecycle: crate::domain::RunLifecycle::Idle,
+                active_turn_id: None,
+                pending_interaction_count: 0,
+                last_event_cursor: None,
+            };
+            let mut writer = crate::writer::WriterRecord::empty(&expected.workspace_id);
+            writer.state = crate::writer::WriterAuthorityState::Reserved;
+            writer.transaction_id = Some(operation);
+            writer.writer_generation = 1;
+            writer.authority_revision = 1;
+            writer.holder = Some(holder.clone());
+            writer.generation_release = Some(crate::writer::GenerationRelease {
+                purpose: crate::writer::GenerationRetirementPurpose::Acquire,
+                transaction_id: operation,
+                source: holder,
+                writer_generation: 1,
+                authority_revision: 1,
+                source_revision: head.sequence,
+                source_ledger_sha256: crate::jcs::sha256_hex(&serde_json::to_vec(&head).unwrap()),
+                source_runtime_sha256: "1".repeat(64),
+                registration_sha256: "2".repeat(64),
+                scope_sha256: None,
+                absence_sha256: None,
+                reader_proof_sha256: None,
+                retired_reader_sha256: None,
+                phase: crate::writer::GenerationReleasePhase::Prepared,
+                successor: None,
+            });
+            let command = SessionCommand::PrepareGenerationRetirement {
+                transaction_id: operation,
+                writer_revision: 1,
+                source_revision: head.sequence,
+            };
+            let records = ledger.durable_records().unwrap();
+            assert_eq!(
+                retirement_prepares_original_write(
+                    &command, &writer, &admission, controller, 1, records
+                )
+                .unwrap(),
+                write
+            );
+            if write {
+                let mut foreign = admission.clone();
+                foreign.request_sha256 = "f".repeat(64);
+                assert!(
+                    !retirement_prepares_original_write(
+                        &command, &writer, &foreign, controller, 1, records
+                    )
+                    .unwrap()
+                );
+                assert!(
+                    !retirement_prepares_original_write(
+                        &command,
+                        &writer,
+                        &admission,
+                        Uuid::now_v7(),
+                        1,
+                        records
+                    )
+                    .unwrap()
+                );
+                writer.generation_release.as_mut().unwrap().purpose =
+                    crate::writer::GenerationRetirementPurpose::Release;
+                assert!(
+                    !retirement_prepares_original_write(
+                        &command, &writer, &admission, controller, 1, records
+                    )
+                    .unwrap()
+                );
+                let owner = writer.generation_release.as_mut().unwrap();
+                owner.purpose = crate::writer::GenerationRetirementPurpose::Acquire;
+                owner.phase = crate::writer::GenerationReleasePhase::ReaderStarting;
+                owner.successor = Some(crate::writer::ReaderReservation {
+                    run_generation: source_generation + 1,
+                    server_epoch: 2,
+                    control_socket_epoch: 2,
+                    attempt_started: true,
+                });
+                ledger.append_required_payload(crate::audit::AuditKind::TurnIntent,
+                    &serde_json::json!({"operation_id":operation,"provisional_thread_id":"original"}), source_generation + 1).unwrap();
+                ledger
+                    .append_required_payload(
+                        crate::audit::AuditKind::ThreadBound,
+                        &serde_json::json!({"operation_id":operation,"thread_id":"original"}),
+                        source_generation + 1,
+                    )
+                    .unwrap();
+                let verification = SessionCommand::VerifyCallerPolicy {
+                    operation_id: operation,
+                };
+                assert!(
+                    retirement_prepares_original_write(
+                        &verification,
+                        &writer,
+                        &admission,
+                        controller,
+                        1,
+                        ledger.durable_records().unwrap()
+                    )
+                    .unwrap()
+                );
+            }
             validate_mutation_admission(&ledger, admission.admission_id, controller, &turn)
                 .unwrap();
             complete_mutation_admission(&mut ledger, admission.admission_id).unwrap();
+            if write {
+                assert!(
+                    retirement_prepares_original_write(
+                        &SessionCommand::VerifyCallerPolicy {
+                            operation_id: operation
+                        },
+                        &writer,
+                        &admission,
+                        controller,
+                        1,
+                        ledger.durable_records().unwrap(),
+                    )
+                    .is_err()
+                );
+            }
+
             assert_eq!(
                 validate_mutation_admission(&ledger, admission.admission_id, controller, &proof)
                     .unwrap_err()
@@ -12862,6 +15821,32 @@ mod tests {
 
     #[test]
     fn held_startup_range_rejects_path_mismatch_and_releases_after_spawn_failure() {
+        const NAME: &str = "worker::tests::held_startup_range_rejects_path_mismatch_and_releases_after_spawn_failure";
+        const ABSENCE_PID: &str = "DOLGORAE_TEST_FAILED_START_ABSENCE_PID";
+        if let Ok(pid) = std::env::var(ABSENCE_PID) {
+            let pid: u32 = pid.parse().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut empty = 0;
+            while empty < 5 {
+                let global = DarwinSystem.all_process_identities().unwrap();
+                let group = DarwinSystem.process_group_pids(pid).unwrap();
+                let absent = matches!(DarwinSystem.bsd_process_identity(pid), Err(error) if error.raw_os_error() == Some(libc::ESRCH));
+                if absent && group.is_empty() && !global.iter().any(|p| p.pid == pid) {
+                    empty += 1;
+                } else {
+                    empty = 0;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "failed-start Child was not reaped"
+                );
+                if empty < 5 {
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            return;
+        }
+
         let state_root =
             std::env::temp_dir().join(format!("dolgorae-held-startup-{}", Uuid::now_v7()));
         fs::create_dir(&state_root).unwrap();
@@ -12949,6 +15934,114 @@ mod tests {
         let contender = StartupLockFile::open(&expected_lock_path, uid).unwrap();
         contender.hold_startup_range(Duration::ZERO).unwrap();
         contender.release_startup_range().unwrap();
+        fs::create_dir_all(&bootstrap.ledger_root).unwrap();
+        let log = bootstrap.ledger_root.join("dedicated-server-1.log");
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(log)
+            .unwrap();
+        let mut bound_identity = owner.identity.clone();
+        bound_identity.executable_sha256 = bootstrap.executable_sha256.clone();
+        let bound = WorkerRuntimeRecord {
+            schema_version: 1,
+            identity: bound_identity,
+            socket_path: worker_socket_path(uid, &bootstrap.workspace_id, run_id).unwrap(),
+            socket_identity: SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            control_socket_epoch: 1,
+            app_server_epoch: None,
+            control_recovery_required: false,
+            startup_scope: None,
+            dedicated_server_identity: None,
+            dolgorae_version: bootstrap.dolgorae_version.clone(),
+            mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+            binary_sha256: bootstrap.executable_sha256.clone(),
+        };
+        struct ExitMarker(PathBuf);
+        impl Drop for ExitMarker {
+            fn drop(&mut self) {
+                let _ = fs::write(&self.0, b"exit");
+            }
+        }
+        for after_ready in [false, true] {
+            let pid_path = state_root.join(format!("failed-child-{after_ready}.pid"));
+            let frame_path = state_root.join(format!("failed-child-{after_ready}.frames"));
+            let script = state_root.join(format!("failed-child-{after_ready}.sh"));
+            let exit = ExitMarker(state_root.join(format!("failed-child-{after_ready}.exit")));
+            let mut frames = Vec::new();
+            if after_ready {
+                serde_json::to_writer(
+                    &mut frames,
+                    &StartupHandoff::Bound {
+                        record: bound.clone(),
+                    },
+                )
+                .unwrap();
+                frames.push(b'\n');
+                let mut invalid_ready = bound.clone();
+                invalid_ready.socket_identity.inode += 1;
+                serde_json::to_writer(
+                    &mut frames,
+                    &StartupHandoff::Ready {
+                        record: invalid_ready,
+                    },
+                )
+                .unwrap();
+                frames.push(b'\n');
+            }
+            fs::write(&frame_path, frames).unwrap();
+            fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\n/bin/cat '{}' >&3\n{}while [ ! -f '{}' ]; do /bin/sleep 0.01; done\n",
+                    pid_path.display(),
+                    frame_path.display(),
+                    if after_ready { "" } else { "exec 3>&-\n" },
+                    exit.0.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+            let lock = StartupLockFile::open(&expected_lock_path, uid).unwrap();
+            lock.hold_startup_range(Duration::ZERO).unwrap();
+            lock.write_owner(&owner).unwrap();
+            let result = spawn_hidden_worker_inner(&script, &bootstrap_path, lock);
+            if after_ready {
+                assert!(
+                    matches!(result, Err(WorkerProtocolError::ProtocolMismatch { .. })),
+                    "actual failed-start error: {:?}",
+                    result.as_ref().err()
+                );
+            } else {
+                assert!(matches!(result, Err(WorkerProtocolError::MalformedFrame)));
+            }
+            // Handoff EOF/validation must return while the actual Child is
+            // still held by its exit marker. Only then allow its real exit.
+            fs::write(&exit.0, b"exit").unwrap();
+            let pid: u32 = fs::read_to_string(&pid_path)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            // A different process verifies complete kernel/group/global absence.
+            // The actual parent blocks without any Child/reaper observer call.
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--test-threads=1"])
+                .env(ABSENCE_PID, pid.to_string())
+                .stdin(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success());
+            assert!(!owned_worker_children().lock().unwrap().contains_key(&pid));
+            let contender = StartupLockFile::open(&expected_lock_path, uid).unwrap();
+            assert!(contender.read_owner(0).unwrap().is_none());
+            contender.hold_startup_range(Duration::ZERO).unwrap();
+            contender.release_startup_range().unwrap();
+        }
         fs::remove_dir_all(state_root).unwrap();
     }
 
@@ -13310,6 +16403,7 @@ mod tests {
             birth: Some((2, 0)),
             zombie: false,
         };
+        let before_window = Instant::now();
         let mut wait = StartupWorkload::new(
             Duration::from_secs(900),
             PathBuf::from("/unused"),
@@ -13319,7 +16413,20 @@ mod tests {
             },
             server.uid,
         );
-        assert!(wait.deadline.duration_since(Instant::now()) <= Duration::from_secs(10));
+        assert!(wait.deadline >= before_window + Duration::from_secs(30));
+        assert!(wait.deadline <= Instant::now() + Duration::from_secs(30));
+        let before_short = Instant::now();
+        let short = StartupWorkload::new(
+            Duration::from_secs(1),
+            PathBuf::from("/unused"),
+            SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            server.uid,
+        );
+        assert!(short.deadline >= before_short + Duration::from_secs(1));
+        assert!(short.deadline <= Instant::now() + Duration::from_secs(1));
         wait.observe(&child, &server, &mut None).unwrap();
         for (changed, mismatch) in [
             (crate::darwin::ProcessCensusEntry { uid: 0, ..child }, "uid"),
@@ -14268,6 +17375,82 @@ mod tests {
                 Err(WorkerProtocolError::InvalidIdentity)
             );
             assert_eq!(details["predicate"], "startup_quiescence_timeout");
+            let observation = &details["observation"];
+            assert_eq!(observation["site"], "before_sample");
+            assert_eq!(observation["sampled_count"], 0);
+            assert_eq!(observation["consecutive_empty_samples"], 0);
+            assert!(observation["deadline_overrun_ms"].is_u64());
+            assert_eq!(observation["proof_entry_remaining_ms"], 0);
+            assert_eq!(observation["remaining_budget_at_sample_start_ms"], 0);
+            assert!(observation["sample_elapsed_ms"].is_null());
+            assert_eq!(observation["retained_child_count"], startup.children.len());
+            assert!(
+                observation["retained_child_sample"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+                    <= 4
+            );
+            assert!(observation["last_sample"].is_null());
+            let runtime_path = root.join("context-runtime.json");
+            let mut context_record = record.clone();
+            context_record.schema_version = 2;
+            let mut witness = StartupScopeWitness::pending(record.identity.clone(), 1);
+            witness.dedicated_server_identity = record.dedicated_server_identity.clone();
+            witness.app_server_socket_identity = Some(startup.socket_identity.clone());
+            witness.complete = false;
+            context_record.startup_scope = Some(witness);
+            write_runtime_record(&runtime_path, &context_record).unwrap();
+            let mut expired = StartupWorkload::new(
+                Duration::ZERO,
+                socket_path.clone(),
+                startup.socket_identity.clone(),
+                record.identity.uid,
+            );
+            expired.deadline = startup.deadline;
+            let commit = QualifiedCallerRuntime {
+                runtime: context_record.clone(),
+                runtime_path: runtime_path.clone(),
+                socket_path: socket_path.clone(),
+                socket_identity: startup.socket_identity.clone(),
+                server_key: "test".to_owned(),
+                binding_sha256: "1".repeat(64),
+                startup_deadline: expired.deadline,
+                startup: None,
+            };
+            let before_commit = fs::read(&runtime_path).unwrap();
+            let mut commit_details = Value::Null;
+            assert_eq!(
+                commit.complete_startup_witness(Some(&mut commit_details)),
+                Err(WorkerProtocolError::InvalidIdentity)
+            );
+            assert_eq!(commit_details["predicate"], "startup_commit_timeout");
+            assert_eq!(commit_details["observation"]["site"], "before_final_proof");
+            assert_eq!(
+                commit_details["observation"]["remaining_budget_before_final_proof_ms"],
+                0
+            );
+            assert!(commit_details["observation"]["final_proof_elapsed_ms"].is_null());
+            assert!(commit_details["observation"]["deadline_overrun_ms"].is_u64());
+            assert_eq!(fs::read(&runtime_path).unwrap(), before_commit);
+            assert!(
+                !read_runtime_record(&runtime_path, record.identity.uid)
+                    .unwrap()
+                    .startup_scope
+                    .unwrap()
+                    .complete
+            );
+            crate::turn::tests::assert_startup_process_context(QualifiedCallerRuntime {
+                runtime: context_record,
+                runtime_path,
+                socket_path: socket_path.clone(),
+                socket_identity: startup.socket_identity.clone(),
+                server_key: "test".to_owned(),
+                binding_sha256: "1".repeat(64),
+                startup_deadline: expired.deadline,
+                startup: Some(expired),
+            });
+
             assert!(prove_worker_workload_absent(&record).is_ok());
             startup.deadline = Instant::now() + Duration::from_secs(1);
             fs::remove_file(&socket_path).unwrap();
@@ -14795,6 +17978,7 @@ mod tests {
             sandbox: "read-only".to_owned(),
             approval_policy: "never".to_owned(),
             safety_policy: SessionSafetyPolicy::ReviewerReadOnly,
+            generation_reader: None,
             artifact_root: PathBuf::from("/tmp/artifacts"),
             attach: SessionAttach::Start,
             eager_thread_operation_id: None,
@@ -14853,7 +18037,6 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(error, WorkerProtocolError::LedgerReplay);
-        assert!(!root.join("dedicated.log").exists());
         drop(ledger);
         fs::remove_dir_all(root).unwrap();
     }
@@ -14893,7 +18076,9 @@ mod tests {
             } else {
                 history
             };
-            let root = std::env::temp_dir().join(format!("drd-{}", Uuid::now_v7().simple()));
+            let root = fs::canonicalize("/tmp")
+                .unwrap()
+                .join(format!("drd-{}", Uuid::now_v7().simple()));
             fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
             let scenario = root.join("scenario.json");
             let manifest = scene.manifest();
@@ -15025,6 +18210,13 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
         }
 
         fn connect(&mut self, scene: &crate::semantic::successor_review_tests::Scene) {
+            self.try_connect(scene).unwrap();
+        }
+
+        fn try_connect(
+            &mut self,
+            scene: &crate::semantic::successor_review_tests::Scene,
+        ) -> Result<(), WorkerProtocolError> {
             let ledger = Arc::new(Mutex::new(
                 Ledger::open(
                     crate::run::run_root(scene.state_root(), self.identity.run_id),
@@ -15043,17 +18235,24 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
                 self.identity.uid,
                 scene.state_root(),
                 &self.identity.workspace_id,
-            )
-            .unwrap();
+            )?;
             self.coordinator = session.coordinator.lock().unwrap().take();
             self.session = Some(session);
+            Ok(())
         }
 
         fn restart(&mut self, scene: &crate::semantic::successor_review_tests::Scene) {
+            self.try_restart(scene).unwrap();
+        }
+
+        fn try_restart(
+            &mut self,
+            scene: &crate::semantic::successor_review_tests::Scene,
+        ) -> Result<(), WorkerProtocolError> {
             self.coordinator.take();
             self.session.take();
             self.identity.run_generation += 1;
-            self.connect(scene);
+            self.try_connect(scene)
         }
 
         fn lose_transport(&mut self) {
@@ -15890,6 +19089,506 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
                 assert!(
                     record.client_projection().is_some(),
                     "recovered Paused must retain its append-time client stamp"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn administrative_member_recovery_joins_original_owners_and_history_only() {
+        for managed in [false, true] {
+            for historical in [false, true] {
+                let mut scene = if historical {
+                    crate::semantic::successor_review_tests::Scene::historical(managed)
+                } else {
+                    crate::semantic::successor_review_tests::Scene::new(managed)
+                };
+                let admin = scene.administrative_fixture();
+                scene.prepare_worker_ledger();
+                let (task, reader) = scene.assign("administrative-original", "head", None);
+                let mut fixture = ReviewDispatchFixture::with_history(
+                    &scene,
+                    recovery_history(
+                        vec![review_agent_item("unverified original history")],
+                        "completed",
+                        Some("full"),
+                    ),
+                );
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "administrative-original"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                fixture.publish_retained_profile(&scene);
+                fixture.coordinator.take();
+                fixture.session.take();
+                prepare_runtime_root(
+                    &runtime_root(scene.state_root()),
+                    DarwinSystem.current_uid(),
+                )
+                .unwrap();
+                let (runtime, _) = crate::semantic::release_fixture::write_absent_worker_locator(
+                    scene.state_root(),
+                    &scene.manifest().workspace_id,
+                    scene.manifest().run_id,
+                );
+                let runtime_bytes = fs::read(&runtime).unwrap();
+                let reader_root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(reader.review_id().to_string());
+                fs::rename(&reader_root, reader_root.with_extension("saved")).unwrap();
+                let original = scene.stability_facts();
+                scene.observe(task.task_ref, false).unwrap();
+                assert!(scene.observe(task.task_ref, true).is_err());
+                assert_eq!(
+                    scene.stability_facts(),
+                    original,
+                    "getters must not recover"
+                );
+                for (scope, member, task_ref) in [
+                    (Uuid::now_v7(), scene.manifest().run_id, task.task_ref),
+                    (scene.owner().scope_ref(), Uuid::now_v7(), task.task_ref),
+                    (
+                        scene.owner().scope_ref(),
+                        scene.manifest().run_id,
+                        Uuid::now_v7(),
+                    ),
+                ] {
+                    assert!(admin.recover(scope, member, task_ref).is_err());
+                    assert_eq!(scene.stability_facts(), original);
+                }
+                admin
+                    .recover(
+                        scene.owner().scope_ref(),
+                        scene.manifest().run_id,
+                        task.task_ref,
+                    )
+                    .unwrap();
+                assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                assert_eq!(
+                    scene.result(task.task_ref)["schema"],
+                    "dolgorae.complete-result-unavailable/v1"
+                );
+                assert!(!reader_root.exists());
+                assert_eq!(fs::read(&runtime).unwrap(), runtime_bytes);
+                let stable = scene.stability_facts();
+                assert_eq!(
+                    scene.observe(task.task_ref, false).unwrap_err().code,
+                    "COMPLETE_RESULT_UNAVAILABLE"
+                );
+                assert_eq!(
+                    scene.observe(task.task_ref, true).unwrap_err().code,
+                    "COMPLETE_RESULT_UNAVAILABLE"
+                );
+                assert_eq!(
+                    scene.stability_facts(),
+                    stable,
+                    "lost recovery reply uses observation"
+                );
+                admin
+                    .recover(
+                        scene.owner().scope_ref(),
+                        scene.manifest().run_id,
+                        task.task_ref,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    scene.stability_facts(),
+                    stable,
+                    "explicit replay must not duplicate settlement"
+                );
+                let requests = fixture.requests();
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r["method"] == "turn/start")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r["method"] == "thread/start")
+                        .count(),
+                    1
+                );
+                assert!(!requests.iter().any(|r| r["method"] == "thread/resume"));
+                let ledger = Ledger::open(
+                    crate::run::run_root(scene.state_root(), scene.manifest().run_id),
+                    scene.manifest().run_id,
+                )
+                .unwrap();
+                let records = ledger.durable_records().unwrap();
+                assert_eq!(
+                    records
+                        .iter()
+                        .filter(|r| r.kind() == crate::audit::AuditKind::Reconciliation)
+                        .count(),
+                    1
+                );
+                crate::conformance::verify_ledger_records(scene.manifest().run_id, records)
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn administrative_member_recovery_preserves_read_and_write_results() {
+        struct ColdWorker(Option<StartedWorker>);
+        impl Drop for ColdWorker {
+            fn drop(&mut self) {
+                if let Some(mut worker) = self.0.take() {
+                    let state = PathBuf::from(&worker.record.socket_path);
+                    let response = control_call(
+                        &worker.record.socket_path,
+                        &ControlRequestV1::Shutdown {
+                            expected: worker.record.identity.clone(),
+                        },
+                    );
+                    assert!(
+                        matches!(response, ControlResponseV1::Shutdown { .. }),
+                        "owned worker shutdown {state:?}: {response:?}"
+                    );
+                    assert!(worker.child.wait().unwrap().success());
+                }
+            }
+        }
+        let mut failures = Vec::new();
+        for managed in [false, true] {
+            for write in [false, true] {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut scene = if write {
+                        crate::semantic::successor_review_tests::Scene::writable(managed)
+                    } else {
+                        crate::semantic::successor_review_tests::Scene::new(managed)
+                    };
+                    let admin = scene.administrative_fixture();
+                    scene.prepare_worker_ledger();
+                    let task = scene.accept_administrative_task("original-read-write", write);
+                    if write {
+                        scene.record_running_execution(&task, "original-read-write", true);
+                    }
+                    let text = "the retained original answer";
+                    let mut fixture = ReviewDispatchFixture::with_history(
+                        &scene,
+                        recovery_history(vec![review_agent_item(text)], "completed", Some("full")),
+                    );
+                    if write {
+                        fixture.identity.run_generation = 2;
+                    } else {
+                        assert!(matches!(
+                            fixture.dispatch(&scene, &task, "original-read-write"),
+                            ControlResponseV1::Accepted { .. }
+                        ));
+                        scene.mark_running(task.task_ref, "turn-1");
+                        fixture.lose_transport();
+                    }
+                    let mut worker = ColdWorker(None);
+                    if let Some(binary) = std::env::var_os("DOLGORAE_MEMBER_RECOVERY_TEST_BINARY") {
+                        fixture.coordinator.take();
+                        fixture.session.take();
+                        let binary = PathBuf::from(binary);
+                        let runtime = runtime_root(scene.state_root());
+                        prepare_runtime_root(&runtime, DarwinSystem.current_uid()).unwrap();
+                        let run_id = scene.manifest().run_id;
+                        assert!(
+                            fixture.bootstrap.dedicated_server.is_none(),
+                            "the cold fixture must never launch a native host"
+                        );
+                        let bootstrap = WorkerBootstrap {
+                            schema_version: 1,
+                            workspace_id: scene.manifest().workspace_id.clone(),
+                            run_id,
+                            run_generation: 2,
+                            boot_uuid: boot_session_uuid(DarwinSystem.current_uid()).unwrap(),
+                            executable_sha256: file_sha256(&binary).unwrap(),
+                            executable_path_sha256: HEXLOWER.encode(
+                                Sha256::digest(binary.as_os_str().as_encoded_bytes()).as_slice(),
+                            ),
+                            dolgorae_version: env!("CARGO_PKG_VERSION").into(),
+                            mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+                            control_socket_epoch: 2,
+                            profile: scene.manifest().profile.profile_name.clone(),
+                            state_root: scene.state_root().into(),
+                            ledger_root: crate::run::run_root(scene.state_root(), run_id),
+                            runtime_record_path: runtime_record_path(&runtime, run_id).unwrap(),
+                            startup_lock_path: startup_lock_path(&runtime, run_id),
+                            session: Some(fixture.bootstrap.clone()),
+                        };
+                        let path = bootstrap_path(&runtime, run_id);
+                        write_worker_bootstrap(&path, &bootstrap, DarwinSystem.current_uid())
+                            .unwrap();
+                        let lock = StartupLockFile::open(
+                            &bootstrap.startup_lock_path,
+                            DarwinSystem.current_uid(),
+                        )
+                        .unwrap();
+                        lock.hold_startup_range(Duration::from_secs(1)).unwrap();
+                        lock.write_owner(
+                            &current_startup_owner(&bootstrap.workspace_id, run_id, 2).unwrap(),
+                        )
+                        .unwrap();
+                        let mut command = Command::new(&binary);
+                        command
+                            .arg("__worker")
+                            .arg("--bootstrap")
+                            .arg(&path)
+                            .env("HOME", admin.home.root().parent().unwrap())
+                            .env_remove("CODEX_HOME");
+                        let (mut child, startup) =
+                            DarwinSystem.spawn_detached_with_fd3(&mut command).unwrap();
+                        let bound = read_bound_handoff(startup);
+                        lock.release_startup_range().unwrap();
+                        let result = bound.and_then(|(mut reader, bound)| {
+                            let ready = read_ready_handoff(&mut reader)?;
+                            assert_eq!(bound.identity, ready.identity);
+                            assert_eq!(ready.identity.pid, child.id());
+                            assert_eq!(
+                                ready.identity.executable_sha256,
+                                bootstrap.executable_sha256
+                            );
+                            Ok(ready)
+                        });
+                        match result {
+                            Ok(record) => worker.0 = Some(StartedWorker { child, record }),
+                            Err(error) => {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                panic!("scripted cold Dolgorae worker failed: {error:?}");
+                            }
+                        }
+                    } else {
+                        if !write {
+                            fixture.restart(&scene);
+                        }
+                        assert!(matches!(
+                            fixture.reconcile(&scene),
+                            ControlResponseV1::Status { .. }
+                        ));
+                    }
+                    let outcome = admin.recover(
+                        scene.owner().scope_ref(),
+                        scene.manifest().run_id,
+                        task.task_ref,
+                    );
+                    if outcome.is_err() {
+                        if let Some(w) = worker.0.as_ref() {
+                            let mut stream = UnixStream::connect(&w.record.socket_path).unwrap();
+                            write_frame(
+                                &mut stream,
+                                &ControlRequestV1::Status {
+                                    expected: w.record.identity.clone(),
+                                },
+                            )
+                            .unwrap();
+                            let value: serde_json::Value =
+                                read_frame(&mut BufReader::new(stream)).unwrap();
+                            eprintln!(
+                                "post-failure task={}, status serde error={:?}, terminal keys={:?}",
+                                scene.state(task.task_ref),
+                                serde_json::from_value::<ControlResponseV1>(value.clone()).err(),
+                                value["last_terminal"]
+                                    .as_object()
+                                    .map(|v| v.keys().collect::<Vec<_>>())
+                            );
+                        }
+                        eprintln!(
+                            "recovery managed={managed} write={write}, methods={:?}, worker_exit={:?}",
+                            fixture
+                                .requests()
+                                .iter()
+                                .map(|r| r["method"].clone())
+                                .collect::<Vec<_>>(),
+                            worker.0.as_mut().map(|w| w.child.try_wait().unwrap())
+                        );
+                    }
+                    outcome.unwrap();
+                    assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                    let result = scene.result(task.task_ref);
+                    if write {
+                        assert_eq!(result["schema"], "dolgorae.complete-result-unavailable/v1");
+                        assert_eq!(
+                            scene.observe(task.task_ref, false).unwrap_err().code,
+                            "COMPLETE_RESULT_UNAVAILABLE"
+                        );
+                        assert_eq!(
+                            scene.observe(task.task_ref, true).unwrap_err().code,
+                            "COMPLETE_RESULT_UNAVAILABLE"
+                        );
+                    } else {
+                        assert_eq!(result["terminal_outcome"], "completed");
+                        assert_eq!(
+                            result["final_response"]["sha256"],
+                            format!("sha256:{}", crate::jcs::sha256_hex(text.as_bytes()))
+                        );
+                        scene.observe(task.task_ref, false).unwrap();
+                        let _ = scene.observe(task.task_ref, true);
+                    }
+                    let stable = scene.stability_facts();
+                    let _ = scene.observe(task.task_ref, false);
+                    let _ = scene.observe(task.task_ref, true);
+                    assert_eq!(scene.stability_facts(), stable);
+                    assert_eq!(scene.result(task.task_ref), result);
+                    let requests = fixture.requests();
+                    assert_eq!(
+                        requests
+                            .iter()
+                            .filter(|r| r["method"] == "turn/start")
+                            .count(),
+                        usize::from(!write)
+                    );
+                    assert_eq!(
+                        requests
+                            .iter()
+                            .filter(|r| r["method"] == "thread/start")
+                            .count(),
+                        usize::from(!write)
+                    );
+                    assert!(
+                        !requests
+                            .iter()
+                            .any(|r| matches!(r["method"].as_str(), Some("thread/fork")))
+                    );
+                }));
+                if outcome.is_err() {
+                    failures.push((managed, write));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "cold owner/result cases failed (managed,write): {failures:?}"
+        );
+    }
+
+    #[test]
+    fn administrative_member_recovery_refuses_bad_history_and_resumes_publication_cuts() {
+        for managed in [false, true] {
+            for case in 0..9 {
+                let mut scene = crate::semantic::successor_review_tests::Scene::new(managed);
+                let admin = scene.administrative_fixture();
+                scene.prepare_worker_ledger();
+                let (task, reader) = scene.assign("administrative-cut", "head", None);
+                let mut history = recovery_history(
+                    vec![review_agent_item("retained")],
+                    "completed",
+                    Some("full"),
+                );
+                match case {
+                    0 => history["result"]["thread"]["id"] = serde_json::json!("foreign"),
+                    1 => {
+                        let turn = history["result"]["thread"]["turns"][0].clone();
+                        history["result"]["thread"]["turns"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(turn);
+                    }
+                    2 => {
+                        history["result"]["thread"]["turns"][0]["itemsView"] =
+                            serde_json::json!("partial")
+                    }
+                    3 => {
+                        history["result"]["thread"]["turns"][0]["status"] =
+                            serde_json::json!("inProgress")
+                    }
+                    _ => {}
+                }
+                let mut fixture = ReviewDispatchFixture::with_history(&scene, history);
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "administrative-cut"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                let profile = fixture.publish_retained_profile(&scene);
+                fixture.coordinator.take();
+                fixture.session.take();
+                prepare_runtime_root(
+                    &runtime_root(scene.state_root()),
+                    DarwinSystem.current_uid(),
+                )
+                .unwrap();
+                crate::semantic::release_fixture::write_absent_worker_locator(
+                    scene.state_root(),
+                    &scene.manifest().workspace_id,
+                    scene.manifest().run_id,
+                );
+                let reader_root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(reader.review_id().to_string());
+                fs::rename(&reader_root, reader_root.with_extension("saved")).unwrap();
+                let original_profile = fs::read(&profile).unwrap();
+                if case == 4 {
+                    let mut state: serde_json::Value =
+                        serde_json::from_slice(&original_profile).unwrap();
+                    state["server_epoch"] = serde_json::json!(999);
+                    fs::write(&profile, serde_json::to_vec(&state).unwrap()).unwrap();
+                }
+                if case == 5 {
+                    fs::write(&profile, b"corrupt retained server state").unwrap();
+                }
+                let before = scene.stability_facts();
+                let barrier = match case {
+                    6 => Some("after_reconciliation"),
+                    7 => Some("after_pause"),
+                    8 => Some("after_settlement"),
+                    _ => None,
+                };
+                let failure = barrier.map(crate::semantic::RecoveryTestFailure::at);
+                let result = admin.recover(
+                    scene.owner().scope_ref(),
+                    scene.manifest().run_id,
+                    task.task_ref,
+                );
+                if case == 2 {
+                    assert!(result.is_ok(), "{result:?}");
+                    assert_eq!(
+                        scene.result(task.task_ref)["schema"],
+                        "dolgorae.complete-result-unavailable/v1"
+                    );
+                    assert_eq!(
+                        scene.observe(task.task_ref, true).unwrap_err().code,
+                        "COMPLETE_RESULT_UNAVAILABLE"
+                    );
+                } else {
+                    assert!(result.is_err(), "case {case}: {result:?}");
+                }
+                if case < 6 && case != 2 {
+                    assert_eq!(scene.stability_facts().0, before.0);
+                    assert_eq!(scene.state(task.task_ref), "running");
+                }
+                drop(failure);
+                if case >= 4 {
+                    fs::write(&profile, original_profile).unwrap();
+                    admin
+                        .recover(
+                            scene.owner().scope_ref(),
+                            scene.manifest().run_id,
+                            task.task_ref,
+                        )
+                        .unwrap();
+                    assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                    assert_eq!(
+                        scene.result(task.task_ref)["schema"],
+                        "dolgorae.complete-result-unavailable/v1"
+                    );
+                }
+                assert!(!reader_root.exists());
+                let requests = fixture.requests();
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r["method"] == "turn/start")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r["method"] == "thread/start")
+                        .count(),
+                    1
                 );
             }
         }
@@ -18065,90 +21764,110 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
 
     #[test]
     fn lost_checked_review_restores_the_original_receipt_after_a_paused_restart() {
-        for managed in [false, true] {
-            let scene = crate::semantic::successor_review_tests::Scene::new(managed);
-            scene.prepare_worker_ledger();
-            let (task, reader) = scene.assign("lost-checked", "head", None);
-            let receipt = scene.evidence(&reader, "turn-1");
-            let verdict = crate::semantic::successor_review_tests::verdict(&receipt);
-            let arguments = serde_json::json!({"side":receipt["side"],"path":"README.md","byte_offset":0,"byte_length":9});
-            let response = reader
-                .read(
-                    "thread-1",
-                    "turn-1",
-                    "read",
-                    &serde_json::from_value(arguments.clone()).unwrap(),
-                )
-                .unwrap();
-            let item = serde_json::json!({"type":"dynamicToolCall","tool":"dolgorae_candidate_read","id":"read","status":"completed",
+        for historical in [false, true] {
+            for managed in [false, true] {
+                let scene = if historical {
+                    crate::semantic::successor_review_tests::Scene::historical(managed)
+                } else {
+                    crate::semantic::successor_review_tests::Scene::new(managed)
+                };
+                let manifest_path =
+                    crate::run::run_root(scene.state_root(), scene.manifest().run_id)
+                        .join("manifest.json");
+                let manifest_before = fs::read(&manifest_path).unwrap();
+                scene.prepare_worker_ledger();
+                let (task, reader) = scene.assign("lost-checked", "head", None);
+                let receipt = scene.evidence(&reader, "turn-1");
+                let verdict = crate::semantic::successor_review_tests::verdict(&receipt);
+                let arguments = serde_json::json!({"side":receipt["side"],"path":"README.md","byte_offset":0,"byte_length":9});
+                let response = reader
+                    .read(
+                        "thread-1",
+                        "turn-1",
+                        "read",
+                        &serde_json::from_value(arguments.clone()).unwrap(),
+                    )
+                    .unwrap();
+                let item = serde_json::json!({"type":"dynamicToolCall","tool":"dolgorae_candidate_read","id":"read","status":"completed",
                 "arguments":arguments,"success":true,"contentItems":[{"type":"inputText","text":response.to_string()}]});
-            let items = vec![item.clone(), review_agent_item(&verdict.to_string())];
-            let mut fixture = ReviewDispatchFixture::new(&scene, items);
-            assert!(matches!(
-                fixture.dispatch(&scene, &task, "lost-checked"),
-                ControlResponseV1::Accepted { .. }
-            ));
-            scene.mark_running(task.task_ref, "turn-1");
-            let root = scene
-                .state_root()
-                .join("direct-reviews")
-                .join(task.task_ref.to_string());
-            let path = fs::read_dir(root.join("reads"))
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path();
-            let bytes = fs::read(&path).unwrap();
-            fs::remove_file(&path).unwrap();
-            assert!(matches!(
-                fixture
-                    .coordinator
-                    .as_mut()
+                let items = vec![item.clone(), review_agent_item(&verdict.to_string())];
+                let mut fixture = ReviewDispatchFixture::new(&scene, items);
+                assert!(matches!(
+                    fixture.dispatch(&scene, &task, "lost-checked"),
+                    ControlResponseV1::Accepted { .. }
+                ));
+                scene.mark_running(task.task_ref, "turn-1");
+                let root = scene
+                    .state_root()
+                    .join("direct-reviews")
+                    .join(task.task_ref.to_string());
+                let path = fs::read_dir(root.join("reads"))
                     .unwrap()
-                    .ingest(serde_json::json!({"method":"item/completed",
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                let bytes = fs::read(&path).unwrap();
+                fs::remove_file(&path).unwrap();
+                assert!(matches!(
+                    fixture
+                        .coordinator
+                        .as_mut()
+                        .unwrap()
+                        .ingest(serde_json::json!({"method":"item/completed",
                 "params":{"threadId":"thread-1","turnId":"turn-1","item":item}})),
-                Err(TurnError::CorrelationMismatch)
-            ));
-            assert_eq!(
-                fixture.coordinator.as_ref().unwrap().state(),
-                &CoordinatorState::OutcomeUnknown
-            );
-            fixture.restart(&scene);
-            assert!(matches!(
-                fixture.reconcile(&scene),
-                ControlResponseV1::Failed { .. }
-            ));
-            assert_eq!(scene.state(task.task_ref), "running");
-            assert!(!root.join("provenance-violation.json").exists());
-            assert_converged_journal(&fixture, 1, 1);
-            fs::write(&path, &bytes).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-            fixture.restart(&scene);
-            assert_eq!(scene.state(task.task_ref), "running");
-            let response = fixture.reconcile(&scene);
-            assert!(
-                matches!(response, ControlResponseV1::Status { .. }),
-                "{response:?}"
-            );
-            assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
-            assert_eq!(
-                scene.result(task.task_ref)["structured_output_schema"],
-                "structured_review_v4"
-            );
-            assert_converged_journal(&fixture, 1, 1);
-            assert_eq!(
-                fixture
-                    .requests()
-                    .iter()
-                    .filter(|r| r["method"] == "turn/start")
-                    .count(),
-                1
-            );
-            assert_eq!(fs::read(path).unwrap(), bytes);
-            let stable = scene.stability_facts();
-            scene.settle(task.task_ref).unwrap();
-            assert_eq!(scene.stability_facts(), stable);
+                    Err(TurnError::CorrelationMismatch)
+                ));
+                assert_eq!(
+                    fixture.coordinator.as_ref().unwrap().state(),
+                    &CoordinatorState::OutcomeUnknown
+                );
+                let restarted = fixture.try_restart(&scene);
+                assert!(
+                    restarted.is_ok(),
+                    "original accepted reader recovery refused: historical={historical}, managed={managed}, {restarted:?}"
+                );
+                assert!(matches!(
+                    fixture.reconcile(&scene),
+                    ControlResponseV1::Failed { .. }
+                ));
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert!(!root.join("provenance-violation.json").exists());
+                assert_converged_journal(&fixture, 1, 1);
+                fs::write(&path, &bytes).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                let restarted = fixture.try_restart(&scene);
+                assert!(
+                    restarted.is_ok(),
+                    "original accepted reader recovery refused after receipt restoration: historical={historical}, managed={managed}, {restarted:?}"
+                );
+                assert_eq!(scene.state(task.task_ref), "running");
+                let response = fixture.reconcile(&scene);
+                assert!(
+                    matches!(response, ControlResponseV1::Status { .. }),
+                    "{response:?}"
+                );
+                assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                assert_eq!(
+                    scene.result(task.task_ref)["structured_output_schema"],
+                    "structured_review_v4"
+                );
+                assert_converged_journal(&fixture, 1, 1);
+                assert_eq!(
+                    fixture
+                        .requests()
+                        .iter()
+                        .filter(|r| r["method"] == "turn/start")
+                        .count(),
+                    1
+                );
+                assert_eq!(fs::read(path).unwrap(), bytes);
+                let stable = scene.stability_facts();
+                scene.settle(task.task_ref).unwrap();
+                assert_eq!(scene.stability_facts(), stable);
+                scene.observe(task.task_ref, false).unwrap();
+                assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+            }
         }
     }
 
@@ -18365,6 +22084,12 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
                     executable_sha256: "11".repeat(32),
                     server_epoch: session.server_epoch,
                 });
+                let original = crate::delegation_service::successor_restart_reader(
+                    scene.state_root(),
+                    manifest,
+                )
+                .err()
+                .unwrap();
                 let error = WorkerSession::connect(
                     &session,
                     RunFacts {
@@ -18380,7 +22105,25 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
                 .err()
                 .unwrap();
                 assert_eq!(error, WorkerProtocolError::LedgerReplay);
-                assert!(!scene.state_root().join("dedicated.log").exists());
+                let log: Value = serde_json::from_slice(
+                    &fs::read(scene.state_root().join("dedicated.log")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(log["phase"], "task_reader_preparation");
+                assert_eq!(log["error"], "LedgerReplay");
+                assert_eq!(log["details"]["cause_kind"], "MachineError");
+                assert_eq!(log["details"]["code"], original.code);
+                assert_eq!(
+                    log["details"]["reason"],
+                    original
+                        .details
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&original.message)
+                        .chars()
+                        .take(1024)
+                        .collect::<String>()
+                );
                 assert!(
                     fs::read(ledger_root.join("audit.jsonl"))
                         .unwrap()
@@ -20143,6 +23886,1125 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
                 "generation {refused}"
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generation_release_scope_stops_exact_owned_helpers_and_keeps_foreign_actor() {
+        const NAME: &str = "worker::tests::generation_release_scope_stops_exact_owned_helpers_and_keeps_foreign_actor";
+        const ROLE: &str = "DG_RELEASE_SCOPE_ROLE";
+        let role = std::env::var(ROLE).ok();
+        if role.as_deref() == Some("controller") {
+            let root = PathBuf::from(std::env::var_os("DG_RELEASE_SCOPE_ROOT").unwrap());
+            let scope: GenerationScope =
+                serde_json::from_slice(&fs::read(root.join("scope.json")).unwrap()).unwrap();
+            let parent: u32 = fs::read_to_string(root.join("parent.pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_ne!(std::process::id(), parent);
+            assert_eq!(
+                DarwinSystem
+                    .bsd_process_identity(scope.runtime.identity.pid)
+                    .unwrap()
+                    .parent_pid,
+                parent
+            );
+            assert_eq!(
+                observe_owned_worker_child(&scope.runtime.identity).unwrap(),
+                WorkerChildReap::NotOwned
+            );
+            let writer = crate::writer::WriterStore::new(
+                &root,
+                &scope.runtime.identity.workspace_id,
+                scope.runtime.identity.uid,
+            );
+            let stopped = stop_generation_scope(&root, &writer, scope, false).unwrap();
+            prove_retained_generation_absent(&stopped).unwrap();
+            fs::write(
+                root.join("controller-complete"),
+                b"five complete absent samples",
+            )
+            .unwrap();
+            return;
+        }
+        if role.as_deref() == Some("server") {
+            let root = PathBuf::from(std::env::var_os("DG_RELEASE_SCOPE_ROOT").unwrap());
+            let mut child = Command::new("/bin/sh");
+            child
+                .args(["-c", "trap '' TERM; exec /bin/sleep 30"])
+                .env(ROLE, "leaf")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let leaf = OwnedFake(Some(DarwinSystem.spawn_detached(&mut child).unwrap()));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let sleep = DarwinSystem.realpath(Path::new("/bin/sleep")).unwrap();
+            while DarwinSystem.live_process_path(leaf.id()).as_ref() != Some(&sleep) {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(10));
+            }
+            fs::write(root.join("leaf.pid"), leaf.id().to_string()).unwrap();
+            loop {
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let root = std::env::temp_dir().join(format!("dg-release-scope-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        struct OwnedFake(Option<std::process::Child>);
+        impl std::ops::Deref for OwnedFake {
+            type Target = std::process::Child;
+            fn deref(&self) -> &Self::Target {
+                self.0.as_ref().unwrap()
+            }
+        }
+        impl std::ops::DerefMut for OwnedFake {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                self.0.as_mut().unwrap()
+            }
+        }
+        impl OwnedFake {
+            fn into_inner(mut self) -> Child {
+                self.0.take().unwrap()
+            }
+        }
+        impl Drop for OwnedFake {
+            fn drop(&mut self) {
+                if let Some(child) = self.0.as_mut() {
+                    if child.try_wait().ok().flatten().is_none() {
+                        let _ = child.kill();
+                    }
+                    let _ = child.wait();
+                }
+            }
+        }
+        struct CachedChildGuard(crate::darwin::ProcessCensusEntry);
+        impl CachedChildGuard {
+            fn cleanup(&self) {
+                // The waiter remains the sole Child owner, even during failure
+                // cleanup. This birth-checked signal never consumes its status.
+                let _ = DarwinSystem.signal_exact_process(&self.0, libc::SIGKILL);
+            }
+        }
+        impl Drop for CachedChildGuard {
+            fn drop(&mut self) {
+                self.cleanup();
+            }
+        }
+        struct OwnedLeaf(Option<crate::darwin::ProcessCensusEntry>);
+        impl Drop for OwnedLeaf {
+            fn drop(&mut self) {
+                if let Some(identity) = &self.0 {
+                    let _ = DarwinSystem.signal_exact_process(identity, libc::SIGKILL);
+                }
+            }
+        }
+        let spawn_sleep = || {
+            let mut command = Command::new("/bin/sleep");
+            command
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            OwnedFake(Some(DarwinSystem.spawn_detached(&mut command).unwrap()))
+        };
+        let mut worker = spawn_sleep();
+        let mut foreign = spawn_sleep();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", NAME, "--test-threads=1"])
+            .env(ROLE, "server")
+            .env("DG_RELEASE_SCOPE_ROOT", &root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut server = OwnedFake(Some(DarwinSystem.spawn_detached(&mut command).unwrap()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.join("leaf.pid").exists() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        let leaf_pid: u32 = fs::read_to_string(root.join("leaf.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let _leaf_guard = OwnedLeaf(
+            DarwinSystem
+                .all_process_identities()
+                .unwrap()
+                .into_iter()
+                .find(|p| p.pid == leaf_pid),
+        );
+        let idle_parent = role.as_deref() == Some("idle-parent");
+        let worker_pid = if idle_parent {
+            server.id()
+        } else {
+            worker.id()
+        };
+        let dedicated_pid = if idle_parent { leaf_pid } else { server.id() };
+        let observed = DarwinSystem.bsd_process_identity(worker_pid).unwrap();
+        let executable = DarwinSystem.live_process_path(worker_pid).unwrap();
+        let metadata = fs::metadata(&executable).unwrap();
+        let identity = WorkerIdentity {
+            workspace_id: "1".repeat(64),
+            run_id: Uuid::now_v7(),
+            run_generation: 1,
+            boot_uuid: Uuid::parse_str(&DarwinSystem.boot_session_uuid().unwrap()).unwrap(),
+            pid: observed.pid,
+            process_group_id: observed.process_group_id,
+            session_id: observed.session_id,
+            uid: observed.uid,
+            start_tvsec: observed.start_tvsec,
+            start_tvusec: observed.start_tvusec,
+            executable_path: executable.clone(),
+            executable_device: metadata.dev(),
+            executable_inode: metadata.ino(),
+            executable_sha256: file_sha256(&executable).unwrap(),
+        };
+        let observed = DarwinSystem.bsd_process_identity(dedicated_pid).unwrap();
+        let executable = DarwinSystem.live_process_path(dedicated_pid).unwrap();
+        let metadata = fs::metadata(&executable).unwrap();
+        let dedicated = DedicatedServerIdentity {
+            pid: observed.pid,
+            process_group_id: observed.process_group_id,
+            session_id: observed.session_id,
+            uid: observed.uid,
+            start_tvsec: observed.start_tvsec,
+            start_tvusec: observed.start_tvusec,
+            executable_path: executable.clone(),
+            executable_device: metadata.dev(),
+            executable_inode: metadata.ino(),
+            executable_sha256: file_sha256(&executable).unwrap(),
+        };
+        let socket_path = dedicated_server_socket_path(identity.uid, identity.run_id, 1).unwrap();
+        prepare_socket_root(identity.uid, socket_path.parent().unwrap()).unwrap();
+        let socket = UnixListener::bind(&socket_path).unwrap();
+        let metadata = fs::symlink_metadata(&socket_path).unwrap();
+        let socket_identity = SocketIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        let mut startup = StartupScopeWitness::pending(identity.clone(), 1);
+        startup.dedicated_server_identity = Some(dedicated.clone());
+        startup.app_server_socket_identity = Some(socket_identity);
+        startup.complete = true;
+        let runtime = WorkerRuntimeRecord {
+            schema_version: 2,
+            identity: identity.clone(),
+            socket_path: worker_socket_path(identity.uid, &identity.workspace_id, identity.run_id)
+                .unwrap(),
+            socket_identity: SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            control_socket_epoch: 1,
+            app_server_epoch: Some(1),
+            control_recovery_required: false,
+            startup_scope: Some(startup),
+            dedicated_server_identity: Some(dedicated),
+            dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+            mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+            binary_sha256: identity.executable_sha256.clone(),
+        };
+        let scope = GenerationScope::capture(
+            runtime,
+            crate::turn::GenerationHistory {
+                thread_id: "original".to_owned(),
+                turns: 0,
+                sha256: crate::jcs::sha256_hex(b""),
+            },
+        )
+        .unwrap();
+        if idle_parent {
+            let census = scope.census().unwrap();
+            let exact_worker = *census.iter().find(|p| p.pid == identity.pid).unwrap();
+            let _worker_guard = CachedChildGuard(exact_worker);
+            fs::create_dir(root.join("runs")).unwrap();
+            let run_root = root.join("runs").join(identity.run_id.to_string());
+            fs::DirBuilder::new().mode(0o700).create(&run_root).unwrap();
+            let log = run_root.join("dedicated-server-1.log");
+            OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&log)
+                .unwrap();
+            retain_worker_child(
+                WorkerChildWaitTag::Ready(identity.clone()),
+                server.into_inner(),
+                log,
+            )
+            .unwrap();
+            fs::write(root.join("scope.json"), serde_json::to_vec(&scope).unwrap()).unwrap();
+            fs::write(root.join("parent.pid"), std::process::id().to_string()).unwrap();
+            let mut controller = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--test-threads=1"])
+                .env(ROLE, "controller")
+                .env("DG_RELEASE_SCOPE_ROOT", &root)
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap();
+            // The actual parent is idle here. It neither polls the owner nor
+            // runs any reaper API while the different controller stops the Run.
+            let status = controller.wait().unwrap();
+            assert!(status.success());
+            assert!(root.join("controller-complete").exists());
+            assert!(foreign.try_wait().unwrap().is_none());
+            assert!(worker.try_wait().unwrap().is_none());
+            assert!(
+                !owned_worker_children()
+                    .lock()
+                    .unwrap()
+                    .contains_key(&identity.pid)
+            );
+            drop(socket);
+            fs::remove_file(socket_path).unwrap();
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let leaf = scope
+            .processes
+            .iter()
+            .find(|p| p.identity.pid == leaf_pid)
+            .unwrap()
+            .clone();
+        assert_ne!(leaf.identity.session_id, server.id());
+        assert_ne!(leaf.identity.process_group_id, server.id());
+        assert!(
+            !scope
+                .processes
+                .iter()
+                .any(|p| p.identity.pid == foreign.id())
+        );
+        let census = scope.census().unwrap();
+        let mut reparented = census.clone();
+        reparented
+            .iter_mut()
+            .find(|p| p.pid == leaf_pid)
+            .unwrap()
+            .parent_pid = 1;
+        assert!(scope.clone().observe_owned(&reparented, false).is_ok());
+        for change in 0..4 {
+            let mut wrong = census.clone();
+            let leaf = wrong.iter_mut().find(|p| p.pid == leaf_pid).unwrap();
+            match change {
+                0 => leaf.birth = None,
+                1 => leaf.uid += 1,
+                2 => leaf.process_group_id += 1,
+                _ => leaf.session_id += 1,
+            };
+            let mut diagnostic = Value::Null;
+            assert!(
+                scope
+                    .clone()
+                    .observe_owned_observed(&wrong, false, &mut Some(&mut diagnostic))
+                    .is_err()
+            );
+            assert_eq!(diagnostic["predicate"], "generation_process_identity");
+            assert_eq!(diagnostic["observation"]["observed"]["pid"], leaf_pid);
+            assert_eq!(diagnostic["observation"]["expected"]["pid"], leaf_pid);
+        }
+        let mut unknown = census.clone();
+        let mut escaped = leaf.identity;
+        escaped.pid = u32::MAX - 1;
+        escaped.parent_pid = 1;
+        escaped.process_group_id = escaped.pid;
+        escaped.session_id = escaped.pid;
+        // An outside global orphan is not old-generation ownership evidence.
+        unknown.push(escaped);
+        let parents = unknown
+            .iter()
+            .map(|p| (p.pid, p.parent_pid))
+            .collect::<BTreeMap<_, _>>();
+        assert!(!scope.in_old_scope(&escaped, &parents));
+        assert!(scope.clone().observe_owned(&unknown, false).is_ok());
+        // Shared old SID without a complete checked ancestry is an unknown
+        // in-scope survivor. It must be refused without adopting/signalling it.
+        unknown.last_mut().unwrap().session_id = identity.session_id;
+        unknown.last_mut().unwrap().parent_pid = u32::MAX - 2;
+        assert!(scope.in_old_scope(unknown.last().unwrap(), &parents));
+        let mut diagnostic = Value::Null;
+        assert!(
+            scope
+                .clone()
+                .observe_owned_observed(&unknown, false, &mut Some(&mut diagnostic))
+                .is_err()
+        );
+        assert_eq!(diagnostic["predicate"], "generation_ancestry_parent");
+        assert_eq!(
+            diagnostic["observation"]["missing_parent_pid"],
+            u32::MAX - 2
+        );
+        let writer = crate::writer::WriterStore::new(&root, &identity.workspace_id, identity.uid);
+        let runs = root.join("runs");
+        fs::DirBuilder::new().mode(0o700).create(&runs).unwrap();
+        let run_root = runs.join(identity.run_id.to_string());
+        fs::DirBuilder::new().mode(0o700).create(&run_root).unwrap();
+        let stop_log = run_root.join("dedicated-server-1.log");
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&stop_log)
+            .unwrap();
+        assert!(matches!(
+            stop_generation_scope_reaping(&root, &writer, scope.clone(), false, || {
+                Err(WorkerProtocolError::Io)
+            }),
+            Err(WorkerProtocolError::Io)
+        ));
+        let refusal: Value =
+            serde_json::from_str(fs::read_to_string(&stop_log).unwrap().trim()).unwrap();
+        assert_eq!(refusal["stage"], "generation_stop");
+        assert_eq!(refusal["failure_site"], "reap");
+        assert_eq!(refusal["error"], "Io");
+        assert_eq!(refusal["sampled_count"], 0);
+        assert_eq!(refusal["details"]["predicate"], "generation_parent_reap");
+        // A replacement socket cannot authorize stopping the captured actors.
+        fs::remove_file(&socket_path).unwrap();
+        let replacement = UnixListener::bind(&socket_path).unwrap();
+        assert!(matches!(
+            stop_generation_scope_reaping(&root, &writer, scope.clone(), false, || Ok(())),
+            Err(WorkerProtocolError::SocketIdentityMismatch)
+        ));
+        assert!(worker.try_wait().unwrap().is_none());
+        assert!(server.try_wait().unwrap().is_none());
+        assert!(!DarwinSystem.bsd_process_identity(leaf_pid).unwrap().zombie);
+        drop(replacement);
+        fs::remove_file(&socket_path).unwrap();
+        let retained_worker = scope
+            .processes
+            .iter()
+            .find(|p| p.identity.pid == worker.id())
+            .unwrap();
+        let expected = retained_worker.identity;
+        let (start_tvsec, start_tvusec) = expected.birth.unwrap();
+        let zombie = crate::darwin::BsdProcessIdentity {
+            pid: expected.pid,
+            parent_pid: expected.parent_pid,
+            uid: expected.uid,
+            process_group_id: expected.process_group_id,
+            session_id: expected.session_id,
+            start_tvsec,
+            start_tvusec,
+            zombie: true,
+        };
+        assert!(
+            GenerationScope::classify_stop_exit(&expected, Ok(zombie), "test", &mut None)
+                .unwrap()
+                .is_dirty()
+        );
+        assert!(
+            GenerationScope::classify_stop_exit(
+                &expected,
+                Err(std::io::Error::from_raw_os_error(libc::ESRCH)),
+                "test",
+                &mut None
+            )
+            .unwrap()
+            .is_dirty()
+        );
+        for change in 0..6 {
+            let mut wrong = zombie;
+            match change {
+                0 => wrong.pid += 1,
+                1 => wrong.uid += 1,
+                2 => wrong.start_tvusec += 1,
+                3 => wrong.process_group_id += 1,
+                4 => wrong.session_id += 1,
+                _ => wrong.zombie = false,
+            }
+            assert!(
+                GenerationScope::classify_stop_exit(&expected, Ok(wrong), "test", &mut None)
+                    .is_err()
+            );
+        }
+        for error in [
+            std::io::Error::from_raw_os_error(libc::EACCES),
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "short BSD"),
+        ] {
+            assert!(
+                GenerationScope::classify_stop_exit(&expected, Err(error), "test", &mut None)
+                    .is_err()
+            );
+        }
+        let without_worker = census
+            .iter()
+            .filter(|p| p.pid != expected.pid)
+            .copied()
+            .collect::<Vec<_>>();
+        let dirty =
+            GenerationScope::classify_stop_exit(&expected, Ok(zombie), "test", &mut None).unwrap();
+        // A live retained actor is still a refusal even if group views differ.
+        assert!(
+            scope
+                .stop_group_observation(
+                    expected.process_group_id,
+                    &[expected.pid],
+                    &[],
+                    &without_worker,
+                    &mut None
+                )
+                .is_err()
+        );
+        for (group, members) in [
+            (expected.process_group_id, vec![expected.pid, foreign.id()]),
+            (expected.process_group_id + 1, vec![expected.pid]),
+            (expected.process_group_id, vec![expected.pid, expected.pid]),
+        ] {
+            assert!(
+                scope
+                    .stop_group_observation(group, &members, &[], &without_worker, &mut None)
+                    .is_err()
+            );
+        }
+        let mut drifted = without_worker.clone();
+        let mut wrong = expected;
+        wrong.birth = None;
+        drifted.push(wrong);
+        assert!(
+            scope
+                .stop_group_observation(
+                    expected.process_group_id,
+                    &[expected.pid],
+                    &[],
+                    &drifted,
+                    &mut None
+                )
+                .is_err()
+        );
+        let mut staged = scope.clone();
+        staged.processes.retain(|p| p.identity.pid != leaf_pid);
+        let original = staged.clone();
+        let (changed, observed) = staged
+            .observe_stop_sample(&without_worker, dirty, &mut None)
+            .unwrap();
+        assert!(changed && observed.is_dirty());
+        assert_eq!(
+            staged, original,
+            "dirty sample adopted a new child or revision"
+        );
+        let mut invalid = without_worker.clone();
+        invalid.push(*unknown.last().unwrap());
+        assert!(
+            staged
+                .observe_stop_sample(&invalid, dirty, &mut None)
+                .is_err()
+        );
+        assert_eq!(staged, original, "violating sample changed retained scope");
+        assert!(foreign.try_wait().unwrap().is_none());
+        retain_worker_child(
+            WorkerChildWaitTag::Ready(identity.clone()),
+            worker.into_inner(),
+            stop_log.clone(),
+        )
+        .unwrap();
+        let cached_worker =
+            CachedChildGuard(*census.iter().find(|p| p.pid == identity.pid).unwrap());
+        assert_eq!(
+            observe_owned_worker_child(&identity).unwrap(),
+            WorkerChildReap::Pending
+        );
+        for change in 0..3 {
+            let mut wrong = identity.clone();
+            match change {
+                0 => wrong.run_generation += 1,
+                1 => wrong.start_tvusec += 1,
+                _ => wrong.run_id = Uuid::now_v7(),
+            }
+            assert_eq!(
+                observe_owned_worker_child(&wrong).unwrap(),
+                WorkerChildReap::NotOwned
+            );
+        }
+        assert_eq!(
+            observe_owned_worker_child(&identity).unwrap(),
+            WorkerChildReap::Pending
+        );
+        let original_scope = scope.clone();
+        // The production stop loop must reap its retained Worker Child; this
+        // callback owns only the test's original Dedicated Child.
+        let started = Instant::now();
+        let settled = stop_generation_scope_reaping(&root, &writer, scope, false, || {
+            server.try_wait().map_err(|_| WorkerProtocolError::Io)?;
+            Ok(())
+        });
+        let elapsed = started.elapsed();
+        // Join every parent-owned child before asserting, also on a refusal.
+        if settled.is_err() {
+            cached_worker.cleanup();
+            let _ = server.kill();
+            let _ = DarwinSystem.signal_exact_process(&leaf.identity, libc::SIGKILL);
+        }
+        server.wait().unwrap();
+        assert!(
+            !owned_worker_children()
+                .lock()
+                .unwrap()
+                .contains_key(&identity.pid)
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                observe_owned_worker_child(&identity).unwrap(),
+                WorkerChildReap::NotOwned
+            );
+        }
+        let retained_worker = original_scope
+            .processes
+            .iter()
+            .find(|p| p.identity.pid == expected.pid)
+            .unwrap();
+        let current = census.iter().find(|p| p.pid == expected.pid).unwrap();
+        assert!(
+            GenerationScope::verify_process_observed(retained_worker, current, &mut None).is_err()
+        );
+        assert!(
+            GenerationScope::verify_process_sample(retained_worker, current, true, &mut None)
+                .unwrap()
+                .is_dirty()
+        );
+        assert!(
+            original_scope
+                .stop_group_observation(
+                    expected.process_group_id,
+                    &[expected.pid],
+                    &[],
+                    &without_worker,
+                    &mut None
+                )
+                .unwrap()
+                .is_dirty()
+        );
+        let foreign_process = DarwinSystem
+            .all_process_identities()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.pid == foreign.id())
+            .unwrap();
+        assert!(!foreign_process.zombie);
+        let mut foreign_identity = identity.clone();
+        foreign_identity.run_id = Uuid::now_v7();
+        foreign_identity.pid = foreign_process.pid;
+        foreign_identity.process_group_id = foreign_process.process_group_id;
+        foreign_identity.session_id = foreign_process.session_id;
+        (foreign_identity.start_tvsec, foreign_identity.start_tvusec) =
+            foreign_process.birth.unwrap();
+        // No owner for this PID: even a completed Worker token cannot consume
+        // the unrelated Child's status.
+        assert_eq!(
+            observe_owned_worker_child(&foreign_identity).unwrap(),
+            WorkerChildReap::NotOwned
+        );
+        let foreign_tag = WorkerChildWaitTag::Unqualified {
+            run_id: foreign_identity.run_id,
+            run_generation: foreign_identity.run_generation,
+            pid: foreign_identity.pid,
+            startup_error: WorkerProtocolError::ThreadStartupOutcomeUnknown,
+        };
+        let foreign_state = prepare_worker_child_wait(&foreign_tag, foreign.into_inner()).unwrap();
+        assert_eq!(
+            observe_owned_worker_child(&foreign_identity).unwrap(),
+            WorkerChildReap::NotOwned
+        );
+        // The same failure path used after thread-spawn failure retains the
+        // actual Child and reports Io; no OS exhaustion is needed for this test.
+        fail_worker_child_wait(
+            &foreign_tag,
+            &foreign_state,
+            None,
+            "spawn",
+            &std::io::Error::from_raw_os_error(libc::EAGAIN),
+            &stop_log,
+        );
+        assert_eq!(
+            observe_owned_worker_child(&foreign_identity),
+            Ok(WorkerChildReap::NotOwned)
+        );
+        assert_eq!(
+            foreign_state.lock().unwrap().outcome,
+            Err(WorkerProtocolError::Io)
+        );
+        assert!(
+            foreign_state
+                .lock()
+                .unwrap()
+                .child
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            observe_owned_worker_child(&identity).unwrap(),
+            WorkerChildReap::NotOwned
+        );
+        let failed_child = foreign_state.lock().unwrap().child.take().unwrap();
+        fail_worker_child_wait(
+            &foreign_tag,
+            &foreign_state,
+            Some(failed_child),
+            "wait",
+            &std::io::Error::from_raw_os_error(libc::EIO),
+            &stop_log,
+        );
+        assert_eq!(
+            observe_owned_worker_child(&foreign_identity),
+            Ok(WorkerChildReap::NotOwned)
+        );
+        assert_eq!(
+            foreign_state.lock().unwrap().outcome,
+            Err(WorkerProtocolError::Io)
+        );
+        assert!(
+            foreign_state
+                .lock()
+                .unwrap()
+                .child
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        let retained_diagnostics = fs::read_to_string(&stop_log).unwrap();
+        for line in retained_diagnostics.lines().rev().take(2) {
+            let diagnostic: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(
+                diagnostic["original_startup_error_code"],
+                WorkerProtocolError::ThreadStartupOutcomeUnknown.code()
+            );
+        }
+        foreign_state.lock().unwrap().outcome = Ok(WorkerChildReap::Pending);
+        DarwinSystem
+            .signal_exact_process(&foreign_process, libc::SIGTERM)
+            .unwrap();
+        let status = DarwinSystem
+            .reap_test_child(foreign_state.lock().unwrap().child.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(libc::SIGTERM)
+        );
+        // This prepared slot has no waiter yet. Its one wait sees the real
+        // ECHILD and caches it; a repeated call cannot issue another wait.
+        wait_owned_worker_child(&foreign_tag, &foreign_state, &stop_log);
+        assert_eq!(
+            foreign_state.lock().unwrap().outcome,
+            Ok(WorkerChildReap::NotOwned)
+        );
+        for _ in 0..3 {
+            wait_owned_worker_child(&foreign_tag, &foreign_state, &stop_log);
+            assert_eq!(
+                observe_owned_worker_child(&foreign_identity).unwrap(),
+                WorkerChildReap::NotOwned
+            );
+        }
+        assert!(
+            !owned_worker_children()
+                .lock()
+                .unwrap()
+                .contains_key(&foreign_identity.pid)
+        );
+        // A delayed completion must not remove a different Arc owner, even
+        // with the same identity. It must not remove a different identity either.
+        let replacement = Arc::new(Mutex::new(WorkerChildWaitState {
+            child: None,
+            outcome: Ok(WorkerChildReap::Pending),
+        }));
+        for mismatched_identity in [false, true] {
+            let mut current = foreign_identity.clone();
+            if mismatched_identity {
+                current.run_generation += 1;
+            }
+            owned_worker_children().lock().unwrap().insert(
+                current.pid,
+                OwnedWorkerChild {
+                    tag: if mismatched_identity {
+                        WorkerChildWaitTag::Ready(current.clone())
+                    } else {
+                        foreign_tag.clone()
+                    },
+                    state: Arc::clone(&replacement),
+                },
+            );
+            finish_worker_child_wait(&foreign_tag, &foreign_state, WorkerChildReap::Reaped);
+            let children = owned_worker_children().lock().unwrap();
+            let owner = children.get(&current.pid).unwrap();
+            assert_eq!(
+                owner.tag,
+                if mismatched_identity {
+                    WorkerChildWaitTag::Ready(current)
+                } else {
+                    foreign_tag.clone()
+                }
+            );
+            assert!(Arc::ptr_eq(&owner.state, &replacement));
+        }
+        owned_worker_children()
+            .lock()
+            .unwrap()
+            .remove(&foreign_identity.pid);
+        drop(socket);
+        assert!(settled.is_ok(), "stop={elapsed:?}; {settled:?}");
+        assert!(
+            elapsed >= Duration::from_secs(5) && elapsed < Duration::from_secs(10),
+            "{elapsed:?}"
+        );
+        prove_retained_generation_absent(&settled.unwrap()).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parent_owned_worker_wait_reaps_for_a_different_controller_while_idle() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "worker::tests::generation_release_scope_stops_exact_owned_helpers_and_keeps_foreign_actor", "--test-threads=1"])
+            .env("DG_RELEASE_SCOPE_ROLE", "idle-parent")
+            .stdin(Stdio::null())
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("test result: ok. 1 passed; 0 failed;")
+        );
+    }
+
+    #[test]
+    fn thread_registration_survives_ledger_reopen_and_refuses_unsafe_namespaces() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let manifest = &fixture.manifest;
+        let binding = manifest.global_profile_binding.as_ref().unwrap();
+        assert!(binding.caller_workspace_supported());
+        let uid = DarwinSystem.current_uid();
+        let (mut runtime, socket_identity, _, _) = caller_policy_fixture(manifest);
+        runtime.schema_version = 2;
+        runtime.identity.uid = uid;
+        runtime.socket_path =
+            worker_socket_path(uid, &manifest.workspace_id, manifest.run_id).unwrap();
+        runtime.dedicated_server_identity.as_mut().unwrap().uid = uid;
+        let mut scope = StartupScopeWitness::pending(
+            runtime.identity.clone(),
+            runtime.app_server_epoch.unwrap(),
+        );
+        scope.dedicated_server_identity = runtime.dedicated_server_identity.clone();
+        scope.app_server_socket_identity = Some(socket_identity.clone());
+        scope.revision += 1;
+        runtime.startup_scope = Some(scope);
+        let runtime_root = fixture.state_root.join("runtime/runs");
+        if !runtime_root.exists() {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&runtime_root)
+                .unwrap();
+        }
+        let runtime_path =
+            runtime_record_path(&fixture.state_root.join("runtime"), manifest.run_id).unwrap();
+        write_runtime_record(&runtime_path, &runtime).unwrap();
+        let qualified = QualifiedCallerRuntime {
+            runtime,
+            runtime_path,
+            socket_path: dedicated_server_socket_path(uid, manifest.run_id, 3).unwrap(),
+            socket_identity,
+            server_key: binding.server_key.clone(),
+            binding_sha256: binding.digest().unwrap(),
+            startup: None,
+            startup_deadline: Instant::now() + Duration::from_secs(10),
+        };
+        let run_root = fixture
+            .state_root
+            .join("runs")
+            .join(manifest.run_id.to_string());
+        let namespace = run_root.join("thread-registrations");
+        let thread = "original-thread";
+        let retain = || {
+            qualified.retain_registration(
+                thread,
+                &manifest.model,
+                &manifest.default_reasoning_effort,
+                &[],
+            )
+        };
+        assert!(read_thread_registration(&fixture.state_root, manifest, thread).is_err());
+        assert!(!namespace.exists());
+        let outside = fixture.root.join("registration-outside");
+        fs::DirBuilder::new().mode(0o700).create(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &namespace).unwrap();
+        assert!(retain().is_err());
+        assert!(read_thread_registration(&fixture.state_root, manifest, thread).is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        fs::remove_file(&namespace).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&namespace)
+            .unwrap();
+        fs::set_permissions(&namespace, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(retain().is_err());
+        assert!(read_thread_registration(&fixture.state_root, manifest, thread).is_err());
+        assert_eq!(fs::metadata(&namespace).unwrap().mode() & 0o777, 0o755);
+        assert_eq!(fs::read_dir(&namespace).unwrap().count(), 0);
+        fs::remove_dir(&namespace).unwrap();
+
+        retain().unwrap();
+        let path = namespace.join(format!(
+            "thread-registration-{}.json",
+            crate::jcs::sha256_hex(thread.as_bytes())
+        ));
+        let original = fs::read(&path).unwrap();
+        let inode = fs::metadata(&path).unwrap().ino();
+        assert_eq!(fs::metadata(&namespace).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(&path).unwrap().nlink(), 1);
+        assert_eq!(fs::read_dir(run_root.join("recovery")).unwrap().count(), 0);
+        let conformant = ConformantLedger::open(&run_root, manifest.run_id).unwrap();
+        let projection = conformant.inner().projection().unwrap();
+        drop(conformant);
+        let plain = Ledger::open(&run_root, manifest.run_id).unwrap();
+        assert_eq!(plain.projection().unwrap(), projection);
+        drop(plain);
+        let witness = read_thread_registration(&fixture.state_root, manifest, thread).unwrap();
+        assert_eq!(witness.thread_id, thread);
+        assert_eq!(witness.binding_sha256, binding.digest().unwrap());
+        assert!(witness.catalog_empty);
+        retain().unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        assert!(
+            qualified
+                .retain_registration(
+                    thread,
+                    &manifest.model,
+                    &manifest.default_reasoning_effort,
+                    &[serde_json::json!({"name":"changed"})],
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(
+            qualified
+                .retain_registration(
+                    &"x".repeat(8192),
+                    &manifest.model,
+                    &manifest.default_reasoning_effort,
+                    &[],
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read_dir(&namespace).unwrap().count(), 1);
+        fs::set_permissions(&run_root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(retain().is_err());
+        assert!(read_thread_registration(&fixture.state_root, manifest, thread).is_err());
+        fs::set_permissions(&run_root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn generation_release_reader_joins_original_holder_with_current_authorized_controller() {
+        use crate::domain::{Access, ControllerKind};
+        use crate::writer::{
+            GenerationRelease, GenerationReleasePhase as P, ReaderReservation, WriterRecord,
+            WriterStore,
+        };
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let mut manifest = fixture.manifest.clone();
+        let root = std::env::temp_dir().join(format!("dg-release-controller-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let mint = |name: &str, generation| {
+            let path = root.join(name);
+            crate::controller::create_controller_credential(
+                &path,
+                ControllerKind::HumanCli,
+                name.to_owned(),
+                None,
+                None,
+            )
+            .unwrap();
+            let carrier = CredentialCarrier::open_path(&path).unwrap();
+            let binding = crate::controller::binding_from_carrier(&carrier, generation).unwrap();
+            (carrier, binding)
+        };
+        let (old_carrier, old_controller) = mint("initiator", 1);
+        let (current_carrier, current_controller) = mint("recovery", 2);
+        let (wrong_carrier, _) = mint("wrong", 2);
+        manifest.controller = old_controller.clone();
+        let (runtime, socket, proof, policy) = caller_policy_fixture(&manifest);
+        let binding = manifest.global_profile_binding.as_ref().unwrap();
+        let holder = WriterStore::holder(
+            manifest.run_id,
+            binding.selected_name.clone(),
+            &old_controller,
+            2,
+            binding.server_key.clone(),
+            6,
+            Some(proof.thread_id.clone()),
+            crate::domain::RunLifecycle::Paused,
+        );
+        let mut writer = WriterRecord::empty(&manifest.workspace_id);
+        writer.schema_version = 2;
+        writer.writer_generation = 4;
+        writer.state = crate::writer::WriterAuthorityState::Releasing;
+        writer.transaction_id = Some(proof.operation_id);
+        writer.holder = Some(holder.clone());
+        writer.generation_release = Some(GenerationRelease {
+            purpose: crate::writer::GenerationRetirementPurpose::Release,
+            transaction_id: proof.operation_id,
+            source: holder.clone(),
+            writer_generation: 4,
+            authority_revision: 8,
+            source_revision: 10,
+            source_ledger_sha256: "1".repeat(64),
+            source_runtime_sha256: "2".repeat(64),
+            registration_sha256: "3".repeat(64),
+            scope_sha256: Some("4".repeat(64)),
+            absence_sha256: Some("5".repeat(64)),
+            reader_proof_sha256: None,
+            retired_reader_sha256: None,
+            phase: P::ReaderStarting,
+            successor: Some(ReaderReservation {
+                run_generation: runtime.identity.run_generation,
+                server_epoch: proof.server_epoch,
+                control_socket_epoch: proof.control_socket_epoch,
+                attempt_started: true,
+            }),
+        });
+        crate::controller::authorize_controller(
+            manifest.run_id,
+            "run.release_write",
+            &current_controller,
+            &current_carrier,
+        )
+        .unwrap();
+        assert!(
+            crate::controller::authorize_controller(
+                manifest.run_id,
+                "run.release_write",
+                &current_controller,
+                &old_carrier
+            )
+            .is_err()
+        );
+        assert!(
+            crate::controller::authorize_controller(
+                manifest.run_id,
+                "run.release_write",
+                &current_controller,
+                &wrong_carrier
+            )
+            .is_err()
+        );
+        let expected = |writer: &crate::writer::WriterRecord,
+                        operation_id,
+                        phase,
+                        manifest: &crate::run::RunManifest| {
+            proof.validate_binding(&CallerPolicyExpectation {
+                manifest,
+                runtime: &runtime,
+                app_server_socket_identity: &socket,
+                original_thread_id: &proof.thread_id,
+                durable_policy: &policy,
+                controller: &current_controller,
+                access: Access::Read,
+                writer: Some(writer),
+                operation_id,
+                phase,
+            })
+        };
+        let mut acquire = writer.clone();
+        acquire.generation_release.as_mut().unwrap().purpose =
+            crate::writer::GenerationRetirementPurpose::Acquire;
+        for state in [
+            crate::writer::WriterAuthorityState::Reserved,
+            crate::writer::WriterAuthorityState::BlockedUnknown,
+        ] {
+            acquire.state = state;
+            expected(
+                &acquire,
+                proof.operation_id,
+                CallerPolicyPhase::GenerationRelease,
+                &manifest,
+            )
+            .unwrap();
+        }
+        acquire.state = crate::writer::WriterAuthorityState::Releasing;
+        assert!(
+            expected(
+                &acquire,
+                proof.operation_id,
+                CallerPolicyPhase::GenerationRelease,
+                &manifest
+            )
+            .is_err()
+        );
+        for schema in [3, 4] {
+            let mut current_manifest = manifest.clone();
+            current_manifest.schema_version = schema;
+            let expectation = CallerPolicyExpectation {
+                manifest: &current_manifest,
+                runtime: &runtime,
+                app_server_socket_identity: &socket,
+                original_thread_id: &proof.thread_id,
+                durable_policy: &policy,
+                controller: &current_controller,
+                access: Access::Read,
+                writer: Some(&writer),
+                operation_id: proof.operation_id,
+                phase: CallerPolicyPhase::GenerationRelease,
+            };
+            assert_eq!(proof.validate_binding(&expectation), Ok(()));
+        }
+        // Retaining the initiating holder does not re-authorize its old carrier.
+        assert_eq!(writer.holder.as_ref(), Some(&holder));
+        assert_ne!(
+            holder.controller_id,
+            current_controller.identity.controller_id
+        );
+        assert!(
+            expected(
+                &writer,
+                Uuid::now_v7(),
+                CallerPolicyPhase::GenerationRelease,
+                &manifest
+            )
+            .is_err()
+        );
+        assert!(
+            expected(
+                &writer,
+                proof.operation_id,
+                CallerPolicyPhase::Prepared,
+                &manifest
+            )
+            .is_err()
+        );
+        for changed in 0..3 {
+            let mut wrong = writer.clone();
+            let r = wrong
+                .generation_release
+                .as_mut()
+                .unwrap()
+                .successor
+                .as_mut()
+                .unwrap();
+            match changed {
+                0 => r.run_generation += 1,
+                1 => r.server_epoch += 1,
+                _ => r.control_socket_epoch += 1,
+            };
+            assert!(
+                expected(
+                    &wrong,
+                    proof.operation_id,
+                    CallerPolicyPhase::GenerationRelease,
+                    &manifest
+                )
+                .is_err()
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn caller_policy_fixture(

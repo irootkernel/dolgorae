@@ -325,6 +325,36 @@ from current work. It is not a second roadmap or status authority.
 - Revisit condition: changing retained-content quota accounting or
   dispatch-index access patterns.
 
+## DF-028: Diagnose intermittent gateway snapshot conflict after interrupt response loss
+
+- Owner: Gateway semantic integration test maintainers
+- Finding: `gateway_semantic_native::native_pending_interaction_parity_after_lost_interrupt_response`
+  intermittently fails when the GetRun helper unwraps `RUN_STATE_CONFLICT` at
+  `tests/gateway_semantic_native.rs:5444`. TASK-076 verification observed one
+  failure in 65 candidate runs and none in 60 runs at the Epic starting commit.
+  These observations do not establish the defect's cause.
+- Reason for deferral: Master explicitly accepted this exact intermittent
+  failure during TASK-076 completion. Keep its recorded failure distinct from
+  passing evidence; do not extend the allowance to another test or signature.
+- Revisit condition: the next occurrence, a change to the exercised
+  snapshot/interrupt/recovery path, or a change to this test's synchronization.
+
+## DF-029: Separate the legacy Controller reset journal from Ledger recovery
+
+- Owner: Controller reset and Ledger persistence maintainers
+- Finding: `DurableResetJournal` writes `recovery/controller-reset.jsonl`, while
+  authoritative Ledger reopen accepts only torn-tail evidence in `recovery/`.
+  A retained reset journal therefore conflicts with Ledger's entry grammar.
+  This finding comes from source inspection; the TASK-077 native campaign did
+  not exercise Controller reset.
+- Reason for deferral: the Controller journal and Ledger grammar predate
+  TASK-077 and are unchanged by it. TASK-077's ThreadRegistration and generation
+  release evidence use separate namespaces. Moving the legacy journal needs
+  its own existing-state recovery decision and must preserve the unresolved
+  prepare fence without deleting journals or weakening Ledger validation.
+- Revisit condition: the next Controller reset or persistence change, or an
+  observed Ledger reopen failure naming `controller-reset.jsonl`.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical

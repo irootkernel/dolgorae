@@ -169,12 +169,31 @@ pub(crate) fn execute_with_source_contract(
             .join(format!("one-shot-{reference}")),
         temporary_server: temporary,
     };
+    if store.one_shot(reference)?.is_some() {
+        let _ = store.reserve_one_shot(&input)?;
+        return Err(blocked(reference, "already_started"));
+    }
+    let resolved = ResolvedGlobalProfile::resolve(&home, profile)?;
+    let binding = match &invocation {
+        Invocation::Legacy(_) | Invocation::Scoped(..) | Invocation::Task(_) => {
+            resolved.prepare(&home)?
+        }
+        Invocation::Direct(request) => {
+            let binding = resolved.prepare_qualified(&home)?;
+            if !binding.caller_workspace_supported() {
+                return Err(crate::direct_review_target::reading_boundary_unsupported());
+            }
+            request.admit_profile(&binding)?;
+            crate::review::verify_executable_identity(&binding.launch_snapshot)?;
+            binding.record_qualified(&home)?;
+            binding
+        }
+    };
     let (_, created) = store.reserve_one_shot(&input)?;
     if !created {
         return Err(blocked(reference, "already_started"));
     }
     let outcome = (|| {
-        let binding = ResolvedGlobalProfile::resolve(&home, profile)?.prepare(&home)?;
         let instructions = if let Invocation::Direct(request) = &invocation {
             request.admit_profile(&binding)?;
             crate::review::verify_executable_identity(&binding.launch_snapshot)?;

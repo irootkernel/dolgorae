@@ -230,6 +230,10 @@ fn complete_result_changes_within(
     let mut changes = Vec::new();
     // One retained-content aggregate spans every file of this producer half.
     let mut sides = RetainedSides::new(retained_bound);
+    // The admitted index identifies content by digest and length. Reuse a
+    // verified image within this capture, without one Git child per duplicate
+    // blob or a second buffer outside the retained-content allowance.
+    let mut git_before = BTreeMap::<(&str, u64), usize>::new();
     for path in candidates {
         // A transient worktree read fault propagates instead of becoming a
         // permanent unavailable result.
@@ -262,6 +266,12 @@ fn complete_result_changes_within(
             // Dirty or untracked at dispatch: its retained bytes are the before side.
             Some(bytes) => Some((*bytes).clone()),
             None => match entry {
+                Some(entry)
+                    if git_before.contains_key(&(entry.sha256.as_str(), entry.byte_length)) =>
+                {
+                    let position = git_before[&(entry.sha256.as_str(), entry.byte_length)];
+                    Some(sides.sides[position].bytes.clone())
+                }
                 Some(entry) => match index.head.as_deref() {
                     Some(head) => {
                         let object = format!("{head}:{path}");
@@ -309,7 +319,15 @@ fn complete_result_changes_within(
         };
         // Keep the exact bytes each side names, bounded across every file.
         if let Some(bytes) = before_bytes.as_deref() {
+            let position = sides.sides.len();
             sides.push(&path, "before", bytes)?;
+            if !retained.contains_key(path.as_str())
+                && let Some(entry) = entry
+            {
+                git_before
+                    .entry((entry.sha256.as_str(), entry.byte_length))
+                    .or_insert(position);
+            }
         }
         if let Some((_, bytes)) = after.as_ref() {
             sides.push(&path, "after", bytes)?;
@@ -1021,16 +1039,18 @@ fn current_domain_paths(
 ) -> Result<std::collections::BTreeSet<String>, MachineError> {
     // A failed listing propagates through `git`, so an incomplete set
     // is never published as a complete one.
-    parse_domain_listing(&crate::review_target::git(
+    // Deleted paths can remain in the index while new paths are untracked.
+    // Observe the two domains separately under the existing per-command Git
+    // bound, rather than doubling one listing before applying the change bound.
+    let mut paths = parse_domain_listing(&crate::review_target::git(
         workspace,
-        &[
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-    )?)
+        &["ls-files", "--cached", "-z"],
+    )?)?;
+    paths.extend(parse_domain_listing(&crate::review_target::git(
+        workspace,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?)?);
+    Ok(paths)
 }
 
 /// Parse one NUL-separated `ls-files` listing.
@@ -1340,7 +1360,7 @@ pub(crate) fn capture_facade_task(
 
 /// The owning digest is the target's JCS digest with `target_sha256` omitted.
 /// Admission owns target semantics; retained reads only check this binding.
-fn verify_target_manifest(identity: &str, bytes: &[u8]) -> Result<(), MachineError> {
+pub(crate) fn verify_target_manifest(identity: &str, bytes: &[u8]) -> Result<(), MachineError> {
     let mut manifest: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| integrity())?;
     let object = manifest.as_object_mut().ok_or_else(integrity)?;
     if object
@@ -2826,7 +2846,7 @@ mod tests {
     fn the_producer_reports_deletes_mode_only_changes_and_orders_kinds() {
         let root = workspace();
         // Add a second tracked file so a delete can be observed alongside an add.
-        std::fs::write(root.join("removed.txt"), b"removed\n").unwrap();
+        std::fs::write(root.join("removed.txt"), b"clean\n").unwrap();
         assert!(
             std::process::Command::new("/usr/bin/git")
                 .arg("-C")
@@ -2880,6 +2900,17 @@ mod tests {
             .find(|change| change.path == "removed.txt")
             .unwrap();
         assert!(removed.after.is_none() && removed.after_mode.is_none());
+        assert_eq!(
+            removed.before.as_ref().unwrap().sha256,
+            format!("sha256:{}", crate::jcs::sha256_hex(b"clean\n"))
+        );
+        let before = changes
+            .retained
+            .iter()
+            .filter(|side| side.side == "before")
+            .collect::<Vec<_>>();
+        assert_eq!(before.len(), 2);
+        assert!(before.iter().all(|side| side.bytes == b"clean\n"));
         // A 0644 -> 0600 change is content-identical: only the modes differ.
         let kept = changes
             .iter()

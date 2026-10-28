@@ -50,7 +50,198 @@ fn orchestration_production_depends_on_the_adapter_trait() {
 #[test]
 fn source_module_dependencies_match_the_approved_graph() {
     let approved = BTreeMap::from([
-        ("app_server", &["darwin", "jcs"][..]),
+        (
+            "specialist_stdio",
+            &[
+                "consumer_bridge",
+                "native_consumer",
+                "darwin",
+                "delegation_service",
+                "engagement",
+                "host_invocation",
+                "jcs",
+                "machine",
+                "paths",
+                "specialist_facade",
+                "trusted_host",
+            ][..],
+        ),
+        (
+            "specialist_facade",
+            &[
+                "consumer_bridge",
+                "native_consumer",
+                "podway_client",
+                "caller_scope",
+                "controller",
+                "delegation_identity",
+                "delegation_service",
+                "engagement",
+                "host_invocation",
+                "machine",
+                "operation",
+                "paths",
+                "semantic",
+                "source_binding",
+                "task_request",
+                "trusted_host",
+            ][..],
+        ),
+        (
+            "managed_specialist",
+            &[
+                "consumer_bridge",
+                "native_consumer",
+                "podway_client",
+                "projection",
+                "workspace",
+                "controller",
+                "delegation_identity",
+                "delegation_service",
+                "host_invocation",
+                "machine",
+                "operation",
+                "paths",
+                "primary_tool",
+                "run",
+                "semantic",
+                "specialist_facade",
+                "trusted_host",
+                "turn",
+            ][..],
+        ),
+        ("app_server", &["darwin", "jcs", "turn"][..]),
+        (
+            "trusted_host",
+            &[
+                "native_consumer",
+                "caller_scope",
+                "controller",
+                "darwin",
+                "delegation_identity",
+                "delegation_service",
+                "domain",
+                "engagement",
+                "host_invocation",
+                "jcs",
+                "machine",
+                "orchestration",
+                "paths",
+                "run",
+                "semantic",
+                "session_policy",
+                "source_binding",
+                "workspace",
+                "managed_specialist",
+            ][..],
+        ),
+        (
+            "host_invocation",
+            &[
+                "caller_scope",
+                "darwin",
+                "delegation_identity",
+                // Test-only: a real product acceptance before mirror recovery.
+                "delegation_service",
+                "engagement",
+                "jcs",
+                "machine",
+                "operation",
+                // Test-only: cold concurrent access under an isolated home.
+                "paths",
+                "trusted_host",
+                "specialist_facade",
+                "native_consumer", // Test-only original-owner witness controls.
+            ][..],
+        ),
+        (
+            "source_binding",
+            &[
+                "profile",
+                // Test-only native completion, managed connection and legacy controls.
+                "app_server",
+                "managed_specialist",
+                "primary_tool",
+                "turn",
+                "conformance",
+                "writer",
+                "caller_scope",
+                "controller",
+                "darwin",
+                "delegation_identity",
+                "delegation_service",
+                "direct_review_target",
+                "domain",
+                "engagement",
+                "global_runtime",
+                "host_invocation",
+                "instructions",
+                "jcs",
+                "machine",
+                "operation",
+                "orchestration",
+                "paths",
+                "provisioning",
+                "review",
+                "run",
+                "semantic",
+                "successor_capture",
+                "task_request",
+                "trusted_host",
+                "workspace",
+                "specialist_facade",
+                "specialist_stdio",
+                "ledger",
+                "snapshot",
+                "consumer_bridge",
+                "native_consumer",
+                "podway_client",
+                "storage_observation",
+            ][..],
+        ),
+        // Protected native consumer setup/claims, source composition and the
+        // pinned public child invocation are separate owned boundaries.
+        (
+            "native_consumer",
+            &[
+                "specialist_facade",
+                "darwin",
+                "delegation_identity",
+                "engagement",
+                "host_invocation",
+                "jcs",
+                "machine",
+                "paths",
+                "podway_client",
+                "run",
+                "trusted_host",
+                "turn",
+                "workspace",
+                "delegation_service",
+            ][..],
+        ),
+        (
+            "consumer_bridge",
+            &[
+                "host_invocation",
+                "specialist_facade",
+                "caller_scope",
+                "delegation_identity",
+                "delegation_service",
+                "engagement",
+                "machine",
+                "native_consumer",
+                "podway_client",
+                "review_output",
+                "specialist",
+                "task_request",
+                "trusted_host",
+            ][..],
+        ),
+        (
+            "podway_client",
+            &["machine", "native_consumer", "trusted_host"][..],
+        ),
         ("codex_socket", &[][..]),
         ("global_runtime_observation", &["workspace"][..]),
         ("audit", &["event", "jcs"][..]),
@@ -60,7 +251,17 @@ fn source_module_dependencies_match_the_approved_graph() {
         ),
         (
             "interaction",
-            &["audit", "domain", "ledger", "machine", "snapshot"][..],
+            &[
+                "audit",
+                "domain",
+                "ledger",
+                "machine",
+                "snapshot",
+                "jcs",
+                "projection",
+                "run",
+                "interaction_payload",
+            ][..],
         ),
         (
             "interaction_payload",
@@ -78,7 +279,11 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "ledger",
                 "ledger_generation",
                 "machine",
+                "operation",
+                "projection",
+                "turn",
                 "workspace",
+                "writer",
             ][..],
         ),
         (
@@ -202,7 +407,13 @@ fn source_module_dependencies_match_the_approved_graph() {
             "global_runtime",
             &[
                 "darwin",
+                // `direct_review` is test-only: compare new review admission
+                // with the retained pin's qualification.
+                "direct_review",
                 "global_profile",
+                // `instructions` is test-only: compare new discovery admission
+                // with the retained pin's qualification.
+                "instructions",
                 "jcs",
                 "machine",
                 "paths",
@@ -323,6 +534,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "darwin",
                 "domain",
                 "engagement",
+                // Test-only: seal the original historical policy binding before acceptance.
+                "global_runtime",
                 "jcs",
                 "ledger_generation",
                 "machine",
@@ -341,7 +554,10 @@ fn source_module_dependencies_match_the_approved_graph() {
             "primary_bridge",
             &["machine", "orchestration", "semantic"][..],
         ),
-        ("primary_tool", &["machine"][..]),
+        (
+            "primary_tool",
+            &["native_consumer", "machine", "specialist_facade"][..],
+        ),
         ("live_transport", &["jcs", "machine", "primary_tool"][..]),
         ("live_transport_mcp", &["live_transport", "machine"][..]),
         ("mcp_review", &[][..]),
@@ -384,6 +600,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "direct_review_target",
                 "domain",
                 "engagement",
+                // Immutable member bindings and their admission qualification live here.
+                "global_runtime",
                 "instructions",
                 "jcs",
                 "machine",
@@ -395,6 +613,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 // `paths` is test-only: the unit fixture builds an instruction
                 // home so one provisioning selection can be captured.
                 "paths",
+                // Test-only genuine qualified admission snapshots.
+                "profile",
                 "provisioning",
                 "review",
                 "run",
@@ -406,6 +626,11 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "task_request",
                 "workspace",
                 "writer",
+                "ledger",
+                "snapshot",
+                "audit",
+                "trusted_host",
+                "turn",
             ][..],
         ),
         (
@@ -476,6 +701,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "controller",
                 "domain",
                 "direct_review",
+                "direct_review_target",
                 "engagement",
                 "global_runtime",
                 "instructions",
@@ -578,6 +804,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 // `provisioning` is test-only here: the delegated-start
                 // regression publishes its Run from a retained snapshot.
                 "provisioning",
+                // Original executable identity and typed review-drift preflight.
+                "review",
                 // The changes producer bounds one Turn's file-change
                 // snapshots by the existing workspace enumeration bound.
                 "review_target",
@@ -587,15 +815,19 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "snapshot",
                 "specialist",
                 "specialist_policy",
+                "storage_observation",
                 "successor_capture",
                 // `task_request` names the accepted task the checked-output
                 // validator (specialist::parse_reviewer_output_v3) inspects.
                 "task_request",
                 "timeline",
+                // Test-only: protected administrative recovery of real member fixtures.
+                "trusted_host",
                 "turn",
                 "worker",
                 "workspace",
                 "writer",
+                "ledger_generation",
             ][..],
         ),
         (
@@ -632,6 +864,8 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "turn",
             &[
+                "consumer_bridge",
+                "native_consumer",
                 "app_server",
                 "audit",
                 "conformance",
@@ -649,6 +883,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "worker",
                 "workspace",
                 "writer",
+                "host_invocation",
+                "specialist_facade",
             ][..],
         ),
         (
@@ -660,8 +896,10 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "writer",
             &[
+                "audit",
                 "darwin",
                 "domain",
+                "jcs",
                 "machine",
                 "projection",
                 "run",
@@ -691,6 +929,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "worker",
             &[
+                "native_consumer",
                 "app_server",
                 "artifact",
                 "audit",
@@ -733,6 +972,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "turn",
                 "workspace",
                 "writer",
+                "managed_specialist",
             ][..],
         ),
         (
@@ -816,6 +1056,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "worker",
                 "workspace",
                 "writer",
+                "ledger_generation",
             ][..],
         ),
         (
@@ -910,6 +1151,22 @@ fn source_module_dependencies_match_the_approved_graph() {
             continue;
         }
         let source = fs::read_to_string(&path).unwrap();
+        if module == "source_binding" {
+            let (production, _) = source.split_once("#[cfg(test)]\nmod tests {").unwrap();
+            let production = direct_crate_dependencies(production);
+            for test_only in [
+                "app_server",
+                "managed_specialist",
+                "primary_tool",
+                "turn",
+                "profile",
+            ] {
+                assert!(
+                    !production.contains(test_only),
+                    "source binding production depends on its native test consumer {test_only}"
+                );
+            }
+        }
         let observed = direct_crate_dependencies(&source);
         let expected = approved
             .get(module)

@@ -1158,6 +1158,22 @@ Before new ready, failure stops the new process and retains old membership. If
 the old contract cannot be restored, state remains `migration_blocked`; it does
 not select either server implicitly.
 
+### Current caller-workspace runtime admission
+
+The [delegation runtime
+qualification](dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
+selects Codex CLI `0.164.0`
+(`d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf`) for new
+qualified caller-workspace startup/policy, instruction-discovery and checked-review
+admissions. Admission precedes each new reservation, member or task acceptance
+and runtime launch. Original-key replay,
+release, closure and recovery retain the accepted binding, including qualified
+0.159.3 records. Existing snapshots are never resealed with current pins. Generic
+Profile lifecycle and binding-history observation retain tested/unverified
+compatibility admission, including doctor probes and migration. Exact pins
+apply at qualified-mechanism admission callers, never in shared Profile helpers.
+Runtime support still requires the selected native and compatibility evidence.
+
 ## SPEC-004: Runtime and Session Identity
 
 A run owns no Codex thread before its first turn and exactly one thereafter.
@@ -2252,22 +2268,61 @@ response or a lost terminal event uses `thread/read` and returns the existing
 accepted turn or `outcome_unknown`. No stage creates a second thread, writer
 generation, or accepted turn for the same transaction.
 
-Release PREPARE acquires writer then run serialization, validates no active turn
-or interaction, fences new work, and fsyncs `releasing` with the selected lane
-and census revisions. APPLY releases file locks, cleans exact workload
-descendants without stopping or changing the Dedicated Lane Server, proves five
-complete empty censuses, then applies and verifies reader policy in that same
-physical generation. COMMIT reacquires writer then run locks and revalidates the
-operation token and revisions. If reader verification fails, authority remains
-`active` only when writer policy is positively reverified; otherwise it becomes
-`blocked_unknown`. The thread never resumes on the shared Profile Server.
-Worker death and kernel unlock alone never perform release.
+Release PREPARE selects the implementation from the immutable lane and exact
+qualified native binding. Existing legacy adapters retain their in-place policy
+transition. Qualified caller-workspace Dedicated Runs use whole-generation
+retirement, including schema-3 Primary and schema-4 Specialist Runs. Selection
+requires the actual successful original thread/start catalog-registration
+witness, including an explicit empty catalog. Older unwitnessed threads refuse
+before any stop; neither a busy census nor an unknown result selects a fallback.
+
+PREPARE authenticates the original release owner, captures the durable head,
+completed native Turn boundary and exact source generation, fences admissions,
+and fsyncs the private release transaction. Before shutdown or signalling, APPLY
+persists `stop_started` and the complete checked old process scope. It retires
+the Run-owned Worker, Dedicated Server and registered descendants, including
+children with their own process groups. Five complete empty old-scope samples
+must precede locator removal. Missing locators, leader exit, native idle and
+kernel unlock do not prove absence. The shared Profile Server is never a target.
+An already withdrawn server socket does not prevent retirement of its exact
+retained process scope. A present socket must still match its recorded identity;
+socket absence never substitutes for process identity or the five empty samples.
+
+Only during this stop, a retained actor may exit between census and executable
+lookup or disagree with its recorded group enumeration. A fresh BSD `ESRCH`, or
+a zombie with the same PID, UID, birth, group and session, invalidates that
+sample; it does not prove an empty scope. All other group, socket, identity,
+ancestry and ownership checks still apply, and any violation refuses the stop.
+An invalidated sample cannot extend or publish the retained scope or authorize
+signals. It resets the empty count and requires five new complete empty samples
+within the original stop deadline. Unknown, live, unreadable or drifting actors
+remain refusals. Capture, absence proof and fresh signal checks retain their
+strict behavior.
+
+The same release owner reserves every replacement server/generation before
+spawn. Authority-free original-thread history inspection precedes thread resume.
+The reserved successor uses readOnly/approval-never in the same logical Dedicated
+Lane and original thread, with the original model, effort and registered catalog
+binding. Fresh Reader proof, history continuity and complete old-generation
+absence precede atomic Writer retirement. No model Turn, task replay, result
+replacement or catalog substitution is permitted; Paused remains Paused.
+Physical generations and epochs advance truthfully. The thread never resumes on
+the shared Profile Server.
+
+The committed private release token survives later acquisitions and is archived
+write-once before supersession. Lost replies and crashes recover that original
+owner and its one reserved candidate. From `stop_started`, failure retains the
+Writer guard and cannot restore old Write. Generic absent-runtime, recovery,
+handoff expiry and cancellation paths cannot clear this obligation. A known
+pre-effect refusal may restore Active only after unchanged original Write proof.
+Terminal/Closed cleanup remains separate and never starts a Reader or appends
+beyond the terminal seal.
 
 Foreground command observation and terminal completion are recorded separately
 and never imply background-process absence. Writer release/handoff/close first
 fences new work and completes the Dedicated Lane workload cleanup protocol. A complete
 five-sample empty workload census proves
-`background_execution:verified_absent`; any live member is `active`. Before a
+`background_execution:verified_absent`; any live member is `active`. For the in-place route, before a
 sandbox-policy request is sent, a transient incomplete census is a known
 pre-effect failure: release rolls `releasing` back to `active`, acquire cancels
 its reservation to `none`, and the known state permits an explicit retry after
@@ -2529,20 +2584,25 @@ this cleanup for ten seconds and otherwise leaves the path for that verified
 next owner.
 
 Acquire or release never changes a Run's logical lane and never substitutes a
-Worker or connection generation for authorization. For a Dedicated Run whose
-pinned profile reports a verified transition, read-to-write and write-to-read
-apply, verify, and commit policy in place on the same physical Dedicated Lane
+Worker or connection generation for authorization. For a legacy in-place
+Dedicated adapter whose pinned profile reports a verified transition,
+read-to-write and write-to-read apply, verify, and commit policy in place on the
+same physical Dedicated Lane
 Server generation and the same Codex thread. The Run's `policy_epoch`
 increments on each committed access transition; `run_generation`, thread ID,
 thread generation, lane ID, process generation, and server epoch do not change.
 
-A known unavailable or unverified Dedicated transition returns
+A known unavailable or unverified legacy in-place Dedicated transition returns
 `ACCESS_TRANSITION_UNSUPPORTED` before reservation and leaves authority
 unchanged. That Run may use a lineage-linked Dedicated write continuation.
 `shared_readonly` Runs always require a Dedicated write continuation and never
 transition in place. Failure during a started transition follows the durable
 `reserved` or `releasing` landing rules and never falsely restores the prior
 state.
+
+Qualified original-Thread Read acquisition follows Acquire retirement under
+[CW-TRANSITION](caller-workspaces-v1.md). It preserves logical Run, lane and
+Thread identity while verifying the replacement physical generation.
 
 A writer transfer between the Primary Run and a brokered Specialist normally
 crosses Controller identities. V1 therefore performs explicit source release,
@@ -2910,6 +2970,12 @@ Every allocated Run has a private directory at
 - `state.json`: a disposable materialized view rebuilt from the ledger.
 - `worker.log` and `worker.log.1`: bounded diagnostics, never audit authority;
 - `recovery/`: preserved torn-tail and repair evidence.
+- `release-evidence/`: private immutable Writer-release evidence, published and
+  fsynced before a Writer checkpoint references its digest. The ledger never
+  reads this directory as repair evidence.
+- `thread-registrations/`: private immutable witnesses of successful original
+  native thread registration, with checked Run, binding, executable, model and
+  catalog identities. Final and staging files stay outside ledger `recovery/`.
 
 The workspace also has
 `~/.dolgorae/workspaces/<workspace-id>/orchestration/orchestration.sqlite3` as the sole
@@ -5722,3 +5788,112 @@ remains authoritative for Dolgorae.
   identity with admitted direct-target manifests and task-scoped checked v4 reviews, the delegation namespace and Engagement store generation 6, keyed
   intents and lookup, complete results with the changes producer, round
   accounting, managed successor services and both member release owners.
+
+
+## Private delegated consumer control
+
+The private native consumer adapter requires explicit Operator and current
+Controller setup. Setup chooses native-only inspection or one immutable
+Podway connection. Ordinary Specialist operations do not require Podway.
+Native-only selections and materialization accept supported Dolgorae identities.
+Selected Podway identifier rules apply during explicit delegated composition.
+Connection setup fixes the executable digest, contract manifest, physical
+worktree, workspace/session/attempt/placement, adapter identity and permitted
+item IDs. Each call also requires its authenticated original Primary session
+or Root, current generation, Turn/call and Controller. Model input grants no
+authority and cannot select executable paths, public fences or artifact paths.
+
+`dolgorae.consumer-control/v1` has six closed actions: `status`, `inspect`,
+`prepare_record`, `record`, `prepare_accept` and `accept`. Preparation reserves
+a caller-known request ID and canonical intent before external reads. The
+request ID is 1 to 128 ASCII letters, digits or `._:-`, scoped by the protected
+owner, bridge generation, caller and original Primary. Reusing it with changed
+intent refuses. Failures preserve the typed action and caller-known logical request ID,
+including a request-status target. Early conflict and capacity refusals retain
+their request-conflict and busy classifications.
+Record input contains 1 to 128 distinct permitted item IDs,
+with exactly `clear:true` or a typed record. Integer records use canonical
+signed-i64 decimal strings; the bridge writes exact public integer literals.
+Artifacts resolve authorized retained sources, never model paths. Check results
+must match the declared operation and retained check evidence.
+
+Prepared mutations retain exact generation-1 Podway stdin bytes, the original
+idempotency key, public fences, package/result identities and explicit Primary
+input. Durable states are `preparing`, `prepared`, `claimed`, `running`,
+`uncertain`, `committed` and `failure`. An atomic claim precedes child launch.
+Duplicates observe the same request. Restarted or ambiguous claims remain
+uncertain and never automatically launch again. Recovery looks up the original
+key, then the acceptance receipt, then current facts. Missing or expired
+outcomes do not prove that dispatch did not occur. Historical committed effects
+remain committed when current applicability changes or a later read fails.
+Once verified against the original key, outcome and receipt observation bytes
+remain unchanged. Fresh receipt reads update applicability separately; their
+request IDs and timestamps do not replace the retained inspection source.
+
+Before first acceptance, the adapter reads and verifies the original accepted
+result and all required content again, obtains a fresh authorized identity,
+and compares the exact 13 execution fields, rounds, result digest, idle or
+released disposition and Podway preimage. Unrelated valid proof revisions may
+change when these projected facts remain equal. It never silently rewrites
+prepared bytes or keys. No lock or transaction spans content reads or a child.
+
+Inspection selections bind their owner, task and representation. Reads permit
+repeat and reordered pages without an acknowledgement prerequisite. Text
+pages preserve original UTF-8; binary views use base64 and declare that encoding.
+Native transport registration, model-history preservation and actual consumer
+qualification remain separate delivery obligations. This private presentation
+does not change public DTOs, H1, producer content limits or release status.
+
+Consumer setup and access MUST check both final and pending database names and
+all SQLite sidecars before opening or creating state. Only a missing pathname
+proves absence; partial files, wrong objects and metadata errors are preserved
+and refused. Concurrent equivalent preparation MUST retain one prepared input
+and one request selection. After dispatch, the adapter carries the known effect
+through later storage or authorization failure without requiring another read.
+A native witness MUST retain its authenticated owner origin, even when another
+owner has the same generation ordinal. Selected read routes, typed evidence
+digest representations and success-result placement/attempt/revision fields
+must match the pinned consumer's public contract.
+Resolved evidence keeps explicit missing slots, including optional selectors.
+Only present values are materialized; missing slots have no invented value or
+digest. Required unresolved sources and unavailable or corrupt present values
+still refuse dispatch. Raw check-result fields are checked before adding the
+adapter's local type discriminator.
+
+Native Specialist registration uses one semantic/control pair: external
+`specialist_native`/`specialist_consumer` and managed
+`dolgorae_specialists_native`/`dolgorae_specialist_consumer`. Accepted legacy
+registrations and full public semantic interfaces remain available. New native
+semantic responses are private bounded presentations of fully validated public
+results. They preserve the original operation, success/failure classification
+and effect; presentation failure cannot repeat or retract a semantic effect.
+Original result selections come from ordinary collection as well as identity
+observation and remain inspectable without a Podway connection.
+Task-authorized inspection of retained completed content remains available
+while its member performs later work. Current idle/released export eligibility
+is checked when preparing or submitting consumer proof, independently of
+content inspection.
+
+An explicitly connected native assignment checks the current Podway package
+only for new admission, after the service resolves the original keyed outcome.
+Authenticated replay returns the original task and receipt even when that
+package has advanced or become unavailable; identity drift still conflicts.
+
+Native inspection separates compact ASCII metadata from an original-text block.
+Each initial page contains at most 1024 original bytes, shortened at UTF8
+boundaries. Raw final and normalized structured output remain separate views;
+the presentation explains substantive differences and canonical equivalence.
+Transport wrappers and selected model/history processing must preserve these
+blocks. Emission and event telemetry do not establish model-facing delivery.
+
+The default-feature startup qualification mode covers omission, configuration
+enable, raw argv enable and repeated enable/disable ordering. It checks actual
+enforced argv/effective disabling against the immutable accepted launch snapshot,
+digest and server key, retaining the existing process-quiescence requirements.
+Each startup-only variant retains normal close/release and owned cleanup.
+The separate full caller-pipeline regression retains its writer, replay and
+generation-recovery scenarios.
+The separate production host driver keeps the original eighteen rows per exact
+selected host and compares original text with decoded next model-facing HTTP
+bytes. Driver implementation and offline controls do not qualify a native host
+or establish consumer acceptance.

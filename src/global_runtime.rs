@@ -194,9 +194,38 @@ impl ResolvedGlobalProfile {
         self.bind(snapshot)
     }
 
+    /// Caller-qualified preparation is deliberately unrecorded. Admission owns
+    /// the Current check and the subsequent registry-locked history publication.
+    pub(crate) fn prepare_qualified(
+        self,
+        home: &DolgoraeHome,
+    ) -> Result<GlobalProfileBinding, MachineError> {
+        let snapshot = crate::profile::qualified_snapshot_for_global(
+            home,
+            &self.selected_name,
+            &self.definition,
+        )?;
+        self.bind_qualified(snapshot)
+    }
+
+    pub(crate) fn bind_qualified(
+        self,
+        launch_snapshot: ProfileSnapshot,
+    ) -> Result<GlobalProfileBinding, MachineError> {
+        self.bind_policy(launch_snapshot, true)
+    }
+
     pub fn bind(
         self,
         launch_snapshot: ProfileSnapshot,
+    ) -> Result<GlobalProfileBinding, MachineError> {
+        self.bind_policy(launch_snapshot, false)
+    }
+
+    fn bind_policy(
+        self,
+        launch_snapshot: ProfileSnapshot,
+        qualified: bool,
     ) -> Result<GlobalProfileBinding, MachineError> {
         let mut expected_arguments = self
             .definition
@@ -212,6 +241,14 @@ impl ResolvedGlobalProfile {
             expected_arguments.push("--strict-config".to_owned());
         }
         expected_arguments.extend(["--enable".to_owned(), "multi_agent".to_owned()]);
+        if qualified {
+            expected_arguments.extend(["--disable".to_owned(), "shell_snapshot".to_owned()]);
+            if launch_snapshot.enabled_features != ["multi_agent"]
+                || launch_snapshot.disabled_features != ["shell_snapshot"]
+            {
+                return Err(binding_invalid("qualified launch feature policy disagrees"));
+            }
+        }
         if self.schema_version != 1
             || self.definition_sha256 != canonical_digest(&self.definition)?
             || launch_snapshot.schema_version != 1
@@ -250,21 +287,48 @@ impl ResolvedGlobalProfile {
 }
 
 impl GlobalProfileBinding {
-    /// Static admission for the empirically qualified native mechanism. Actual
+    /// New admission for the empirically qualified native mechanism. Actual
     /// process, socket and configuration evidence remains Worker-owned.
     pub(crate) fn caller_workspace_supported(&self) -> bool {
+        self.accepted_current_executable() && self.uses_qualified_launch_policy()
+    }
+
+    pub(crate) fn uses_qualified_launch_policy(&self) -> bool {
+        ResolvedGlobalProfile::from_definition(&self.selected_name, self.definition.clone())
+            .and_then(|resolved| resolved.bind_qualified(self.launch_snapshot.clone()))
+            .is_ok()
+    }
+
+    fn accepted_current_executable(&self) -> bool {
         self.validate_for_recovery().is_ok()
-            && self.launch_snapshot.codex_version == "0.159.3"
+            && self.launch_snapshot.codex_version == "0.164.0"
             && self.launch_snapshot.executable_identity.sha256
-                == "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878"
+                == "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
+    }
+
+    /// Retained execution uses its immutable accepted binding, without resolving
+    /// the current registry or transferring qualification between executables.
+    pub(crate) fn accepted_caller_workspace_supported(&self) -> bool {
+        self.accepted_current_executable()
+            || (self.validate_for_recovery().is_ok()
+                && self.launch_snapshot.codex_version == "0.159.3"
+                && self.launch_snapshot.executable_identity.sha256
+                    == "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878")
     }
 
     /// The native reader/history fixture qualifies this bounded tool surface,
     /// independently of caller startup and Profile readiness.
     pub(crate) fn checked_review_supported(&self) -> bool {
+        self.caller_workspace_supported() && self.checked_review_configuration_supported()
+    }
+
+    pub(crate) fn accepted_checked_review_supported(&self) -> bool {
+        self.accepted_caller_workspace_supported() && self.checked_review_configuration_supported()
+    }
+
+    fn checked_review_configuration_supported(&self) -> bool {
         let snapshot = &self.launch_snapshot;
-        self.caller_workspace_supported()
-            && snapshot.enabled_features == ["multi_agent"]
+        snapshot.enabled_features == ["multi_agent"]
             && [
                 "mcp_servers",
                 "apps",
@@ -286,6 +350,22 @@ impl GlobalProfileBinding {
                             || value.as_array().is_some_and(|items| items.is_empty())
                     })
             })
+    }
+
+    /// Call only after qualified Current admission. The registry lock rechecks
+    /// the originally resolved definition before publishing the binding record.
+    pub(crate) fn record_qualified(&self, home: &DolgoraeHome) -> Result<(), MachineError> {
+        if !self.caller_workspace_supported() {
+            return Err(binding_invalid(
+                "unqualified candidate cannot be recorded by qualified admission",
+            ));
+        }
+        GlobalProfileStore::new(home).record_binding(crate::global_profile::ProfileBindingRecord {
+            selected_name: self.selected_name.clone(),
+            definition_sha256: self.definition_sha256.clone(),
+            server_key: self.server_key.clone(),
+            launch_snapshot_sha256: self.launch_snapshot_sha256.clone(),
+        })
     }
 
     pub fn digest(&self) -> Result<String, MachineError> {
@@ -2223,6 +2303,107 @@ mod tests {
     }
 
     #[test]
+    fn current_admission_and_accepted_qualification_do_not_share_pin_eligibility() {
+        let (parent, _) = home();
+        let definition = definition(&parent);
+        let old = "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878";
+        let current = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf";
+        for version in ["0.158.0", "0.159.3", "0.164.0", "0.164.1"] {
+            for sha in [old, current, &"0".repeat(64)] {
+                let mut snapshot = snapshot("reviewer", &definition, &"a".repeat(64));
+                snapshot.codex_version = version.to_owned();
+                snapshot.executable_identity.sha256 = sha.to_owned();
+                let binding =
+                    ResolvedGlobalProfile::from_definition("reviewer", definition.clone())
+                        .unwrap()
+                        .bind(snapshot)
+                        .unwrap();
+                let review: crate::direct_review::ReviewRequestV4 = serde_json::from_value(json!({
+                    "schema":"dolgorae-specialist-review-request/v4","operation":"review_target",
+                    "target":{"kind":"head","revision":null},"purpose":"completion","brief":"Check the accepted candidate",
+                    "contexts":[{"id":"context","content":"Accepted requirement","provenance":"caller"}],
+                    "criteria":[{"id":"criterion","statement":"Candidate meets the requirement","source_context_ids":["context"]}],
+                    "expected_output":"structured_review_v4","deadline_seconds":60,"role":null
+                })).unwrap();
+                let admission = false; // Generic construction is never qualified admission.
+                let accepted = (version == "0.164.0" && sha == current)
+                    || (version == "0.159.3" && sha == old);
+                assert_eq!(
+                    binding.caller_workspace_supported(),
+                    admission,
+                    "{version}/{sha}"
+                );
+                assert!(!binding.uses_qualified_launch_policy());
+                assert_eq!(review.admit_profile(&binding).is_ok(), admission);
+                if !admission {
+                    assert_eq!(
+                        review.admit_profile(&binding).unwrap_err().code,
+                        "REVIEW_READING_BOUNDARY_UNSUPPORTED"
+                    );
+                }
+                assert_eq!(
+                    binding.checked_review_supported(),
+                    admission,
+                    "{version}/{sha}"
+                );
+                assert_eq!(
+                    binding.accepted_caller_workspace_supported(),
+                    accepted,
+                    "{version}/{sha}"
+                );
+                assert_eq!(
+                    binding.accepted_checked_review_supported(),
+                    accepted,
+                    "{version}/{sha}"
+                );
+                assert_eq!(
+                    crate::instructions::require_discovery_control(&binding).is_ok(),
+                    admission
+                );
+                assert_eq!(
+                    crate::instructions::require_accepted_discovery_control(&binding).is_ok(),
+                    accepted
+                );
+                if accepted && !admission {
+                    assert_eq!(
+                        crate::instructions::require_discovery_control(&binding)
+                            .unwrap_err()
+                            .code,
+                        "INSTRUCTION_DISCOVERY_UNSUPPORTED"
+                    );
+                }
+                let qualified = crate::profile::qualified_test_binding(&binding);
+                assert!(qualified.uses_qualified_launch_policy());
+                let current_pin = version == "0.164.0" && sha == current;
+                assert_eq!(qualified.caller_workspace_supported(), current_pin);
+                assert_eq!(review.admit_profile(&qualified).is_ok(), current_pin);
+                assert_ne!(qualified.server_key, binding.server_key);
+                assert_eq!(
+                    binding.launch_snapshot.disabled_features,
+                    Vec::<String>::new()
+                );
+                let mut missing = qualified.clone();
+                missing.launch_snapshot.disabled_features.clear();
+                missing.launch_snapshot_sha256 =
+                    canonical_digest(&missing.launch_snapshot).unwrap();
+                assert!(!missing.caller_workspace_supported());
+                let mut overridden = qualified;
+                overridden
+                    .launch_snapshot
+                    .normalized_argv
+                    .extend(["--enable".into(), "shell_snapshot".into()]);
+                overridden.launch_snapshot_sha256 =
+                    canonical_digest(&overridden.launch_snapshot).unwrap();
+                assert!(!overridden.caller_workspace_supported());
+                let mut damaged = binding;
+                damaged.launch_snapshot_sha256 = "0".repeat(64);
+                assert!(!damaged.accepted_caller_workspace_supported());
+            }
+        }
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
     fn direct_review_qualification_rejects_unexercised_tool_surfaces_and_pin_drift() {
         let (parent, _) = home();
         let definition = definition(&parent);
@@ -2237,7 +2418,7 @@ mod tests {
                 .unwrap()
         };
         let binding = bind(snapshot.clone());
-        assert!(binding.checked_review_supported());
+        assert!(binding.accepted_checked_review_supported());
         for name in [
             "mcp_servers",
             "apps",
@@ -2252,17 +2433,17 @@ mod tests {
             changed
                 .process_static_configuration
                 .insert(name.to_owned(), json!({"enabled":true}));
-            assert!(!bind(changed).checked_review_supported(), "{name}");
+            assert!(!bind(changed).accepted_checked_review_supported(), "{name}");
         }
         let mut changed = snapshot.clone();
         changed.enabled_features.push("apps".to_owned());
-        assert!(!bind(changed).checked_review_supported());
+        assert!(!bind(changed).accepted_checked_review_supported());
         let mut changed = snapshot;
         changed.executable_identity.sha256 = "b".repeat(64);
-        assert!(!bind(changed).checked_review_supported());
+        assert!(!bind(changed).accepted_checked_review_supported());
         let mut changed = binding;
         changed.launch_snapshot.codex_version = "0.159.4".to_owned();
-        assert!(!changed.checked_review_supported());
+        assert!(!changed.accepted_checked_review_supported());
         fs::remove_dir_all(parent).unwrap();
     }
 

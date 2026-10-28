@@ -39,9 +39,13 @@ development commits.
   preserving existing files and rejecting unsafe or invalid instruction sources.
 - Capture exact delegated Role, configuration, task and result identities with
   keyed recovery across managed writes, review targets and v4 Reviewer tasks.
+- Add trusted stdio MCP adapters for Codex and Claude, durable invocation lookup, and versioned
+  `dolgorae.external/1` and `dolgorae.managed/1` Podway exports through protected consumer configuration.
 
 ### Fixed
 
+- Retire caller Writer generations through a retained release owner and verified
+  original-Thread Reader succession, preserving accepted work and recovery guards.
 - Enforce state-based member release proofs and retained release operations from
   the separately selected H1 contract erratum on Engagement store generation 6.
 

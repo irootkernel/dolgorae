@@ -28,8 +28,8 @@ TASK-092 are COMPLETE. With that prerequisite met, Master resumed EPIC-020, whic
 is ACTIVE.
 EPIC-009, EPIC-021, and EPIC-022 remain PLANNED for v0.1.4, in that execution
 order. TASK-067 is COMPLETE;
-TASK-068 through TASK-076 are COMPLETE;
-TASK-077 through TASK-089 remain PLANNED.
+TASK-068 through TASK-077 are COMPLETE;
+TASK-078 through TASK-089 remain PLANNED.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -2662,7 +2662,7 @@ Handoff: Authoritative identities shared by facade, Broker and adapter export.
 
 ### TASK-077: Add the Trusted MCP Facade and Podway Export
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-076.
 

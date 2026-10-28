@@ -35,6 +35,81 @@ pub const FINALIZATION_RESERVED_BYTES: u64 = 32 * MAX_AUDIT_LINE_BYTES as u64;
 pub const FINALIZATION_RESERVED_RECORDS: usize = 256;
 pub const REPLAY_BUDGET_MILLIS: u64 = 5 * 60 * 1_000;
 
+/// One cumulative allowance for a complete delegation observation, including
+/// generation selection/verification and every retry. No display capture uses it.
+pub struct ObservationBudget {
+    clock: Box<dyn LedgerClock>,
+    started: u64,
+    bytes: u64,
+    records: usize,
+    max_bytes: u64,
+    max_records: usize,
+}
+impl Default for ObservationBudget {
+    fn default() -> Self {
+        Self::new(
+            Box::new(SystemLedgerClock::default()),
+            MAX_LEDGER_BYTES,
+            MAX_LEDGER_RECORDS,
+        )
+    }
+}
+impl ObservationBudget {
+    pub(crate) fn new(clock: Box<dyn LedgerClock>, max_bytes: u64, max_records: usize) -> Self {
+        let started = clock.monotonic_millis();
+        Self {
+            clock,
+            started,
+            bytes: 0,
+            records: 0,
+            max_bytes,
+            max_records,
+        }
+    }
+    pub(crate) fn check(&self) -> Result<(), LedgerError> {
+        if self.clock.monotonic_millis().saturating_sub(self.started) >= REPLAY_BUDGET_MILLIS {
+            return Err(LedgerError::OperationTimeout(
+                "complete observation exhausted its cumulative clock allowance".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn wait_for_publication(&self) -> Result<(), LedgerError> {
+        let elapsed = self.clock.monotonic_millis().saturating_sub(self.started);
+        let remaining = REPLAY_BUDGET_MILLIS.saturating_sub(elapsed);
+        if remaining > 0 {
+            thread::sleep(Duration::from_millis(GROUP_COMMIT_MILLIS.min(remaining)));
+        }
+        self.check()
+    }
+    pub(crate) fn charge_bytes(&mut self, bytes: u64) -> Result<(), LedgerError> {
+        self.check()?;
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or_else(|| LedgerError::Capacity("observation byte overflow".to_owned()))?;
+        if self.bytes > self.max_bytes {
+            return Err(LedgerError::Capacity(
+                "complete observation exhausted its cumulative byte allowance".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+    fn charge_record(&mut self) -> Result<(), LedgerError> {
+        self.check()?;
+        self.records = self
+            .records
+            .checked_add(1)
+            .ok_or_else(|| LedgerError::Capacity("observation record overflow".to_owned()))?;
+        if self.records > self.max_records {
+            return Err(LedgerError::Capacity(
+                "complete observation exhausted its cumulative record allowance".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppendDurability {
     Streaming,
@@ -84,7 +159,7 @@ impl std::fmt::Display for LedgerError {
             Self::Capacity(reason) => write!(formatter, "storage capacity exceeded: {reason}"),
             Self::Integrity(reason) => write!(formatter, "audit integrity failure: {reason}"),
             Self::CaptureConflict => {
-                formatter.write_str("display sources changed during verified capture")
+                formatter.write_str("ledger sources changed during verified capture")
             }
             Self::InvalidRecord(reason) => write!(formatter, "invalid audit record: {reason}"),
             Self::InvalidEvent(reason) => write!(formatter, "invalid client event: {reason}"),
@@ -1801,9 +1876,32 @@ pub(crate) fn project(
     replay_with_budget(run_id, records, &SystemLedgerClock::default(), 0)
 }
 
+pub(crate) fn project_observation(
+    run_id: Uuid,
+    records: &[AuditRecord],
+    budget: &ObservationBudget,
+) -> Result<RunStateProjection, LedgerError> {
+    let mut projection = RunStateProjection::empty(run_id);
+    for record in records {
+        budget.check()?;
+        projection = project_next(run_id, &projection, record)?;
+    }
+    budget.check()?;
+    Ok(projection)
+}
+
 fn read_bounded_segment(reader: &mut impl BufRead) -> Result<Option<(Vec<u8>, bool)>, LedgerError> {
+    read_bounded_segment_using(reader, None)
+}
+fn read_bounded_segment_using(
+    reader: &mut impl BufRead,
+    budget: Option<&mut ObservationBudget>,
+) -> Result<Option<(Vec<u8>, bool)>, LedgerError> {
     let mut output = Vec::with_capacity(8192);
     loop {
+        if let Some(budget) = budget.as_deref() {
+            budget.check()?;
+        }
         let available = reader.fill_buf()?;
         if available.is_empty() {
             return if output.is_empty() {
@@ -2426,6 +2524,25 @@ impl ObservedLedger {
         })
     }
 
+    pub(crate) fn open_complete_bounded(
+        root: &Path,
+        run_id: Uuid,
+        head: u64,
+        budget: &mut ObservationBudget,
+    ) -> Result<Self, LedgerError> {
+        Ok(Self {
+            records: Arc::new(observe_records_using(
+                root,
+                run_id,
+                head,
+                true,
+                Some(budget),
+            )?),
+            head,
+            derived: Arc::new(ObservedLedgerDerived::default()),
+        })
+    }
+
     #[must_use]
     pub(crate) fn records(&self) -> &[AuditRecord] {
         &self.records[..usize::try_from(self.head).expect("verified head fits usize")]
@@ -2625,6 +2742,34 @@ pub(crate) fn display_observation_error(
     }
 }
 
+pub(crate) fn observation_error(
+    run_id: Uuid,
+    head: u64,
+    error: LedgerError,
+) -> crate::machine::MachineError {
+    match error {
+        LedgerError::CaptureConflict => crate::machine::MachineError::new(
+            "RUN_STATE_CONFLICT",
+            "complete observation source capture changed",
+            false,
+            serde_json::json!({"observation_motion":true}),
+        ),
+        LedgerError::Capacity(_) => crate::machine::MachineError::new(
+            "STORAGE_CAPACITY_EXCEEDED",
+            "cumulative observation byte or record allowance exhausted",
+            false,
+            serde_json::json!({}),
+        ),
+        LedgerError::OperationTimeout(_) => crate::machine::MachineError::new(
+            "OPERATION_TIMEOUT",
+            "cumulative observation clock allowance exhausted",
+            false,
+            serde_json::json!({}),
+        ),
+        other => audit_integrity_error(run_id, head, &other.to_string()),
+    }
+}
+
 pub(crate) fn audit_integrity_error(
     run_id: Uuid,
     sequence: u64,
@@ -2646,7 +2791,7 @@ fn interaction_state_revision(records: &[AuditRecord]) -> u64 {
     revision
 }
 
-fn next_interaction_revision(revision: u64, record: &AuditRecord) -> u64 {
+pub(crate) fn next_interaction_revision(revision: u64, record: &AuditRecord) -> u64 {
     let changes_interactions = match record.kind() {
         AuditKind::ApprovalRequested
         | AuditKind::ApprovalDecided
@@ -2682,6 +2827,15 @@ fn observe_records(
     head: u64,
     require_complete: bool,
 ) -> Result<Vec<AuditRecord>, LedgerError> {
+    observe_records_using(root, run_id, head, require_complete, None)
+}
+fn observe_records_using(
+    root: &Path,
+    run_id: Uuid,
+    head: u64,
+    require_complete: bool,
+    mut budget: Option<&mut ObservationBudget>,
+) -> Result<Vec<AuditRecord>, LedgerError> {
     OBSERVATION_FULL_REPLAYS.fetch_add(1, Ordering::Relaxed);
     if run_id.get_version_num() != 7 {
         return Err(LedgerError::InvalidRecord(
@@ -2690,7 +2844,7 @@ fn observe_records(
     }
     let uid = current_uid();
     verify_secure_directory(root, uid).map_err(machine_as_security)?;
-    let pin = crate::ledger_generation::pin(root, run_id)?;
+    let pin = crate::ledger_generation::pin_using(root, run_id, budget.as_deref_mut())?;
     let mut pin = pin;
     let mut files = std::mem::take(&mut pin.historical);
     verify_secure_file(&pin.append_path, uid).map_err(machine_as_security)?;
@@ -2721,17 +2875,34 @@ fn observe_records(
             "selected generation exceeds replay bounds".to_owned(),
         ));
     }
+    let mut bounded_files = Vec::new();
+    for file in files {
+        let length = file.metadata()?.len();
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.charge_bytes(length)?;
+        }
+        bounded_files.push(BufReader::new(file.take(if budget.is_some() {
+            length
+        } else {
+            u64::MAX
+        })));
+    }
     let mut reader = GenerationReader {
-        files: files.into_iter().map(BufReader::new).collect(),
+        files: bounded_files,
         current: 0,
     };
     let mut records: Vec<AuditRecord> = Vec::new();
     while records.len() < usize::try_from(head).unwrap_or(usize::MAX) {
-        let Some((mut line, terminated)) = read_bounded_segment(&mut reader)? else {
+        let Some((mut line, terminated)) =
+            read_bounded_segment_using(&mut reader, budget.as_deref_mut())?
+        else {
             break;
         };
         if !terminated {
             break;
+        }
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.charge_record()?;
         }
         line.pop();
         let index = records.len();
@@ -2760,26 +2931,31 @@ fn observe_records(
         )));
     }
     if require_complete && !reader.fill_buf().map_err(LedgerError::Io)?.is_empty() {
-        return Err(LedgerError::Integrity(
-            "operation history has an unpublished tail; authoritative recovery is required"
-                .to_owned(),
-        ));
+        return Err(LedgerError::CaptureConflict);
     }
     if pin
         .manifest
         .as_ref()
         .is_some_and(|manifest| head >= manifest.durable_watermark)
     {
-        crate::ledger_generation::validate_checkpoint(root, &pin, &records)?;
+        crate::ledger_generation::validate_checkpoint_using(
+            root,
+            &pin,
+            &records,
+            budget.as_deref_mut(),
+        )?;
+    }
+    if let Some(budget) = budget {
+        budget.check()?;
     }
     Ok(records)
 }
 
-struct GenerationReader {
-    files: Vec<BufReader<File>>,
+struct GenerationReader<R: std::io::Read = File> {
+    files: Vec<BufReader<R>>,
     current: usize,
 }
-impl std::io::Read for GenerationReader {
+impl<R: std::io::Read> std::io::Read for GenerationReader<R> {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         let available = self.fill_buf()?;
         let n = bytes.len().min(available.len());
@@ -2788,7 +2964,7 @@ impl std::io::Read for GenerationReader {
         Ok(n)
     }
 }
-impl BufRead for GenerationReader {
+impl<R: std::io::Read> BufRead for GenerationReader<R> {
     fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
         while self.current < self.files.len() {
             if !self.files[self.current].fill_buf()?.is_empty() {
@@ -2969,6 +3145,208 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ObservationClock(Arc<AtomicU64>);
+    impl LedgerClock for ObservationClock {
+        fn monotonic_millis(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+        fn timestamp(&self) -> String {
+            "2026-10-26T00:00:00Z".to_owned()
+        }
+    }
+    #[test]
+    fn complete_observation_allowance_is_cumulative_at_each_boundary() {
+        assert_eq!(MAX_LEDGER_BYTES, 512 * 1024 * 1024);
+        assert_eq!(MAX_LEDGER_RECORDS, 1_000_000);
+        assert_eq!(REPLAY_BUDGET_MILLIS, 300_000);
+        for bytes in [MAX_LEDGER_BYTES - 1, MAX_LEDGER_BYTES, MAX_LEDGER_BYTES + 1] {
+            let mut budget = ObservationBudget::default();
+            assert_eq!(
+                budget.charge_bytes(bytes).is_ok(),
+                bytes <= MAX_LEDGER_BYTES
+            );
+        }
+        for records in [
+            MAX_LEDGER_RECORDS - 1,
+            MAX_LEDGER_RECORDS,
+            MAX_LEDGER_RECORDS + 1,
+        ] {
+            let mut budget = ObservationBudget {
+                records: records - 1,
+                ..ObservationBudget::default()
+            };
+            assert_eq!(
+                budget.charge_record().is_ok(),
+                records <= MAX_LEDGER_RECORDS
+            );
+        }
+        let clock = Arc::new(AtomicU64::new(10));
+        let mut budget = ObservationBudget::new(Box::new(ObservationClock(clock.clone())), 10, 2);
+        budget.charge_bytes(6).unwrap();
+        budget.charge_record().unwrap();
+        // A second attempt shares the original allowance and start instant.
+        budget.charge_bytes(4).unwrap();
+        budget.charge_record().unwrap();
+        assert!(matches!(
+            budget.charge_bytes(1),
+            Err(LedgerError::Capacity(_))
+        ));
+        assert!(matches!(
+            budget.charge_record(),
+            Err(LedgerError::Capacity(_))
+        ));
+        for elapsed in [
+            REPLAY_BUDGET_MILLIS - 1,
+            REPLAY_BUDGET_MILLIS,
+            REPLAY_BUDGET_MILLIS + 1,
+        ] {
+            clock.store(10 + elapsed, Ordering::Relaxed);
+            assert_eq!(budget.check().is_ok(), elapsed < REPLAY_BUDGET_MILLIS);
+        }
+    }
+    #[test]
+    fn complete_observation_checks_every_line_boundary_and_mid_read_clock() {
+        for length in [
+            MAX_AUDIT_LINE_BYTES - 1,
+            MAX_AUDIT_LINE_BYTES,
+            MAX_AUDIT_LINE_BYTES + 1,
+        ] {
+            let mut data = vec![b'x'; length];
+            *data.last_mut().unwrap() = b'\n';
+            let mut reader = BufReader::with_capacity(31, std::io::Cursor::new(data));
+            assert_eq!(
+                read_bounded_segment_using(&mut reader, Some(&mut ObservationBudget::default()))
+                    .is_ok(),
+                length <= MAX_AUDIT_LINE_BYTES
+            );
+        }
+        let clock = Arc::new(AtomicU64::new(0));
+        let mut budget = ObservationBudget::new(
+            Box::new(ObservationClock(clock.clone())),
+            MAX_LEDGER_BYTES,
+            MAX_LEDGER_RECORDS,
+        );
+        clock.store(REPLAY_BUDGET_MILLIS, Ordering::Relaxed);
+        let mut reader = std::io::Cursor::new(b"{}\n");
+        assert!(matches!(
+            read_bounded_segment_using(&mut reader, Some(&mut budget)),
+            Err(LedgerError::OperationTimeout(_))
+        ));
+        struct ReadCut {
+            clock: Arc<AtomicU64>,
+            data: std::io::Cursor<Vec<u8>>,
+        }
+        impl std::io::Read for ReadCut {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let result = std::io::Read::read(&mut self.data, bytes)?;
+                self.clock.store(REPLAY_BUDGET_MILLIS, Ordering::Relaxed);
+                Ok(result)
+            }
+        }
+        clock.store(0, Ordering::Relaxed);
+        let mut reader = BufReader::with_capacity(
+            1,
+            ReadCut {
+                clock,
+                data: std::io::Cursor::new(b"{}\n".to_vec()),
+            },
+        );
+        assert!(matches!(
+            read_bounded_segment_using(&mut reader, Some(&mut budget)),
+            Err(LedgerError::OperationTimeout(_))
+        ));
+    }
+
+    #[test]
+    fn complete_observation_projection_shares_deadline_between_records() {
+        struct Clock(AtomicU64);
+        impl LedgerClock for Clock {
+            fn monotonic_millis(&self) -> u64 {
+                self.0.fetch_add(100_000, Ordering::Relaxed)
+            }
+            fn timestamp(&self) -> String {
+                "2026-10-26T00:00:00.000000Z".to_owned()
+            }
+        }
+        let run = Uuid::now_v7();
+        let mut previous = GENESIS_PREVIOUS_HASH.to_owned();
+        let mut records = Vec::new();
+        for sequence in 1..=3 {
+            let record = AuditRecord::new(
+                sequence,
+                "2026-10-26T00:00:00.000000Z",
+                run,
+                1,
+                AuditKind::ProfileObserved,
+                parse("{}").unwrap(),
+                &previous,
+            )
+            .unwrap();
+            previous = record.hash().to_owned();
+            records.push(record);
+        }
+        let budget = ObservationBudget::new(
+            Box::new(Clock(AtomicU64::new(0))),
+            MAX_LEDGER_BYTES,
+            MAX_LEDGER_RECORDS,
+        );
+        assert!(matches!(
+            project_observation(run, &records, &budget),
+            Err(LedgerError::OperationTimeout(_))
+        ));
+    }
+
+    #[test]
+    fn complete_observation_reader_charges_actual_prefix_and_shared_retries() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let root =
+            std::env::temp_dir().join(format!("dolgorae-complete-prefix-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let run = Uuid::now_v7();
+        let mut previous = GENESIS_PREVIOUS_HASH.to_owned();
+        let mut bytes = Vec::new();
+        for sequence in 1..=3 {
+            let record = AuditRecord::new(
+                sequence,
+                "2026-10-26T00:00:00.000000Z",
+                run,
+                1,
+                AuditKind::ProfileObserved,
+                parse("{}").unwrap(),
+                &previous,
+            )
+            .unwrap();
+            previous = record.hash().to_owned();
+            bytes.extend(record.canonical_line().unwrap());
+        }
+        let path = root.join("audit.jsonl");
+        fs::write(&path, &bytes).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let length = bytes.len() as u64;
+        for limit in [length - 1, length, length + 1] {
+            let mut budget =
+                ObservationBudget::new(Box::new(SystemLedgerClock::default()), limit, 3);
+            let result = ObservedLedger::open_complete_bounded(&root, run, 3, &mut budget);
+            assert_eq!(result.is_ok(), limit >= length);
+        }
+        for limit in [2, 3, 4] {
+            let mut budget =
+                ObservationBudget::new(Box::new(SystemLedgerClock::default()), 3 * length, limit);
+            let result = ObservedLedger::open_complete_bounded(&root, run, 3, &mut budget);
+            assert_eq!(result.is_ok(), limit >= 3);
+        }
+        let mut budget =
+            ObservationBudget::new(Box::new(SystemLedgerClock::default()), 2 * length, 6);
+        assert!(ObservedLedger::open_complete_bounded(&root, run, 3, &mut budget).is_ok());
+        assert!(ObservedLedger::open_complete_bounded(&root, run, 3, &mut budget).is_ok());
+        assert!(matches!(
+            ObservedLedger::open_complete_bounded(&root, run, 3, &mut budget),
+            Err(LedgerError::Capacity(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn dropped_ledger_releases_anchor_while_duplicated_descriptor_survives() {
@@ -3377,7 +3755,7 @@ mod tests {
             assert_eq!(fresh, first_bytes);
             assert!(matches!(
                 ObservedLedger::open_complete(&root, run_id, 1),
-                Err(LedgerError::Integrity(_))
+                Err(LedgerError::CaptureConflict)
             ));
             let mut stable = Vec::new();
             ObservedLedger::open_display(&root, run_id, 1)

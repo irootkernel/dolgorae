@@ -161,7 +161,7 @@ pub struct Envelope {
     pub request_schema: String,
     #[serde(flatten)]
     pub namespace: Namespace,
-    #[serde(deserialize_with = "required_nullable")]
+    #[serde(deserialize_with = "crate::delegation_identity::deserialize_optional_invocation_ref")]
     pub trusted_invocation_ref: Option<Uuid>,
     pub request_body: BytesRef,
 }
@@ -904,6 +904,60 @@ mod tests {
         let mut legacy = records.clone();
         legacy.pop();
         assert!(lookup(&legacy, &namespace).is_err());
+    }
+
+    #[test]
+    fn serialized_invocation_proof_requires_canonical_uuid_before_conversion() {
+        let request = request();
+        let namespace = Namespace::submit(
+            &controller(),
+            "workspace",
+            Uuid::now_v7(),
+            &request.idempotency_key,
+        )
+        .unwrap();
+        let identity =
+            SubmitIdentity::prepare(Uuid::now_v7(), namespace, &request, "medium").unwrap();
+        let original = serde_json::to_value(identity).unwrap();
+        assert!(
+            serde_json::from_value::<SubmitIdentity>(original.clone())
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        let canonical = "00000000-0000-7000-8000-00000000000a";
+        for value in [json!(canonical), Value::Null] {
+            let mut input = original.clone();
+            input["mutation_envelope"]["trusted_invocation_ref"] = value;
+            assert!(serde_json::from_value::<SubmitIdentity>(input).is_ok());
+        }
+        for value in [
+            Some(json!(canonical.replace('-', ""))),
+            Some(json!(canonical.to_uppercase())),
+            Some(json!(format!("{{{canonical}}}"))),
+            Some(json!(format!("urn:uuid:{canonical}"))),
+            Some(json!(canonical.replacen("-7000-", "-4000-", 1))),
+            Some(json!(canonical.replacen("-8000-", "-c000-", 1))),
+            Some(json!("")),
+            Some(json!(3)),
+            Some(json!({})),
+            Some(json!([])),
+            None,
+        ] {
+            let mut input = original.clone();
+            if let Some(value) = value {
+                input["mutation_envelope"]["trusted_invocation_ref"] = value;
+            } else {
+                input["mutation_envelope"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("trusted_invocation_ref");
+            }
+            assert!(
+                serde_json::from_value::<SubmitIdentity>(input).is_err(),
+                "original serialized invocation proof accepted"
+            );
+        }
     }
 
     #[test]

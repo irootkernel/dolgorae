@@ -34,16 +34,18 @@ pub const PROVISIONING_REF_PREFIX: &str = "provisioning:sha256:";
 /// A snapshot is a Profile binding plus admitted configuration plus at most the
 /// 65,536 aggregate captured source bytes; the retained-file read is bounded by
 /// the same ceiling the caller-start reservation already uses (src/run.rs:24).
-const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 
 /// The admission policy one provisioning selection carries. Accepting the
 /// policy fields without their digests keeps every digest derived from the
 /// captured bytes instead of caller-supplied.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProvisioningAdmission {
     pub model: String,
     pub effort: String,
     pub purpose_kind: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub purpose_label: Option<String>,
     pub required_capabilities: Vec<String>,
     pub execution_lane: String,
@@ -114,7 +116,7 @@ pub struct RetainedSnapshot {
 
 impl RetainedSnapshot {
     /// Build the retained snapshot from accepted capture bytes and admission.
-    fn from_capture(
+    pub(crate) fn from_capture(
         capture: DelegationCapture,
         profile_binding: GlobalProfileBinding,
         admission: ProvisioningAdmission,
@@ -251,7 +253,7 @@ impl RetainedSnapshot {
         .map_err(|_| snapshot_invalid("the provisioning snapshot is not canonicalizable"))
     }
 
-    fn verify(&self) -> Result<(), MachineError> {
+    pub(crate) fn verify(&self) -> Result<(), MachineError> {
         if self.schema != SNAPSHOT_SCHEMA {
             return Err(snapshot_corrupt(
                 "the provisioning snapshot has another schema",

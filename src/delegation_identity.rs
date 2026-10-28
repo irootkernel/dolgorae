@@ -12,6 +12,7 @@ use crate::jcs::{canonicalize, parse, sha256_hex};
 use crate::machine::MachineError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use uuid::Uuid;
 
 pub const ROLE_SCHEMA: &str = "dolgorae.role-snapshot/v1";
 pub const INSTRUCTION_SCHEMA: &str = "dolgorae.instruction-identity/v1";
@@ -987,6 +988,157 @@ pub struct LookupNamespace {
     pub scope_ref: Option<String>,
     pub operation_kind: String,
     pub idempotency_key: String,
+}
+
+fn checked_invocation_ref<E: serde::de::Error>(value: &str) -> Result<Uuid, E> {
+    if !uuid7(value) {
+        return Err(E::custom("invalid canonical UUIDv7"));
+    }
+    Uuid::try_parse(value).map_err(E::custom)
+}
+
+pub(crate) fn deserialize_invocation_ref<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Uuid, D::Error> {
+    checked_invocation_ref(&String::deserialize(deserializer)?)
+}
+
+pub(crate) fn deserialize_optional_invocation_ref<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Uuid>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| checked_invocation_ref(&value))
+        .transpose()
+}
+
+/// The safe checked host context; possession alone is not authentication.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedInvocationContext {
+    pub schema: String,
+    #[serde(deserialize_with = "deserialize_invocation_ref")]
+    pub invocation_ref: Uuid,
+    pub host_route: String,
+    pub state_generation: u64,
+    pub accepted_public_input_digest: String,
+    pub native_event_digest: String,
+    pub server_binding: String,
+    pub tool_binding: String,
+}
+
+impl TrustedInvocationContext {
+    pub fn validate(&self) -> Result<(), MachineError> {
+        if self.schema != "dolgorae.trusted-invocation-context/v1"
+            || self.invocation_ref.get_version_num() != 7
+            || self.invocation_ref.get_variant() != uuid::Variant::RFC4122
+            || !matches!(
+                self.host_route.as_str(),
+                "codex-0.160.0" | "claude-code-2.1.295"
+            )
+            || !(1..=MAX_JCS_SAFE_INTEGER).contains(&self.state_generation)
+            || !prefixed_digest(&self.accepted_public_input_digest)
+            || !prefixed_digest(&self.native_event_digest)
+            || self.server_binding != "dolgorae"
+            || !opaque(&self.tool_binding)
+            || self.tool_binding.len() > 128
+        {
+            return Err(MachineError::invalid_argument(
+                "trusted_invocation",
+                "invalid trusted context",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// K-only mirror. Native R/S bookkeeping never uses this checked envelope.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProtectedInvocation {
+    pub schema: String,
+    pub context: TrustedInvocationContext,
+    pub namespace: LookupNamespace,
+    pub native_session_ref: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub native_turn_ref: Option<String>,
+    pub native_tool_use_ref: String,
+    pub opaque_binding_secret_digest: String,
+    pub state: String,
+    #[serde(deserialize_with = "deserialize_optional_invocation_ref")]
+    pub operation_ref: Option<Uuid>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub receipt: Option<OperationReceipt>,
+}
+
+impl ProtectedInvocation {
+    pub fn validate(&self) -> Result<(), MachineError> {
+        self.context.validate()?;
+        let ns = &self.namespace;
+        if self.schema != "dolgorae.protected-invocation-state/v1"
+            || !opaque(&self.native_session_ref)
+            || !opaque(&self.native_tool_use_ref)
+            || self
+                .native_turn_ref
+                .as_ref()
+                .is_some_and(|value| !opaque(value))
+            || !prefixed_digest(&self.opaque_binding_secret_digest)
+            || !opaque(&ns.controller_principal)
+            || !opaque(&ns.workspace_ref)
+            || !(1..=MAX_JCS_SAFE_INTEGER).contains(&ns.controller_generation)
+            || !opaque(&ns.idempotency_key)
+            || ns.idempotency_key.len() > 256
+            || ns.scope_kind.is_some() != ns.scope_ref.is_some()
+            || ns.scope_kind.as_ref().is_some_and(|value| {
+                !matches!(
+                    value.as_str(),
+                    "external_engagement"
+                        | "orchestrated_session"
+                        | "workspace"
+                        | "run"
+                        | "profile"
+                )
+            })
+            || ns.scope_ref.as_ref().is_some_and(|value| !opaque(value))
+            || !matches!(
+                ns.operation_kind.as_str(),
+                "install_provisioning"
+                    | "open_external_engagement"
+                    | "hire_external_specialist"
+                    | "assign_external_specialist_task"
+                    | "spawn_specialist"
+                    | "assign_specialist_task"
+            )
+            || self.operation_ref.is_some_and(|value| {
+                value.get_version_num() != 7 || value.get_variant() != uuid::Variant::RFC4122
+            })
+            || !matches!(
+                self.state.as_str(),
+                "prepared" | "accepted" | "unresolved" | "resolved_not_accepted"
+            )
+            || (self.state == "accepted") != self.receipt.is_some()
+            || (self.state == "prepared" && self.operation_ref.is_some())
+            || (self.state == "accepted" && self.operation_ref.is_none())
+        {
+            return Err(MachineError::invalid_argument(
+                "protected_invocation",
+                "invalid keyed host linkage",
+            ));
+        }
+        if let Some(receipt) = &self.receipt {
+            receipt.validate()?;
+            receipt.verify_digest()?;
+            if receipt.namespace != self.namespace
+                || self.operation_ref.map(|value| value.to_string()).as_deref()
+                    != Some(&receipt.operation_ref)
+            {
+                return Err(MachineError::invalid_argument(
+                    "protected_invocation",
+                    "receipt differs from linkage",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

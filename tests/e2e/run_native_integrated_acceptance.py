@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -13,6 +14,10 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import tarfile
+import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -23,7 +28,7 @@ from run_live_instruction_discovery import (
     CORE_PREFIX, ProbeCheckFailure, checked_codex, executable_identity, isolated_environment,
     private_file, verify_core_prefix,
 )
-from run_native_workspace_policy_fixture import ScriptedResponses, fixture_config, terminal_output
+from run_native_workspace_policy_fixture import ScriptedResponses, code_call, code_results, fixture_config, terminal_output
 from schema_support import assert_valid, validator
 
 OPT_IN = "DOLGORAE_RUN_NATIVE_INTEGRATED_ACCEPTANCE"
@@ -31,6 +36,12 @@ CODEX_VERSION = caller.CODEX_VERSION
 CODEX_SHA256 = caller.CODEX_SHA256
 MAX_TURNS = 17
 MAX_POSTS = MAX_TURNS * 2
+SUCCESSOR_READ_PAGES = {"complete_result": 2, "final_response": 2, "before": 1, "after": 1, "package": 1,
+                        "record_input": 1, "record_outcome": 1, "accept_input": 2, "accept_outcome": 1, "accept_receipt": 3}
+# Original reads batch their second pages together. Accept input adds one
+# exchange; the original receipt adds two. These are required pages, not slack.
+SUCCESSOR_CONTINUATIONS = 1 + 1 + 2
+SUCCESSOR_POSTS = 19 + SUCCESSOR_CONTINUATIONS
 TURN_TIMEOUT = "60s"
 PROTOCOL = Path(__file__).resolve().parents[2] / "docs" / "protocol"
 COMMON = "integrated-common-017"
@@ -38,6 +49,122 @@ GENERAL = "integrated-general-017"
 REVIEWER = "integrated-reviewer-017"
 PROFILE = "integrated-profile-user-017"
 AMBIENT = ("integrated-project-forbidden-017", "integrated-ancestor-forbidden-017")
+
+
+def successor_aquarium_sources(root: Path, archive: Path) -> None:
+    """Retain only the selected instruction/helper inputs; never execute on extraction."""
+    archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    if archive_digest != "542a7836dee2d412b06f6c78e16712124cce8f89c14413d943c1bd3fab5454e9":
+        raise ProbeCheckFailure("selected_aquarium_archive_changed")
+    prefix = "plugins/aquarium/"
+    names = ["references/ordinary-agent-orchestration.md",
+             "references/formal-agent-orchestration-v1.md", "references/executor-guidance.md",
+             "skills/goal-evaluator/scripts/prepare_assignment.py",
+             "skills/goal-evaluator/scripts/render_dispatch.py",
+             "skills/goal-evaluator/scripts/ordinary_assignment.py"]
+    source = root / "aquarium-source"
+    source.mkdir(mode=0o700)
+    identities = []
+    with tarfile.open(archive) as selected:
+        for name in names:
+            member = selected.getmember(prefix + name)
+            if not member.isfile():
+                raise ProbeCheckFailure("selected_aquarium_input_not_regular")
+            body = selected.extractfile(member).read()
+            destination = source / name
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            private_file(destination, body)
+            identities.append({"member": member.name, "sha256": hashlib.sha256(body).hexdigest()})
+    private_file(root / "aquarium-source.json", json.dumps({
+        "selection": "db132845624c24bb4d0a889503b35a2a59b2571d",
+        "archive_sha256": archive_digest, "files": identities}).encode())
+
+
+def prepare_successor_consumers(root: Path) -> None:
+    """Called by the existing Rust fixture before managed assignment admission."""
+    from run_native_production_host import podway_fixture
+    inputs = json.loads((root / "consumer-inputs.json").read_text())
+    facts = json.loads((root / "managed-consumer-setup.json").read_text())
+    podway_fixture(root, Path(inputs["podway"]), inputs["podway_sha256"], facts["candidate"],
+                   dict(os.environ), time.monotonic() + 30,
+                   adapter_id="dolgorae.managed/1", adapter_version=facts["adapter_version"])
+    source = root / "aquarium-source"
+    scripts = source / "skills/goal-evaluator/scripts"
+    modules = []
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        for name in ("prepare_assignment", "render_dispatch"):
+            spec = importlib.util.spec_from_file_location(name, scripts / (name + ".py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            modules.append(module)
+        connection = json.loads((root / "connection.json").read_text())
+        procedure = {key: connection[key] for key in ("workspace", "session", "attempt", "placement")}
+        evidence = [{"path": str(root / "workspace/file.txt"), "basis": "original workspace bytes"}]
+        gaps = [{"owner": "independent evaluator", "obligation": "Assess the delivered candidate; no goal pass is supplied by this fixture."}]
+        ordinary = {"schema": "aquarium.assignment/v3", "role": "executor",
+            "work": {"objective": "Perform the authorized second native write", "sources": "references/ordinary-agent-orchestration.md"},
+            "target": {"workspace": str(root / "workspace"), "included": ["file.txt"], "excluded": ["all other paths"]},
+            "authority": {"allowed": ["Write file.txt in the isolated fixture"], "excluded": ["Git history or index mutation", "workflow acceptance"]},
+            "procedure": None, "native": {"harness": "codex", "agent": "unknown until actual spawn", "lifecycle": "not-dispatched"},
+            "evidence": evidence, "gaps": gaps, "purpose": "Bounded ordinary delivery",
+            "instructions": (source / "references/ordinary-agent-orchestration.md").read_text(),
+            "deliverables": ["Actual changed file and ordinary executor handoff"],
+            "success_criteria": ["Return actual evidence and remaining gaps without formal receipt requirements"], "checkpoint": "delivery"}
+        prepared = modules[0].prepare(source, ordinary)
+        dispatch = modules[1].render_dispatch(prepared)
+        private_file(root / "ordinary-assignment.json", json.dumps(prepared, ensure_ascii=False).encode())
+        private_file(root / "ordinary-dispatch.txt", dispatch["dispatch_text"].encode())
+        formal = {"schema": "aquarium.assignment-request/v1",
+            "role": {"path": "references/executor-guidance.md", "dependencies": ["references/formal-agent-orchestration-v1.md"]},
+            "node": {"objective": "Perform the authorized first native write", "purpose": "Formal Worker delivery",
+                "instructions": "Return the actual result and gaps. Primary must inspect original content, explicitly Record/Accept, then separately complete the Action. No Judge or goal pass is implied.",
+                "canonical_sources": ["references/formal-agent-orchestration-v1.md"],
+                "context": {"work_identity": "native-managed-writer", "goal_ref": "not-applicable:no-Podway-goal", "goal_revision": "not-applicable",
+                    "target": str(root / "workspace/file.txt"), "base": facts["base_commit"],
+                    "procedure": procedure["session"], "node": procedure["placement"]},
+                "selected_evidence": [], "permitted_effects": {"allowed": ["Write file.txt in the isolated fixture"], "excluded": ["workflow acceptance"]},
+                "deliverables": ["Complete native write result"], "success_criteria": ["Preserve actual native bindings, original evidence and remaining gaps"]}}
+        prepared = modules[0].prepare(source, formal)
+        dispatch = modules[1].render_dispatch(prepared)
+        private_file(root / "formal-preparation.json", json.dumps(prepared, ensure_ascii=False).encode())
+        private_file(root / "formal-dispatch.txt", dispatch["dispatch_text"].encode())
+    finally:
+        sys.dont_write_bytecode = previous
+
+
+def successor_public(root: Path, *args: str) -> dict:
+    connection = json.loads((root / "connection.json").read_text())
+    executable = Path(connection["executable"])
+    if "sha256:" + hashlib.sha256(executable.read_bytes()).hexdigest() != connection["executable_sha256"]:
+        raise ProbeCheckFailure("selected_podway_executable_changed")
+    argv = [str(executable), "--contract-generation", "1", "--worktree", connection["worktree"], "--json", *args]
+    result = subprocess.run(argv, cwd=connection["worktree"], capture_output=True, timeout=10)
+    with (root / "consumer-public.jsonl").open("a") as log:
+        log.write(json.dumps({"argv": argv, "exit": result.returncode,
+            "stdout": result.stdout.decode(), "stderr": result.stderr.decode()}) + "\n")
+    if result.returncode:
+        raise ProbeCheckFailure("selected_public_consumer_read_or_completion_failed")
+    return json.loads(result.stdout)
+
+
+def finish_successor_consumer(root: Path) -> None:
+    """A separate public Action completion after the Primary's delivery decision."""
+    accepted = json.loads((root / "consumer-prepared-accept.json").read_text())
+    connection = json.loads((root / "connection.json").read_text())
+    receipt = successor_public(root, "delegation", "receipt", "--session", connection["session"], "--attempt", connection["attempt"])
+    if receipt["result"]["applicability"] != "accepted" or receipt["result"]["receipt"]["result_digest"] != accepted["result_digest"]:
+        raise ProbeCheckFailure("formal_receipt_not_current_before_separate_completion")
+    before = successor_public(root, "observe")
+    if before["result"]["status"]["session"]["lifecycle"] != "running":
+        raise ProbeCheckFailure("acceptance_already_completed_action")
+    completed = successor_public(root, "complete", "--idempotency-key", "primary-action-complete")
+    after = successor_public(root, "observe")
+    if after["result"]["status"]["session"]["lifecycle"] != "completed":
+        raise ProbeCheckFailure("separate_action_completion_unproved")
+    private_file(root / "consumer-completion.json", json.dumps({"before": before, "complete": completed,
+        "after": after, "semantic_goal_pass": False}).encode())
 
 
 def overwrite_fixture_file(path: Path, body: bytes) -> None:
@@ -74,18 +201,21 @@ def assert_no_source_isolation(home: Path) -> None:
             raise ProbeCheckFailure("source_isolation_created")
 
 
-def stop_fixture_profile(call, root: Path, operator: Path) -> None:
-    status = call("profile", "server", "status", "integrated")
-    state = status["state"]
-    if (status["profile"] != "integrated" or state["server_key"] != status["server_key"]
-            or state["snapshot"]["canonical_codex_home"] != str(root / "profile")
-            or state["snapshot"]["executable_identity"]["sha256"] != CODEX_SHA256):
-        raise ProbeCheckFailure("fixture_profile_ownership_unverified")
-    membership = call("profile", "membership", "verify", "integrated")
-    if not membership["complete"] or membership["server_key"] != status["server_key"]:
-        raise ProbeCheckFailure("fixture_profile_membership_unverified")
-    call("profile", "server", "stop", "integrated", "--operator-file", str(operator),
-         "--interrupt", "--confirm-server-key", status["server_key"])
+def accepted_profile_state(root: Path, workspace_id: str, run_id: str) -> dict:
+    manifest=json.loads((root / "home/.dolgorae/workspaces" / workspace_id / "runs" / run_id / "manifest.json").read_text())
+    binding=manifest["global_profile_binding"]
+    state=json.loads((root / "home/.dolgorae/profiles" / binding["server_key"] / "state.json").read_text())
+    if (state["server_key"]!=binding["server_key"] or state["snapshot"]!=binding["launch_snapshot"]
+            or state["snapshot"]["canonical_codex_home"]!=str(root / "profile")
+            or state["snapshot"]["executable_identity"]["sha256"]!=CODEX_SHA256):
+        raise ProbeCheckFailure("accepted_fixture_profile_binding_changed")
+    return state
+
+
+def stop_fixture_profile(driver: Path, root: Path, environment: dict) -> None:
+    result=subprocess.run([str(driver),"--retire-profiles",str(root)],env={**environment,caller.OPT_IN:"1"},capture_output=True,text=True,timeout=30)
+    if result.returncode or json.loads(result.stdout).get("retained_profiles_retired") is not True:
+        raise ProbeCheckFailure("accepted_fixture_profile_retirement_failed")
 
 
 def require_fixture_process_absence(observation: dict) -> None:
@@ -134,7 +264,7 @@ class IntegratedResponses(ScriptedResponses):
                          and item.get("type") == "message" and item.get("role") == "user"]
                 if PROFILE not in json.dumps(users):
                     raise ProbeCheckFailure("profile_user_guidance_missing")
-                if not users or self.marker not in json.dumps(users[-1]):
+                if len([user for user in users if self.marker in json.dumps(user)]) != 1:
                     raise ProbeCheckFailure("fixture_task_mismatch")
                 self.issued = True
                 if self.request_specialist:
@@ -150,18 +280,16 @@ class IntegratedResponses(ScriptedResponses):
                 else:
                     arguments = {"cmd": self.command, "yield_time_ms": 10000}
                     name = "exec_command"
-                item = {"type": "function_call", "call_id": self.call_id, "name": name,
-                        "arguments": json.dumps(arguments)}
+                self.native_calls = [(self.call_id, name, arguments)]
+                if self.request_specialist and getattr(self, "managed_native_sources", None) is not None:
+                    self.native_calls.extend([
+                        (self.call_id + "-native-0", "dolgorae_specialists_native", {"schema": "dolgorae.external-specialist-request/v5", "operation": "validate_provisioning", "sources": self.managed_native_sources}),
+                        (self.call_id + "-native-1", "dolgorae_specialist_consumer", {"schema": "dolgorae.consumer-control/v1", "action": "status", "target": {"kind": "context"}})])
+                item = code_call(request, self.call_id, self.native_calls)
             else:
-                returns = [item for item in inputs if isinstance(item, dict)
-                           and item.get("type") == "function_call_output"
-                           and item.get("call_id") == self.call_id]
-                if len(returns) != 1:
-                    raise ProbeCheckFailure("fixture_return_correlation_invalid")
-                output = returns[0].get("output")
+                outputs = code_results(request, self.call_id, [label for label, _, _ in self.native_calls])
+                output = outputs[self.call_id]
                 if self.request_specialist:
-                    if isinstance(output, list) and len(output) == 1:
-                        output = output[0].get("text")
                     if not isinstance(output, str) or len(output) > 65536:
                         raise ProbeCheckFailure("primary_tool_return_missing")
                     result = json.loads(output)
@@ -177,8 +305,6 @@ class IntegratedResponses(ScriptedResponses):
                     self.specialist_run_id = operation["specialist_run_id"]
                     answer = "Done."
                 elif self.command is None:
-                    if isinstance(output, list) and len(output) == 1:
-                        output = output[0].get("text")
                     if not isinstance(output, str) or len(output) > 65536:
                         raise ProbeCheckFailure("candidate_return_missing")
                     result = json.loads(output)
@@ -219,6 +345,19 @@ class IntegratedResponses(ScriptedResponses):
                 self.steps += 1
                 item = {"type": "message", "role": "assistant", "id": f"integrated-message-{self.steps}",
                         "content": [{"type": "output_text", "text": answer}]}
+            if self.request_specialist and getattr(self,"managed_native_sources",None) is not None and not self.pending:
+                headers=[]
+                for index in range(2):
+                    output=outputs[self.call_id+"-native-"+str(index)]
+                    if not isinstance(output,str) or not output.isascii() or len(output.encode())>4096: raise ProbeCheckFailure("managed_native_metadata_missing")
+                    headers.append(json.loads(output))
+                candidate=headers[0].get("facts",{}).get("candidate",{})
+                if (headers[0].get("schema")!="dolgorae.native-specialist-response/v1" or headers[0].get("ok") is not True
+                        or not candidate.get("agent_configuration_digest","").startswith("sha256:") or candidate.get("installed") is not False
+                        or headers[1].get("schema")!="dolgorae.consumer-control-response/v1" or headers[1].get("ok") is not True
+                        or headers[1].get("data")!={"kind":"context","mode":"native_only","context_ref":None}):
+                    raise ProbeCheckFailure("managed_native_product_result_unverified")
+                self.managed_native_seen=True
             identity = f"integrated-response-{self.posts}"
             return [{"type": "response.created", "response": {"id": identity}},
                     {"type": "response.output_item.done", "item": item},
@@ -301,6 +440,7 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
         overwrite_fixture_file(root / "home/.dolgorae/home/AGENTS.md", (COMMON + "\n").encode())
         overwrite_fixture_file(root / "home/.dolgorae/roles/general/AGENTS.md", (GENERAL + "\n").encode())
         overwrite_fixture_file(root / "home/.dolgorae/roles/reviewer/AGENTS.md", (REVIEWER + "\n").encode())
+        private_file(root / "fixture-owned", b"native-integrated-acceptance/v1\n")
         operator = root / "operator"
         call("operator", "credential", "initialize", "--output", str(operator))
         owner = root / "controller"
@@ -319,8 +459,9 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
             return call(*args, expected_error=error)
 
         writer = start("default-writer")
-        profile = call("profile", "server", "status", "integrated")
-        features = profile["state"]["snapshot"]["process_static_configuration"]["features"]
+        fixture_view=call("workspace","inspect","--workspace",str(workspace))
+        profile = accepted_profile_state(root,fixture_view["workspace_id"],writer["run_id"])
+        features = profile["snapshot"]["process_static_configuration"]["features"]
         if (not isinstance(features, dict) or features.get("plugins") is not False
                 or (root / "profile/.tmp/plugins").exists()):
             raise ProbeCheckFailure("fixture_plugin_startup_isolation_unverified")
@@ -371,7 +512,7 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
                     raise ProbeCheckFailure("ordinary_writable_close_retained_writer")
             if fixture.posts != 0 or fixture.failure is not None:
                 raise ProbeCheckFailure("ordinary_close_started_unapproved_turn")
-            stop_fixture_profile(call, root, operator)
+            stop_fixture_profile(caller_driver, root, environment)
             cleanup_removed_root(binary, root, allow_existing_root=True)
             require_fixture_process_absence(call("runtime", "orphan", "inspect",
                                                 "--owner-root-under", str(root)))
@@ -565,10 +706,38 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
         captures = json.loads(capture[0])["captures"]
         role_ref = policy["roles"][0]["role_ref"]
         accepted_child = captures["configurations"][role_ref]
+        # Explicit setup for the existing Primary Turn; no additional Turn/POST.
+        host_root = root / "managed-native-host"
+        host_root.mkdir(mode=0o700)
+        host_controller = host_root / "controller"
+        private_file(host_controller, primary_controller.read_bytes())
+        journal=host_root / "journal";journal.mkdir(mode=0o700)
+        draft=host_root / "draft.json"
+        root_manifest=json.loads((state_root / "runs" / primary["run_id"] / "manifest.json").read_text())
+        private_file(draft,json.dumps({"route":"codex-0.160.0","executable":{"path":str(codex),"version":CODEX_VERSION,"sha256":CODEX_SHA256},
+            "owner":{"kind":"managed","session_ref":primary["run_id"]},"controller_generation":root_manifest["controller"]["identity"]["generation"],
+            "controller_file":str(host_controller),"native_host_root":str(journal),"allowed_scopes":[{"kind":"orchestrated_session","reference":primary["run_id"]}],
+            "tools":["dolgorae_specialists_native","dolgorae_specialist_consumer"],"caller_scope":{"binding_ref":"native-managed","podway_workspace_ref":"native-workspace","podway_session_ref":"native-session","podway_attempt_ref":"native-attempt","delegated_placement_ref":"native-placement","max_rounds":3},
+            "adapter_id":"dolgorae.managed/1","adapter_version":root_manifest["dolgorae"]["version"].removeprefix("v")}).encode())
+        owner_config=host_root / "owner.json"
+        def native_setup(operation, extra=()):
+            with operator.open("rb") as op,primary_controller.open("rb") as controller:
+                completed=subprocess.run([str(binary),"__trusted-specialist-host",operation,"--owner-config",str(owner_config),"--operator-fd",str(op.fileno()),"--controller-fd",str(controller.fileno()),*extra],env=environment,pass_fds=(op.fileno(),controller.fileno()),capture_output=True,timeout=30)
+            if completed.returncode or completed.stdout or completed.stderr: raise ProbeCheckFailure("managed_native_setup_failed")
+        native_setup("owner-config-create",("--workspace",str(workspace),"--request",str(draft)))
+        native_setup("namespace-setup");native_setup("host-state-init");native_setup("preparation-init");native_setup("managed-connect")
+        mode=host_root / "consumer-mode.json";private_file(mode,b'{"kind":"native_only"}')
+        native_setup("consumer-init",("--request",str(mode)))
+        selected=host_root / "managed-provisioning.json";projected=root / "managed-projection.json"
+        private_file(selected,json.dumps({"role_name":"reviewer","role":{"kind":"file","value":["roles","reviewer"]},"dependencies":[],"selected_guidance":[],"profile_binding":root_manifest["global_profile_binding"],
+            "admission":{"model":"gpt-5.6-luna","effort":"low","purpose_kind":"review","purpose_label":None,"required_capabilities":[],"execution_lane":"dedicated","requested_access":"read_only","required_assurance":"best_effort_personal_alpha","native_subagent_policy":"disabled"}}).encode())
+        native_setup("provisioning-prepare",("--request",str(selected),"--output",str(projected)))
+        fixture.managed_native_sources=json.loads(projected.read_text())
         fixture.prepare("native-primary-child-request", GENERAL, request_specialist=True)
         call("run", "send", primary["run_id"], "--workspace", str(workspace),
              "--controller-file", str(primary_controller), "--message", "native-primary-child-request",
              "--idempotency-key", "native-primary-child", "--timeout", TURN_TIMEOUT)
+        if getattr(fixture,"managed_native_seen",False) is not True: raise ProbeCheckFailure("managed_native_current_http_unproved")
         child_path = state_root / "runs" / str(fixture.specialist_run_id) / "manifest.json"
         if not child_path.is_file():
             raise ProbeCheckFailure("broker_child_manifest_missing")
@@ -647,7 +816,7 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
         if fixture.failure or fixture.pending or fixture.posts != MAX_POSTS or fixture.steps != MAX_TURNS:
             raise ProbeCheckFailure("integrated_turn_budget_mismatch")
         assert_no_source_isolation(root / "home")
-        stop_fixture_profile(call, root, operator)
+        stop_fixture_profile(caller_driver, root, environment)
         cleanup_removed_root(binary, root, allow_existing_root=True)
         require_fixture_process_absence(call("runtime", "orphan", "inspect",
                                             "--owner-root-under", str(root)))
@@ -663,7 +832,7 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
                 "profile_guidance_observed_as_user_input": True,
                 "reusable_review_tasks": 2, "primary_policy_capture_and_replay": True,
                 "rejected_review_failures": ["native_read", "forged_receipt", "missing_receipt", "target_drift"],
-                "broker_child_accepted_configuration": True,
+                "broker_child_accepted_configuration": True,"managed_native_current_http":True,
                 "direct_review_scopes": [case[1] for case in cases],
                 "copy_and_worktree_creation": False, "caller_service_recovery": recovery,
                 "owned_operator_cleanup": True, "owned_process_absence_verified": True,
@@ -686,17 +855,377 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
 
 
 class SuccessorResponses(IntegratedResponses):
-    """Allow only the bounded successor writer task selected by this campaign."""
+    """Serve the existing two Writer tasks and three actual Primary Turns."""
+
+    def __init__(self) -> None:
+        self.assignment_seen = threading.Event()
+        self.writer_steps = 0
+        super().__init__(concurrent_requests=True)
+
+    def primary_user(self, request: dict, phase: dict) -> dict | None:
+        marker = "native-primary-" + phase["phase"] + "\n"
+        users = [v for v in request.get("input", []) if v.get("type") == "message" and v.get("role") == "user"
+                 and any(b.get("text", "").startswith(marker) for b in v.get("content", []))]
+        if len(users) > 1:
+            raise ProbeCheckFailure("duplicate_current_primary_phase_message")
+        return users[0] if users else None
+
+    def writer_task(self, request: dict, writer_step: int) -> dict:
+        expected = json.loads((self.consumer_root / ("formal-task.json" if writer_step == 0 else "ordinary-task.json")).read_text())
+        suffix = (f"\n\nExecution intent: {expected['execution_intent']}\n"
+                  f"Task deadline: {expected['deadline_seconds']} seconds after durable acceptance")
+        tasks = []
+        for message in request.get("input", []):
+            if message.get("type") != "message" or message.get("role") != "user":
+                continue
+            for block in message.get("content", []):
+                text = block.get("text", "")
+                if "\n\nAccepted task:\n" not in text:
+                    continue
+                tail = text.split("\n\nAccepted task:\n", 1)[1]
+                try:
+                    task, end = json.JSONDecoder().raw_decode(tail)
+                except json.JSONDecodeError as error:
+                    raise ProbeCheckFailure("writer_accepted_task_json_invalid") from error
+                if tail[end:] != suffix:
+                    raise ProbeCheckFailure("writer_execution_intent_or_deadline_mismatch")
+                if task != expected["task"]:
+                    raise ProbeCheckFailure("writer_accepted_task_mismatch")
+                tasks.append(task)
+        if len(tasks) != 1:
+            raise ProbeCheckFailure("writer_accepted_task_missing_or_duplicate")
+        return tasks[0]
+
+    def check_prepared_input(self, kind: str, phase: dict) -> None:
+        raw = self.finished_reads[kind + "_input"]
+        value = json.loads(raw)
+        if uuid.UUID(value["idempotency_key"]).version != 7:
+            raise ProbeCheckFailure("prepared_original_key_invalid")
+        connection = json.loads((self.consumer_root / "connection.json").read_text())
+        expected = {"workspace_uuid": connection["workspace"], "session_id": connection["session"],
+                    "attempt_id": connection["attempt"], "idempotency_key": value["idempotency_key"]}
+        if kind == "record":
+            observed = self.record_observation["result"]
+            item = next(v for v in observed["active_items"] if v["item_id"] == "result")
+            expected.update(schema="podway.item-record-many-input/v1", session_revision=observed["status"]["session"]["revision"],
+                operations=[{"item_id": "result", "expected_item_revision": item["revision"],
+                    "record": {"type": "text", "value": "Primary inspected the original managed delivery and retained its gaps."}}])
+        else:
+            expected.update(schema="podway.delegation-accept-input/v1", session_revision=self.accept_package["result"]["session_revision"],
+                package_digest=self.accept_package["result"]["package_digest"], execution=phase["input"]["execution"],
+                rounds_used=1, result_digest=phase["input"]["result_digest"], worker_disposition="idle", accepted=True,
+                summary="Primary verified the complete managed delivery, original content, bindings and retained assessment gaps.")
+        expected_raw = json.dumps(expected, ensure_ascii=False, sort_keys=True,
+                                  separators=(",", ":")).encode("utf-8")
+        if raw != expected_raw:
+            raise ProbeCheckFailure("prepared_input_not_exact_selected_contract")
+        setattr(self, kind + "_input", value)
+        private_file(self.consumer_root / f"consumer-prepared-{kind}.json", raw)
+
+    def primary_return(self, request: dict, call_id: str) -> tuple[dict, str | None]:
+        if call_id not in self.primary_pending:
+            raise ProbeCheckFailure("managed_primary_return_label_not_pending")
+        output = code_results(request, self.primary_outer_call, list(self.primary_pending))[call_id]
+        if not isinstance(output, str):
+            raise ProbeCheckFailure("managed_primary_return_shape_changed")
+        header, separator, original = output.partition("\n")
+        if not header.isascii() or len(header.encode()) > 4096:
+            raise ProbeCheckFailure("managed_primary_metadata_unbounded")
+        value = json.loads(header)
+        if value.get("ok") is not True:
+            raise ProbeCheckFailure("managed_primary_product_refused", value)
+        return value, original if separator else None
+
+    def primary_calls(self, requests: list[tuple[str, dict, dict | None]]) -> list[dict]:
+        self.primary_pending = {}
+        calls = []
+        for index, (tool, body, page) in enumerate(requests):
+            call_id = f"primary-{self.primary_phase}-{self.posts}-{index}"
+            self.primary_pending[call_id] = (body, page)
+            calls.append((call_id, tool, body))
+        self.primary_outer_call = f"primary-{self.primary_phase}-{self.posts}"
+        item = code_call(self.primary_carrier_request, self.primary_outer_call, calls)
+        identity = f"primary-response-{self.posts}"
+        return [{"type": "response.created", "response": {"id": identity}},
+                {"type": "response.output_item.done", "item": item},
+                {"type": "response.completed", "response": {"id": identity, "usage": {
+                    "input_tokens": 0, "input_tokens_details": None, "output_tokens": 0,
+                    "output_tokens_details": None, "total_tokens": 0}}}]
+
+    def read_view(self, label: str, selection: str, view: dict, expected: bytes | None,
+                  declared: dict | None = None) -> tuple[str, dict, dict]:
+        page = {"label": label, "selection": selection, "view": view, "expected": expected,
+                "declared": declared, "offset": 0, "body": b""}
+        return self.read_call(page, None)
+
+    def read_call(self, page: dict, cursor: str | None) -> tuple[str, dict, dict]:
+        return ("dolgorae_specialist_consumer", {"schema": "dolgorae.consumer-control/v1", "action": "inspect",
+            "selection_ref": page["selection"], "view": page["view"],
+            "range": {"kind": "continue", "cursor": cursor} if cursor else {"kind": "start", "offset": 0}}, page)
+
+    def check_primary_page(self, header: dict, original: str | None, page: dict) -> None:
+        data = header["data"]
+        raw = original.encode() if isinstance(original, str) else None
+        if (raw is None or data.get("kind") != "page" or data.get("encoding") != "utf8"
+                or data["offset"] != page["offset"] or data["returned_length"] != len(raw) or len(raw) > 1024):
+            raise ProbeCheckFailure("managed_original_page_metadata_changed")
+        if (data["source_length"] + 1023) // 1024 != SUCCESSOR_READ_PAGES[page["label"]]:
+            raise ProbeCheckFailure("frozen_managed_read_trace_changed")
+        expected = page["expected"]
+        if expected is not None:
+            end = min(page["offset"] + 1024, len(expected))
+            while True:
+                try: expected[page["offset"]:end].decode(); break
+                except UnicodeDecodeError: end -= 1
+            if raw != expected[page["offset"]:end]:
+                raise ProbeCheckFailure("managed_original_next_http_bytes_changed")
+        page["body"] += raw
+        page["offset"] += len(raw)
+        declared = page["declared"]
+        if declared is not None and (data["source_digest"] != declared["digest"] or data["source_length"] != declared["byte_length"]):
+            raise ProbeCheckFailure("managed_prepared_or_outcome_source_changed")
+        if expected is None and (raw is None or not raw.isascii() or len(raw) != min(1024, data["source_length"] - data["offset"])):
+            raise ProbeCheckFailure("managed_frozen_json_page_length_changed")
+        self.primary_pages.append({"label": page["label"], "post": self.posts, "offset": data["offset"],
+            "outer_call_id": getattr(self, "primary_outer_call", None), "view": page["view"], "selection_ref": page["selection"],
+            "bytes": len(raw), "bytes_sha256": hashlib.sha256(raw).hexdigest(),
+            "source_bytes": data["source_length"], "source_digest": data["source_digest"]})
+        if data["continuation"] is not None:
+            if page["offset"] >= data["source_length"]:
+                raise ProbeCheckFailure("managed_invented_continuation")
+            self.continuing.append(self.read_call(page, data["continuation"]))
+            return
+        if (page["offset"] != data["source_length"] or "sha256:" + hashlib.sha256(page["body"]).hexdigest() != data["source_digest"]
+                or (expected is not None and page["body"] != expected)):
+            raise ProbeCheckFailure("managed_incomplete_original_read")
+        self.finished_reads[page["label"]] = page["body"]
+
+    def primary_response(self, request: dict, phase: dict) -> list[dict]:
+        from run_native_production_host import encoded, Responses
+        with self.lock:
+            self.posts += 1
+            if self.posts > SUCCESSOR_POSTS:
+                raise ProbeCheckFailure("successor_exact_trace_budget_exceeded")
+            self.primary_posts = getattr(self, "primary_posts", 0) + 1
+            name = phase["phase"]
+            private_file(self.consumer_root / f"primary-http-{name}-{self.primary_posts}.json", encoded(request))
+            if getattr(self, "primary_phase", None) != name:
+                if getattr(self, "primary_pending", {}):
+                    raise ProbeCheckFailure("unfinished_primary_phase")
+                self.primary_phase, self.primary_step = name, 0
+                self.primary_results, self.primary_pending = [], {}
+                self.primary_pages, self.finished_reads = [], {}
+                self.continuation_posts = getattr(self, "continuation_posts", 0)
+                self.continuing = []
+                text = json.dumps([request.get("instructions"), request.get("input")], ensure_ascii=False)
+                if not all(marker in text for marker in (CORE_PREFIX, COMMON, GENERAL, PROFILE)) or any(marker in text for marker in AMBIENT):
+                    raise ProbeCheckFailure("managed_primary_captured_instructions_missing_or_ambient")
+                user = self.primary_user(request, phase)
+                original_instruction = "".join(v.get("text", "") for v in user.get("content", [])) if user else ""
+                if (self.consumer_root / "aquarium-source/references/formal-agent-orchestration-v1.md").read_text() not in original_instruction:
+                    raise ProbeCheckFailure("selected_formal_primary_instruction_not_delivered")
+                self.primary_carrier_request = {"input": [v for v in request["input"] if v.get("type") == "additional_tools"]}
+            for call_id, (body, page) in self.primary_pending.items():
+                header, original = self.primary_return(request, call_id)
+                if (("operation" in body and (header.get("schema") != "dolgorae.native-specialist-response/v1" or header.get("operation") != body["operation"]))
+                        or ("action" in body and (header.get("schema") != "dolgorae.consumer-control-response/v1" or header.get("action") != body["action"]))
+                        or ("request_id" in body and header.get("request_id") != body["request_id"])):
+                    raise ProbeCheckFailure("managed_primary_return_operation_or_request_changed")
+                self.primary_results.append({"outer_call_id": self.primary_outer_call, "label": call_id, "request": body, "header": header})
+                if page is not None:
+                    self.check_primary_page(header, original, page)
+                if body.get("operation") == "assign_specialist_task":
+                    self.managed_task = header["facts"]["task"]
+                    if (self.managed_task["member_ref"] != phase["input"]["member_ref"]
+                            or self.managed_task["accepted_task_digest"] != phase["input"]["accepted_task_digest"]):
+                        raise ProbeCheckFailure("actual_managed_assignment_binding_changed")
+                    self.assignment_seen.set()
+                if body.get("operation") == "spawn_specialist":
+                    member = header["facts"]["member"]
+                    if (member["scope_kind"] != "orchestrated_session" or member["scope_ref"] != phase["root_run"]
+                            or member["run_ref"] != member["member_ref"]
+                            or member["agent_configuration_digest"] != phase["input"]["candidate"]["agent_configuration_digest"]
+                            or member["role_snapshot_digest"] != phase["input"]["candidate"]["role_snapshot_digest"]):
+                        raise ProbeCheckFailure("actual_managed_spawn_binding_changed")
+            self.primary_pending = {}
+            if self.continuing:
+                calls, self.continuing = self.continuing, []
+                self.continuation_posts += 1
+                return self.primary_calls(calls)
+            semantic = "dolgorae_specialists_native"
+            control = "dolgorae_specialist_consumer"
+            schema = "dolgorae.external-specialist-request/v5"
+            def call(action: str, **fields) -> tuple[str, dict, None]:
+                return control, {"schema": "dolgorae.consumer-control/v1", "action": action, **fields}, None
+            def status(action: str) -> dict:
+                return next(v["header"]["data"] for v in reversed(self.primary_results) if v["request"].get("action") == action)
+            step = self.primary_step
+            self.primary_step += 1
+            data = phase["input"]
+            calls = []
+            if name == "spawn" and step == 0:
+                candidate = data["candidate"]
+                calls = [(semantic, {"schema": schema, "operation": "spawn_specialist", "scope_kind": "orchestrated_session",
+                    "scope_ref": phase["root_run"], "provisioning_ref": candidate["provisioning_ref"], "role_ref": "general",
+                    "agent_configuration_digest": candidate["agent_configuration_digest"], "idempotency_key": "native-spawn", "expected_revision": None}, None)]
+            elif name == "assignment":
+                if step == 0: calls = [(semantic, data["request"], None)]
+                elif step == 1:
+                    calls = [(semantic, {"schema": schema, "operation": "await_specialist_task", "scope_kind": "orchestrated_session",
+                        "scope_ref": phase["root_run"], "member_ref": data["member_ref"], "task_ref": self.managed_task["task_ref"], "timeout_seconds": 60}, None)]
+                else:
+                    last = self.primary_results[-1]["header"]["facts"]
+                    if last["task"]["state"] != "completed" or last["wait_timed_out"] is not False:
+                        raise ProbeCheckFailure("actual_managed_task_did_not_complete")
+            elif name == "consumer":
+                if step == 0:
+                    calls = [(semantic, {"schema": schema, "operation": "collect_specialist_task", "scope_kind": "orchestrated_session",
+                        "scope_ref": phase["root_run"], "member_ref": data["member_ref"], "task_ref": data["task_ref"]}, None), call("status", target={"kind": "context"})]
+                elif step == 1:
+                    collected = next(v["header"] for v in self.primary_results if v["request"].get("operation") == "collect_specialist_task")
+                    if (collected["evidence"]["mapping_contract"] != "dolgorae.podway-managed/v1"
+                            or collected["facts"]["task"]["task_ref"] != data["task_ref"]
+                            or collected["facts"]["task"]["member_ref"] != data["member_ref"]
+                            or collected["evidence"]["result_digest"] != data["result_digest"]):
+                        raise ProbeCheckFailure("actual_managed_collection_mapping_changed")
+                    self.result_selection = collected["evidence"]["selection_ref"]
+                    self.context_selection = status("status")["context_ref"]
+                    package = json.loads((self.consumer_root / "package.json").read_text())["result"]["package"]
+                    originals = [("complete_result", {"kind": "complete_result"}, data["originals"]["complete_result"].encode()),
+                        ("final_response", {"kind": "final_response"}, self.managed_original),
+                        ("before", {"kind": "change", "index": 0, "side": "before"}, data["originals"]["before"].encode()),
+                        ("after", {"kind": "change", "index": 0, "side": "after"}, data["originals"]["after"].encode())]
+                    calls = [self.read_view(label, self.result_selection, view, expected) for label, view, expected in originals]
+                    calls.append(self.read_view("package", self.context_selection, {"kind": "package"}, encoded(package)))
+                elif step == 2:
+                    self.record_observation = successor_public(self.consumer_root, "observe")
+                    calls = [call("prepare_record", request_id="primary-record", context_ref=self.context_selection,
+                        evidence_ref=self.result_selection, operations=[{"item_id": "result", "record": {"type": "text", "value": "Primary inspected the original managed delivery and retained its gaps."}}])]
+                elif step == 3:
+                    prepared = status("prepare_record")["input"]
+                    self.record_selection = prepared["selection_ref"]
+                    calls = [self.read_view("record_input", self.record_selection, {"kind": "prepared_input"}, None, prepared)]
+                elif step == 4:
+                    self.check_prepared_input("record", phase)
+                    calls = [call("record", request_id="primary-record", decision="record")]
+                elif step == 5:
+                    record = status("record")
+                    if record["effect"] != "committed": raise ProbeCheckFailure("actual_record_not_committed")
+                    self.accept_package = successor_public(self.consumer_root, "delegation", "package")
+                    original = successor_public(self.consumer_root, "--idempotency-key", self.record_input["idempotency_key"], "outcome", "lookup")
+                    calls = [call("prepare_accept", request_id="primary-accept", evidence_ref=self.result_selection,
+                        summary="Primary verified the complete managed delivery, original content, bindings and retained assessment gaps."),
+                        self.read_view("record_outcome", self.record_selection, {"kind": "outcome"}, encoded(original["result"]["outcome"]["response"]), record["outcome"])]
+                elif step == 6:
+                    prepared = status("prepare_accept")["input"]
+                    self.accept_selection = prepared["selection_ref"]
+                    calls = [self.read_view("accept_input", self.accept_selection, {"kind": "prepared_input"}, None, prepared)]
+                elif step == 7:
+                    self.check_prepared_input("accept", phase)
+                    calls = [call("accept", request_id="primary-accept", decision="accept")]
+                elif step == 8:
+                    accepted = status("accept")
+                    if accepted["effect"] != "committed": raise ProbeCheckFailure("actual_acceptance_not_committed")
+                    original = successor_public(self.consumer_root, "--idempotency-key", self.accept_input["idempotency_key"], "outcome", "lookup")
+                    calls = [self.read_view("accept_outcome", self.accept_selection, {"kind": "outcome"}, encoded(original["result"]["outcome"]["response"]), accepted["outcome"]),
+                        self.read_view("accept_receipt", self.accept_selection, {"kind": "receipt"}, None, accepted["receipt"])]
+                else:
+                    receipt = json.loads(self.finished_reads["accept_receipt"])
+                    connection = json.loads((self.consumer_root / "connection.json").read_text())
+                    observed = successor_public(self.consumer_root, "delegation", "receipt", "--session", connection["session"], "--attempt", connection["attempt"])
+                    if receipt["result"]["receipt"] != observed["result"]["receipt"] or observed["result"]["applicability"] != "accepted":
+                        raise ProbeCheckFailure("actual_original_receipt_not_current_or_matching")
+            if calls:
+                return self.primary_calls(calls)
+            private_file(self.consumer_root / f"primary-{name}-results.json", encoded(self.primary_results))
+            private_file(self.consumer_root / f"primary-{name}-pages.json", encoded(self.primary_pages))
+            if name == "consumer" and (set(self.finished_reads) != set(SUCCESSOR_READ_PAGES)
+                    or self.continuation_posts != SUCCESSOR_CONTINUATIONS):
+                raise ProbeCheckFailure("required_managed_reads_or_continuation_count_missing")
+            self.steps += 1
+            return Responses.codex_events({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Primary delivery checks finished; no semantic goal pass is claimed."}]}, self.posts)
 
     def respond(self, request: Any) -> list[dict[str, Any]]:
+        phase_path = self.consumer_root / "primary-phase.json"
+        phase = json.loads(phase_path.read_text()) if phase_path.is_file() else None
+        if phase is not None and phase["phase"] == "spawn":
+            with self.lock:
+                if not getattr(self, "first_request_captured", False):
+                    # Preserve the actual decoded HTTP input before classification.
+                    private_file(self.consumer_root / "successor-first-request.json",
+                                 json.dumps(request, ensure_ascii=False).encode())
+                    self.first_request_captured = True
+        if phase is not None and self.primary_user(request, phase) is not None:
+            return self.primary_response(request, phase)
+        writer_step = getattr(self, "writer_steps", 0)
         if not getattr(self, "pending", False):
             markers = ["native-managed-writer", "native-external-writer"]
-            if self.steps >= len(markers):
+            if writer_step >= len(markers):
                 raise ProbeCheckFailure("unexpected_successor_turn")
-            marker = markers[self.steps]
-            self.prepare(marker, GENERAL, command=f"printf '{self.steps + 1} after\\n' > file.txt; printf 'written\\n'",
+            marker = markers[writer_step]
+            self.prepare(marker, GENERAL, command=f"printf '{writer_step + 1} after\\n' > file.txt; printf 'written\\n'",
                          expected=b"written\n")
-        return super().respond(request)
+            dispatch = (self.consumer_root / ("formal-dispatch.txt" if writer_step == 0 else "ordinary-dispatch.txt")).read_text()
+            task = self.writer_task(request, writer_step)
+            if not any(context.get("content") == dispatch for context in task.get("contexts", [])):
+                raise ProbeCheckFailure("selected_aquarium_assignment_not_delivered")
+        private_file(self.consumer_root / f"writer-http-{writer_step}-{self.posts}.json", json.dumps(request, ensure_ascii=False).encode())
+        events = super().respond(request)
+        if not self.pending:
+            self.writer_steps = writer_step + 1
+        if writer_step == 0 and not self.pending:
+            # Wait for the genuine assignment acknowledgement, never a scraped
+            # task ID. The HTTP server can serve the concurrent Root request.
+            if not self.assignment_seen.wait(5):
+                raise ProbeCheckFailure("actual_assignment_ack_not_observed")
+            phase = json.loads((self.consumer_root / "primary-phase.json").read_text())
+            facts = phase["input"]
+            task = self.managed_task
+            connection = json.loads((self.consumer_root / "connection.json").read_text())
+            package = json.loads((self.consumer_root / "package.json").read_text())["result"]["package"]
+            preparation = json.loads((self.consumer_root / "formal-preparation.json").read_text())
+            setup = json.loads((self.consumer_root / "managed-consumer-setup.json").read_text())
+            handoff = {"schema": "aquarium.worker-handoff/v1", "work": {"objective": "Bounded formal native delivery",
+                    "unit": "native-managed-writer", "sources": "aquarium-source.json"},
+                "target": {"path": "file.txt", "sha256": hashlib.sha256((self.consumer_root / "workspace/file.txt").read_bytes()).hexdigest(),
+                    "base_revision": setup["base_commit"]},
+                "procedure": {"session": connection["session"], "attempt": connection["attempt"], "placement": connection["placement"],
+                    "procedure_digest": package["procedure_digest"], "goal": package["goal"]},
+                "native": {"backend": "codex", "adapter": "dolgorae.managed/1", "adapter_version": connection["adapter_version"],
+                    "primary_run_ref": phase["root_run"], "supervisor_ref": facts["controller_ref"],
+                    "worker_ref": facts["member_ref"], "task_ref": task["task_ref"]},
+                "configuration": {"role_snapshot_digest": facts["candidate"]["role_snapshot_digest"],
+                    "agent_configuration_digest": facts["candidate"]["agent_configuration_digest"], "accepted_task_digest": task["accepted_task_digest"],
+                    "aquarium_local_role_sha256": preparation["local_prepared_role_snapshot_sha256"]},
+                "authority": {"allowed": ["write file.txt"], "excluded": ["goal acceptance"]},
+                "evidence": [{"basis": "correlated native command", "exit": 0, "output": "written\n"}],
+                "gaps": [{"owner": "independent evaluator", "obligation": "Assess candidate against original requirements"}],
+                "deliverables": ["file.txt"], "changed_artifacts": ["file.txt"],
+                "complete_result": {"owner": "managed task", "task_ref": task["task_ref"], "binding": "Primary reads the authoritative terminal result"},
+                "settlement": "Terminal publication and Primary fresh idle proof still required", "next_owner": "Primary"}
+            self.managed_original = json.dumps(handoff, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+            for event in events:
+                item = event.get("item", {})
+                if item.get("type") == "message" and item.get("role") == "assistant":
+                    item["content"][0]["text"] = self.managed_original.decode()
+        if writer_step == 1 and not self.pending:
+            assignment = json.loads((self.consumer_root / "ordinary-assignment.json").read_text())
+            body = (self.consumer_root / "workspace/file.txt").read_bytes()
+            handoff = {key: assignment[key] for key in ("work", "target", "authority", "procedure", "native", "evidence", "gaps")}
+            handoff.update(schema="aquarium.executor-handoff/v3", assignment="ordinary-assignment.json",
+                deliverables={"delivered": ["file.txt"], "missing": []},
+                changed_artifacts=[{"path": "file.txt", "sha256": hashlib.sha256(body).hexdigest()}],
+                results=[{"basis": "firsthand correlated native exec_command", "exit": 0, "output": "written\n"}],
+                settlement="Native result publication and owner close must still be observed", next_owner="Primary")
+            handoff["native"] = {"harness": "codex", "agent": "unknown in this response fixture", "lifecycle": "returning-delivery"}
+            self.ordinary_handoff = handoff
+            for event in events:
+                item = event.get("item", {})
+                if item.get("type") == "message" and item.get("role") == "assistant":
+                    item["content"][0]["text"] = json.dumps(handoff, ensure_ascii=False)
+        if self.posts > SUCCESSOR_POSTS:
+            raise ProbeCheckFailure("successor_exact_trace_budget_exceeded")
+        return events
 
 
 def assert_successor_dispatch(root: Path, fixture: SuccessorResponses) -> None:
@@ -716,11 +1245,16 @@ def assert_successor_dispatch(root: Path, fixture: SuccessorResponses) -> None:
     fixture.dispatch_checks = getattr(fixture, "dispatch_checks", 0) + 1
 
 
-def successor_campaign(binary: Path, codex: Path) -> dict[str, Any]:
+def successor_campaign(binary: Path, codex: Path, podway: Path | None = None,
+                       aquarium_source: Path | None = None) -> dict[str, Any]:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit integrated native opt-in required")
     if executable_identity(codex)["sha256"] != CODEX_SHA256:
         raise ValueError("successor acceptance requires the pinned executable")
+    if podway is None or aquarium_source is None:
+        raise ValueError("successor acceptance requires the selected --podway and --aquarium-source inputs")
+    podway = podway.resolve(strict=True)
+    aquarium_source = aquarium_source.resolve(strict=True)
     root = Path(tempfile.mkdtemp(prefix="dsn-", dir=os.environ["TMPDIR"])).resolve()
     root.chmod(0o700)
     fixture = None
@@ -733,10 +1267,15 @@ def successor_campaign(binary: Path, codex: Path) -> dict[str, Any]:
         environment = isolated_environment(root)
         environment[OPT_IN] = "1"
         environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+        successor_aquarium_sources(root, aquarium_source)
+        private_file(root / "consumer-inputs.json", json.dumps({
+            "python": sys.executable, "scripts": str(Path(__file__).resolve().parent),
+            "podway": str(podway), "podway_sha256": "4ff3c8d3162d9ff05f434101add9c7b81abfa04dd522da7c7016a0033ac0a461"}).encode())
         checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
         command = shlex.split(os.environ.get("CARGO", "cargo")) + [
-            "rustc", "--locked", "--example", "native_successor_pipeline", "--",
-            "--cfg", "dolgorae_native_acceptance", "--cfg", "test"]
+            "rustc", "--locked", "--release", "--example", "native_successor_pipeline", "--",
+            "--cfg", "dolgorae_native_acceptance", "--cfg", "test",
+            "-C", "debug-assertions=on", "-C", "overflow-checks=on"]
         build = subprocess.run(command, cwd=PROTOCOL.parents[1], capture_output=True,
                                text=True, timeout=300)
         private_file(root / "build.stdout", build.stdout.encode())
@@ -744,9 +1283,10 @@ def successor_campaign(binary: Path, codex: Path) -> dict[str, Any]:
         if build.returncode:
             raise ProbeCheckFailure("successor_driver_build_failed")
         driver = root / "fixture-successor-driver"
-        shutil.copyfile(PROTOCOL.parents[1] / "target/debug/examples/native_successor_pipeline", driver)
+        shutil.copyfile(Path(os.environ.get("CARGO_TARGET_DIR",str(PROTOCOL.parents[1] / "target"))) / "release/examples/native_successor_pipeline", driver)
         driver.chmod(0o700)
         fixture = SuccessorResponses()
+        fixture.consumer_root = root
         fixture.source_check = lambda: assert_successor_dispatch(root, fixture)
         private_file(root / "profile/config.toml", b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n'
                      + fixture_config(fixture.base_url) + b"\n[features]\nplugins = false\nshell_snapshot = false\n")
@@ -758,10 +1298,14 @@ def successor_campaign(binary: Path, codex: Path) -> dict[str, Any]:
         private_file(root / "driver.stderr", result.stderr.encode())
         if result.returncode or fixture.failure:
             raise ProbeCheckFailure("successor_driver_failed", {"exit": result.returncode,
-                "loopback_posts": fixture.posts, "fixture_failure": fixture.failure})
+                "loopback_posts": fixture.posts, "fixture_failure": fixture.failure,
+                "http_posts": len(fixture.input_sizes), "first_fixture_error": fixture.failure_details})
         value = json.loads(result.stdout)
         if (value.get("schema") != "dolgorae.native-successor-pipeline/v1"
-                or not value.get("passed") or fixture.steps != 2 or fixture.posts != 4
+                or not value.get("passed") or fixture.steps != 5 or fixture.posts != SUCCESSOR_POSTS
+                or len(fixture.input_sizes) != SUCCESSOR_POSTS
+                or getattr(fixture, "primary_posts", 0) != 15 + SUCCESSOR_CONTINUATIONS
+                or getattr(fixture, "writer_steps", 0) != 2
                 or getattr(fixture, "dispatch_checks", 0) != 4
                 or (root / "cleanup-result").read_bytes() != b"complete\n"):
             raise ProbeCheckFailure("successor_evidence_incomplete", {"native_turns":fixture.steps,"loopback_posts":fixture.posts,"dispatch_checks":getattr(fixture,"dispatch_checks",0)})
@@ -775,6 +1319,16 @@ def successor_campaign(binary: Path, codex: Path) -> dict[str, Any]:
             raise ProbeCheckFailure("successor_process_inventory_failed")
         require_fixture_process_absence(observation["data"])
         value.update(native_turns=fixture.steps, loopback_posts=fixture.posts,
+                     primary_posts=fixture.primary_posts, continuation_posts=fixture.continuation_posts,
+                     original_pages=fixture.primary_pages, http_input_sizes=fixture.input_sizes,
+                     primary_turns={phase: json.loads((root / f"primary-{phase}-turn.json").read_text())
+                                    for phase in ("spawn", "assignment", "consumer")},
+                     primary_returns={phase: [{"outer_call_id": v["outer_call_id"], "logical_label": v["label"],
+                         "operation": v["request"].get("operation", v["request"].get("action")), "header": v["header"]}
+                         for v in json.loads((root / f"primary-{phase}-results.json").read_text())]
+                         for phase in ("spawn", "assignment", "consumer")},
+                     action_completion=json.loads((root / "consumer-completion.json").read_text()),
+                     ordinary_delivery=json.loads((root / "ordinary-consumed.json").read_text()),
                      external_provider_requests=0, real_account_or_credentials_used=False,
                      codex_sha256=CODEX_SHA256, owned_process_absence_verified=True)
         passed = True
@@ -785,6 +1339,7 @@ def successor_campaign(binary: Path, codex: Path) -> dict[str, Any]:
                                      capture_output=True, text=True, timeout=120)
             private_file(root / "cleanup.stdout", cleanup.stdout.encode())
             private_file(root / "cleanup.stderr", cleanup.stderr.encode())
+            private_file(root / "cleanup-status.json", json.dumps({"exit": cleanup.returncode}).encode())
             if cleanup.returncode == 0:
                 with patch.dict(os.environ, environment, clear=True):
                     cleanup_removed_root(binary, root, allow_existing_root=True)
@@ -805,17 +1360,25 @@ def main() -> int:
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--codex", type=Path, required=True)
     parser.add_argument("--caller-driver", type=Path, required=True)
+    parser.add_argument("--podway", type=Path, default=Path(os.environ["DOLGORAE_TEST_PODWAY_BIN"]) if os.environ.get("DOLGORAE_TEST_PODWAY_BIN") else None)
+    parser.add_argument("--aquarium-source", type=Path, default=Path(os.environ["DOLGORAE_TEST_AQUARIUM_SOURCE"]) if os.environ.get("DOLGORAE_TEST_AQUARIUM_SOURCE") else None)
+    parser.add_argument("--default-feature-startup-only", action="store_true")
     parser.add_argument("--ordinary-close-only", action="store_true")
     parser.add_argument("--successor-only", action="store_true")
     args = parser.parse_args()
     try:
-        if args.successor_only:
-            result = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True))
+        if args.default_feature_startup_only:
+            if args.successor_only or args.ordinary_close_only:
+                raise ValueError("default-feature startup is a distinct mode")
+            with patch.dict(os.environ, {caller.OPT_IN:"1"}):
+                result=caller.default_feature_campaign(args.caller_driver.resolve(strict=True),args.codex.resolve(strict=True))
+        elif args.successor_only:
+            result = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True), args.podway, args.aquarium_source)
         else:
             result = campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True),
                               args.caller_driver.resolve(strict=True), ordinary_close_only=args.ordinary_close_only)
             if not args.ordinary_close_only:
-                result["successor_writer_acceptance"] = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True))
+                result["successor_writer_acceptance"] = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True), args.podway, args.aquarium_source)
     except ProbeCheckFailure as error:
         print(json.dumps({"schema": "dolgorae.native-integrated-acceptance-failure/v1",
                           "passed": False, "check": error.kind,

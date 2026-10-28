@@ -381,6 +381,66 @@ pub fn ensure_global_server(
     Ok(state)
 }
 
+/// Qualified admission cannot replace another contract for this CODEX_HOME.
+pub(crate) fn ensure_qualified_global_server(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+) -> Result<ServerState, MachineError> {
+    binding.validate_for_recovery()?;
+    let home = DolgoraeHome::system()?;
+    let context = Context {
+        registry_path: home.root().join("profiles.yaml"),
+        dolgorae_home_root: home.root().to_path_buf(),
+    };
+    start_snapshot_inner(
+        &context,
+        &binding.launch_snapshot,
+        None,
+        QuiescentRolloverPolicy::Deny,
+        None,
+        &mut OperatorHandoff::none(),
+    )
+}
+
+/// Keep an accepted binding's launch policy without upgrading legacy history.
+pub(crate) fn ensure_retained_global_server(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+) -> Result<ServerState, MachineError> {
+    if binding.uses_qualified_launch_policy() {
+        ensure_qualified_global_server(binding)
+    } else {
+        ensure_global_server(binding)
+    }
+}
+
+/// Retire an explicitly selected qualified binding through the ordinary,
+/// non-interrupting operator-authorized lifecycle. No registry replacement or
+/// automatic rollover is performed; live membership still refuses retirement.
+#[doc(hidden)]
+pub fn retire_qualified_global_server(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    carrier: &crate::controller::CredentialCarrier,
+) -> Result<bool, MachineError> {
+    binding.validate_for_recovery()?;
+    if !binding.caller_workspace_supported() {
+        return Err(internal("retirement requires an exact qualified binding"));
+    }
+    let home = DolgoraeHome::system()?;
+    let context = Context {
+        registry_path: home.root().join("profiles.yaml"),
+        dolgorae_home_root: home.root().to_path_buf(),
+    };
+    let store = crate::controller::OperatorStore::new(home.operator_root());
+    let mut operator = authorize_operator_in(&store, carrier, "profile.server.stop")?;
+    stop_snapshot(
+        &context,
+        &binding.launch_snapshot,
+        false,
+        &mut operator,
+        &mut || authorize_operator_in(&store, carrier, "profile.server.stop"),
+        unavailable_member_quiescer,
+    )
+}
+
 pub(crate) fn ensure_global_server_for_review(
     binding: &crate::global_runtime::GlobalProfileBinding,
     owner: &ReviewServerOwner,
@@ -2649,6 +2709,15 @@ fn observe_snapshot(
     name: &str,
     profile: &RuntimeProfile,
 ) -> Result<ProfileSnapshot, MachineError> {
+    observe_snapshot_policy(context, name, profile, false)
+}
+
+fn observe_snapshot_policy(
+    context: &Context,
+    name: &str,
+    profile: &RuntimeProfile,
+    qualified: bool,
+) -> Result<ProfileSnapshot, MachineError> {
     let executable = Path::new(&profile.argv[0]);
     let canonical_executable = fs::canonicalize(executable).map_err(|error| {
         MachineError::profile_config_invalid(&context.registry_path, error.to_string())
@@ -2672,60 +2741,149 @@ fn observe_snapshot(
         let schema_bundle_sha256 = directory_sha256(name, &schema_root.join("stable"))?;
         let verdict = version_verdict(name, &version)?;
         verify_exact_bundle_digests(name, &schema_root, verdict, &schema_bundle_sha256)?;
-        let compatibility_manifest_sha256 = sha256_hex(MANIFEST.as_bytes());
-        let normalized_argv = normalized_argv(profile, &canonical_executable)?;
-        let mut sanitized_environment = prepared_environment(profile)?;
-        sanitized_environment.insert("CODEX_HOME".to_owned(), canonical_codex_home.clone());
-        let enabled_features = vec!["multi_agent".to_owned()];
-        let disabled_features = Vec::new();
         let configuration = configuration_snapshot(name, &canonical_codex_home)?;
-        let process_static_configuration = configuration.launch;
-        let initial_configuration_observation = configuration.observation;
-        let launch_contract = json!({
-            "schema_version": 1,
-            "canonical_codex_home": canonical_codex_home,
-            "normalized_argv": normalized_argv,
-            "launch_cwd_policy": "profile_state_directory_v1",
-            "launch_mode": "app_server_unix_socket_v1",
-            "sanitized_environment": sanitized_environment,
-            "executable_identity": executable_identity,
-            "process_static_configuration": process_static_configuration,
-            "codex_version": version,
-            "app_server_schema_sha256": schema_bundle_sha256,
-            "compatibility_manifest_sha256": compatibility_manifest_sha256,
-            "enabled_features": enabled_features,
-            "disabled_features": disabled_features,
-        });
-        let launch_contract_sha256 = canonical_sha256(&launch_contract)?;
-        let server_key =
-            domain_separated_sha256(b"dolgorae-profile-server-key-v1\0", &launch_contract)?;
-        let derived_launch_cwd = context
-            .dolgorae_home_root
-            .join("profiles")
-            .join(&server_key);
-        Ok(ProfileSnapshot {
-            schema_version: 1,
-            profile_name: name.to_owned(),
-            canonical_codex_home,
-            normalized_argv,
-            launch_cwd_policy: "profile_state_directory_v1".to_owned(),
-            derived_launch_cwd: path_utf8(&derived_launch_cwd)?.to_owned(),
-            sanitized_environment,
-            enabled_features,
-            disabled_features,
-            process_static_configuration,
-            initial_configuration_observation,
-            executable_identity,
-            codex_version: version,
-            schema_bundle_sha256,
-            compatibility_manifest_sha256,
-            launch_contract_sha256,
-            compatibility_verdict: verdict,
-            server_key,
-        })
+        snapshot_from_probes(
+            context,
+            name,
+            profile,
+            SnapshotProbes {
+                canonical_executable,
+                canonical_codex_home,
+                executable_identity,
+                version,
+                schema_bundle_sha256,
+                verdict,
+                configuration,
+            },
+            qualified,
+        )
     })();
     let _ = fs::remove_dir_all(&schema_root);
     result
+}
+
+struct SnapshotProbes {
+    canonical_executable: PathBuf,
+    canonical_codex_home: String,
+    executable_identity: ExecutableIdentity,
+    version: String,
+    schema_bundle_sha256: String,
+    verdict: CompatibilityVerdict,
+    configuration: ConfigurationSnapshot,
+}
+
+fn snapshot_from_probes(
+    context: &Context,
+    name: &str,
+    profile: &RuntimeProfile,
+    probes: SnapshotProbes,
+    qualified: bool,
+) -> Result<ProfileSnapshot, MachineError> {
+    let SnapshotProbes {
+        canonical_executable,
+        canonical_codex_home,
+        executable_identity,
+        version,
+        schema_bundle_sha256,
+        verdict,
+        configuration,
+    } = probes;
+    let compatibility_manifest_sha256 = sha256_hex(MANIFEST.as_bytes());
+    let mut normalized_argv = normalized_argv(profile, &canonical_executable)?;
+    if qualified {
+        normalized_argv.extend(["--disable".to_owned(), "shell_snapshot".to_owned()]);
+    }
+    let mut sanitized_environment = prepared_environment(profile)?;
+    sanitized_environment.insert("CODEX_HOME".to_owned(), canonical_codex_home.clone());
+    let enabled_features = vec!["multi_agent".to_owned()];
+    let disabled_features = if qualified {
+        vec!["shell_snapshot".to_owned()]
+    } else {
+        Vec::new()
+    };
+    let process_static_configuration = configuration.launch;
+    let initial_configuration_observation = configuration.observation;
+    let launch_contract = json!({
+        "schema_version": 1,
+        "canonical_codex_home": canonical_codex_home,
+        "normalized_argv": normalized_argv,
+        "launch_cwd_policy": "profile_state_directory_v1",
+        "launch_mode": "app_server_unix_socket_v1",
+        "sanitized_environment": sanitized_environment,
+        "executable_identity": executable_identity,
+        "process_static_configuration": process_static_configuration,
+        "codex_version": version,
+        "app_server_schema_sha256": schema_bundle_sha256,
+        "compatibility_manifest_sha256": compatibility_manifest_sha256,
+        "enabled_features": enabled_features,
+        "disabled_features": disabled_features,
+    });
+    let launch_contract_sha256 = canonical_sha256(&launch_contract)?;
+    let server_key =
+        domain_separated_sha256(b"dolgorae-profile-server-key-v1\0", &launch_contract)?;
+    let derived_launch_cwd = context
+        .dolgorae_home_root
+        .join("profiles")
+        .join(&server_key);
+    Ok(ProfileSnapshot {
+        schema_version: 1,
+        profile_name: name.to_owned(),
+        canonical_codex_home,
+        normalized_argv,
+        launch_cwd_policy: "profile_state_directory_v1".to_owned(),
+        derived_launch_cwd: path_utf8(&derived_launch_cwd)?.to_owned(),
+        sanitized_environment,
+        enabled_features,
+        disabled_features,
+        process_static_configuration,
+        initial_configuration_observation,
+        executable_identity,
+        codex_version: version,
+        schema_bundle_sha256,
+        compatibility_manifest_sha256,
+        launch_contract_sha256,
+        compatibility_verdict: verdict,
+        server_key,
+    })
+}
+
+/// Current-positive test controls use the production constructor, never reseal
+/// an old H1 vector after changing feature metadata. Probe facts remain explicit.
+#[cfg(test)]
+pub(crate) fn qualified_test_binding(
+    observed: &crate::global_runtime::GlobalProfileBinding,
+) -> crate::global_runtime::GlobalProfileBinding {
+    let snapshot = &observed.launch_snapshot;
+    let context = Context {
+        registry_path: PathBuf::from("/tmp/qualified-test/profiles.yaml"),
+        dolgorae_home_root: PathBuf::from("/tmp/qualified-test"),
+    };
+    let prepared = snapshot_from_probes(
+        &context,
+        &observed.selected_name,
+        &observed.definition,
+        SnapshotProbes {
+            canonical_executable: PathBuf::from(&snapshot.executable_identity.resolved_path),
+            canonical_codex_home: snapshot.canonical_codex_home.clone(),
+            executable_identity: snapshot.executable_identity.clone(),
+            version: snapshot.codex_version.clone(),
+            schema_bundle_sha256: snapshot.schema_bundle_sha256.clone(),
+            verdict: snapshot.compatibility_verdict,
+            configuration: ConfigurationSnapshot {
+                launch: snapshot.process_static_configuration.clone(),
+                observation: snapshot.initial_configuration_observation.clone(),
+            },
+        },
+        true,
+    )
+    .unwrap();
+    crate::global_runtime::ResolvedGlobalProfile::from_definition(
+        &observed.selected_name,
+        observed.definition.clone(),
+    )
+    .unwrap()
+    .bind_qualified(prepared)
+    .unwrap()
 }
 
 /// Prepare the launch snapshot for a definition already resolved from the
@@ -2743,6 +2901,38 @@ pub(crate) fn snapshot_for_global(
         },
         name,
         profile,
+    )
+}
+
+/// Fresh, unrecorded caller-qualified candidate. Display caches are not evidence.
+pub(crate) fn qualified_snapshot_for_global(
+    home: &DolgoraeHome,
+    name: &str,
+    profile: &RuntimeProfile,
+) -> Result<ProfileSnapshot, MachineError> {
+    observe_snapshot_policy(
+        &Context {
+            registry_path: home.root().join("profiles.yaml"),
+            dolgorae_home_root: home.root().to_path_buf(),
+        },
+        name,
+        profile,
+        true,
+    )
+}
+
+pub(crate) fn observe_qualified_global_profile(
+    home: &DolgoraeHome,
+    name: &str,
+    snapshot: ProfileSnapshot,
+) -> Result<ProfileObservation, MachineError> {
+    observe_profile_snapshot(
+        &Context {
+            registry_path: home.root().join("profiles.yaml"),
+            dolgorae_home_root: home.root().to_path_buf(),
+        },
+        name,
+        snapshot,
     )
 }
 
@@ -2880,6 +3070,14 @@ fn observe_registered_profile(
     definition: &RuntimeProfile,
 ) -> Result<ProfileObservation, MachineError> {
     let snapshot = observe_snapshot_reused(context, name, definition)?;
+    observe_profile_snapshot(context, name, snapshot)
+}
+
+fn observe_profile_snapshot(
+    context: &Context,
+    name: &str,
+    snapshot: ProfileSnapshot,
+) -> Result<ProfileObservation, MachineError> {
     let mut observation = ProfileObservation {
         snapshot,
         server_epoch: None,
@@ -7030,6 +7228,123 @@ mod tests {
                 .unwrap();
         }
         (root, home, definition)
+    }
+
+    #[test]
+    fn qualified_constructor_enforces_final_policy_without_relabelling_configuration_or_generic_identity()
+     {
+        use super::*;
+        let (root, home, mut definition) = profile_list_fixture();
+        let context = Context {
+            registry_path: home.root().join("profiles.yaml"),
+            dolgorae_home_root: home.root().to_owned(),
+        };
+        let config = Path::new(&definition.codex_home).join("config.toml");
+        let observed_identity = ExecutableIdentity {
+            resolved_path: definition.argv[0].clone(),
+            device: 1,
+            inode: 1,
+            sha256: "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf".into(),
+        };
+        for variant in 0..4 {
+            definition.argv.truncate(1);
+            if variant == 2 {
+                definition
+                    .argv
+                    .extend(["--enable".into(), "shell_snapshot".into()]);
+            }
+            if variant == 3 {
+                definition.argv.extend([
+                    "--enable".into(),
+                    "shell_snapshot".into(),
+                    "--disable".into(),
+                    "shell_snapshot".into(),
+                    "--enable".into(),
+                    "shell_snapshot".into(),
+                ]);
+            }
+            fs::write(
+                &config,
+                if variant == 1 {
+                    "[features]\nshell_snapshot = true\n"
+                } else {
+                    ""
+                },
+            )
+            .unwrap();
+            fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+            let construct = |qualified| {
+                snapshot_from_probes(
+                    &context,
+                    "profile-0",
+                    &definition,
+                    SnapshotProbes {
+                        canonical_executable: PathBuf::from(&definition.argv[0]),
+                        canonical_codex_home: definition.codex_home.clone(),
+                        executable_identity: observed_identity.clone(),
+                        version: "0.164.0".into(),
+                        schema_bundle_sha256: "a".repeat(64),
+                        verdict: CompatibilityVerdict::Unverified,
+                        configuration: configuration_snapshot("profile-0", &definition.codex_home)
+                            .unwrap(),
+                    },
+                    qualified,
+                )
+                .unwrap()
+            };
+            let generic = construct(false);
+            let qualified = construct(true);
+            assert_eq!(generic, construct(false));
+            assert_ne!(generic.server_key, qualified.server_key);
+            assert_eq!(
+                generic.process_static_configuration,
+                qualified.process_static_configuration
+            );
+            assert_eq!(
+                generic.initial_configuration_observation,
+                qualified.initial_configuration_observation
+            );
+            if variant == 1 {
+                assert_eq!(
+                    qualified.process_static_configuration["features"]["shell_snapshot"],
+                    json!(true)
+                );
+            }
+            assert!(generic.disabled_features.is_empty());
+            assert_eq!(qualified.disabled_features, ["shell_snapshot"]);
+            assert_eq!(
+                qualified.normalized_argv[qualified.normalized_argv.len() - 2..],
+                ["--disable", "shell_snapshot"]
+            );
+            let binding = crate::global_runtime::ResolvedGlobalProfile::from_definition(
+                "profile-0",
+                definition.clone(),
+            )
+            .unwrap()
+            .bind_qualified(qualified.clone())
+            .unwrap();
+            assert!(binding.caller_workspace_supported());
+            let history = fs::read(home.root().join("profile-bindings.json")).unwrap();
+            let observation =
+                observe_qualified_global_profile(&home, "profile-0", qualified).unwrap();
+            assert_eq!(
+                observation.blockers,
+                [ProfileObservationBlocker::ServerUnavailable]
+            );
+            assert_eq!(
+                fs::read(home.root().join("profile-bindings.json")).unwrap(),
+                history
+            );
+            assert!(!home.root().join("profiles").exists());
+            // The registry no longer equals the prepared definition in argv variants.
+            if variant >= 2 {
+                assert_eq!(
+                    binding.record_qualified(&home).unwrap_err().code,
+                    "PROFILE_MISMATCH"
+                );
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

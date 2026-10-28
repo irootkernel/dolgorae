@@ -104,7 +104,7 @@ Before publishing WorkerReady for each new physical Worker connection,
 initial runtime qualification, configuration
 readback and turnless Thread binding or original-Thread rebinding MAY wait for
 same-user Dedicated Server startup descendants to exit. These checks MUST share
-one monotonic budget for that connection, capped at ten seconds
+one monotonic budget for that connection, capped at thirty seconds
 and the session transport budget. Every observed child
 MUST retain its exact PID and birth identity until kernel absence is verified;
 identity drift, scope escape, inaccessible census and Worker workload MUST fail
@@ -141,6 +141,21 @@ safe absence or a completed transition.
 An unqualified turnless startup/effective-policy mechanism MUST return
 `WORKSPACE_STARTUP_UNSUPPORTED` before allocation. Qualification cannot infer
 write access from a reservation, thread sandbox label or synthetic task.
+New caller and Specialist admission MUST prepare a qualified launch snapshot
+with final `--disable shell_snapshot` arguments and `shell_snapshot` in its
+disabled features before computing the launch contract, server key and derived
+cwd. The registered definition and observed configuration remain unchanged.
+Qualified preparation MUST NOT record history until current-runtime admission
+passes; recording revalidates the definition under the existing registry lock.
+Read-only configuration and capability inspection MUST NOT start, repair or
+replace a server or record a qualified binding. Generic Profile preparation,
+observation and lifecycle retain their existing behavior. Qualified readiness
+MUST refuse conflicting active or uncertain contracts for the same CODEX_HOME;
+a distinct key does not authorize automatic rollover or concurrent contracts.
+Accepted pre-policy 0.164.0 and historical 0.159.3 bindings retain their original
+bytes, hashes, keys and executable checks during replay and recovery. They MUST
+NOT qualify genuinely new work through that recovery permission.
+
 The existing shared Profile readiness/catalog check MAY precede allocation and
 Writer reservation. It MUST NOT create the caller Run's Dedicated Server,
 Thread or task Turn. The final Writer reservation remains authoritative after
@@ -185,6 +200,26 @@ Retiring the verified absent generation MUST inspect its committed policy and
 guard under Writer serialization without requiring active Writer authority.
 It MUST retain the original guarded transaction, validate generation and
 server bindings, and compare the complete committed audit head before release.
+A qualified authenticated acquire with an original Thread and protected recorded
+Read policy MUST use the retained generation-retirement owner with an explicit
+Acquire purpose before its Write update. Active Writer replay, threadless first
+write and legacy shared startup retain their existing paths. The original acquire
+transaction, Reserved holder, writer generation, Controller, Thread and source
+bindings MUST remain protected. Retirement MAY stop checked owned descendants
+without proving them inert; active Turns, pending interactions, foreign actors,
+unreadable identity and scope drift MUST still refuse. Persist intent before
+stop, prove full owned-generation absence, and verify a normal read-only
+successor on the original Thread and history before atomically rebinding the
+reservation. Only the subsequent authorized Write update and fresh proof MAY
+commit Active. After retirement intent is persisted, uncertainty MUST retain
+Reserved or BlockedUnknown authority.
+Explicit recovery MUST remain read-conservative and MUST NOT acquire Write or
+replay a Turn. Missing purpose retains historical Release meaning and encoding;
+Acquire purpose MUST be explicit and rejected by unsupported readers. The
+successor uses the normal one-shot connection startup window defined above,
+without reset or retry. Descriptor and readiness timeouts, stop deadlines and
+the five-sample absence proof remain unchanged.
+
 A lost policy response MAY be reconciled using fresh proof of the already
 durable policy for the same Controller, Thread and guarded transaction. It
 MUST NOT reissue the native policy operation to reconstruct that response.

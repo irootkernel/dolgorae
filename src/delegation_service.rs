@@ -6,6 +6,7 @@
 //! view shapes; it never names the semantic Run service: member Run start is
 //! reached through the [`RunSettlementPort`] the caller supplies.
 
+use crate::delegation_identity::AcceptedTask;
 use crate::delegation_identity::{AcceptedSubjects, LookupNamespace, OperationReceipt};
 use crate::domain::{AggregateKind, CallerWorkspaceAccess};
 use crate::engagement::{self, EngagementStore, IntentAdmission, IntentLookup, IntentPreparation};
@@ -44,6 +45,7 @@ pub struct DelegationScope<'a> {
     pub view: &'a WorkspaceView,
     pub state_root: &'a Path,
     pub controller: &'a crate::run::ControllerBinding,
+    pub trusted_invocation: Option<&'a crate::caller_scope::TrustedInvocation>,
 }
 
 /// The one installed provisioning snapshot a hire request names.
@@ -334,6 +336,7 @@ pub struct MemberTaskSettlement<'a> {
 /// the read path asks it for the fact instead of deriving it. This observation
 /// must never mutate the writer or the Run, and it names the aggregate owner so
 /// both owners reach it through the same port.
+#[derive(Clone, Copy)]
 pub struct MemberCleanupObservation<'a> {
     pub view: &'a WorkspaceView,
     pub state_root: &'a Path,
@@ -491,6 +494,36 @@ pub enum MemberDispatchOutcome {
 /// Run layer: the service names this trait, and the caller supplies the
 /// implementation.
 pub trait RunSettlementPort {
+    /// Interrupt only the original recorded task Turn under its aggregate owner.
+    /// An acknowledgement never substitutes for terminal settlement.
+    fn cancel_member_task(&self, _request: MemberTaskSettlement<'_>) -> Result<(), MachineError> {
+        Err(MachineError::new(
+            "CAPABILITY_UNSUPPORTED",
+            "task cancellation is unavailable",
+            false,
+            json!({}),
+        ))
+    }
+    /// Observe the original member binding before accepting new work. The
+    /// aggregate service has already authenticated the owner and member.
+    fn member_profile_binding(
+        &self,
+        state_root: &Path,
+        member_ref: Uuid,
+    ) -> Result<crate::global_runtime::GlobalProfileBinding, MachineError> {
+        crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, state_root)
+            .load_manifest(member_ref)?
+            .global_profile_binding
+            .ok_or_else(|| {
+                MachineError::new(
+                    "CAPABILITY_UNSUPPORTED",
+                    "member Profile binding is unavailable",
+                    false,
+                    json!({}),
+                )
+            })
+    }
+
     fn start_member_run(
         &self,
         request: AdmittedMemberStart<'_>,
@@ -547,6 +580,34 @@ pub trait RunSettlementPort {
         request: MemberReleaseRequest<'_>,
     ) -> Result<MemberReleaseOutcome, MemberReleaseFailure>;
 
+    /// Fresh Run/source capture, without a history read or nested retry.
+    fn member_run_observation(
+        &self,
+        _request: MemberCleanupObservation<'_>,
+        _budget: &mut crate::ledger::ObservationBudget,
+    ) -> Result<crate::snapshot::MemberRunObservation, MachineError> {
+        Err(MachineError::new(
+            "CAPABILITY_UNSUPPORTED",
+            "complete Run observation is unavailable",
+            false,
+            json!({}),
+        ))
+    }
+    /// Complete fresh history reduced against exactly the captured Run context.
+    fn member_interaction_observation(
+        &self,
+        _request: MemberCleanupObservation<'_>,
+        _source: &crate::snapshot::MemberRunObservation,
+        _budget: &mut crate::ledger::ObservationBudget,
+    ) -> Result<(bool, crate::domain::ProjectionStamp), MachineError> {
+        Err(MachineError::new(
+            "CAPABILITY_UNSUPPORTED",
+            "complete interaction observation is unavailable",
+            false,
+            json!({}),
+        ))
+    }
+
     /// Whether this member still owes an owned writer cleanup .
     ///
     /// A member Run that holds the workspace writer — or whose guard is
@@ -593,6 +654,15 @@ fn install_provisioning_in(
     let key = checked_key(idempotency_key)?;
     engagement::require_delegation_namespace(scope.state_root)?;
     let snapshot = crate::provisioning::capture_provisioning(sources)?;
+    install_captured_provisioning(scope, snapshot, key, expected_revision)
+}
+
+fn install_captured_provisioning(
+    scope: &DelegationScope<'_>,
+    snapshot: crate::provisioning::RetainedSnapshot,
+    key: &str,
+    expected_revision: Option<u64>,
+) -> Result<(ProvisioningCandidate, OperationReceipt), MachineError> {
     let body = json!({"sources": snapshot.sources_identity()?});
     let identity = intent_identity(
         scope,
@@ -617,6 +687,7 @@ fn install_provisioning_in(
     if expected_revision.is_some() {
         return Err(preallocation_revision_refusal("install_provisioning"));
     }
+    require_current_member_runtime(snapshot.profile_binding(), "install_provisioning")?;
     let operation_ref = Uuid::now_v7();
     let now = now_ms()?;
     let preparation = store.transact(|transaction| {
@@ -627,6 +698,7 @@ fn install_provisioning_in(
                 namespace: &identity.lookup,
                 mutation_envelope_json: &identity.json,
                 mutation_envelope_digest: &identity.digest,
+                trusted_invocation: identity.trusted_invocation.as_ref(),
                 expected_revision,
                 now_ms: now,
             },
@@ -746,6 +818,7 @@ fn open_external_engagement_in(
                 namespace: &identity.lookup,
                 mutation_envelope_json: &identity.json,
                 mutation_envelope_digest: &identity.digest,
+                trusted_invocation: identity.trusted_invocation.as_ref(),
                 expected_revision,
                 now_ms: now,
             },
@@ -893,6 +966,7 @@ fn hire_external_specialist_in(
             member_admission_view(&store, &snapshot, &instructions, &receipt),
         );
     }
+    require_current_member_runtime(snapshot.profile_binding(), "hire_external_specialist")?;
     let operation_ref = Uuid::now_v7();
     let specialist_run_id = Uuid::now_v7();
     let now = now_ms()?;
@@ -911,6 +985,7 @@ fn hire_external_specialist_in(
                 namespace: &identity.lookup,
                 mutation_envelope_json: &identity.json,
                 mutation_envelope_digest: &identity.digest,
+                trusted_invocation: identity.trusted_invocation.as_ref(),
                 expected_revision: request.expected_revision,
                 now_ms: now,
             },
@@ -1066,6 +1141,186 @@ fn hire_external_specialist_in(
     )
 }
 
+#[cfg(test)]
+thread_local! {static SOURCE_TRACE:std::cell::RefCell<Vec<&'static str>>=const {std::cell::RefCell::new(Vec::new())};}
+#[cfg(test)]
+pub(crate) fn source_trace() -> Vec<&'static str> {
+    SOURCE_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()))
+}
+fn source_event(event: &'static str) {
+    #[cfg(test)]
+    SOURCE_TRACE.with(|t| t.borrow_mut().push(event));
+    #[cfg(not(test))]
+    let _ = event;
+}
+
+/// An adapter supplies a resolver, never an acceptance or pre-captured task.
+/// The service invokes it only after fresh member/runtime admission.
+pub(crate) trait AssignmentSource {
+    fn expected(&self) -> &AcceptedTask;
+    fn selection(&self) -> Result<Option<crate::review::ReviewTargetRequest>, MachineError>;
+    fn verify_capture(
+        &self,
+        accepted: &AcceptedTask,
+        contents: &crate::successor_capture::AcceptedTaskContents,
+    ) -> Result<(), MachineError>;
+}
+
+/// Install bridge: retained acceptance precedes registry and live source access.
+pub(crate) fn install_bound_provisioning(
+    scope: &DelegationScope<'_>,
+    expected: &crate::provisioning::ProvisioningSourcesIdentity,
+    key: &str,
+    revision: Option<u64>,
+    capture: impl FnOnce() -> Result<crate::provisioning::RetainedSnapshot, MachineError>,
+) -> Result<(ProvisioningCandidate, OperationReceipt), MachineError> {
+    boundary(
+        "install_provisioning",
+        (|| {
+            let key = checked_key(key)?;
+            engagement::require_delegation_namespace(scope.state_root)?;
+            let body = json!({"sources":expected});
+            let identity = intent_identity(
+                scope,
+                "install_provisioning",
+                None,
+                key,
+                INSTALL_BODY_SCHEMA,
+                &body,
+            )?;
+            let store = open_store(scope)?;
+            if let Some(receipt) = replay(
+                &store,
+                &identity.lookup,
+                &identity.digest,
+                "install_provisioning",
+            )? {
+                let reference = receipt
+                    .accepted_subjects
+                    .provisioning_ref
+                    .as_deref()
+                    .ok_or_else(retained_source_invalid)?;
+                let snapshot = crate::provisioning::retained_snapshot(scope.state_root, reference)
+                    .map_err(|_| retained_source_invalid())?;
+                if snapshot.sources_identity()? != *expected
+                    || snapshot.provisioning_ref()? != reference
+                {
+                    return Err(retained_source_invalid());
+                }
+                return Ok((snapshot.candidate(true)?, receipt));
+            }
+            let snapshot = capture()?;
+            if snapshot.sources_identity()? != *expected {
+                return Err(idempotency_conflict());
+            }
+            install_captured_provisioning(scope, snapshot, key, revision)
+        })(),
+    )
+}
+
+fn retained_source_invalid() -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "retained source proof is inconsistent",
+        false,
+        json!({"required_action":"restore_state"}),
+    )
+}
+
+pub(crate) fn assign_external_with_source(
+    scope: &DelegationScope<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: AssignExternalSpecialistTask<'_>,
+    source: &dyn AssignmentSource,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    boundary(
+        "assign_external_specialist_task",
+        assign_external_specialist_task_in(scope, caller, port, request, Some(source)),
+    )
+}
+
+pub(crate) fn assign_managed_with_source(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: AssignSpecialistTask<'_>,
+    source: &dyn AssignmentSource,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    boundary(
+        "assign_specialist_task",
+        assign_specialist_task_in(scope, context, caller, port, request, Some(source)),
+    )
+}
+
+/// Explicit administrative preparation obtains actual owned member configuration.
+/// It does not allocate a task, round, intent, reader or Run.
+pub(crate) fn preparation_configuration(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    member: Uuid,
+) -> Result<crate::run::AgentConfigurationSnapshot, MachineError> {
+    let store = open_store(scope)?;
+    match owner {
+        SettlementOwner::External { engagement_id } => {
+            let (workspace, controller) = store.external_owner_binding(engagement_id)?;
+            if workspace != scope.view.workspace_id || controller != *scope.controller {
+                return Err(owner_refusal_for("assign_external_specialist_task"));
+            }
+            Ok(store
+                .external_member_configuration(engagement_id, member)?
+                .0)
+        }
+        SettlementOwner::Managed { session_id } => {
+            let session =
+                crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?
+                    .session(session_id)?;
+            let manifest = crate::run::RunStore::new(
+                crate::workspace::SystemWorkspacePlatform,
+                scope.state_root,
+            )
+            .load_manifest(session.root_run_id)?;
+            if session.workspace_id != scope.view.workspace_id
+                || manifest.controller != *scope.controller
+                || session.root_run_id != session_id
+            {
+                return Err(owner_refusal_for("assign_specialist_task"));
+            }
+            Ok(managed_member(&store, session_id, member)?.agent_configuration)
+        }
+    }
+}
+
+pub(crate) fn prepare_assignment_capture(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    member: Uuid,
+    task: &crate::task_request::SpecialistTaskRequest,
+    intent: &str,
+    selection: Option<&crate::review::ReviewTargetRequest>,
+) -> Result<(AcceptedTask, crate::successor_capture::AcceptedTaskContents), MachineError> {
+    let configuration = preparation_configuration(scope, owner, member)?;
+    admit_checked_task(
+        scope,
+        owner,
+        member,
+        &configuration,
+        task,
+        intent,
+        selection,
+    )?;
+    let target = admit_assignment_target(scope, selection)?;
+    crate::successor_capture::capture_facade_task(
+        &configuration,
+        task,
+        intent,
+        target
+            .as_ref()
+            .map(|(identity, bytes)| (identity.as_str(), bytes.as_slice())),
+    )
+}
+
 /// Assign one external task under the caller's trusted round budget.
 ///
 /// The accepted task identity and its exact bytes are committed with the
@@ -1079,7 +1334,7 @@ pub fn assign_external_specialist_task(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_external_specialist_task",
-        assign_external_specialist_task_in(scope, caller, port, request),
+        assign_external_specialist_task_in(scope, caller, port, request, None),
     )
 }
 
@@ -1088,6 +1343,7 @@ fn assign_external_specialist_task_in(
     caller: &crate::caller_scope::TrustedCallerScope,
     port: &dyn RunSettlementPort,
     request: AssignExternalSpecialistTask<'_>,
+    source: Option<&dyn AssignmentSource>,
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     let key = checked_key(request.idempotency_key)?;
     if !(1..=MAX_ASSIGN_DEADLINE_SECONDS).contains(&request.deadline_seconds) {
@@ -1120,6 +1376,7 @@ fn assign_external_specialist_task_in(
         &request.task,
         request.execution_intent,
         request.target.as_ref(),
+        source.map(AssignmentSource::expected),
         request.deadline_seconds,
         key,
     )? {
@@ -1132,6 +1389,19 @@ fn assign_external_specialist_task_in(
     }
     let (configuration, _, _) =
         store.external_member_configuration(request.engagement_id, request.member_ref)?;
+    let runtime = port.member_profile_binding(scope.state_root, request.member_ref)?;
+    if runtime.digest()? != configuration.runtime_profile_snapshot_sha256 {
+        return Err(MachineError::invalid_argument(
+            "member_ref",
+            "member Profile binding differs from its accepted configuration",
+        ));
+    }
+    require_current_member_runtime(&runtime, "assign_external_specialist_task")?;
+    let registered_selection = source.map(AssignmentSource::selection).transpose()?;
+    let selection = registered_selection
+        .as_ref()
+        .map(Option::as_ref)
+        .unwrap_or(request.target.as_ref());
     admit_checked_task(
         scope,
         SettlementOwner::External {
@@ -1141,9 +1411,10 @@ fn assign_external_specialist_task_in(
         &configuration,
         &request.task,
         request.execution_intent,
-        request.target.as_ref(),
+        selection,
     )?;
-    let target = admit_assignment_target(scope, request.target.as_ref())?;
+    let target = admit_assignment_target(scope, selection)?;
+    source_event("task");
     let (accepted, contents) = crate::successor_capture::capture_facade_task(
         &configuration,
         &request.task,
@@ -1152,6 +1423,12 @@ fn assign_external_specialist_task_in(
             .as_ref()
             .map(|(identity, bytes)| (identity.as_str(), bytes.as_slice())),
     )?;
+    if let Some(source) = source {
+        if *source.expected() != accepted {
+            return Err(idempotency_conflict());
+        }
+        source.verify_capture(&accepted, &contents)?;
+    }
     let accepted_task_digest = accepted.digest()?;
     let scope_ref = request.engagement_id.to_string();
     // The acceptance body and the dispatch re-derivation share one producer, so
@@ -1194,6 +1471,7 @@ fn assign_external_specialist_task_in(
                 namespace: &identity.lookup,
                 mutation_envelope_json: &identity.json,
                 mutation_envelope_digest: &identity.digest,
+                trusted_invocation: identity.trusted_invocation.as_ref(),
                 expected_revision: request.expected_revision,
                 now_ms: now,
             },
@@ -1306,10 +1584,21 @@ fn assign_external_specialist_task_in(
             // accounting transition are written.
             // The step stays inside the accepted boundary, so a failure here
             // reports the accepted effect with its operation reference.
-            accepted_boundary(
+            let cancelled = accepted_boundary(
                 "assign_external_specialist_task",
                 Some(operation_ref),
                 store.transact(|transaction| {
+                    if assignment_cancelled(
+                        transaction,
+                        scope,
+                        SettlementOwner::External {
+                            engagement_id: request.engagement_id,
+                        },
+                        request.member_ref,
+                        task_id,
+                    )? {
+                        return Ok(true);
+                    }
                     engagement::terminalize_external_task_in(
                         transaction,
                         engagement::TaskTerminal {
@@ -1323,9 +1612,17 @@ fn assign_external_specialist_task_in(
                             now_ms: now,
                         },
                     )?;
-                    crate::caller_scope::proved_nondispatch(transaction, task_id)
+                    crate::caller_scope::proved_nondispatch(transaction, task_id)?;
+                    Ok(false)
                 }),
             )?;
+            if cancelled {
+                return accepted_boundary(
+                    "assign_external_specialist_task",
+                    Some(operation_ref),
+                    assigned_observation(&store, &receipt),
+                );
+            }
             Err(successor_error(
                 &code,
                 "assign_external_specialist_task",
@@ -1409,13 +1706,28 @@ fn await_external_specialist_tasks_in(
             observations.push(observation);
         }
         if await_satisfied(request.predicate, terminal, request.tasks.len()) {
+            #[cfg(test)]
+            if let Some(path) = std::env::var_os("DOLGORAE_SPECIALIST_AWAIT_COMPLETED") {
+                std::fs::write(path, b"product await completed before response projection")
+                    .map_err(|_| retained_source_invalid())?;
+            }
             return Ok((observations, false));
         }
         let now = std::time::Instant::now();
         if now >= deadline {
+            #[cfg(test)]
+            if let Some(path) = std::env::var_os("DOLGORAE_SPECIALIST_AWAIT_COMPLETED") {
+                std::fs::write(path, b"product await completed before response projection")
+                    .map_err(|_| retained_source_invalid())?;
+            }
             return Ok((observations, true));
         }
         let remaining = deadline.saturating_duration_since(now);
+        #[cfg(test)]
+        if let Some(path) = std::env::var_os("DOLGORAE_SPECIALIST_AWAIT_ENTERED") {
+            std::fs::write(path, b"pending product observation before bounded wait")
+                .map_err(|_| retained_source_invalid())?;
+        }
         crate::storage_observation::wait(
             observed,
             remaining.min(std::time::Duration::from_millis(50)),
@@ -1466,6 +1778,157 @@ pub fn reconcile_external_member_task(
     })
 }
 
+/// Original accepted managed-call provenance for local administrative recovery.
+/// This value is never supplied by a model or returned over a public transport.
+pub(crate) struct RetainedManagedRecovery {
+    session_id: Uuid,
+    source_run_id: Uuid,
+    source_turn_id: String,
+    source_tool_call_id: String,
+    idempotency_key: String,
+}
+impl RetainedManagedRecovery {
+    pub(crate) fn context(&self) -> ManagedCallContext<'_> {
+        ManagedCallContext {
+            session_id: self.session_id,
+            source_run_id: self.source_run_id,
+            source_turn_id: &self.source_turn_id,
+            source_tool_call_id: &self.source_tool_call_id,
+            idempotency_key: &self.idempotency_key,
+        }
+    }
+}
+
+/// Read the original acceptance and call in one snapshot, before any recovery.
+/// Current owner authority is separate from the acceptance's original namespace.
+pub(crate) fn retained_managed_recovery(
+    scope: &DelegationScope<'_>,
+    session_id: Uuid,
+    member_ref: Uuid,
+    task_ref: Uuid,
+) -> Result<RetainedManagedRecovery, MachineError> {
+    let refused = || {
+        MachineError::new(
+            "RECOVERY_REQUIRED",
+            "original managed recovery provenance is unavailable",
+            false,
+            json!({"required_action":"restore_state"}),
+        )
+    };
+    engagement::require_delegation_namespace(scope.state_root)?;
+    let broker = crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?;
+    let session = broker.session(session_id)?;
+    managed_scope_identity(scope, &session, session_id, "reconcile_member_task")?;
+    if session.root_run_id != session_id {
+        return Err(refused());
+    }
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let transaction = store
+        .connection()
+        .unchecked_transaction()
+        .map_err(|_| refused())?;
+    let facts = crate::orchestration::successor_task(&transaction, session_id, task_ref)?
+        .ok_or_else(refused)?;
+    if facts.member_ref != member_ref.to_string() {
+        return Err(refused());
+    }
+    let (source_run, source_turn, source_call, internal_key, key, operation, envelope): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = transaction
+        .query_row(
+            "SELECT t.source_run_id,t.source_turn_id,t.source_tool_call_id,t.idempotency_key,
+                d.idempotency_key,d.operation_ref,d.mutation_envelope_json
+         FROM brokered_tasks t JOIN delegation_operations d
+           ON d.operation_ref=json_extract(t.request_json,'$.operation_ref')
+         WHERE t.task_id=?1 AND t.session_id=?2 AND t.target_run_id=?3 AND d.state='accepted'",
+            rusqlite::params![
+                task_ref.to_string(),
+                session_id.to_string(),
+                member_ref.to_string()
+            ],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
+        )
+        .map_err(|_| refused())?;
+    checked_key(&key).map_err(|_| refused())?;
+    checked_provenance(&source_turn, &source_call).map_err(|_| refused())?;
+    if source_run != session.root_run_id.to_string()
+        || internal_key != format!("successor:{operation}")
+    {
+        return Err(refused());
+    }
+    let envelope: Envelope = serde_json::from_str(&envelope).map_err(|_| refused())?;
+    let namespace = LookupNamespace::from(&envelope.namespace);
+    if namespace.workspace_ref != scope.view.workspace_id
+        || namespace.scope_kind.as_deref() != Some("orchestrated_session")
+        || namespace.scope_ref.as_deref() != Some(session_id.to_string().as_str())
+        || namespace.operation_kind != "assign_specialist_task"
+        || envelope.request_schema != ASSIGN_MANAGED_BODY_SCHEMA
+        || namespace.idempotency_key != key
+        || envelope.request_body.sha256 != format!("sha256:{}", facts.source_request_sha256)
+    {
+        return Err(refused());
+    }
+    let IntentLookup::Accepted(receipt) = engagement::intent_lookup(&transaction, &namespace)?
+    else {
+        return Err(refused());
+    };
+    if receipt.operation_ref != operation
+        || receipt.accepted_subjects.member_ref.as_deref() != Some(member_ref.to_string().as_str())
+        || receipt.accepted_subjects.run_ref.as_deref() != Some(member_ref.to_string().as_str())
+        || receipt.accepted_subjects.task_ref.as_deref() != Some(task_ref.to_string().as_str())
+    {
+        return Err(refused());
+    }
+    let accepted = crate::successor_capture::retained_accepted_task(&facts.accepted_request_json)?;
+    let marker: Value = serde_json::from_str(&facts.request_json).map_err(|_| refused())?;
+    let deadline = marker["deadline_seconds"]
+        .as_u64()
+        .filter(|n| (1..=MAX_ASSIGN_DEADLINE_SECONDS).contains(n))
+        .ok_or_else(refused)?;
+    let (body, _, _) =
+        engagement::accepted_task_content(&transaction, task_ref)?.ok_or_else(refused)?;
+    let task = serde_json::from_slice(&body).map_err(|_| refused())?;
+    if marker["schema"] != crate::orchestration::SUCCESSOR_TASK_MARKER_SCHEMA
+        || marker["member_ref"] != member_ref.to_string()
+        || marker["accepted_task_digest"] != accepted.digest()?
+        || marker["execution_intent"] != accepted.execution_intent
+        || !crate::successor_capture::verify_accepted_assignment(
+            member_ref,
+            &task,
+            &accepted,
+            deadline,
+            &envelope.request_body.sha256,
+        )?
+    {
+        return Err(refused());
+    }
+    Ok(RetainedManagedRecovery {
+        session_id,
+        source_run_id: session.root_run_id,
+        source_turn_id: source_turn,
+        source_tool_call_id: source_call,
+        idempotency_key: key,
+    })
+}
+
 pub fn reconcile_managed_member_task(
     scope: &DelegationScope<'_>,
     context: &ManagedCallContext<'_>,
@@ -1503,9 +1966,25 @@ pub fn collect_external_specialist_task(
     port: &dyn RunSettlementPort,
     request: CollectExternalSpecialistTask<'_>,
 ) -> Result<CollectedTask, MachineError> {
+    collect_external_specialist_task_observation(scope, port, request)
+        .map(|(collected, _)| collected)
+}
+
+/// Preserve the typed result already verified by the owning collection boundary.
+pub(crate) fn collect_external_specialist_task_observation(
+    scope: &DelegationScope<'_>,
+    port: &dyn RunSettlementPort,
+    request: CollectExternalSpecialistTask<'_>,
+) -> Result<
+    (
+        CollectedTask,
+        Option<crate::delegation_identity::CompleteResult>,
+    ),
+    MachineError,
+> {
     boundary(
         "collect_external_specialist_task",
-        collect_external_specialist_task_in(scope, port, &request).map(|(collected, _)| collected),
+        collect_external_specialist_task_in(scope, port, &request),
     )
 }
 
@@ -1524,41 +2003,59 @@ fn collect_external_specialist_task_in(
     MachineError,
 > {
     engagement::require_delegation_namespace(scope.state_root)?;
-    let engagement_id = request.engagement_id;
-    let member_ref = request.member_ref;
-    // The read path authorizes the aggregate owner on the read-only opener.
-    let execution_intent = {
-        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
-            scope.state_root,
-        ))?;
-        let (owner_workspace, owner) = store.external_owner_binding(engagement_id)?;
-        if owner_workspace != scope.view.workspace_id || owner != *scope.controller {
-            return Err(owner_refusal_for("collect_external_specialist_task"));
-        }
-        let _ = store.external_member_configuration(engagement_id, member_ref)?;
-        let task = store.external_task(engagement_id, request.task_ref)?;
-        if task.specialist_run_id != member_ref {
-            return Err(successor_error(
-                "SPECIALIST_TASK_NOT_FOUND",
-                "collect_external_specialist_task",
-                None,
-                "none",
-                "Rejected",
-                "fix_request",
-                "the task is not one this member was dispatched",
-            ));
-        }
-        store.external_task_execution_intent(engagement_id, request.task_ref)?
-    };
-    // The dispatch facts are observed, never acted on: settlement belongs to the
-    // execution side .
-    let _ = execution_intent;
     let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
         scope.state_root,
     ))?;
-    let task = store.external_task(engagement_id, request.task_ref)?;
+    let (workspace, controller) = store.external_owner_binding(request.engagement_id)?;
+    if workspace != scope.view.workspace_id || controller != *scope.controller {
+        return Err(owner_refusal_for("collect_external_specialist_task"));
+    }
+    observe_collected_task(
+        scope,
+        port,
+        &store,
+        SettlementOwner::External {
+            engagement_id: request.engagement_id,
+        },
+        request.member_ref,
+        request.task_ref,
+    )
+}
+
+fn collect_external_specialist_task_from_store(
+    store: &EngagementStore,
+    scope: &DelegationScope<'_>,
+    engagement_id: Uuid,
+    member_ref: Uuid,
+    task_ref: Uuid,
+) -> Result<
+    (
+        DelegationTaskObservation,
+        Option<crate::delegation_identity::CompleteResult>,
+        crate::delegation_identity::AcceptedTask,
+    ),
+    MachineError,
+> {
+    let (owner_workspace, owner) = store.external_owner_binding(engagement_id)?;
+    if owner_workspace != scope.view.workspace_id || owner != *scope.controller {
+        return Err(owner_refusal_for("collect_external_specialist_task"));
+    }
+    let _ = store.external_member_configuration(engagement_id, member_ref)?;
+    let task = store.external_task(engagement_id, task_ref)?;
+    if task.specialist_run_id != member_ref {
+        return Err(successor_error(
+            "SPECIALIST_TASK_NOT_FOUND",
+            "collect_external_specialist_task",
+            None,
+            "none",
+            "Rejected",
+            "fix_request",
+            "the task is not one this member was dispatched",
+        ));
+    }
+    let _ = store.external_task_execution_intent(engagement_id, task_ref)?;
     let accepted = store
-        .external_task_identity(engagement_id, request.task_ref)?
+        .external_task_identity(engagement_id, task_ref)?
         .ok_or_else(|| {
             successor_error(
                 "ACCEPTED_TASK_UNAVAILABLE",
@@ -1572,10 +2069,10 @@ fn collect_external_specialist_task_in(
         })?;
     let accepted_task_digest = accepted.digest()?;
     let complete = complete_result_of(
-        &store,
+        store,
         SettlementOwner::External { engagement_id },
         member_ref,
-        request.task_ref,
+        task_ref,
         &accepted_task_digest,
         &task.state,
         "collect_external_specialist_task",
@@ -1589,46 +2086,6 @@ fn collect_external_specialist_task_in(
     let required_action = task_required_action(&task.state);
     // The disposition is computed inside the confirmed attempt, from that
     // attempt's cleanup fact, so it can never say "idle" while cleanup is pending.
-    let digest = complete
-        .as_ref()
-        .map_or_else(|| "none".to_owned(), |(digest, _, _)| digest.clone());
-    let (disposition, _) = consistent_observation(
-        || {
-            port.member_writer_observation(MemberCleanupObservation {
-                view: scope.view,
-                state_root: scope.state_root,
-                owner: SettlementOwner::External { engagement_id },
-                member_ref,
-            })
-        },
-        |hold| {
-            let transaction = store.connection().unchecked_transaction().map_err(|_| {
-                MachineError::new(
-                    "INTERNAL_ERROR",
-                    "the engagement read transaction is unavailable",
-                    false,
-                    json!({"invariant": "disposition_read"}),
-                )
-            })?;
-            // The write-work fact is read in this attempt's snapshot, so the
-            // cleanup decision and the state see one database state.
-            let active_write_tasks = crate::engagement::EngagementStore::active_write_task_count(
-                &transaction,
-                engagement_id,
-                member_ref,
-            )?;
-            let disposition = disposition_view(
-                &transaction,
-                &scope.view.workspace_id,
-                SettlementOwner::External { engagement_id },
-                member_ref,
-                digest.clone(),
-                cleanup_pending(hold, active_write_tasks),
-            )?;
-            drop(transaction);
-            Ok(disposition)
-        },
-    )?;
     // A complete result is published whole or not at all (the typed-unavailable
     // rule): a terminal task without one is the typed condition, never a
     // partial object.
@@ -1638,7 +2095,7 @@ fn collect_external_specialist_task_in(
         ));
     }
     let observation = DelegationTaskObservation {
-        task_ref: request.task_ref.to_string(),
+        task_ref: task_ref.to_string(),
         member_ref: member_ref.to_string(),
         accepted_task_digest,
         state: state.to_owned(),
@@ -1653,18 +2110,8 @@ fn collect_external_specialist_task_in(
         },
         required_action: required_action.to_owned(),
     };
-    let (value, typed) = match complete {
-        Some((_, value, result)) => (Some(value), Some(result)),
-        None => (None, None),
-    };
-    Ok((
-        CollectedTask {
-            task: observation,
-            complete_result: value,
-            disposition,
-        },
-        typed,
-    ))
+    let typed = complete.map(|(_, _, result)| result);
+    Ok((observation, typed, accepted))
 }
 
 /// The closed `delegation_identity/v1` for one collected task (R).
@@ -1689,21 +2136,15 @@ fn get_external_delegation_identity_in(
     port: &dyn RunSettlementPort,
     request: &CollectExternalSpecialistTask<'_>,
 ) -> Result<DelegationIdentityView, MachineError> {
-    let (collected, complete_result) = collect_external_specialist_task_in(scope, port, request)
-        .map_err(|error| reoperation(error, "get_external_delegation_identity"))?;
-    let Some(complete_result) = complete_result else {
-        return Err(complete_result_unavailable(
-            "get_external_delegation_identity",
-        ));
-    };
-    // The disposition is re-observed together with the proof below; the
-    // collect snapshot supplies only the task and its result.
+    engagement::require_delegation_namespace(scope.state_root)?;
     let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
         scope.state_root,
     ))?;
-    let accepted = store
-        .external_task_identity(request.engagement_id, request.task_ref)?
-        .ok_or_else(|| complete_result_unavailable("get_external_delegation_identity"))?;
+    let (workspace, controller) = store.external_owner_binding(request.engagement_id)?;
+    if workspace != scope.view.workspace_id || controller != *scope.controller {
+        return Err(owner_refusal_for("get_external_delegation_identity"));
+    }
+    let _ = store.external_member_configuration(request.engagement_id, request.member_ref)?;
     let manifest =
         crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, scope.state_root)
             .load_manifest(request.member_ref)?;
@@ -1713,10 +2154,7 @@ fn get_external_delegation_identity_in(
         .ok_or_else(|| complete_result_unavailable("get_external_delegation_identity"))?;
     let ambient_guidance =
         member_ambient_disclosure_in(scope, request.engagement_id, request.member_ref)?;
-    let database_facts = || {
-        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
-            scope.state_root,
-        ))?;
+    let database_facts = |close: &mut dyn FnMut() -> Result<(), MachineError>| {
         let transaction = store.connection().unchecked_transaction().map_err(|_| {
             MachineError::new(
                 "INTERNAL_ERROR",
@@ -1725,6 +2163,16 @@ fn get_external_delegation_identity_in(
                 json!({"invariant": "identity_read"}),
             )
         })?;
+        let (collected, complete_result, accepted) = collect_external_specialist_task_from_store(
+            &store,
+            scope,
+            request.engagement_id,
+            request.member_ref,
+            request.task_ref,
+        )
+        .map_err(|error| reoperation(error, "get_external_delegation_identity"))?;
+        let complete_result = complete_result
+            .ok_or_else(|| complete_result_unavailable("get_external_delegation_identity"))?;
         // Export binds the task to the caller scope it was admitted under; a
         // relabelled task is a closed refusal, never an identity.
         if crate::caller_scope::verify_replay(&transaction, request.task_ref, caller).is_err() {
@@ -1759,31 +2207,49 @@ fn get_external_delegation_identity_in(
             quiescence.membership_revision,
             quiescence.workload_revision,
         )?;
+        #[cfg(test)]
+        member_observation_probe("D");
+        close()?;
         drop(transaction);
-        Ok((rounds, counts, quiescence, active_write_tasks, released))
+        Ok((
+            rounds,
+            counts,
+            quiescence,
+            active_write_tasks,
+            released,
+            (collected, complete_result, accepted),
+        ))
     };
     // The writer fact and the database facts are one observation boundary,
     // re-observed while the writer fact moves (a concurrent assign can release a
     // stale hold and start a new write task).
     let (
-        (rounds_used, (accepted_assignments, unresolved_assignments), quiescence, released),
+        (
+            rounds_used,
+            (accepted_assignments, unresolved_assignments),
+            quiescence,
+            released,
+            (collected, complete_result, accepted),
+        ),
         _hold,
-    ) = consistent_observation(
-        || {
-            port.member_writer_observation(MemberCleanupObservation {
-                view: scope.view,
-                state_root: scope.state_root,
-                owner: SettlementOwner::External {
-                    engagement_id: request.engagement_id,
-                },
-                member_ref: request.member_ref,
-            })
+    ) = consistent_member_observation(
+        port,
+        MemberCleanupObservation {
+            view: scope.view,
+            state_root: scope.state_root,
+            owner: SettlementOwner::External {
+                engagement_id: request.engagement_id,
+            },
+            member_ref: request.member_ref,
         },
-        |hold| {
-            let (rounds, counts, mut facts, active_write_tasks, released) = database_facts()?;
+        |source| source.matches_manifest(&manifest),
+        |hold, pending, close| {
+            let (rounds, counts, mut facts, active_write_tasks, released, result) =
+                database_facts(close)?;
+            facts.pending_interaction = pending;
             // The write-work fact of the same snapshot decides the cleanup.
             facts.cleanup_pending = cleanup_pending(hold, active_write_tasks);
-            Ok((rounds, counts, facts, released))
+            Ok((rounds, counts, facts, released, result))
         },
     )?;
     drop(store);
@@ -1793,7 +2259,6 @@ fn get_external_delegation_identity_in(
         ));
     }
     let digest = collected
-        .task
         .result_digest
         .clone()
         .ok_or_else(|| complete_result_unavailable("get_external_delegation_identity"))?;
@@ -1816,7 +2281,7 @@ fn get_external_delegation_identity_in(
                 claimed: 0,
                 dispatching: 0,
                 unresolved: 0,
-                pending_interaction: false,
+                pending_interaction: quiescence.pending_interaction,
                 cleanup_pending: false,
                 release_receipt: Some(proof),
             },
@@ -1837,7 +2302,7 @@ fn get_external_delegation_identity_in(
                 claimed: quiescence.claimed,
                 dispatching: quiescence.dispatching,
                 unresolved: quiescence.unresolved,
-                pending_interaction: false,
+                pending_interaction: quiescence.pending_interaction,
                 cleanup_pending: quiescence.cleanup_pending,
                 release_receipt: None,
             },
@@ -1998,6 +2463,7 @@ fn spawn_specialist_in(
             managed_member_view(&store, &broker, scope, caller.session_id, &receipt),
         );
     }
+    require_current_member_runtime(snapshot.profile_binding(), "spawn_specialist")?;
     let operation_ref = Uuid::now_v7();
     let member_run_id = Uuid::now_v7();
     let now = now_ms()?;
@@ -2017,6 +2483,7 @@ fn spawn_specialist_in(
                 namespace: &identity.lookup,
                 mutation_envelope_json: &identity.json,
                 mutation_envelope_digest: &identity.digest,
+                trusted_invocation: identity.trusted_invocation.as_ref(),
                 expected_revision: request.expected_revision,
                 now_ms: now,
             },
@@ -2325,7 +2792,7 @@ pub fn assign_specialist_task(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_specialist_task",
-        assign_specialist_task_in(scope, context, caller, port, request),
+        assign_specialist_task_in(scope, context, caller, port, request, None),
     )
 }
 
@@ -2335,6 +2802,7 @@ fn assign_specialist_task_in(
     caller: &crate::caller_scope::TrustedCallerScope,
     port: &dyn RunSettlementPort,
     request: AssignSpecialistTask<'_>,
+    source: Option<&dyn AssignmentSource>,
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     let key = checked_key(context.idempotency_key)?;
     checked_provenance(context.source_turn_id, context.source_tool_call_id)?;
@@ -2365,6 +2833,7 @@ fn assign_specialist_task_in(
         &request.task,
         request.execution_intent,
         request.target.as_ref(),
+        source.map(AssignmentSource::expected),
         request.deadline_seconds,
         key,
     )? {
@@ -2376,7 +2845,38 @@ fn assign_specialist_task_in(
         );
     }
     // Only a member its own successor spawn admitted is a successor member.
+    let fence = managed_membership_revision(&store, scope, context.session_id)?;
+    if request
+        .expected_revision
+        .is_some_and(|expected| expected != fence)
+    {
+        return Err(revision_conflict("assign_specialist_task"));
+    }
     let member = managed_member(&store, context.session_id, request.member_ref)?;
+    if member.membership_state != "active" {
+        return Err(successor_error(
+            "SPECIALIST_NOT_MEMBER",
+            "assign_specialist_task",
+            None,
+            "none",
+            "Rejected",
+            "fix_request",
+            "the member is not active",
+        ));
+    }
+    let runtime = port.member_profile_binding(scope.state_root, request.member_ref)?;
+    if runtime.digest()? != member.agent_configuration.runtime_profile_snapshot_sha256 {
+        return Err(MachineError::invalid_argument(
+            "member_ref",
+            "member Profile binding differs from its accepted configuration",
+        ));
+    }
+    require_current_member_runtime(&runtime, "assign_specialist_task")?;
+    let registered_selection = source.map(AssignmentSource::selection).transpose()?;
+    let selection = registered_selection
+        .as_ref()
+        .map(Option::as_ref)
+        .unwrap_or(request.target.as_ref());
     admit_checked_task(
         scope,
         SettlementOwner::Managed {
@@ -2386,9 +2886,10 @@ fn assign_specialist_task_in(
         &member.agent_configuration,
         &request.task,
         request.execution_intent,
-        request.target.as_ref(),
+        selection,
     )?;
-    let target = admit_assignment_target(scope, request.target.as_ref())?;
+    let target = admit_assignment_target(scope, selection)?;
+    source_event("task");
     let (accepted, contents) = crate::successor_capture::capture_facade_task(
         &member.agent_configuration,
         &request.task,
@@ -2397,6 +2898,12 @@ fn assign_specialist_task_in(
             .as_ref()
             .map(|(identity, bytes)| (identity.as_str(), bytes.as_slice())),
     )?;
+    if let Some(source) = source {
+        if *source.expected() != accepted {
+            return Err(idempotency_conflict());
+        }
+        source.verify_capture(&accepted, &contents)?;
+    }
     let accepted_task_digest = accepted.digest()?;
     let body = crate::successor_capture::assignment_body(
         request.member_ref,
@@ -2430,13 +2937,6 @@ fn assign_specialist_task_in(
     // A replay answers before any new-admission fence (MDC:66-68), so the budget
     // and the revision fence decide only a new admission.
     require_assignment_budget(&store, caller, "assign_specialist_task")?;
-    let fence = managed_membership_revision(&store, scope, context.session_id)?;
-    if request
-        .expected_revision
-        .is_some_and(|expected| expected != fence)
-    {
-        return Err(revision_conflict("assign_specialist_task"));
-    }
     let operation_ref = Uuid::now_v7();
     let task_id = Uuid::now_v7();
     let now = now_ms()?;
@@ -2469,6 +2969,7 @@ fn assign_specialist_task_in(
                 namespace: &identity.lookup,
                 mutation_envelope_json: &identity.json,
                 mutation_envelope_digest: &identity.digest,
+                trusted_invocation: identity.trusted_invocation.as_ref(),
                 expected_revision: request.expected_revision,
                 now_ms: now,
             },
@@ -2684,10 +3185,21 @@ fn assign_specialist_task_in(
             // Case B of the round accounting rules: the accepted intent and its
             // receipt stay byte-identical; only the dispatch refusal and the
             // accounting transition are written.
-            accepted_boundary(
+            let cancelled = accepted_boundary(
                 "assign_specialist_task",
                 Some(operation_ref),
                 store.transact(|transaction| {
+                    if assignment_cancelled(
+                        transaction,
+                        scope,
+                        SettlementOwner::Managed {
+                            session_id: context.session_id,
+                        },
+                        request.member_ref,
+                        task_id,
+                    )? {
+                        return Ok(true);
+                    }
                     crate::orchestration::terminalize_successor_task(
                         transaction,
                         context.session_id,
@@ -2695,9 +3207,17 @@ fn assign_specialist_task_in(
                         &code,
                         now,
                     )?;
-                    crate::caller_scope::proved_nondispatch(transaction, task_id)
+                    crate::caller_scope::proved_nondispatch(transaction, task_id)?;
+                    Ok(false)
                 }),
             )?;
+            if cancelled {
+                return accepted_boundary(
+                    "assign_specialist_task",
+                    Some(operation_ref),
+                    managed_assigned_observation(&broker, context.session_id, &receipt),
+                );
+            }
             Err(successor_error(
                 &code,
                 "assign_specialist_task",
@@ -2988,9 +3508,25 @@ pub fn collect_specialist_task(
     port: &dyn RunSettlementPort,
     request: CollectSpecialistTask<'_>,
 ) -> Result<CollectedTask, MachineError> {
+    collect_specialist_task_observation(scope, context, port, request)
+        .map(|(collected, _)| collected)
+}
+
+pub(crate) fn collect_specialist_task_observation(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    port: &dyn RunSettlementPort,
+    request: CollectSpecialistTask<'_>,
+) -> Result<
+    (
+        CollectedTask,
+        Option<crate::delegation_identity::CompleteResult>,
+    ),
+    MachineError,
+> {
     boundary(
         "collect_specialist_task",
-        collect_specialist_task_in(scope, context, port, &request).map(|(collected, _)| collected),
+        collect_specialist_task_in(scope, context, port, &request),
     )
 }
 
@@ -3007,24 +3543,61 @@ fn collect_specialist_task_in(
     MachineError,
 > {
     engagement::require_delegation_namespace(scope.state_root)?;
-    let owner = SettlementOwner::Managed {
-        session_id: context.session_id,
-    };
     let observer = crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?;
     managed_read_scope(&observer, scope, context, "collect_specialist_task")?;
     let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
         scope.state_root,
     ))?;
-    let facts = crate::orchestration::successor_task(
-        store.connection(),
-        context.session_id,
+    observe_collected_task(
+        scope,
+        port,
+        &store,
+        SettlementOwner::Managed {
+            session_id: context.session_id,
+        },
+        request.member_ref,
         request.task_ref,
-    )?
-    .ok_or_else(|| managed_task_not_found("collect_specialist_task", request.member_ref))?;
-    if facts.member_ref != request.member_ref.to_string() {
+    )
+}
+
+fn collect_specialist_task_from_store(
+    store: &EngagementStore,
+    scope: &DelegationScope<'_>,
+    session_id: Uuid,
+    member_ref: Uuid,
+    task_ref: Uuid,
+) -> Result<
+    (
+        DelegationTaskObservation,
+        Option<crate::delegation_identity::CompleteResult>,
+        crate::delegation_identity::AcceptedTask,
+    ),
+    MachineError,
+> {
+    let owner = SettlementOwner::Managed { session_id };
+    let (root, workspace): (String, String) = store
+        .connection()
+        .query_row(
+            "SELECT root_run_id,workspace_id FROM orchestrated_sessions WHERE session_id=?1",
+            [session_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| complete_result_unavailable("collect_specialist_task"))?;
+    if root != session_id.to_string() || workspace != scope.view.workspace_id {
+        return Err(owner_refusal_for("collect_specialist_task"));
+    }
+    let binding =
+        crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, scope.state_root)
+            .load_controller_binding(session_id)?;
+    if binding != *scope.controller {
+        return Err(owner_refusal_for("collect_specialist_task"));
+    }
+    let facts = crate::orchestration::successor_task(store.connection(), session_id, task_ref)?
+        .ok_or_else(|| managed_task_not_found("collect_specialist_task", member_ref))?;
+    if facts.member_ref != member_ref.to_string() {
         return Err(managed_task_not_found(
             "collect_specialist_task",
-            request.member_ref,
+            member_ref,
         ));
     }
     let accepted: crate::delegation_identity::AcceptedTask =
@@ -3032,10 +3605,10 @@ fn collect_specialist_task_in(
             .map_err(|_| complete_result_unavailable("collect_specialist_task"))?;
     let accepted_task_digest = accepted.digest()?;
     let complete = complete_result_of(
-        &store,
+        store,
         owner,
-        request.member_ref,
-        request.task_ref,
+        member_ref,
+        task_ref,
         &accepted_task_digest,
         &facts.state,
         "collect_specialist_task",
@@ -3046,57 +3619,14 @@ fn collect_specialist_task_in(
     );
     let state = task_state(&facts.state);
     let required_action = task_required_action(&facts.state);
-    let digest = complete
-        .as_ref()
-        .map_or_else(|| "none".to_owned(), |(digest, _, _)| digest.clone());
-    let (disposition, _) = consistent_observation(
-        || {
-            port.member_writer_observation(MemberCleanupObservation {
-                view: scope.view,
-                state_root: scope.state_root,
-                owner,
-                member_ref: request.member_ref,
-            })
-        },
-        |hold| {
-            let transaction = store.connection().unchecked_transaction().map_err(|_| {
-                MachineError::new(
-                    "INTERNAL_ERROR",
-                    "the engagement read transaction is unavailable",
-                    false,
-                    json!({"invariant": "managed_disposition"}),
-                )
-            })?;
-            #[cfg(test)]
-            managed_observation_probe(&transaction, "collect_specialist_task", None);
-            let active_write_tasks =
-                managed_active_write_count(&transaction, context.session_id, request.member_ref)?;
-            #[cfg(test)]
-            managed_observation_probe(
-                &transaction,
-                "collect_specialist_task",
-                Some(active_write_tasks),
-            );
-            let disposition = disposition_view(
-                &transaction,
-                &scope.view.workspace_id,
-                owner,
-                request.member_ref,
-                digest.clone(),
-                cleanup_pending(hold, active_write_tasks),
-            )?;
-            drop(transaction);
-            Ok(disposition)
-        },
-    )?;
     // A complete result is published whole or not at all (the typed-unavailable
     // rule).
     if terminal && complete.is_none() {
         return Err(complete_result_unavailable("collect_specialist_task"));
     }
     let observation = DelegationTaskObservation {
-        task_ref: request.task_ref.to_string(),
-        member_ref: request.member_ref.to_string(),
+        task_ref: task_ref.to_string(),
+        member_ref: member_ref.to_string(),
         accepted_task_digest,
         state: state.to_owned(),
         result_digest: complete.as_ref().map(|(digest, _, _)| digest.clone()),
@@ -3108,18 +3638,8 @@ fn collect_specialist_task_in(
         },
         required_action: required_action.to_owned(),
     };
-    let (value, typed) = match complete {
-        Some((_, value, result)) => (Some(value), Some(result)),
-        None => (None, None),
-    };
-    Ok((
-        CollectedTask {
-            task: observation,
-            complete_result: value,
-            disposition,
-        },
-        typed,
-    ))
+    let typed = complete.map(|(_, _, result)| result);
+    Ok((observation, typed, accepted))
 }
 
 /// The closed `delegation_identity/v1` for one collected managed task (R).
@@ -3147,11 +3667,7 @@ fn get_managed_delegation_identity_in(
     request: &CollectSpecialistTask<'_>,
 ) -> Result<DelegationIdentityView, MachineError> {
     const OPERATION: &str = "get_managed_delegation_identity";
-    let (collected, complete_result) = collect_specialist_task_in(scope, context, port, request)
-        .map_err(|error| reoperation(error, OPERATION))?;
-    let Some(complete_result) = complete_result else {
-        return Err(complete_result_unavailable(OPERATION));
-    };
+    engagement::require_delegation_namespace(scope.state_root)?;
     let session_id = context.session_id;
     let owner = SettlementOwner::Managed { session_id };
     let observer = crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?;
@@ -3159,14 +3675,6 @@ fn get_managed_delegation_identity_in(
     let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
         scope.state_root,
     ))?;
-    let facts =
-        crate::orchestration::successor_task(store.connection(), session_id, request.task_ref)?
-            .ok_or_else(|| {
-                managed_task_not_found("get_managed_delegation_identity", request.member_ref)
-            })?;
-    let accepted: crate::delegation_identity::AcceptedTask =
-        serde_json::from_str(&facts.accepted_request_json)
-            .map_err(|_| complete_result_unavailable(OPERATION))?;
     let runs =
         crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, scope.state_root);
     let manifest = runs.load_manifest(request.member_ref)?;
@@ -3178,10 +3686,7 @@ fn get_managed_delegation_identity_in(
     // Controller, never the member's own Broker controller.
     let supervisor = runs.load_controller_binding(session.root_run_id)?;
     let ambient_guidance = managed_ambient_disclosure_in(scope, session_id, &manifest)?;
-    let database_facts = || {
-        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
-            scope.state_root,
-        ))?;
+    let database_facts = |close: &mut dyn FnMut() -> Result<(), MachineError>| {
         let transaction = store.connection().unchecked_transaction().map_err(|_| {
             MachineError::new(
                 "INTERNAL_ERROR",
@@ -3190,6 +3695,16 @@ fn get_managed_delegation_identity_in(
                 json!({"invariant": "managed_identity_read"}),
             )
         })?;
+        let (collected, complete_result, accepted) = collect_specialist_task_from_store(
+            &store,
+            scope,
+            session_id,
+            request.member_ref,
+            request.task_ref,
+        )
+        .map_err(|error| reoperation(error, OPERATION))?;
+        let complete_result =
+            complete_result.ok_or_else(|| complete_result_unavailable(OPERATION))?;
         // Export binds the task to the caller scope it was admitted under; a
         // relabelled task is a closed refusal, never an identity.
         if crate::caller_scope::verify_replay(&transaction, request.task_ref, caller).is_err() {
@@ -3220,25 +3735,43 @@ fn get_managed_delegation_identity_in(
             quiescence.membership_revision,
             quiescence.workload_revision,
         )?;
+        #[cfg(test)]
+        member_observation_probe("D");
+        close()?;
         drop(transaction);
-        Ok((rounds, counts, quiescence, active_write_tasks, released))
+        Ok((
+            rounds,
+            counts,
+            quiescence,
+            active_write_tasks,
+            released,
+            (collected, complete_result, accepted),
+        ))
     };
     let (
-        (rounds_used, (accepted_assignments, unresolved_assignments), quiescence, released),
+        (
+            rounds_used,
+            (accepted_assignments, unresolved_assignments),
+            quiescence,
+            released,
+            (collected, complete_result, accepted),
+        ),
         _hold,
-    ) = consistent_observation(
-        || {
-            port.member_writer_observation(MemberCleanupObservation {
-                view: scope.view,
-                state_root: scope.state_root,
-                owner,
-                member_ref: request.member_ref,
-            })
+    ) = consistent_member_observation(
+        port,
+        MemberCleanupObservation {
+            view: scope.view,
+            state_root: scope.state_root,
+            owner,
+            member_ref: request.member_ref,
         },
-        |hold| {
-            let (rounds, counts, mut facts, active_write_tasks, released) = database_facts()?;
+        |source| source.matches_manifest(&manifest) && source.matches_supervisor(&supervisor),
+        |hold, pending, close| {
+            let (rounds, counts, mut facts, active_write_tasks, released, result) =
+                database_facts(close)?;
+            facts.pending_interaction = pending;
             facts.cleanup_pending = cleanup_pending(hold, active_write_tasks);
-            Ok((rounds, counts, facts, released))
+            Ok((rounds, counts, facts, released, result))
         },
     )?;
     drop(store);
@@ -3246,7 +3779,6 @@ fn get_managed_delegation_identity_in(
         return Err(complete_result_unavailable(OPERATION));
     }
     let digest = collected
-        .task
         .result_digest
         .clone()
         .ok_or_else(|| complete_result_unavailable(OPERATION))?;
@@ -3269,7 +3801,7 @@ fn get_managed_delegation_identity_in(
                 claimed: 0,
                 dispatching: 0,
                 unresolved: 0,
-                pending_interaction: false,
+                pending_interaction: quiescence.pending_interaction,
                 cleanup_pending: false,
                 release_receipt: Some(proof),
             },
@@ -3290,7 +3822,7 @@ fn get_managed_delegation_identity_in(
                 claimed: quiescence.claimed,
                 dispatching: quiescence.dispatching,
                 unresolved: quiescence.unresolved,
-                pending_interaction: false,
+                pending_interaction: quiescence.pending_interaction,
                 cleanup_pending: quiescence.cleanup_pending,
                 release_receipt: None,
             },
@@ -4152,6 +4684,282 @@ fn managed_observation_probe(
     });
 }
 
+#[cfg(test)]
+type MemberObservationProbe = Option<Box<dyn FnMut(&str)>>;
+#[cfg(test)]
+thread_local! { static MEMBER_OBSERVATION_PROBE: std::cell::RefCell<MemberObservationProbe> = const { std::cell::RefCell::new(None) }; }
+#[cfg(test)]
+pub(crate) struct MemberObservationProbeGuard;
+#[cfg(test)]
+impl Drop for MemberObservationProbeGuard {
+    fn drop(&mut self) {
+        MEMBER_OBSERVATION_PROBE.with(|p| {
+            p.borrow_mut().take();
+        });
+    }
+}
+#[cfg(test)]
+pub(crate) fn set_member_observation_probe(
+    probe: impl FnMut(&str) + 'static,
+) -> MemberObservationProbeGuard {
+    MEMBER_OBSERVATION_PROBE.with(|p| {
+        assert!(p.borrow().is_none());
+        *p.borrow_mut() = Some(Box::new(probe));
+    });
+    MemberObservationProbeGuard
+}
+#[cfg(test)]
+fn member_observation_probe(stage: &str) {
+    MEMBER_OBSERVATION_PROBE.with(|p| {
+        if let Some(probe) = p.borrow_mut().as_mut() {
+            probe(stage);
+        }
+    });
+}
+
+fn observation_failure(error: MachineError) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        format!(
+            "complete delegation observation unavailable ({})",
+            error.code
+        ),
+        false,
+        json!({"required_action":"restore_state", "source_code":error.code}),
+    )
+}
+fn observation_motion() -> MachineError {
+    MachineError::new(
+        "RUN_STATE_CONFLICT",
+        "delegation observation moved",
+        false,
+        json!({"observation_motion":true}),
+    )
+}
+fn observation_is_motion(error: &MachineError) -> bool {
+    error.details.get("observation_motion") == Some(&Value::Bool(true))
+}
+
+/// A0/W0/fold/A1/D/W1/A2. The callback must close the external fences before
+/// dropping its pinned transaction. Every attempt shares this one allowance.
+fn consistent_member_observation<T>(
+    port: &dyn RunSettlementPort,
+    request: MemberCleanupObservation<'_>,
+    accepts_source: impl FnMut(&crate::snapshot::MemberRunObservation) -> bool,
+    database_facts: impl FnMut(
+        &MemberWriterObservation,
+        bool,
+        &mut dyn FnMut() -> Result<(), MachineError>,
+    ) -> Result<T, MachineError>,
+) -> Result<(T, MemberWriterObservation), MachineError> {
+    let mut budget = crate::ledger::ObservationBudget::default();
+    consistent_member_observation_using(port, request, accepts_source, database_facts, &mut budget)
+}
+fn consistent_member_observation_using<T>(
+    port: &dyn RunSettlementPort,
+    request: MemberCleanupObservation<'_>,
+    mut accepts_source: impl FnMut(&crate::snapshot::MemberRunObservation) -> bool,
+    mut database_facts: impl FnMut(
+        &MemberWriterObservation,
+        bool,
+        &mut dyn FnMut() -> Result<(), MachineError>,
+    ) -> Result<T, MachineError>,
+    budget: &mut crate::ledger::ObservationBudget,
+) -> Result<(T, MemberWriterObservation), MachineError> {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            // Only source motion reaches another attempt. Its transaction and
+            // captured sources have already dropped before this bounded wait.
+            budget.wait_for_publication().map_err(|error| {
+                observation_failure(crate::ledger::observation_error(
+                    request.member_ref,
+                    0,
+                    error,
+                ))
+            })?;
+        }
+        let a0 = match port.member_run_observation(request, budget) {
+            Ok(source) => source,
+            Err(error) if observation_is_motion(&error) => continue,
+            Err(error) => return Err(observation_failure(error)),
+        };
+        if !accepts_source(&a0) {
+            return Err(observation_failure(observation_motion()));
+        }
+        #[cfg(test)]
+        member_observation_probe("A0");
+        let w0 = port
+            .member_writer_observation(request)
+            .map_err(observation_failure)?;
+        #[cfg(test)]
+        member_observation_probe("W0");
+        let interaction = port.member_interaction_observation(request, &a0, budget);
+        #[cfg(test)]
+        member_observation_probe("fold");
+        let a1 = match port.member_run_observation(request, budget) {
+            Ok(source) => source,
+            Err(error) if observation_is_motion(&error) => continue,
+            Err(error) => return Err(observation_failure(error)),
+        };
+        if a0 != a1 {
+            continue;
+        }
+        #[cfg(test)]
+        member_observation_probe("A1");
+        let (pending, stamp) = match interaction {
+            Ok(observation) => observation,
+            Err(error) if observation_is_motion(&error) => continue,
+            Err(error) => return Err(observation_failure(error)),
+        };
+        if !a0.matches_stamp(&stamp) {
+            return Err(observation_failure(MachineError::new(
+                "AUDIT_INTEGRITY_FAILURE",
+                "interaction stamp differs from its complete Run observation",
+                false,
+                json!({}),
+            )));
+        }
+        let mut closed = false;
+        let mut close = || {
+            let w1 = port
+                .member_writer_observation(request)
+                .map_err(observation_failure)?;
+            #[cfg(test)]
+            member_observation_probe("W1");
+            let a2 = port
+                .member_run_observation(request, budget)
+                .map_err(|error| {
+                    if observation_is_motion(&error) {
+                        error
+                    } else {
+                        observation_failure(error)
+                    }
+                })?;
+            #[cfg(test)]
+            member_observation_probe("A2");
+            budget.check().map_err(|error| {
+                observation_failure(crate::ledger::observation_error(
+                    request.member_ref,
+                    0,
+                    error,
+                ))
+            })?;
+            closed = true;
+            if w0 != w1 || a0 != a2 {
+                return Err(observation_motion());
+            }
+            Ok(())
+        };
+        #[cfg(test)]
+        member_observation_probe("before_D");
+        match database_facts(&w0, pending, &mut close) {
+            Err(error) if observation_is_motion(&error) => continue,
+            Err(error) => return Err(error),
+            Ok(facts) if closed => return Ok((facts, w0)),
+            Ok(_) => {
+                return Err(observation_failure(MachineError::new(
+                    "INTERNAL_ERROR",
+                    "database snapshot ended without source recheck",
+                    false,
+                    json!({}),
+                )));
+            }
+        }
+    }
+    Err(observation_failure(observation_motion()))
+}
+
+fn observe_collected_task(
+    scope: &DelegationScope<'_>,
+    port: &dyn RunSettlementPort,
+    store: &EngagementStore,
+    owner: SettlementOwner,
+    member: Uuid,
+    task: Uuid,
+) -> Result<
+    (
+        CollectedTask,
+        Option<crate::delegation_identity::CompleteResult>,
+    ),
+    MachineError,
+> {
+    let ((task, complete, facts), _) = consistent_member_observation(
+        port,
+        MemberCleanupObservation {
+            view: scope.view,
+            state_root: scope.state_root,
+            owner,
+            member_ref: member,
+        },
+        |_| true,
+        |hold, pending, close| {
+            let transaction = store
+                .connection()
+                .unchecked_transaction()
+                .map_err(|_| complete_result_unavailable("collect_specialist_task"))?;
+            let (collected, complete, _) = match owner {
+                SettlementOwner::External { engagement_id } => {
+                    collect_external_specialist_task_from_store(
+                        store,
+                        scope,
+                        engagement_id,
+                        member,
+                        task,
+                    )?
+                }
+                SettlementOwner::Managed { session_id } => {
+                    collect_specialist_task_from_store(store, scope, session_id, member, task)?
+                }
+            };
+            #[cfg(test)]
+            if matches!(owner, SettlementOwner::Managed { .. }) {
+                managed_observation_probe(&transaction, "collect_specialist_task", None);
+            }
+            let active_write_tasks = match owner {
+                SettlementOwner::External { engagement_id } => {
+                    EngagementStore::active_write_task_count(&transaction, engagement_id, member)?
+                }
+                SettlementOwner::Managed { session_id } => {
+                    managed_active_write_count(&transaction, session_id, member)?
+                }
+            };
+            #[cfg(test)]
+            if matches!(owner, SettlementOwner::Managed { .. }) {
+                managed_observation_probe(
+                    &transaction,
+                    "collect_specialist_task",
+                    Some(active_write_tasks),
+                );
+            }
+            let facts = disposition_view(
+                &transaction,
+                &scope.view.workspace_id,
+                owner,
+                member,
+                collected
+                    .result_digest
+                    .clone()
+                    .unwrap_or_else(|| "none".to_owned()),
+                cleanup_pending(hold, active_write_tasks),
+                pending,
+            )?;
+            #[cfg(test)]
+            member_observation_probe("D");
+            close()?;
+            drop(transaction);
+            Ok((collected, complete, facts))
+        },
+    )?;
+    Ok((
+        CollectedTask {
+            complete_result: task.complete_result.clone(),
+            task,
+            disposition: facts,
+        },
+        complete,
+    ))
+}
+
 /// Observe the writer fact and the database facts as one consistent boundary.
 ///
 /// The writer record is not part of the engagement database, so each attempt
@@ -4160,6 +4968,7 @@ fn managed_observation_probe(
 /// unchanged across that read. A fact that will not hold still is a typed
 /// recovery refusal. The database closure receives the confirmed writer fact, so
 /// a state derived from it can never contradict the cleanup it reports.
+#[cfg(test)]
 fn consistent_observation<T>(
     mut writer_fact: impl FnMut() -> Result<MemberWriterObservation, MachineError>,
     mut database_facts: impl FnMut(&MemberWriterObservation) -> Result<T, MachineError>,
@@ -4273,6 +5082,7 @@ fn disposition_view(
     member_ref: Uuid,
     observed_after_result_digest: String,
     cleanup_pending: bool,
+    pending_interaction: bool,
 ) -> Result<DelegationDispositionView, MachineError> {
     let mut quiescence = match owner {
         SettlementOwner::External { engagement_id } => {
@@ -4296,6 +5106,7 @@ fn disposition_view(
         }
     };
     quiescence.cleanup_pending = cleanup_pending;
+    quiescence.pending_interaction = pending_interaction;
     // A terminal release row is read in the same snapshot as the quiescence,
     // so the proof's revision domains and the observation are one fact.
     let release_receipt = released_proof(
@@ -4551,6 +5362,7 @@ struct IntentIdentity {
     lookup: LookupNamespace,
     json: String,
     digest: String,
+    trusted_invocation: Option<crate::delegation_identity::TrustedInvocationContext>,
 }
 
 fn intent_identity(
@@ -4571,11 +5383,21 @@ fn intent_identity(
     .map_err(|reason| MachineError::invalid_argument("namespace", reason))?;
     let request_body = crate::operation::canonical(body)
         .map_err(|_| MachineError::invalid_argument("request_body", "unrepresentable"))?;
+    let lookup: LookupNamespace = (&namespace).into();
+    let trusted_invocation = scope
+        .trusted_invocation
+        .map(|proof| {
+            proof.require_namespace(&lookup)?;
+            Ok::<_, MachineError>(proof.context().clone())
+        })
+        .transpose()?;
     let envelope = Envelope {
         schema: ENVELOPE_SCHEMA.to_owned(),
         request_schema: request_schema.to_owned(),
         namespace,
-        trusted_invocation_ref: None,
+        trusted_invocation_ref: trusted_invocation
+            .as_ref()
+            .map(|context| context.invocation_ref),
         request_body: BytesRef {
             byte_length: u64::try_from(request_body.len())
                 .map_err(|_| MachineError::invalid_argument("request_body", "unbounded"))?,
@@ -4590,6 +5412,7 @@ fn intent_identity(
         namespace,
         json: canonical_text(&envelope)?,
         digest,
+        trusted_invocation,
     })
 }
 
@@ -4725,6 +5548,109 @@ fn run_pre_acceptance_interleave() {
             hook();
         }
     });
+}
+
+/// Seed an already accepted task for retained-runtime recovery tests. This
+/// deliberately uses the durable acceptance primitives below new admission.
+#[cfg(test)]
+pub(crate) fn seed_retained_checked_assignment(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    configuration: &crate::run::AgentConfigurationSnapshot,
+    member: Uuid,
+    key: &str,
+    task: &crate::task_request::SpecialistTaskRequest,
+    target: &crate::review::ReviewTargetRequest,
+) -> (Uuid, String) {
+    engagement::ensure_delegation_namespace(scope.state_root).unwrap();
+    let caller = crate::caller_scope::fixture(3);
+    let captured = admit_assignment_target(scope, Some(target))
+        .unwrap()
+        .unwrap();
+    let (accepted, contents) = crate::successor_capture::capture_facade_task(
+        configuration,
+        task,
+        "read_only",
+        Some((&captured.0, &captured.1)),
+    )
+    .unwrap();
+    let digest = accepted.digest().unwrap();
+    let body = crate::successor_capture::assignment_body(member, task, &accepted, 600).unwrap();
+    let scope_ref = owner.scope_ref().to_string();
+    let external = matches!(owner, SettlementOwner::External { .. });
+    let operation = if external {
+        "assign_external_specialist_task"
+    } else {
+        "assign_specialist_task"
+    };
+    let identity = intent_identity(
+        scope,
+        operation,
+        Some((owner.scope_kind(), &scope_ref)),
+        key,
+        if external {
+            ASSIGN_BODY_SCHEMA
+        } else {
+            ASSIGN_MANAGED_BODY_SCHEMA
+        },
+        &body,
+    )
+    .unwrap();
+    let operation_ref = Uuid::now_v7();
+    let task_ref = Uuid::now_v7();
+    let now = now_ms().unwrap();
+    let mut store = open_store(scope).unwrap();
+    store.transact(|tx| {
+        engagement::intent_prepare(tx, IntentAdmission { operation_ref, namespace: &identity.lookup,
+            mutation_envelope_json: &identity.json, mutation_envelope_digest: &identity.digest, trusted_invocation: identity.trusted_invocation.as_ref(),
+            expected_revision: None, now_ms: now })?;
+        match owner {
+            SettlementOwner::External { engagement_id } => {
+                accept_assign(tx, AssignAcceptance { caller: &caller, engagement_id, member_ref: member,
+                    task_id: task_ref, namespace: &identity.namespace, accepted_input_digest: &identity.digest,
+                    expected_revision: None, objective_sha256: &digest,
+                    external_request_json: &json!({"provisioning_ref":null,"accepted_task_digest":digest,"deadline_seconds":600}),
+                    request_json: &canonical_text(&accepted)?, accepted_contents: &contents,
+                    request_sha256: &identity.digest, execution_intent: "read_only", deadline_seconds: 600,
+                    operation_ref, now_ms: now, workspace_ref: &scope.view.workspace_id })?;
+                engagement::mark_external_task_dispatching_in(tx, engagement_id, task_ref, now)?;
+            }
+            SettlementOwner::Managed { session_id } => {
+                let marker = successor_task_payload(&SuccessorTaskMarker { operation_ref, member_ref: member,
+                    accepted_task_digest: &digest, execution_intent: "read_only", deadline_seconds: 600 });
+                let accepted_json = canonical_text(&accepted)?;
+                crate::orchestration::admit_successor_task(tx, crate::orchestration::SuccessorTask {
+                    session_id, task_id: task_ref, member_run_id: member,
+                    internal_key: &successor_internal_key(operation_ref),
+                    request_sha256: &sha256_hex(&crate::operation::canonical(&body).unwrap()),
+                    request_json: &canonical_text(&marker)?, accepted_request_json: &accepted_json,
+                    accepted_request_sha256: &sha256_hex(accepted_json.as_bytes()), source_run_id: session_id,
+                    source_turn_id: "primary-turn", source_tool_call_id: "primary-tool",
+                    deadline_origin_ms: now, now_ms: now })?;
+                engagement::retain_accepted_task_content(tx, task_ref, &contents.task_body,
+                    &contents.contexts, contents.target.as_deref(), now)?;
+                crate::caller_scope::admit(tx, &crate::caller_scope::CallerAssignment {
+                    assignment_id: task_ref, workspace_ref: &scope.view.workspace_id,
+                    aggregate_scope_kind: owner.scope_kind(), aggregate_scope_ref: &scope_ref,
+                    member_ref: member }, &caller, now)?;
+                engagement::advance_member_workload_revision(tx, &scope.view.workspace_id,
+                    owner.scope_kind(), &scope_ref, &member.to_string())?;
+                let revision = engagement::scope_membership_revision(tx, &scope.view.workspace_id,
+                    owner.scope_kind(), &scope_ref)?;
+                let receipt = build_receipt(&identity.namespace, operation_ref, &identity.digest,
+                    AcceptedSubjects { run_ref: Some(member.to_string()), member_ref: Some(member.to_string()),
+                        task_ref: Some(task_ref.to_string()), ..Default::default() }, revision)?;
+                engagement::intent_accept(tx, operation_ref, &receipt, now)?;
+                crate::orchestration::mark_successor_task_dispatching(tx, session_id, task_ref, now)?;
+            }
+        }
+        crate::caller_scope::accepted(tx, task_ref)?;
+        Ok(())
+    }).unwrap();
+    (
+        task_ref,
+        contents.prompt(&accepted, "read_only", 600).unwrap(),
+    )
 }
 
 /// Reserve the task, admit its accounting row, advance the member workload
@@ -4983,10 +5909,30 @@ pub(crate) fn qualified_successor_review(manifest: &crate::run::RunManifest) -> 
         && manifest
             .global_profile_binding
             .as_ref()
-            .is_some_and(|binding| binding.checked_review_supported())
+            .is_some_and(|binding| binding.accepted_checked_review_supported())
 }
 
 #[allow(clippy::too_many_arguments)]
+/// New member and task acceptance is independent of retained execution.
+fn require_current_member_runtime(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    operation_kind: &str,
+) -> Result<(), MachineError> {
+    source_event("current");
+    if binding.caller_workspace_supported() {
+        return Ok(());
+    }
+    Err(successor_error(
+        "CAPABILITY_UNSUPPORTED",
+        operation_kind,
+        None,
+        "none",
+        "Rejected",
+        "renegotiate",
+        "new qualified work requires the current runtime pin and qualified launch policy",
+    ))
+}
+
 fn admit_checked_task(
     scope: &DelegationScope<'_>,
     owner: SettlementOwner,
@@ -5215,6 +6161,7 @@ fn admit_assignment_target(
     scope: &DelegationScope<'_>,
     request: Option<&crate::review::ReviewTargetRequest>,
 ) -> Result<Option<(String, Vec<u8>)>, MachineError> {
+    source_event("target");
     request
         .map(|request| {
             request.validate()?;
@@ -5240,6 +6187,7 @@ fn assignment_replay(
     task: &crate::task_request::SpecialistTaskRequest,
     intent: &str,
     target: Option<&crate::review::ReviewTargetRequest>,
+    expected: Option<&AcceptedTask>,
     deadline: u64,
     key: &str,
 ) -> Result<Option<OperationReceipt>, MachineError> {
@@ -5339,12 +6287,18 @@ fn assignment_replay(
                     .map_err(|_| bad())
             })
             .transpose()?;
-        match (target, selection) {
-            (Some(request), Some(retained))
-                if request.kind == retained.kind
-                    && request.revision == retained.requested_revision => {}
-            (None, None) => {}
-            _ => return Err(idempotency_conflict()),
+        if let Some(expected) = expected {
+            if *expected != accepted {
+                return Err(idempotency_conflict());
+            }
+        } else {
+            match (target, selection) {
+                (Some(request), Some(retained))
+                    if request.kind == retained.kind
+                        && request.revision == retained.requested_revision => {}
+                (None, None) => {}
+                _ => return Err(idempotency_conflict()),
+            }
         }
         accepted.execution_intent = intent.to_owned();
         let body = crate::successor_capture::assignment_body(member, task, &accepted, deadline)?;
@@ -5880,7 +6834,7 @@ fn uncertain_dispatch(
 }
 
 fn replay_operation_ref(receipt: &OperationReceipt) -> Uuid {
-    Uuid::parse_str(&receipt.operation_ref).unwrap_or(Uuid::nil())
+    Uuid::parse_str(&receipt.operation_ref).unwrap_or_default()
 }
 
 /// The trusted Controller is not the engagement's authenticated owner.
@@ -6061,8 +7015,989 @@ fn idempotency_conflict() -> MachineError {
     )
 }
 
+/// Read-only authenticated service join for transport state and retained replay.
+pub(crate) fn transport_owner(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    context: Option<&ManagedCallContext<'_>>,
+    operation: &'static str,
+) -> Result<(), MachineError> {
+    engagement::require_delegation_namespace(scope.state_root)?;
+    match owner {
+        SettlementOwner::External { engagement_id } => {
+            let store = EngagementStore::open_read_only(
+                &EngagementStore::workspace_database_path(scope.state_root),
+            )?;
+            let (workspace, controller) = store.external_owner_binding(engagement_id)?;
+            if workspace != scope.view.workspace_id || controller != *scope.controller {
+                return Err(owner_refusal_for(operation));
+            }
+        }
+        SettlementOwner::Managed { session_id } => {
+            let context = context.ok_or_else(|| owner_refusal_for(operation))?;
+            if context.session_id != session_id {
+                return Err(owner_refusal_for(operation));
+            }
+            let store = crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?;
+            managed_read_scope(&store, scope, context, operation)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn transport_member(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    member: Uuid,
+    context: Option<&ManagedCallContext<'_>>,
+) -> Result<DelegationMemberView, MachineError> {
+    transport_owner(scope, owner, context, "get_external_engagement")?;
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let (role, configuration, state, residency) = match owner {
+        SettlementOwner::External { engagement_id } => {
+            successor_external_member(&store, engagement_id, member)?;
+            let (configuration, _, _) =
+                store.external_member_configuration(engagement_id, member)?;
+            let (state, residency) = store.external_member_state(engagement_id, member)?;
+            (
+                configuration
+                    .role_reference
+                    .clone()
+                    .ok_or_else(retained_source_invalid)?,
+                configuration,
+                state,
+                residency,
+            )
+        }
+        SettlementOwner::Managed { session_id } => {
+            let facts = managed_member(&store, session_id, member)?;
+            (
+                facts.role_ref,
+                facts.agent_configuration,
+                facts.membership_state,
+                facts.actor_residency,
+            )
+        }
+    };
+    let admitted = configuration
+        .admitted_configuration
+        .as_ref()
+        .ok_or_else(retained_source_invalid)?;
+    let instructions = configuration
+        .instructions
+        .delegation()
+        .ok_or_else(retained_source_invalid)?;
+    Ok(DelegationMemberView {
+        member_ref: member.to_string(),
+        run_ref: member.to_string(),
+        scope_kind: owner.scope_kind().into(),
+        scope_ref: owner.scope_ref().to_string(),
+        role_ref: role,
+        role_snapshot_digest: instructions
+            .instruction_identity
+            .role_snapshot_digest
+            .clone(),
+        agent_configuration_digest: admitted.digest()?,
+        state: member_state(&state, &residency).into(),
+        revision: store.scope_membership_revision(
+            &scope.view.workspace_id,
+            owner.scope_kind(),
+            &owner.scope_ref().to_string(),
+        )?,
+    })
+}
+
+/// Successor engagement observation never invokes legacy provenance or mutation-on-read.
+pub(crate) fn get_external_engagement(
+    scope: &DelegationScope<'_>,
+    engagement_id: Uuid,
+) -> Result<DelegationEngagementView, MachineError> {
+    use rusqlite::params;
+    let owner = SettlementOwner::External { engagement_id };
+    transport_owner(scope, owner, None, "get_external_engagement")?;
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let (state, revision): (String, u64) = store
+        .connection()
+        .query_row(
+            "SELECT state,revision FROM engagements WHERE engagement_id=?1",
+            [engagement_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| retained_source_invalid())?;
+    let mut query = store.connection().prepare("SELECT specialist_run_id FROM members WHERE engagement_id=?1 ORDER BY specialist_run_id LIMIT 65").map_err(|_| retained_source_invalid())?;
+    let refs = query
+        .query_map(params![engagement_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|_| retained_source_invalid())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| retained_source_invalid())?;
+    if refs.len() > 64 {
+        return Err(successor_error(
+            "CAPABILITY_UNSUPPORTED",
+            "get_external_engagement",
+            None,
+            "none",
+            "Rejected",
+            "renegotiate",
+            "complete member observation exceeds the frozen response bound",
+        ));
+    }
+    let members = refs
+        .into_iter()
+        .map(|id| {
+            transport_member(
+                scope,
+                owner,
+                Uuid::parse_str(&id).map_err(|_| retained_source_invalid())?,
+                None,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(DelegationEngagementView {
+        engagement_ref: engagement_id.to_string(),
+        workspace_ref: scope.view.workspace_id.clone(),
+        state: match state.as_str() {
+            "active" => "open",
+            "closing" => "closing",
+            "completed" | "aborted" => "closed",
+            _ => "recovery_needed",
+        }
+        .into(),
+        revision,
+        members,
+        next_cursor: None,
+    })
+}
+
+/// Recover a successful K response exclusively from the original retained acceptance.
+pub(crate) fn retained_transport_response(
+    scope: &DelegationScope<'_>,
+    receipt: &OperationReceipt,
+    request: &Value,
+    caller: &crate::caller_scope::TrustedCallerScope,
+) -> Result<Value, MachineError> {
+    let result = (|| {
+        receipt.validate()?;
+        receipt.verify_digest()?;
+        let operation = receipt.namespace.operation_kind.as_str();
+        if request["operation"] != operation {
+            return Err(retained_source_invalid());
+        }
+        let key = request["idempotency_key"]
+            .as_str()
+            .ok_or_else(retained_source_invalid)?;
+        let aggregate = receipt
+            .namespace
+            .scope_kind
+            .as_deref()
+            .zip(receipt.namespace.scope_ref.as_deref());
+        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+            scope.state_root,
+        ))?;
+        let mut result = json!({"schema":"dolgorae.external-specialist-response/v5","operation":operation,"receipt":receipt});
+        let (schema, body) = match operation {
+            "install_provisioning" => (INSTALL_BODY_SCHEMA, json!({"sources":request["sources"]})),
+            "open_external_engagement" => (OPEN_BODY_SCHEMA, json!({})),
+            "hire_external_specialist" => (
+                HIRE_BODY_SCHEMA,
+                json!({"provisioning_ref":request["provisioning_ref"],"role_ref":request["role_ref"],"agent_configuration_digest":request["agent_configuration_digest"]}),
+            ),
+            "assign_external_specialist_task" => {
+                let member = Uuid::parse_str(
+                    request["member_ref"]
+                        .as_str()
+                        .ok_or_else(retained_source_invalid)?,
+                )
+                .map_err(|_| retained_source_invalid())?;
+                let engagement_id = Uuid::parse_str(
+                    request["scope_ref"]
+                        .as_str()
+                        .ok_or_else(retained_source_invalid)?,
+                )
+                .map_err(|_| retained_source_invalid())?;
+                let owner = SettlementOwner::External { engagement_id };
+                transport_owner(scope, owner, None, "assign_external_specialist_task")?;
+                let task: crate::task_request::SpecialistTaskRequest =
+                    serde_json::from_value(request["assignment"]["task_body"].clone())
+                        .map_err(|_| retained_source_invalid())?;
+                let expected: AcceptedTask =
+                    serde_json::from_value(request["assignment"]["accepted_task_identity"].clone())
+                        .map_err(|_| retained_source_invalid())?;
+                let deadline = request["assignment"]["deadline_seconds"]
+                    .as_u64()
+                    .ok_or_else(retained_source_invalid)?;
+                let verified = assignment_replay(
+                    scope,
+                    &store,
+                    owner,
+                    member,
+                    &task,
+                    &expected.execution_intent,
+                    None,
+                    Some(&expected),
+                    deadline,
+                    key,
+                )?
+                .ok_or_else(retained_source_invalid)?;
+                if verified != *receipt {
+                    return Err(retained_source_invalid());
+                }
+                verify_replay_scope(&store, receipt, caller)?;
+                result["task"] = serde_json::to_value(assigned_observation(&store, receipt)?.0)
+                    .map_err(|_| retained_source_invalid())?;
+                return Ok(result);
+            }
+            _ => return Err(retained_source_invalid()),
+        };
+        let identity = intent_identity(scope, operation, aggregate, key, schema, &body)?;
+        if identity.lookup != receipt.namespace || identity.digest != receipt.accepted_input_digest
+        {
+            return Err(retained_source_invalid());
+        }
+        match operation {
+            "install_provisioning" => {
+                let reference = receipt
+                    .accepted_subjects
+                    .provisioning_ref
+                    .as_deref()
+                    .ok_or_else(retained_source_invalid)?;
+                let snapshot = crate::provisioning::retained_snapshot(scope.state_root, reference)?;
+                let expected: crate::provisioning::ProvisioningSourcesIdentity =
+                    serde_json::from_value(request["sources"].clone())
+                        .map_err(|_| retained_source_invalid())?;
+                if snapshot.sources_identity()? != expected
+                    || snapshot.provisioning_ref()? != reference
+                {
+                    return Err(retained_source_invalid());
+                }
+                result["candidate"] = serde_json::to_value(snapshot.candidate(true)?)
+                    .map_err(|_| retained_source_invalid())?;
+            }
+            "open_external_engagement" => {
+                result["engagement"] =
+                    serde_json::to_value(opened_engagement(&scope.view.workspace_id, receipt)?)
+                        .map_err(|_| retained_source_invalid())?
+            }
+            "hire_external_specialist" => {
+                let engagement_id = Uuid::parse_str(
+                    request["scope_ref"]
+                        .as_str()
+                        .ok_or_else(retained_source_invalid)?,
+                )
+                .map_err(|_| retained_source_invalid())?;
+                transport_owner(
+                    scope,
+                    SettlementOwner::External { engagement_id },
+                    None,
+                    "hire_external_specialist",
+                )?;
+                let reference = request["provisioning_ref"]
+                    .as_str()
+                    .ok_or_else(retained_source_invalid)?;
+                if store
+                    .accepted_install_receipt(&scope.view.workspace_id, reference)?
+                    .is_none()
+                {
+                    return Err(retained_source_invalid());
+                }
+                let snapshot = crate::provisioning::retained_snapshot(scope.state_root, reference)?;
+                let (instructions, _) = snapshot.admitted_configuration()?;
+                let candidate = snapshot.candidate(true)?;
+                if request["role_ref"] != snapshot.role_name()
+                    || request["agent_configuration_digest"] != candidate.agent_configuration_digest
+                    || candidate.provisioning_ref != reference
+                {
+                    return Err(retained_source_invalid());
+                }
+                result["member"] = serde_json::to_value(
+                    member_admission_view(&store, &snapshot, &instructions, receipt)?.member,
+                )
+                .map_err(|_| retained_source_invalid())?;
+            }
+            _ => return Err(retained_source_invalid()),
+        }
+        Ok(result)
+    })();
+    accepted_boundary(
+        &receipt.namespace.operation_kind,
+        Some(replay_operation_ref(receipt)),
+        result,
+    )
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransportStateOperation {
+    schema: String,
+    record_digest: String,
+    #[serde(deserialize_with = "crate::delegation_identity::deserialize_invocation_ref")]
+    operation_ref: Uuid,
+    operation: String,
+    workspace: String,
+    scope_kind: String,
+    scope_ref: String,
+    target: String,
+    input_digest: String,
+    terminal: bool,
+}
+fn state_input_digest(value: &Value) -> Result<String, MachineError> {
+    Ok(format!(
+        "sha256:{}",
+        sha256_hex(canonical_text(value)?.as_bytes())
+    ))
+}
+fn state_record_digest(record: &TransportStateOperation) -> Result<String, MachineError> {
+    let mut value = serde_json::to_value(record).map_err(|_| retained_source_invalid())?;
+    value
+        .as_object_mut()
+        .ok_or_else(retained_source_invalid)?
+        .remove("record_digest");
+    state_input_digest(&value)
+}
+fn new_state_record(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    operation: &str,
+    target: Uuid,
+    body: &Value,
+) -> Result<TransportStateOperation, MachineError> {
+    let mut record = TransportStateOperation {
+        schema: "dolgorae.successor-state-owner/v1".into(),
+        record_digest: String::new(),
+        operation_ref: Uuid::now_v7(),
+        operation: operation.into(),
+        workspace: scope.view.workspace_id.clone(),
+        scope_kind: owner.scope_kind().into(),
+        scope_ref: owner.scope_ref().to_string(),
+        target: target.to_string(),
+        input_digest: state_input_digest(body)?,
+        terminal: false,
+    };
+    record.record_digest = state_record_digest(&record)?;
+    Ok(record)
+}
+fn state_key(owner: SettlementOwner, operation: &str, target: Uuid) -> String {
+    format!("successor-state:{operation}:{}:{target}", owner.scope_ref())
+}
+
+/// The authenticated port may settle only an already admitted cancellation.
+pub(crate) fn require_cancellation_owner(
+    connection: &rusqlite::Connection,
+    request: &MemberTaskSettlement<'_>,
+) -> Result<(), MachineError> {
+    let operation = match request.owner {
+        SettlementOwner::External { .. } => "cancel_external_specialist_task",
+        SettlementOwner::Managed { .. } => "cancel_specialist_task",
+    };
+    let record = read_state_operation(
+        connection,
+        &state_key(request.owner, operation, request.task_ref),
+    )?
+    .ok_or_else(retained_source_invalid)?;
+    if record.operation != operation
+        || record.workspace != request.view.workspace_id
+        || record.scope_kind != request.owner.scope_kind()
+        || record.scope_ref != request.owner.scope_ref().to_string()
+        || record.target != request.task_ref.to_string()
+        || record.terminal
+    {
+        return Err(retained_source_invalid());
+    }
+    Ok(())
+}
+
+/// A concurrent cancellation preserves the assignment's accepted receipt.
+fn assignment_cancelled(
+    connection: &rusqlite::Connection,
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    member: Uuid,
+    task: Uuid,
+) -> Result<bool, MachineError> {
+    if state_task(scope, owner, member, task)?.state != "cancelled" {
+        return Ok(false);
+    }
+    require_cancellation_owner(
+        connection,
+        &MemberTaskSettlement {
+            view: scope.view,
+            state_root: scope.state_root,
+            owner,
+            member_ref: member,
+            task_ref: task,
+            execution_intent: "",
+        },
+    )?;
+    let accounting: String = connection
+        .query_row(
+            "SELECT accounting_state FROM caller_scope_assignments WHERE assignment_id=?1",
+            [task.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|_| retained_source_invalid())?;
+    if accounting != "proved_nondispatch" {
+        return Err(retained_source_invalid());
+    }
+    Ok(true)
+}
+fn read_state_operation(
+    connection: &rusqlite::Connection,
+    key: &str,
+) -> Result<Option<TransportStateOperation>, MachineError> {
+    use rusqlite::OptionalExtension as _;
+    let text: Option<String> = connection
+        .query_row("SELECT value FROM metadata WHERE key=?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()
+        .map_err(|_| retained_source_invalid())?;
+    text.map(|text| {
+        if text.len() > 65_536 {
+            return Err(retained_source_invalid());
+        }
+        let bytes = canonicalize(&parse(&text).map_err(|_| retained_source_invalid())?)
+            .map_err(|_| retained_source_invalid())?;
+        let record: TransportStateOperation =
+            serde_json::from_slice(&bytes).map_err(|_| retained_source_invalid())?;
+        if record.record_digest != state_record_digest(&record)?
+            || record.schema != "dolgorae.successor-state-owner/v1"
+            || !record
+                .input_digest
+                .strip_prefix("sha256:")
+                .is_some_and(|s| {
+                    s.len() == 64
+                        && s.bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+        {
+            return Err(retained_source_invalid());
+        }
+        Ok(record)
+    })
+    .transpose()
+}
+fn check_state_operation(
+    record: &TransportStateOperation,
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    operation: &str,
+    target: Uuid,
+) -> Result<(), MachineError> {
+    if record.operation != operation
+        || record.workspace != scope.view.workspace_id
+        || record.scope_kind != owner.scope_kind()
+        || record.scope_ref != owner.scope_ref().to_string()
+        || record.target != target.to_string()
+    {
+        return Err(retained_source_invalid());
+    }
+    Ok(())
+}
+fn state_task(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    member: Uuid,
+    task: Uuid,
+) -> Result<DelegationTaskObservation, MachineError> {
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let observation = match owner {
+        SettlementOwner::External { engagement_id } => {
+            task_observation(&store, engagement_id, task)?
+        }
+        SettlementOwner::Managed { .. } => {
+            managed_task_observation(store.connection(), owner, member, task)?
+        }
+    };
+    if observation.member_ref != member.to_string() {
+        return Err(managed_task_not_found("cancel_specialist_task", member));
+    }
+    Ok(observation)
+}
+
+/// An S repeat is an observation of its original durable owner, never a new interrupt.
+pub(crate) fn observe_state_control(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    context: Option<&ManagedCallContext<'_>>,
+    operation: &'static str,
+    member: Option<Uuid>,
+    task: Option<Uuid>,
+    expected_body: Option<&Value>,
+) -> Result<Value, MachineError> {
+    transport_owner(scope, owner, context, operation)?;
+    let target = task.or(member).unwrap_or(owner.scope_ref());
+    let mut result =
+        json!({"schema":"dolgorae.external-specialist-response/v5","operation":operation});
+    if operation.starts_with("release_") {
+        let member = member.ok_or_else(retained_source_invalid)?;
+        let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+            scope.state_root,
+        ))?;
+        let record = engagement::member_release_operation(
+            store.connection(),
+            &scope.view.workspace_id,
+            owner.scope_kind(),
+            &owner.scope_ref().to_string(),
+            &member.to_string(),
+        )?
+        .ok_or_else(retained_source_invalid)?;
+        let mut projected = transport_member(scope, owner, member, context)?;
+        projected.state = release_member_state(&record.progress).into();
+        result["member"] =
+            serde_json::to_value(projected).map_err(|_| retained_source_invalid())?;
+        result["operation_ref"] = json!(record.operation_ref);
+        return Ok(result);
+    }
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let record = read_state_operation(store.connection(), &state_key(owner, operation, target))?
+        .ok_or_else(|| {
+            successor_error(
+                "OUTCOME_UNKNOWN",
+                operation,
+                None,
+                "unresolved",
+                "Unknown",
+                "reconcile_operation",
+                "the original state operation has no retained owner",
+            )
+        })?;
+    check_state_operation(&record, scope, owner, operation, target)?;
+    if record.input_digest
+        != state_input_digest(expected_body.ok_or_else(retained_source_invalid)?)?
+    {
+        return Err(retained_source_invalid());
+    }
+    result["operation_ref"] = json!(record.operation_ref);
+    let projection = (|| {
+        if operation == "close_external_engagement" {
+            let engagement = get_external_engagement(scope, owner.scope_ref())?;
+            if record.terminal && engagement.state != "closed" {
+                return Err(retained_source_invalid());
+            }
+            result["engagement"] =
+                serde_json::to_value(engagement).map_err(|_| retained_source_invalid())?;
+        } else {
+            result["task"] = serde_json::to_value(state_task(
+                scope,
+                owner,
+                member.ok_or_else(retained_source_invalid)?,
+                target,
+            )?)
+            .map_err(|_| retained_source_invalid())?;
+        }
+        Ok(result)
+    })();
+    projection.map_err(|error: MachineError| {
+        unresolved_effect(
+            &error.code,
+            operation,
+            record.operation_ref,
+            "original state operation observation is unavailable",
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cancel_specialist_task(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    context: Option<&ManagedCallContext<'_>>,
+    port: &dyn RunSettlementPort,
+    member: Uuid,
+    task: Uuid,
+    revision: u64,
+    reason: &str,
+) -> Result<Value, MachineError> {
+    let operation = match owner {
+        SettlementOwner::External { .. } => "cancel_external_specialist_task",
+        SettlementOwner::Managed { .. } => "cancel_specialist_task",
+    };
+    boundary(
+        operation,
+        (|| {
+            transport_owner(scope, owner, context, operation)?;
+            if reason.is_empty() || reason.len() > 4096 {
+                return Err(MachineError::invalid_argument(
+                    "reason",
+                    "invalid cancellation reason",
+                ));
+            }
+            transport_member(scope, owner, member, context)?;
+            state_task(scope, owner, member, task)?;
+            let key = state_key(owner, operation, task);
+            let body = json!({"member_ref":member,"task_ref":task,"reason":reason});
+            let digest = state_input_digest(&body)?;
+            let mut store = open_store(scope)?;
+            let mut attempted = None;
+            let admission = store.transact(|tx| {
+                if let Some(record) = read_state_operation(tx, &key)? {
+                    check_state_operation(&record, scope, owner, operation, task)?;
+                    if record.input_digest != digest {
+                        return Err(MachineError::new(
+                            "RUN_STATE_CONFLICT",
+                            "original cancellation input differs",
+                            false,
+                            json!({}),
+                        ));
+                    }
+                    attempted = Some(record.operation_ref);
+                    return Ok((false, record));
+                }
+                if engagement::scope_membership_revision(
+                    tx,
+                    &scope.view.workspace_id,
+                    owner.scope_kind(),
+                    &owner.scope_ref().to_string(),
+                )? != revision
+                {
+                    return Err(MachineError::new(
+                        "RUN_STATE_CONFLICT",
+                        "membership revision differs",
+                        false,
+                        json!({}),
+                    ));
+                }
+                let record = new_state_record(scope, owner, operation, task, &body)?;
+                tx.execute(
+                    "INSERT INTO metadata(key,value) VALUES(?1,?2)",
+                    rusqlite::params![key, canonical_text(&record)?],
+                )
+                .map_err(|_| retained_source_invalid())?;
+                attempted = Some(record.operation_ref);
+                Ok((true, record))
+            });
+            let (created, record) = admission.map_err(|error| match attempted {
+                Some(reference) => unresolved_effect(
+                    &error.code,
+                    operation,
+                    reference,
+                    "state admission commit requires observation",
+                ),
+                None => error,
+            })?;
+            let result = (|| {
+                if created {
+                    let observed = state_task(scope, owner, member, task)?;
+                    if matches!(
+                        observed.state.as_str(),
+                        "queued" | "claimed" | "dispatching" | "running" | "unknown"
+                    ) {
+                        let intent = match owner {
+                            SettlementOwner::External { engagement_id } => {
+                                store.external_task_execution_intent(engagement_id, task)?
+                            }
+                            SettlementOwner::Managed { .. } => {
+                                let facts = crate::orchestration::successor_task(
+                                    store.connection(),
+                                    owner.scope_ref(),
+                                    task,
+                                )?
+                                .ok_or_else(retained_source_invalid)?;
+                                crate::successor_capture::retained_accepted_task(
+                                    &facts.accepted_request_json,
+                                )?
+                                .execution_intent
+                            }
+                        };
+                        port.cancel_member_task(MemberTaskSettlement {
+                            view: scope.view,
+                            state_root: scope.state_root,
+                            owner,
+                            member_ref: member,
+                            task_ref: task,
+                            execution_intent: &intent,
+                        })?;
+                    }
+                }
+                observe_state_control(
+                    scope,
+                    owner,
+                    context,
+                    operation,
+                    Some(member),
+                    Some(task),
+                    Some(&body),
+                )
+            })();
+            result.map_err(|error| {
+                unresolved_effect(
+                    &error.code,
+                    operation,
+                    record.operation_ref,
+                    "original cancellation requires observation",
+                )
+            })
+        })(),
+    )
+}
+
+pub(crate) fn close_external_engagement(
+    scope: &DelegationScope<'_>,
+    port: &dyn RunSettlementPort,
+    id: Uuid,
+    revision: u64,
+    allow_interrupt: bool,
+) -> Result<Value, MachineError> {
+    const OP: &str = "close_external_engagement";
+    boundary(
+        OP,
+        (|| {
+            let owner = SettlementOwner::External { engagement_id: id };
+            transport_owner(scope, owner, None, OP)?;
+            // Refuse an unrepresentable complete response before close admission.
+            get_external_engagement(scope, id)?;
+            let key = state_key(owner, OP, id);
+            let body = json!({"allow_interrupt":allow_interrupt});
+            let digest = state_input_digest(&body)?;
+            let mut store = open_store(scope)?;
+            let mut attempted = None;
+            let admission=store.transact(|tx|{
+            if let Some(record)=read_state_operation(tx,&key)?{
+                check_state_operation(&record,scope,owner,OP,id)?;
+                if record.input_digest!=digest{return Err(MachineError::new("RUN_STATE_CONFLICT","original close options differ",false,json!({})));}
+                attempted=Some(record.operation_ref);return Ok((false,record));
+            }
+            let(state,current):(String,u64)=tx.query_row("SELECT state,revision FROM engagements WHERE engagement_id=?1",[id.to_string()],|row|Ok((row.get(0)?,row.get(1)?))).map_err(|_|retained_source_invalid())?;
+            if state!="active"||current!=revision{return Err(MachineError::new("RUN_STATE_CONFLICT","engagement revision differs",false,json!({})));}
+            let record=new_state_record(scope,owner,OP,id,&body)?;
+            tx.execute("INSERT INTO metadata(key,value) VALUES(?1,?2)",rusqlite::params![key,canonical_text(&record)?]).map_err(|_|retained_source_invalid())?;
+            attempted=Some(record.operation_ref);
+            tx.execute("UPDATE engagements SET state='closing',revision=revision+1 WHERE engagement_id=?1 AND state='active'",[id.to_string()]).map_err(|_|retained_source_invalid())?;Ok((true,record))
+        });
+            let (created, record) = admission.map_err(|error| match attempted {
+                Some(reference) => unresolved_effect(
+                    &error.code,
+                    OP,
+                    reference,
+                    "close admission commit requires observation",
+                ),
+                None => error,
+            })?;
+            let result = (|| {
+                if created {
+                    let observed = get_external_engagement(scope, id)?;
+                    for member in observed.members {
+                        let member_ref = Uuid::parse_str(&member.member_ref)
+                            .map_err(|_| retained_source_invalid())?;
+                        // Each preceding terminal release advances the shared counter.
+                        let member = transport_member(scope, owner, member_ref, None)?;
+                        if member.state == "released" {
+                            continue;
+                        }
+                        let prior_release = {
+                            let releases = EngagementStore::open_read_only(
+                                &EngagementStore::workspace_database_path(scope.state_root),
+                            )?;
+                            engagement::member_release_operation(
+                                releases.connection(),
+                                &scope.view.workspace_id,
+                                owner.scope_kind(),
+                                &id.to_string(),
+                                &member_ref.to_string(),
+                            )?
+                        };
+                        // Close observes an earlier release; explicit recovery owns its effects.
+                        if prior_release.is_some() {
+                            continue;
+                        }
+                        release_external_specialist(
+                            scope,
+                            port,
+                            ReleaseExternalSpecialist {
+                                engagement_id: id,
+                                member_ref,
+                                expected_revision: member.revision,
+                                allow_interrupt,
+                            },
+                        )?;
+                    }
+                    store.transact(|tx|{
+                    let remaining:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM members WHERE engagement_id=?1 AND state<>'released')",[id.to_string()],|row|row.get(0)).map_err(|_|retained_source_invalid())?;
+                    if !remaining{
+                        let mut current=read_state_operation(tx,&key)?.ok_or_else(retained_source_invalid)?;check_state_operation(&current,scope,owner,OP,id)?;
+                        if !current.terminal{
+                            tx.execute("UPDATE engagements SET state='completed',revision=revision+1 WHERE engagement_id=?1 AND state='closing'",[id.to_string()]).map_err(|_|retained_source_invalid())?;
+                            current.terminal=true;current.record_digest=state_record_digest(&current)?;
+                            tx.execute("UPDATE metadata SET value=?2 WHERE key=?1",rusqlite::params![key,canonical_text(&current)?]).map_err(|_|retained_source_invalid())?;
+                        }
+                    }Ok(())
+                })?;
+                }
+                observe_state_control(scope, owner, None, OP, None, None, Some(&body))
+            })();
+            result.map_err(|error| {
+                unresolved_effect(
+                    &error.code,
+                    OP,
+                    record.operation_ref,
+                    "original close requires observation",
+                )
+            })
+        })(),
+    )
+}
+
+/// Original response for an already authorized task-bound result reader. The
+/// Engagement content owner serves checked outputs; ordinary responses come
+/// from the verified Run ledger, never the latest task of a reused member.
+pub(crate) fn original_delegation_response(
+    state_root: &Path,
+    result: &crate::delegation_identity::CompleteResult,
+    structured: bool,
+) -> Result<Option<Vec<u8>>, MachineError> {
+    let unavailable = || complete_result_unavailable("native_result_content");
+    result.digest()?;
+    let identity = &result.source;
+    let member = Uuid::parse_str(&identity.worker_ref).map_err(|_| unavailable())?;
+    let task = Uuid::parse_str(&identity.task_ref).map_err(|_| unavailable())?;
+    let scope = Uuid::parse_str(&identity.scope_ref).map_err(|_| unavailable())?;
+    let store =
+        EngagementStore::open_read_only(&EngagementStore::workspace_database_path(state_root))?;
+    if let Some(bytes) = store.original_task_output(task, structured)? {
+        return Ok(Some(bytes));
+    }
+    if structured {
+        return Ok(None);
+    }
+    let turn = match identity.scope_kind.as_str() {
+        "external_engagement" => {
+            let facts = store.external_task(scope, task)?;
+            if facts.specialist_run_id != member {
+                return Err(unavailable());
+            }
+            facts.turn_id
+        }
+        "orchestrated_session" => {
+            let facts = crate::orchestration::successor_task(store.connection(), scope, task)?
+                .ok_or_else(unavailable)?;
+            if facts.member_ref != identity.worker_ref {
+                return Err(unavailable());
+            }
+            facts.target_turn_id
+        }
+        _ => return Err(unavailable()),
+    }
+    .ok_or_else(unavailable)?;
+    drop(store);
+    let projection =
+        crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, state_root)
+            .load_state_projection(member)?;
+    let ledger = crate::ledger::ObservedLedger::open(
+        &crate::run::run_root(state_root, member),
+        member,
+        projection.ledger_head.sequence,
+    )
+    .map_err(|_| unavailable())?;
+    for payload in ledger
+        .payloads_of_kind(crate::audit::AuditKind::TurnTerminal)
+        .map_err(|_| unavailable())?
+        .into_iter()
+        .rev()
+    {
+        let terminal: crate::turn::TerminalTurn =
+            serde_json::from_value(payload).map_err(|_| unavailable())?;
+        if terminal.turn_id != turn {
+            continue;
+        }
+        return match terminal.final_response {
+            None => Ok(None),
+            Some(crate::turn::FinalResponse::Inline { text }) => Ok(Some(text.into_bytes())),
+            Some(crate::turn::FinalResponse::Artifact {
+                artifact_id,
+                byte_length,
+                sha256,
+                ..
+            }) => {
+                if byte_length > 33_554_432 {
+                    return Err(unavailable());
+                }
+                let root = crate::trusted_host::PrivateDirectory::open(&crate::run::run_root(
+                    state_root, member,
+                ))?;
+                let mut file = root.open_file(
+                    &root
+                        .path
+                        .join("artifacts")
+                        .join(format!("{artifact_id}.bin")),
+                )?;
+                use std::io::Read as _;
+                let mut bytes = Vec::new();
+                file.by_ref()
+                    .take(byte_length + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| unavailable())?;
+                if bytes.len() as u64 != byte_length
+                    || crate::jcs::sha256_hex(&bytes) != sha256.trim_start_matches("sha256:")
+                {
+                    return Err(unavailable());
+                }
+                Ok(Some(bytes))
+            }
+            _ => Err(unavailable()),
+        };
+    }
+    Err(unavailable())
+}
+
+/// Verify and consume the original accepted task and context bytes for a native
+/// reader after the collection or export service authorized the aggregate/task.
+pub(crate) fn original_delegation_task(
+    state_root: &Path,
+    result: &crate::delegation_identity::CompleteResult,
+) -> Result<crate::successor_capture::AcceptedTaskContents, MachineError> {
+    let unavailable = || complete_result_unavailable("native_task_content");
+    result.digest()?;
+    let identity = &result.source;
+    let task = Uuid::parse_str(&identity.task_ref).map_err(|_| unavailable())?;
+    let scope = Uuid::parse_str(&identity.scope_ref).map_err(|_| unavailable())?;
+    let store =
+        EngagementStore::open_read_only(&EngagementStore::workspace_database_path(state_root))?;
+    let accepted = match identity.scope_kind.as_str() {
+        "external_engagement" => store
+            .external_task_identity(scope, task)?
+            .ok_or_else(unavailable)?,
+        "orchestrated_session" => {
+            let facts = crate::orchestration::successor_task(store.connection(), scope, task)?
+                .ok_or_else(unavailable)?;
+            if facts.member_ref != identity.worker_ref {
+                return Err(unavailable());
+            }
+            crate::successor_capture::retained_accepted_task(&facts.accepted_request_json)?
+        }
+        _ => return Err(unavailable()),
+    };
+    if accepted.digest()? != identity.accepted_task_digest
+        || accepted.role_snapshot_digest != identity.role_snapshot_digest
+        || accepted.agent_configuration_digest != identity.agent_configuration_digest
+    {
+        return Err(unavailable());
+    }
+    let (task_body, contexts, target) =
+        crate::engagement::accepted_task_content(store.connection(), task)?
+            .ok_or_else(unavailable)?;
+    let contents = crate::successor_capture::AcceptedTaskContents {
+        task_body,
+        contexts,
+        target,
+    };
+    // The existing owner verifies all references, input schemas and image/context
+    // ownership. Rendering is discarded; original task and context bytes remain
+    // available for response validation and explicit consumer composition.
+    contents.prompt(&accepted, &accepted.execution_intent, 1)?;
+    Ok(contents)
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::domain::{ControllerIdentity, ControllerKind};
     use crate::instructions::SelectedNamedSource;
@@ -6082,7 +8017,7 @@ mod tests {
         broker: bool,
     }
 
-    struct FakePort {
+    pub(crate) struct FakePort {
         calls: std::cell::Cell<usize>,
         started: RefCell<Vec<AgentConfigurationSnapshot>>,
         starts: RefCell<Vec<StartRecord>>,
@@ -6103,7 +8038,7 @@ mod tests {
     }
 
     impl FakePort {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 calls: std::cell::Cell::new(0),
                 started: RefCell::new(Vec::new()),
@@ -6130,7 +8065,7 @@ mod tests {
             }
         }
 
-        fn calls(&self) -> usize {
+        pub(crate) fn calls(&self) -> usize {
             self.calls.get()
         }
 
@@ -6188,6 +8123,46 @@ mod tests {
     }
 
     impl RunSettlementPort for FakePort {
+        fn member_profile_binding(
+            &self,
+            state_root: &Path,
+            member_ref: Uuid,
+        ) -> Result<crate::global_runtime::GlobalProfileBinding, MachineError> {
+            let bytes = fs::read(
+                state_root
+                    .join("fixture-member-bindings")
+                    .join(member_ref.to_string()),
+            )
+            .map_err(|error| MachineError::invalid_argument("member_ref", error.to_string()))?;
+            serde_json::from_slice(&bytes)
+                .map_err(|error| MachineError::invalid_argument("member_ref", error.to_string()))
+        }
+
+        fn member_run_observation(
+            &self,
+            request: MemberCleanupObservation<'_>,
+            _budget: &mut crate::ledger::ObservationBudget,
+        ) -> Result<crate::snapshot::MemberRunObservation, MachineError> {
+            Ok(crate::snapshot::MemberRunObservation::fixture(
+                request.member_ref.to_string(),
+            ))
+        }
+        fn member_interaction_observation(
+            &self,
+            _request: MemberCleanupObservation<'_>,
+            _source: &crate::snapshot::MemberRunObservation,
+            _budget: &mut crate::ledger::ObservationBudget,
+        ) -> Result<(bool, crate::domain::ProjectionStamp), MachineError> {
+            Ok((
+                false,
+                crate::domain::ProjectionStamp {
+                    run_state_revision: 0,
+                    interaction_state_revision: 0,
+                    writer_state_revision: 0,
+                    captured_head_cursor: "0".to_owned(),
+                },
+            ))
+        }
         fn member_writer_observation(
             &self,
             _request: MemberCleanupObservation<'_>,
@@ -6327,6 +8302,13 @@ mod tests {
                     json!({"effect":"unknown"}),
                 ));
             }
+            let bindings = request.state_root.join("fixture-member-bindings");
+            fs::create_dir_all(&bindings).unwrap();
+            fs::write(
+                bindings.join(request.run_id.to_string()),
+                serde_json::to_vec(request.snapshot.profile_binding()).unwrap(),
+            )
+            .unwrap();
             self.starts.borrow_mut().push(StartRecord {
                 run_id: request.run_id,
                 aggregate: request.aggregate.clone(),
@@ -6340,6 +8322,543 @@ mod tests {
                 run_id: request.run_id,
             })
         }
+    }
+
+    struct RetainedOnlySource(AcceptedTask);
+    impl AssignmentSource for RetainedOnlySource {
+        fn expected(&self) -> &AcceptedTask {
+            &self.0
+        }
+        fn selection(&self) -> Result<Option<crate::review::ReviewTargetRequest>, MachineError> {
+            panic!("accepted replay consulted preparation")
+        }
+        fn verify_capture(
+            &self,
+            _: &AcceptedTask,
+            _: &crate::successor_capture::AcceptedTaskContents,
+        ) -> Result<(), MachineError> {
+            panic!("accepted replay recaptured source")
+        }
+    }
+
+    struct BudgetPort {
+        base: FakePort,
+        captures: std::cell::Cell<usize>,
+        clock: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    }
+    impl RunSettlementPort for BudgetPort {
+        fn member_run_observation(
+            &self,
+            request: MemberCleanupObservation<'_>,
+            budget: &mut crate::ledger::ObservationBudget,
+        ) -> Result<crate::snapshot::MemberRunObservation, MachineError> {
+            let captures = self.captures.get() + 1;
+            self.captures.set(captures);
+            if let Some(clock) = &self.clock {
+                clock.store(
+                    captures as u64 * 100_000,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                budget.check()
+            } else {
+                budget.charge_bytes(200 * 1024 * 1024)
+            }
+            .map_err(|e| crate::ledger::observation_error(request.member_ref, 0, e))?;
+            Ok(crate::snapshot::MemberRunObservation::fixture(
+                captures.to_string(),
+            ))
+        }
+        fn member_interaction_observation(
+            &self,
+            request: MemberCleanupObservation<'_>,
+            source: &crate::snapshot::MemberRunObservation,
+            budget: &mut crate::ledger::ObservationBudget,
+        ) -> Result<(bool, crate::domain::ProjectionStamp), MachineError> {
+            self.base
+                .member_interaction_observation(request, source, budget)
+        }
+        fn member_writer_observation(
+            &self,
+            request: MemberCleanupObservation<'_>,
+        ) -> Result<MemberWriterObservation, MachineError> {
+            self.base.member_writer_observation(request)
+        }
+        fn start_member_run(
+            &self,
+            request: AdmittedMemberStart<'_>,
+        ) -> Result<MemberRunStart, MachineError> {
+            self.base.start_member_run(request)
+        }
+        fn dispatch_member_task(
+            &self,
+            request: MemberTaskDispatch<'_>,
+        ) -> Result<MemberDispatchOutcome, MachineError> {
+            self.base.dispatch_member_task(request)
+        }
+        fn dispatch_managed_task(
+            &self,
+            request: ManagedTaskDispatch<'_>,
+        ) -> Result<MemberDispatchOutcome, MachineError> {
+            self.base.dispatch_managed_task(request)
+        }
+        fn settle_member_task(
+            &self,
+            request: MemberTaskSettlement<'_>,
+        ) -> Result<MemberSettlement, MachineError> {
+            self.base.settle_member_task(request)
+        }
+        fn settle_member_release(
+            &self,
+            request: MemberReleaseRequest<'_>,
+        ) -> Result<MemberReleaseOutcome, MemberReleaseFailure> {
+            self.base.settle_member_release(request)
+        }
+    }
+    struct BoundaryClock(std::sync::Arc<std::sync::atomic::AtomicU64>);
+    impl crate::ledger::LedgerClock for BoundaryClock {
+        fn monotonic_millis(&self) -> u64 {
+            self.0.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        fn timestamp(&self) -> String {
+            "2026-10-26T00:00:00Z".to_owned()
+        }
+    }
+    #[test]
+    fn administrative_recovery_rejects_another_valid_acceptance_or_capture() {
+        for swap_capture in [false, true] {
+            let fixture = Fixture::new();
+            let session = fixture.managed_session();
+            let port = FakePort::new();
+            let member = Uuid::parse_str(
+                &fixture
+                    .spawn_member(session, "recover-link-spawn", &port)
+                    .member
+                    .member_ref,
+            )
+            .unwrap();
+            let mut task = fixture_task();
+            task.expected_output = "complete_result".into();
+            let assign = |key: &str, task| {
+                fixture
+                    .assign(
+                        session,
+                        key,
+                        &crate::caller_scope::fixture(3),
+                        &port,
+                        AssignSpecialistTask {
+                            member_ref: member,
+                            task,
+                            execution_intent: "read_only",
+                            target: None,
+                            deadline_seconds: 600,
+                            expected_revision: None,
+                        },
+                    )
+                    .unwrap()
+            };
+            let (first, _) = assign("original-link", task.clone());
+            fixture.settle_managed_task(
+                session,
+                member,
+                Uuid::parse_str(&first.task_ref).unwrap(),
+                "completed",
+                Some("first retained result"),
+            );
+            if swap_capture {
+                task.brief = "a valid different original assignment".into();
+            }
+            let (second, receipt) = assign("other-link", task);
+            let first = Uuid::parse_str(&first.task_ref).unwrap();
+            let second = Uuid::parse_str(&second.task_ref).unwrap();
+            assert_eq!(
+                retained_managed_recovery(&fixture.scope(), session, member, first)
+                    .unwrap()
+                    .context()
+                    .idempotency_key,
+                "original-link"
+            );
+            assert_eq!(
+                retained_managed_recovery(&fixture.scope(), session, member, second)
+                    .unwrap()
+                    .context()
+                    .idempotency_key,
+                "other-link"
+            );
+            let db = rusqlite::Connection::open(fixture.database()).unwrap();
+            let triggers: Vec<String> = db
+                .prepare("SELECT name FROM sqlite_master WHERE type='trigger'")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            for name in triggers {
+                db.execute_batch(&format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\"")))
+                    .unwrap();
+            }
+            if swap_capture {
+                let value:(String,String)=db.query_row("SELECT accepted_request_json,accepted_request_sha256 FROM brokered_task_acceptances WHERE task_id=?1",[second.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+                let accepted = crate::successor_capture::retained_accepted_task(&value.0).unwrap();
+                db.execute("UPDATE brokered_task_acceptances SET accepted_request_json=?2,accepted_request_sha256=?3 WHERE task_id=?1",rusqlite::params![first.to_string(),value.0,value.1]).unwrap();
+                db.execute("UPDATE brokered_tasks SET request_json=json_set(request_json,'$.accepted_task_digest',?2) WHERE task_id=?1",rusqlite::params![first.to_string(),accepted.digest().unwrap()]).unwrap();
+            } else {
+                db.execute("UPDATE brokered_tasks SET idempotency_key='retained-other-internal' WHERE task_id=?1",[second.to_string()]).unwrap();
+                db.execute("UPDATE brokered_tasks SET idempotency_key=?2,request_json=json_set(request_json,'$.operation_ref',?3) WHERE task_id=?1",rusqlite::params![first.to_string(),format!("successor:{}",receipt.operation_ref),receipt.operation_ref]).unwrap();
+            }
+            let before = std::fs::read(fixture.database()).unwrap();
+            assert!(
+                retained_managed_recovery(&fixture.scope(), session, member, first).is_err(),
+                "another valid proof must not replace the requested task's original provenance; capture={swap_capture}"
+            );
+            assert_eq!(std::fs::read(fixture.database()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn administrative_recovery_uses_only_original_accepted_managed_provenance() {
+        for case in 0..15 {
+            let mut fixture = Fixture::new();
+            let session = fixture.managed_session();
+            let port = FakePort::new();
+            let member = Uuid::parse_str(
+                &fixture
+                    .spawn_member(session, "recover-spawn", &port)
+                    .member
+                    .member_ref,
+            )
+            .unwrap();
+            let mut task = fixture_task();
+            task.expected_output = "complete_result".into();
+            let (observation, _) = fixture
+                .assign(
+                    session,
+                    "original-call-key",
+                    &crate::caller_scope::fixture(3),
+                    &port,
+                    AssignSpecialistTask {
+                        member_ref: member,
+                        task,
+                        execution_intent: "read_only",
+                        target: None,
+                        deadline_seconds: 600,
+                        expected_revision: None,
+                    },
+                )
+                .unwrap();
+            let task = Uuid::parse_str(&observation.task_ref).unwrap();
+            let original =
+                retained_managed_recovery(&fixture.scope(), session, member, task).unwrap();
+            let context = original.context();
+            assert_eq!(context.source_run_id, session);
+            assert_eq!(context.source_turn_id, "turn-primary");
+            assert_eq!(context.source_tool_call_id, "tool-call-primary");
+            assert_eq!(context.idempotency_key, "original-call-key");
+            if case == 0 {
+                fixture.controller.identity.controller_id = Uuid::now_v7();
+                fixture.controller.identity.generation += 1;
+                std::fs::write(
+                    crate::run::run_root(&fixture.state_root, session).join("controller.json"),
+                    serde_json::to_vec(&fixture.controller).unwrap(),
+                )
+                .unwrap();
+                let original =
+                    retained_managed_recovery(&fixture.scope(), session, member, task).unwrap();
+                assert_eq!(
+                    original.context().idempotency_key,
+                    "original-call-key",
+                    "current owner rotation must preserve original accepted lookup"
+                );
+            }
+            let db = rusqlite::Connection::open(fixture.database()).unwrap();
+            let triggers: Vec<String> = db
+                .prepare("SELECT name FROM sqlite_master WHERE type='trigger'")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            for name in triggers {
+                db.execute_batch(&format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\"")))
+                    .unwrap();
+            }
+            let sql = match case {
+                0 => "UPDATE brokered_tasks SET source_run_id='foreign-root'",
+                1 => "UPDATE brokered_tasks SET source_turn_id=''",
+                2 => "UPDATE brokered_tasks SET source_tool_call_id=''",
+                3 => "UPDATE brokered_tasks SET idempotency_key='successor:invented'",
+                4 => {
+                    "UPDATE delegation_operations SET idempotency_key='different-key' WHERE operation_kind='assign_specialist_task'"
+                }
+                5 => {
+                    "UPDATE delegation_operations SET mutation_envelope_json='{}' WHERE operation_kind='assign_specialist_task'"
+                }
+                6 => {
+                    "UPDATE delegation_operations SET state='unresolved',receipt_json=NULL WHERE operation_kind='assign_specialist_task'"
+                }
+                7 => {
+                    "UPDATE brokered_tasks SET request_json=json_set(request_json,'$.operation_ref','missing')"
+                }
+                8 => {
+                    "UPDATE brokered_tasks SET request_json=json_set(request_json,'$.schema','unknown')"
+                }
+                9 => {
+                    "UPDATE brokered_tasks SET request_json=json_set(request_json,'$.member_ref','foreign')"
+                }
+                10 => {
+                    "UPDATE brokered_tasks SET request_json=json_set(request_json,'$.deadline_seconds',0)"
+                }
+                11 => {
+                    "UPDATE brokered_tasks SET request_json=json_set(request_json,'$.accepted_task_digest','sha256:wrong')"
+                }
+                12 => {
+                    "UPDATE brokered_tasks SET request_json=json_set(request_json,'$.execution_intent','canonical_workspace_write')"
+                }
+                13 => "UPDATE brokered_task_acceptances SET source_request_sha256='wrong'",
+                _ => {
+                    "UPDATE delegation_operations SET receipt_json='{}' WHERE operation_kind='assign_specialist_task'"
+                }
+            };
+            db.execute_batch(sql).unwrap();
+            let before = std::fs::read(fixture.database()).unwrap();
+            assert!(
+                retained_managed_recovery(&fixture.scope(), session, member, task).is_err(),
+                "case {case}"
+            );
+            assert_eq!(
+                std::fs::read(fixture.database()).unwrap(),
+                before,
+                "case {case}: recovery lookup must not repair corruption"
+            );
+            assert_eq!(fixture.broker_task_rows(), 1);
+        }
+    }
+
+    #[test]
+    fn complete_observation_retry_cannot_reset_byte_or_clock_allowance() {
+        let fixture = Fixture::new();
+        for timed in [false, true] {
+            let clock = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let port = BudgetPort {
+                base: FakePort::new(),
+                captures: std::cell::Cell::new(0),
+                clock: timed.then(|| clock.clone()),
+            };
+            let mut budget = crate::ledger::ObservationBudget::new(
+                Box::new(BoundaryClock(clock)),
+                crate::ledger::MAX_LEDGER_BYTES,
+                crate::ledger::MAX_LEDGER_RECORDS,
+            );
+            let error = consistent_member_observation_using(
+                &port,
+                MemberCleanupObservation {
+                    view: &fixture.view,
+                    state_root: &fixture.state_root,
+                    owner: SettlementOwner::External {
+                        engagement_id: Uuid::now_v7(),
+                    },
+                    member_ref: Uuid::now_v7(),
+                },
+                |_| true,
+                |_, _, close| {
+                    close()?;
+                    Ok(())
+                },
+                &mut budget,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            assert_eq!(
+                error.details["source_code"],
+                if timed {
+                    "OPERATION_TIMEOUT"
+                } else {
+                    "STORAGE_CAPACITY_EXCEEDED"
+                }
+            );
+            assert_eq!(
+                port.captures.get(),
+                3,
+                "an exhausted enclosing allowance cannot start another attempt"
+            );
+        }
+    }
+
+    #[test]
+    fn source_binding_install_retained_replay_and_single_capture_before_intent() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let (snapshot, _, receipt) = historical_install(&fixture);
+        let expected = snapshot.sources_identity().unwrap();
+        fs::remove_dir_all(fixture.home_root.join("roles")).unwrap();
+        source_trace();
+        let replay = install_bound_provisioning(
+            &fixture.scope(),
+            &expected,
+            "historical-install",
+            Some(10),
+            || panic!("old accepted install consulted sources"),
+        )
+        .unwrap();
+        assert_eq!(replay.1, receipt);
+        assert!(source_trace().is_empty());
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        assert_eq!(
+            install_provisioning(
+                &fixture.scope(),
+                &fixture.generic_sources(),
+                "unqualified-install",
+                None,
+            )
+            .unwrap_err()
+            .code,
+            "CAPABILITY_UNSUPPORTED"
+        );
+        let snapshot = crate::provisioning::capture_provisioning(&fixture.sources()).unwrap();
+        let expected = snapshot.sources_identity().unwrap();
+        let calls = std::cell::Cell::new(0);
+        let output =
+            install_bound_provisioning(&fixture.scope(), &expected, "single", None, || {
+                calls.set(calls.get() + 1);
+                fs::remove_dir_all(fixture.home_root.join("roles")).unwrap();
+                Ok(snapshot.clone())
+            })
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            crate::provisioning::retained_snapshot(&fixture.state_root, &output.0.provisioning_ref)
+                .unwrap(),
+            snapshot
+        );
+        let mut changed = expected;
+        changed.configuration.model = "other".into();
+        let error = install_bound_provisioning(&fixture.scope(), &changed, "single", None, || {
+            panic!("conflict consulted sources")
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "IDEMPOTENCY_CONFLICT");
+    }
+
+    pub(crate) fn source_binding_prepare_fixture_intent(
+        scope: &DelegationScope<'_>,
+        namespace: &LookupNamespace,
+        body: &Value,
+        state: &str,
+    ) -> Uuid {
+        let aggregate = namespace
+            .scope_kind
+            .as_deref()
+            .zip(namespace.scope_ref.as_deref());
+        let schema = match namespace.operation_kind.as_str() {
+            "install_provisioning" => INSTALL_BODY_SCHEMA,
+            "assign_external_specialist_task" => ASSIGN_BODY_SCHEMA,
+            "assign_specialist_task" => ASSIGN_MANAGED_BODY_SCHEMA,
+            _ => unreachable!(),
+        };
+        let identity = intent_identity(
+            scope,
+            &namespace.operation_kind,
+            aggregate,
+            &namespace.idempotency_key,
+            schema,
+            body,
+        )
+        .unwrap();
+        assert_eq!(identity.lookup, *namespace);
+        let operation = Uuid::now_v7();
+        let mut store = open_store(scope).unwrap();
+        store
+            .transact(|tx| {
+                engagement::intent_prepare(
+                    tx,
+                    IntentAdmission {
+                        operation_ref: operation,
+                        namespace: &identity.lookup,
+                        mutation_envelope_json: &identity.json,
+                        mutation_envelope_digest: &identity.digest,
+                        trusted_invocation: None,
+                        expected_revision: None,
+                        now_ms: 1,
+                    },
+                )?;
+                match state {
+                    "unresolved" => engagement::intent_mark_unresolved(tx, operation, 1),
+                    "refused" => engagement::intent_refuse_before_acceptance(
+                        tx,
+                        operation,
+                        "INVALID_ARGUMENT",
+                        1,
+                    )
+                    .map(|_| ()),
+                    _ => Ok(()),
+                }
+            })
+            .unwrap();
+        operation
+    }
+
+    /// Seed complete historical spawn proof for a fixture whose member rows
+    /// precede the successor facade, without changing shared fixture semantics.
+    pub(crate) fn record_fixture_spawn(scope: &DelegationScope<'_>, session: Uuid, member: Uuid) {
+        let mut store = open_store(scope).unwrap();
+        let facts = crate::orchestration::successor_member(store.connection(), session, member)
+            .unwrap()
+            .unwrap();
+        let files = std::fs::read_dir(scope.state_root.join("provisioning/sha256"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 1);
+        let reference = format!(
+            "provisioning:sha256:{}",
+            files[0].file_stem().unwrap().to_str().unwrap()
+        );
+        let snapshot =
+            crate::provisioning::retained_snapshot(scope.state_root, &reference).unwrap();
+        assert_eq!(
+            snapshot.admitted_configuration().unwrap().1,
+            facts.agent_configuration
+        );
+        let body = json!({"provisioning_ref":reference,"role_ref":facts.role_ref,"agent_configuration_digest":snapshot.candidate(true).unwrap().agent_configuration_digest});
+        let aggregate = session.to_string();
+        let identity = intent_identity(
+            scope,
+            "spawn_specialist",
+            Some(("orchestrated_session", &aggregate)),
+            "fixture-spawn",
+            SPAWN_BODY_SCHEMA,
+            &body,
+        )
+        .unwrap();
+        let receipt = build_receipt(
+            &identity.namespace,
+            facts.spawn_operation_id,
+            &identity.digest,
+            AcceptedSubjects {
+                member_ref: Some(member.to_string()),
+                provisioning_ref: Some(reference),
+                ..AcceptedSubjects::default()
+            },
+            0,
+        )
+        .unwrap();
+        store
+            .transact(|tx| {
+                engagement::intent_prepare(
+                    tx,
+                    IntentAdmission {
+                        operation_ref: facts.spawn_operation_id,
+                        namespace: &identity.lookup,
+                        mutation_envelope_json: &identity.json,
+                        mutation_envelope_digest: &identity.digest,
+                        trusted_invocation: None,
+                        expected_revision: None,
+                        now_ms: 1,
+                    },
+                )?;
+                engagement::intent_accept(tx, facts.spawn_operation_id, &receipt, 1)
+            })
+            .unwrap();
     }
 
     struct Fixture {
@@ -6418,6 +8937,7 @@ mod tests {
 
         fn scope(&self) -> DelegationScope<'_> {
             DelegationScope {
+                trusted_invocation: None,
                 view: &self.view,
                 state_root: &self.state_root,
                 controller: &self.controller,
@@ -6440,8 +8960,15 @@ mod tests {
         }
 
         fn sources(&self) -> ProvisioningSources<'_> {
-            // The selected Profile binding keeps the fixture's approved shape;
-            // only the ambient codex home is redirected into this fixture.
+            let mut sources = self.generic_sources();
+            sources.profile_binding =
+                crate::profile::qualified_test_binding(&sources.profile_binding);
+            sources
+        }
+
+        fn generic_sources(&self) -> ProvisioningSources<'_> {
+            // Preserve the pre-policy binding for historical recovery cases.
+            // New-admission fixtures use the qualified constructor above.
             let mut binding = {
                 let reservation: crate::run::CallerStartReservation =
                     serde_json::from_str(include_str!(
@@ -6452,6 +8979,9 @@ mod tests {
             };
             binding.launch_snapshot.canonical_codex_home =
                 self.codex_home.to_str().unwrap().to_owned();
+            binding.launch_snapshot.codex_version = "0.164.0".to_owned();
+            binding.launch_snapshot.executable_identity.sha256 =
+                "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf".to_owned();
             binding.launch_snapshot_sha256 =
                 sha256_hex(&canonical_bytes(&binding.launch_snapshot).unwrap());
             ProvisioningSources {
@@ -7207,6 +9737,7 @@ mod tests {
                             namespace: &identity.lookup,
                             mutation_envelope_json: &identity.json,
                             mutation_envelope_digest: &identity.digest,
+                            trusted_invocation: identity.trusted_invocation.as_ref(),
                             expected_revision: None,
                             now_ms: now,
                         },
@@ -7291,7 +9822,7 @@ mod tests {
     /// A managed successor call is authorized against the authenticated root
     /// Primary Controller (MDC:604), so the session fixture needs a real manifest
     /// rather than an inferred identity.
-    fn root_manifest(
+    pub(crate) fn root_manifest(
         view: &WorkspaceView,
         controller: &ControllerBinding,
         run_id: Uuid,
@@ -7425,7 +9956,7 @@ mod tests {
     ///
     /// The member's own manifest is the authority for the accepted instructions,
     /// so the identity surface must read a real one (MDC:604).
-    fn member_manifest(
+    pub(crate) fn member_manifest(
         view: &WorkspaceView,
         controller: &ControllerBinding,
         run_id: Uuid,
@@ -7590,6 +10121,655 @@ mod tests {
             .map_err(|_| MachineError::invalid_argument("value", "invalid"))
     }
 
+    /// Seed an acceptance from the previous runtime, below today's admission
+    /// entrypoint. Its bytes are complete before the operation under test.
+    fn historical_install(
+        fixture: &Fixture,
+    ) -> (RetainedSnapshot, ProvisioningCandidate, OperationReceipt) {
+        let mut sources = fixture.generic_sources();
+        sources.profile_binding.launch_snapshot.codex_version = "0.159.3".to_owned();
+        sources
+            .profile_binding
+            .launch_snapshot
+            .executable_identity
+            .sha256 = "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878".to_owned();
+        sources.profile_binding.launch_snapshot_sha256 =
+            sha256_hex(&canonical_bytes(&sources.profile_binding.launch_snapshot).unwrap());
+        let snapshot = crate::provisioning::capture_provisioning(&sources).unwrap();
+        crate::provisioning::install_snapshot(&fixture.state_root, &snapshot).unwrap();
+        let identity = intent_identity(
+            &fixture.scope(),
+            "install_provisioning",
+            None,
+            "historical-install",
+            INSTALL_BODY_SCHEMA,
+            &json!({"sources":snapshot.sources_identity().unwrap()}),
+        )
+        .unwrap();
+        let operation = Uuid::now_v7();
+        let now = now_ms().unwrap();
+        let receipt = build_receipt(
+            &identity.namespace,
+            operation,
+            &identity.digest,
+            AcceptedSubjects {
+                provisioning_ref: Some(snapshot.provisioning_ref().unwrap()),
+                ..AcceptedSubjects::default()
+            },
+            0,
+        )
+        .unwrap();
+        let mut store = open_store(&fixture.scope()).unwrap();
+        store
+            .transact(|tx| {
+                engagement::intent_prepare(
+                    tx,
+                    IntentAdmission {
+                        operation_ref: operation,
+                        namespace: &identity.lookup,
+                        mutation_envelope_json: &identity.json,
+                        mutation_envelope_digest: &identity.digest,
+                        trusted_invocation: identity.trusted_invocation.as_ref(),
+                        expected_revision: None,
+                        now_ms: now,
+                    },
+                )?;
+                engagement::intent_accept(tx, operation, &receipt, now)
+            })
+            .unwrap();
+        let candidate = snapshot.candidate(true).unwrap();
+        (snapshot, candidate, receipt)
+    }
+
+    #[test]
+    fn old_install_replays_but_cannot_accept_new_install_hire_or_spawn() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let (snapshot, candidate, receipt) = historical_install(&fixture);
+        let mut sources = fixture.sources();
+        sources.profile_binding = snapshot.profile_binding().clone();
+        let before = canonical_bytes(&snapshot).unwrap();
+        assert_eq!(
+            install_provisioning(&fixture.scope(), &sources, "historical-install", None)
+                .unwrap()
+                .1,
+            receipt
+        );
+        assert_eq!(
+            install_provisioning(&fixture.scope(), &sources, "fresh-install", None)
+                .unwrap_err()
+                .code,
+            "CAPABILITY_UNSUPPORTED"
+        );
+        let engagement = fixture.open();
+        let port = FakePort::new();
+        assert_eq!(
+            hire_external_specialist(
+                &fixture.scope(),
+                &port,
+                hire_request(engagement, &candidate, "fresh-hire", None)
+            )
+            .unwrap_err()
+            .code,
+            "CAPABILITY_UNSUPPORTED"
+        );
+        let session = fixture.managed_session();
+        assert_eq!(
+            fixture
+                .spawn(session, &candidate, "fresh-spawn", None, &port)
+                .unwrap_err()
+                .code,
+            "CAPABILITY_UNSUPPORTED"
+        );
+        assert_eq!(fixture.member_rows(), 0);
+        assert_eq!(fixture.broker_member_rows(), 0);
+        assert_eq!(fixture.broker_key_rows("fresh-spawn"), 0);
+        assert_eq!(port.calls(), 0);
+        assert_eq!(
+            canonical_bytes(
+                &crate::provisioning::retained_snapshot(
+                    &fixture.state_root,
+                    &candidate.provisioning_ref
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            before
+        );
+        for key in ["fresh-install", "fresh-hire", "fresh-spawn"] {
+            let count: i64 = rusqlite::Connection::open(fixture.database())
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM delegation_operations WHERE idempotency_key=?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "{key}");
+        }
+    }
+
+    #[test]
+    fn old_external_member_replays_hire_but_refuses_every_new_task_output() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let (snapshot, candidate, _) = historical_install(&fixture);
+        let engagement = fixture.open();
+        let scope_ref = engagement.to_string();
+        let identity = intent_identity(&fixture.scope(),"hire_external_specialist",Some(("external_engagement",&scope_ref)),
+            "historical-hire",HIRE_BODY_SCHEMA,&json!({"provisioning_ref":candidate.provisioning_ref,"role_ref":"reviewer","agent_configuration_digest":candidate.agent_configuration_digest})).unwrap();
+        let (_, configuration) = snapshot.admitted_configuration().unwrap();
+        let config_json = canonical_text(&configuration).unwrap();
+        let config_digest = crate::run::agent_configuration_digest(&configuration).unwrap();
+        let operation = Uuid::now_v7();
+        let member = Uuid::now_v7();
+        let now = now_ms().unwrap();
+        let mut store = open_store(&fixture.scope()).unwrap();
+        let accepted = store
+            .transact(|tx| {
+                engagement::intent_prepare(
+                    tx,
+                    IntentAdmission {
+                        operation_ref: operation,
+                        namespace: &identity.lookup,
+                        mutation_envelope_json: &identity.json,
+                        mutation_envelope_digest: &identity.digest,
+                        trusted_invocation: identity.trusted_invocation.as_ref(),
+                        expected_revision: None,
+                        now_ms: now,
+                    },
+                )?;
+                accept_hire(
+                    tx,
+                    HireAcceptance {
+                        engagement_id: engagement,
+                        operation_ref: operation,
+                        namespace: &identity.namespace,
+                        accepted_input_digest: &identity.digest,
+                        expected_revision: None,
+                        specialist_run_id: member,
+                        role_ref: "reviewer",
+                        configuration_json: &config_json,
+                        configuration_sha256: &config_digest,
+                        requested_access: "read_only",
+                        request_payload: &identity.json,
+                        now_ms: now,
+                    },
+                )
+            })
+            .unwrap();
+        let HireAdmission::Accepted(accepted) = accepted else {
+            panic!("historical fixture was refused")
+        };
+        store
+            .transact(|tx| {
+                engagement::settle_external_hire_in(
+                    tx,
+                    &accepted.reservation,
+                    engagement::RuntimeOutcome::Accepted,
+                    now,
+                )
+            })
+            .unwrap();
+        let bindings = fixture.state_root.join("fixture-member-bindings");
+        fs::create_dir_all(&bindings).unwrap();
+        fs::write(
+            bindings.join(member.to_string()),
+            serde_json::to_vec(snapshot.profile_binding()).unwrap(),
+        )
+        .unwrap();
+        let port = FakePort::new();
+        assert_eq!(
+            hire_external_specialist(
+                &fixture.scope(),
+                &port,
+                hire_request(engagement, &candidate, "historical-hire", None)
+            )
+            .unwrap()
+            .receipt,
+            accepted.receipt
+        );
+        let caller = caller(4);
+        let original_request = assign_request(engagement, member, "historical-task", "read_only");
+        let (task, contents) = crate::successor_capture::capture_facade_task(
+            &configuration,
+            &original_request.task,
+            "read_only",
+            None,
+        )
+        .unwrap();
+        let task_digest = task.digest().unwrap();
+        let body =
+            crate::successor_capture::assignment_body(member, &original_request.task, &task, 600)
+                .unwrap();
+        let task_identity = intent_identity(
+            &fixture.scope(),
+            "assign_external_specialist_task",
+            Some(("external_engagement", &scope_ref)),
+            "historical-task",
+            ASSIGN_BODY_SCHEMA,
+            &body,
+        )
+        .unwrap();
+        let task_operation = Uuid::now_v7();
+        let task_ref = Uuid::now_v7();
+        let original_receipt = store.transact(|tx| {
+            engagement::intent_prepare(tx,IntentAdmission {operation_ref:task_operation,namespace:&task_identity.lookup,
+                mutation_envelope_json:&task_identity.json,mutation_envelope_digest:&task_identity.digest, trusted_invocation: task_identity.trusted_invocation.as_ref(),expected_revision:None,now_ms:now})?;
+            accept_assign(tx,AssignAcceptance {caller:&caller,engagement_id:engagement,member_ref:member,task_id:task_ref,
+                namespace:&task_identity.namespace,accepted_input_digest:&task_identity.digest,expected_revision:None,
+                objective_sha256:&task_digest,external_request_json:&json!({"provisioning_ref":null,"accepted_task_digest":task_digest,"deadline_seconds":600}),
+                request_json:&canonical_text(&task)?,accepted_contents:&contents,request_sha256:&task_identity.digest,
+                execution_intent:"read_only",deadline_seconds:600,operation_ref:task_operation,now_ms:now,workspace_ref:&fixture.view.workspace_id})
+        }).unwrap().0;
+        assert_eq!(
+            assign_external_specialist_task(&fixture.scope(), &caller, &port, original_request)
+                .unwrap()
+                .1,
+            original_receipt
+        );
+        source_trace();
+        assert_eq!(
+            assign_external_with_source(
+                &fixture.scope(),
+                &caller,
+                &port,
+                assign_request(engagement, member, "historical-task", "read_only"),
+                &RetainedOnlySource(task.clone())
+            )
+            .unwrap()
+            .1,
+            original_receipt
+        );
+        assert!(
+            source_trace().is_empty(),
+            "accepted old facade replay must precede Current and capture"
+        );
+        // Inject a mismatched port observation; accepted store/snapshot bytes stay intact.
+        let wrong_binding = fixture.sources().profile_binding;
+        fs::write(
+            bindings.join(member.to_string()),
+            serde_json::to_vec(&wrong_binding).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            assign_external_specialist_task(
+                &fixture.scope(),
+                &caller,
+                &port,
+                assign_request(engagement, member, "binding-drift", "read_only")
+            )
+            .unwrap_err()
+            .code,
+            "INVALID_ARGUMENT"
+        );
+        fs::write(
+            bindings.join(member.to_string()),
+            serde_json::to_vec(snapshot.profile_binding()).unwrap(),
+        )
+        .unwrap();
+        // Keep the retained member idle for fresh-key admission checks.
+        store
+            .finish_external_task(engagement, task_ref, None, "failed", Some("TURN_REJECTED"))
+            .unwrap();
+        for output in ["plain_text", "structured_review_v3", "structured_review_v4"] {
+            let mut request = assign_request(engagement, member, output, "read_only");
+            request.task.expected_output = output.to_owned();
+            if output == "structured_review_v4" {
+                request.target = Some(crate::review::ReviewTargetRequest {
+                    kind: "head".to_owned(),
+                    revision: None,
+                });
+            }
+            let error = assign_external_specialist_task(&fixture.scope(), &caller, &port, request)
+                .unwrap_err();
+            assert_eq!(error.code, "CAPABILITY_UNSUPPORTED", "{output}");
+        }
+        assert_eq!(fixture.task_count(), 1);
+        assert_eq!(fixture.accounting_rows(), 1);
+        assert_eq!(port.calls(), 0);
+        assert_eq!(
+            store
+                .external_member_configuration(engagement, member)
+                .unwrap()
+                .0,
+            configuration
+        );
+    }
+
+    #[test]
+    fn old_managed_member_replays_spawn_but_refuses_every_new_task_output() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let (snapshot, candidate, _) = historical_install(&fixture);
+        let session = fixture.managed_session();
+        let context = fixture.managed_context(session, "historical-spawn");
+        let body = json!({"provisioning_ref":candidate.provisioning_ref,"role_ref":"reviewer","agent_configuration_digest":candidate.agent_configuration_digest});
+        let identity = intent_identity(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "historical-spawn",
+            SPAWN_BODY_SCHEMA,
+            &body,
+        )
+        .unwrap();
+        let (instructions, configuration) = snapshot.admitted_configuration().unwrap();
+        let operation = Uuid::now_v7();
+        let member = Uuid::now_v7();
+        let broker = crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let credential = broker.create_member_credential(member).unwrap();
+        let marker = successor_spawn_payload(&SuccessorSpawnMarker {
+            operation_ref: operation,
+            provisioning_ref: &candidate.provisioning_ref,
+            role_ref: "reviewer",
+            agent_configuration_digest: &candidate.agent_configuration_digest,
+            requested_access: "read_only",
+        });
+        let now = now_ms().unwrap();
+        let mut store = open_store(&fixture.scope()).unwrap();
+        let receipt = store
+            .transact(|tx| {
+                engagement::intent_prepare(
+                    tx,
+                    IntentAdmission {
+                        operation_ref: operation,
+                        namespace: &identity.lookup,
+                        mutation_envelope_json: &identity.json,
+                        mutation_envelope_digest: &identity.digest,
+                        trusted_invocation: identity.trusted_invocation.as_ref(),
+                        expected_revision: None,
+                        now_ms: now,
+                    },
+                )?;
+                crate::orchestration::admit_successor_spawn(
+                    tx,
+                    crate::orchestration::SuccessorSpawn {
+                        operation_ref: operation,
+                        session_id: session,
+                        member_run_id: member,
+                        parent_run_id: session,
+                        internal_key: &successor_internal_key(operation),
+                        request_sha256: &sha256_hex(&crate::operation::canonical(&body).unwrap()),
+                        request_json: &canonical_text(&marker)?,
+                        role_ref: "reviewer",
+                        role_snapshot_sha256: &bare_digest(&instructions.role_snapshot_digest),
+                        agent_configuration_json: &canonical_text(&configuration)?,
+                        agent_configuration_sha256: &crate::run::agent_configuration_digest(
+                            &configuration,
+                        )
+                        .unwrap(),
+                        controller_binding_json: &canonical_text(&credential.binding)?,
+                        requested_access: "read_only",
+                        source_turn_id: context.source_turn_id,
+                        source_tool_call_id: context.source_tool_call_id,
+                        now_ms: now,
+                    },
+                )?;
+                let revision = engagement::advance_scope_membership_revision(
+                    tx,
+                    &fixture.view.workspace_id,
+                    "orchestrated_session",
+                    &session.to_string(),
+                )?;
+                let receipt = build_receipt(
+                    &identity.namespace,
+                    operation,
+                    &identity.digest,
+                    AcceptedSubjects {
+                        run_ref: Some(member.to_string()),
+                        member_ref: Some(member.to_string()),
+                        provisioning_ref: Some(candidate.provisioning_ref.clone()),
+                        ..AcceptedSubjects::default()
+                    },
+                    revision,
+                )?;
+                engagement::intent_accept(tx, operation, &receipt, now)?;
+                crate::orchestration::settle_successor_spawn(
+                    tx, session, operation, member, true, None, now,
+                )?;
+                Ok(receipt)
+            })
+            .unwrap();
+        let bindings = fixture.state_root.join("fixture-member-bindings");
+        fs::create_dir_all(&bindings).unwrap();
+        fs::write(
+            bindings.join(member.to_string()),
+            serde_json::to_vec(snapshot.profile_binding()).unwrap(),
+        )
+        .unwrap();
+        let port = FakePort::new();
+        assert_eq!(
+            fixture
+                .spawn(session, &candidate, "historical-spawn", None, &port)
+                .unwrap()
+                .receipt,
+            receipt
+        );
+        let caller = caller(4);
+        let original_request = managed_assign(
+            member,
+            "Assess the accepted candidate.\n",
+            "read_only",
+            None,
+        );
+        let (task, contents) = crate::successor_capture::capture_facade_task(
+            &configuration,
+            &original_request.task,
+            "read_only",
+            None,
+        )
+        .unwrap();
+        let task_digest = task.digest().unwrap();
+        let task_body =
+            crate::successor_capture::assignment_body(member, &original_request.task, &task, 600)
+                .unwrap();
+        let task_identity = intent_identity(
+            &fixture.scope(),
+            "assign_specialist_task",
+            Some(("orchestrated_session", &session.to_string())),
+            "historical-task",
+            ASSIGN_MANAGED_BODY_SCHEMA,
+            &task_body,
+        )
+        .unwrap();
+        let task_operation = Uuid::now_v7();
+        let task_ref = Uuid::now_v7();
+        let task_marker = successor_task_payload(&SuccessorTaskMarker {
+            operation_ref: task_operation,
+            member_ref: member,
+            accepted_task_digest: &task_digest,
+            execution_intent: "read_only",
+            deadline_seconds: 600,
+        });
+        let task_json = canonical_text(&task).unwrap();
+        let task_sha = sha256_hex(task_json.as_bytes());
+        let original_receipt = store
+            .transact(|tx| {
+                engagement::intent_prepare(
+                    tx,
+                    IntentAdmission {
+                        operation_ref: task_operation,
+                        namespace: &task_identity.lookup,
+                        mutation_envelope_json: &task_identity.json,
+                        mutation_envelope_digest: &task_identity.digest,
+                        trusted_invocation: task_identity.trusted_invocation.as_ref(),
+                        expected_revision: None,
+                        now_ms: now,
+                    },
+                )?;
+                crate::orchestration::admit_successor_task(
+                    tx,
+                    crate::orchestration::SuccessorTask {
+                        session_id: session,
+                        task_id: task_ref,
+                        member_run_id: member,
+                        internal_key: &successor_internal_key(task_operation),
+                        request_sha256: &sha256_hex(
+                            &crate::operation::canonical(&task_body).unwrap(),
+                        ),
+                        request_json: &canonical_text(&task_marker)?,
+                        accepted_request_json: &task_json,
+                        accepted_request_sha256: &task_sha,
+                        source_run_id: session,
+                        source_turn_id: context.source_turn_id,
+                        source_tool_call_id: context.source_tool_call_id,
+                        deadline_origin_ms: now,
+                        now_ms: now,
+                    },
+                )?;
+                engagement::retain_accepted_task_content(
+                    tx,
+                    task_ref,
+                    &contents.task_body,
+                    &contents.contexts,
+                    contents.target.as_deref(),
+                    now,
+                )?;
+                crate::caller_scope::admit(
+                    tx,
+                    &crate::caller_scope::CallerAssignment {
+                        assignment_id: task_ref,
+                        workspace_ref: &fixture.view.workspace_id,
+                        aggregate_scope_kind: "orchestrated_session",
+                        aggregate_scope_ref: &session.to_string(),
+                        member_ref: member,
+                    },
+                    &caller,
+                    now,
+                )?;
+                engagement::advance_member_workload_revision(
+                    tx,
+                    &fixture.view.workspace_id,
+                    "orchestrated_session",
+                    &session.to_string(),
+                    &member.to_string(),
+                )?;
+                let revision = engagement::scope_membership_revision(
+                    tx,
+                    &fixture.view.workspace_id,
+                    "orchestrated_session",
+                    &session.to_string(),
+                )?;
+                let receipt = build_receipt(
+                    &task_identity.namespace,
+                    task_operation,
+                    &task_identity.digest,
+                    AcceptedSubjects {
+                        run_ref: Some(member.to_string()),
+                        member_ref: Some(member.to_string()),
+                        task_ref: Some(task_ref.to_string()),
+                        ..AcceptedSubjects::default()
+                    },
+                    revision,
+                )?;
+                engagement::intent_accept(tx, task_operation, &receipt, now)?;
+                Ok(receipt)
+            })
+            .unwrap();
+        assert_eq!(
+            fixture
+                .assign(session, "historical-task", &caller, &port, original_request)
+                .unwrap()
+                .1,
+            original_receipt
+        );
+        source_trace();
+        assert_eq!(
+            assign_managed_with_source(
+                &fixture.scope(),
+                &fixture.managed_context(session, "historical-task"),
+                &caller,
+                &port,
+                managed_assign(
+                    member,
+                    "Assess the accepted candidate.\n",
+                    "read_only",
+                    None
+                ),
+                &RetainedOnlySource(task.clone())
+            )
+            .unwrap()
+            .1,
+            original_receipt
+        );
+        assert!(
+            source_trace().is_empty(),
+            "accepted old facade replay must precede Current and capture"
+        );
+        // Inject a mismatched port observation; accepted store/snapshot bytes stay intact.
+        let wrong_binding = fixture.sources().profile_binding;
+        fs::write(
+            bindings.join(member.to_string()),
+            serde_json::to_vec(&wrong_binding).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .assign(
+                    session,
+                    "binding-drift",
+                    &caller,
+                    &port,
+                    managed_assign(
+                        member,
+                        "Assess the accepted candidate.\n",
+                        "read_only",
+                        None
+                    )
+                )
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+        fs::write(
+            bindings.join(member.to_string()),
+            serde_json::to_vec(snapshot.profile_binding()).unwrap(),
+        )
+        .unwrap();
+        // Keep the retained member idle for fresh-key admission checks.
+        store
+            .transact(|tx| {
+                crate::orchestration::terminalize_successor_task(
+                    tx,
+                    session,
+                    task_ref,
+                    "TURN_REJECTED",
+                    now,
+                )
+            })
+            .unwrap();
+        for output in ["plain_text", "structured_review_v3", "structured_review_v4"] {
+            let mut request = managed_assign(
+                member,
+                "Assess the accepted candidate.\n",
+                "read_only",
+                None,
+            );
+            request.task.expected_output = output.to_owned();
+            if output == "structured_review_v4" {
+                request.target = Some(crate::review::ReviewTargetRequest {
+                    kind: "head".to_owned(),
+                    revision: None,
+                });
+            }
+            let error = fixture
+                .assign(session, output, &caller, &port, request)
+                .unwrap_err();
+            assert_eq!(error.code, "CAPABILITY_UNSUPPORTED", "{output}");
+        }
+        assert_eq!(fixture.broker_task_rows(), 1);
+        assert_eq!(fixture.broker_acceptance_rows(), 1);
+        assert_eq!(fixture.accounting_rows(), 1);
+        assert_eq!(port.calls(), 0);
+        assert_eq!(
+            managed_member(&store, session, member)
+                .unwrap()
+                .agent_configuration,
+            configuration
+        );
+    }
+
     fn hire_request<'a>(
         engagement_id: Uuid,
         candidate: &'a ProvisioningCandidate,
@@ -7729,6 +10909,7 @@ mod tests {
                         namespace: &identity.lookup,
                         mutation_envelope_json: &identity.json,
                         mutation_envelope_digest: &identity.digest,
+                        trusted_invocation: identity.trusted_invocation.as_ref(),
                         expected_revision: None,
                         now_ms: 1,
                     },
@@ -8150,6 +11331,7 @@ mod tests {
             capability_sha256: "f".repeat(64),
         };
         let other_scope = DelegationScope {
+            trusted_invocation: None,
             view: &fixture.view,
             state_root: &fixture.state_root,
             controller: &other,
@@ -9622,6 +12804,7 @@ mod tests {
         let mut view = fixture.view.clone();
         view.mode = WorkspaceMode::NonGit;
         let scope = DelegationScope {
+            trusted_invocation: None,
             view: &view,
             state_root: &fixture.state_root,
             controller: &fixture.controller,
@@ -10446,6 +13629,7 @@ mod tests {
             capability_sha256: "f".repeat(64),
         };
         let stranger_scope = DelegationScope {
+            trusted_invocation: None,
             view: &fixture.view,
             state_root: &fixture.state_root,
             controller: &stranger,
@@ -11622,6 +14806,7 @@ mod tests {
             )
             .unwrap();
         let task = Uuid::parse_str(&observation.task_ref).unwrap();
+        fixture.publish_member_manifest(session, member);
         fixture.settle_managed_task_unavailable(session, member, task);
         let context = fixture.managed_context(session, "unavailable-call");
         let refused = collect_specialist_task(
@@ -12381,6 +15566,7 @@ mod tests {
             capability_sha256: "f".repeat(64),
         };
         let stranger_scope = DelegationScope {
+            trusted_invocation: None,
             view: &fixture.view,
             state_root: &fixture.state_root,
             controller: &stranger,
@@ -12635,6 +15821,7 @@ mod tests {
         foreign.identity.controller_id = Uuid::now_v7();
         for member_ref in [member, legacy_member, Uuid::now_v7()] {
             let scope = DelegationScope {
+                trusted_invocation: None,
                 view: &fixture.view,
                 state_root: &fixture.state_root,
                 controller: &foreign,
@@ -12848,6 +16035,7 @@ mod tests {
             capability_sha256: "f".repeat(64),
         };
         let stranger_scope = DelegationScope {
+            trusted_invocation: None,
             view: &fixture.view,
             state_root: &fixture.state_root,
             controller: &stranger,

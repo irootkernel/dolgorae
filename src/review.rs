@@ -6,7 +6,8 @@ use crate::engagement::{EngagementStore, RuntimeOutcome};
 use crate::machine::{MachineError, new_uuid_v7};
 use crate::run::RunStore;
 use crate::semantic::{
-    ReviewerStartContext, RunVerb, control_reviewer_run, prepare_reviewer, start_reviewer_run,
+    ReviewerStartContext, RunVerb, control_reviewer_run, prepare_legacy_reviewer,
+    start_reviewer_run,
 };
 use crate::specialist::{
     ReviewerOutput, ReviewerOutputV3, reviewer_turn_output_value, validate_reviewer_output,
@@ -482,9 +483,10 @@ pub fn execute_direct_cli(arguments: &[OsString]) -> Result<Value, MachineError>
                 crate::workspace::WorkspaceService::system()?.discover(workspace.as_deref())?;
             let home = crate::paths::DolgoraeHome::system()?;
             let binding = crate::global_runtime::ResolvedGlobalProfile::resolve(&home, &profile)?
-                .prepare(&home)?;
+                .prepare_qualified(&home)?;
             request.admit_profile(&binding)?;
             verify_executable_identity(&binding.launch_snapshot)?;
+            binding.record_qualified(&home)?;
             crate::instructions::InstructionSourceStore::new(&home)
                 .capture(request.role.as_deref().unwrap_or("reviewer"))?;
             let carriers = EphemeralCarriers::create(&home.workspace_root(&view.workspace_id))?;
@@ -687,7 +689,7 @@ pub(crate) fn execute_legacy_with_context(
     let durable = context.is_some();
     let (prepared, retained_carriers) = match context {
         Some(context) => (context.prepared, Some(context.carriers)),
-        None => (prepare_reviewer(workspace, profile)?, None),
+        None => (prepare_legacy_reviewer(workspace, profile)?, None),
     };
     reject_recursive_reviewer_context(&prepared.state_root)?;
     let canonical_workspace = prepared.view.canonical_path.to_path_buf()?;
@@ -986,7 +988,7 @@ pub(crate) fn execute_scoped_common(
             Some(context.carriers),
             context.capture_ref,
         ),
-        None => (prepare_reviewer(workspace, profile)?, None, None),
+        None => (prepare_legacy_reviewer(workspace, profile)?, None, None),
     };
     reject_recursive_reviewer_context(&prepared.state_root)?;
     let canonical_workspace = prepared.view.canonical_path.to_path_buf()?;

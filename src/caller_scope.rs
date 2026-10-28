@@ -25,7 +25,7 @@ impl TrustedCallerScope {
     }
 }
 
-mod sealed {
+pub(crate) mod sealed {
     pub trait Sealed {}
 }
 
@@ -35,6 +35,47 @@ mod sealed {
 /// falls back to any other identity.
 pub trait TrustedCallerPort: sealed::Sealed {
     fn load(&self) -> Result<([String; 5], u64), MachineError>;
+}
+
+/// Only the protected native producer can supply this keyed provenance.
+pub(crate) trait TrustedInvocationPort: sealed::Sealed {
+    fn invocation(
+        &self,
+    ) -> Result<
+        (
+            crate::delegation_identity::TrustedInvocationContext,
+            crate::delegation_identity::LookupNamespace,
+        ),
+        MachineError,
+    >;
+}
+
+pub struct TrustedInvocation {
+    context: crate::delegation_identity::TrustedInvocationContext,
+    namespace: crate::delegation_identity::LookupNamespace,
+}
+
+impl TrustedInvocation {
+    pub(crate) fn from_port(port: &impl TrustedInvocationPort) -> Result<Self, MachineError> {
+        let (context, namespace) = port.invocation()?;
+        context.validate()?;
+        Ok(Self { context, namespace })
+    }
+
+    pub fn context(&self) -> &crate::delegation_identity::TrustedInvocationContext {
+        &self.context
+    }
+
+    pub(crate) fn require_namespace(
+        &self,
+        namespace: &crate::delegation_identity::LookupNamespace,
+    ) -> Result<(), MachineError> {
+        self.context.validate()?;
+        if &self.namespace != namespace {
+            return Err(integrity());
+        }
+        Ok(())
+    }
 }
 
 /// The closed port: it always refuses, so format validation alone can never

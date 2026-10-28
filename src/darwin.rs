@@ -11,6 +11,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+/// Restrict files created by the private native adapter and inherited native processes.
+pub(crate) fn private_host_umask() {
+    // SAFETY: called once at the private adapter entrypoint, before threads start.
+    unsafe {
+        libc::umask(0o077);
+    }
+}
+
 /// Count-only context whose static lifetime covers every registered connection.
 pub(crate) struct SqliteStatementCounters {
     queries: std::sync::atomic::AtomicU64,
@@ -71,12 +79,249 @@ unsafe extern "C" fn count_sqlite_statement(
     rusqlite::ffi::SQLITE_OK
 }
 
+/// A runtime read half with a private event that can yield at a message boundary.
+/// Readiness polling and nonblocking syscalls stay in the platform adapter.
+pub(crate) struct WakeRead {
+    stream: UnixStream,
+    event: UnixStream,
+    control: std::sync::Arc<ReadWake>,
+    boundary: bool,
+    pub(crate) yielded: bool,
+    #[cfg(test)]
+    pub(crate) progress: Option<std::sync::mpsc::Sender<usize>>,
+}
+
+pub(crate) struct ReadWake {
+    event: UnixStream,
+    state: std::sync::Mutex<(bool, Option<std::time::Instant>)>,
+}
+
+impl ReadWake {
+    pub(crate) fn deadline(&self) -> Option<std::time::Instant> {
+        self.state.lock().ok().and_then(|state| state.1)
+    }
+
+    pub(crate) fn pause(&self, deadline: std::time::Instant) -> std::io::Result<()> {
+        *self
+            .state
+            .lock()
+            .map_err(|_| std::io::Error::other("read control poisoned"))? = (true, Some(deadline));
+        self.signal()
+    }
+
+    pub(crate) fn resume(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            *state = (false, None);
+        }
+        let _ = self.signal();
+    }
+
+    fn signal(&self) -> std::io::Result<()> {
+        let mut event = &self.event;
+        match std::io::Write::write(&mut event, &[1]) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl WakeRead {
+    pub(crate) fn new(stream: UnixStream) -> std::io::Result<(Self, std::sync::Arc<ReadWake>)> {
+        let (event, sender) = UnixStream::pair()?;
+        event.set_nonblocking(true)?;
+        sender.set_nonblocking(true)?;
+        let control = std::sync::Arc::new(ReadWake {
+            event: sender,
+            state: std::sync::Mutex::new((false, None)),
+        });
+        Ok((
+            Self {
+                stream,
+                event,
+                control: std::sync::Arc::clone(&control),
+                boundary: true,
+                yielded: false,
+                #[cfg(test)]
+                progress: None,
+            },
+            control,
+        ))
+    }
+
+    pub(crate) fn deadline(&self) -> Option<std::time::Instant> {
+        self.control.deadline()
+    }
+
+    pub(crate) fn boundary(&mut self, boundary: bool) {
+        self.boundary = boundary;
+        self.yielded = false;
+    }
+}
+
+impl std::io::Read for WakeRead {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let (paused, deadline) = *self
+                .control
+                .state
+                .lock()
+                .map_err(|_| std::io::Error::other("read control poisoned"))?;
+            if paused && self.boundary {
+                self.yielded = true;
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            let timeout = match deadline {
+                Some(deadline) => deadline
+                    .checked_duration_since(std::time::Instant::now())
+                    .filter(|remaining| !remaining.is_zero())
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::TimedOut))?
+                    .as_millis()
+                    .saturating_add(1)
+                    .min(i32::MAX as u128) as i32,
+                None => -1,
+            };
+            // SAFETY: recv writes only into the supplied live slice. MSG_DONTWAIT
+            // does not change flags shared with the independent writer.
+            let count = unsafe {
+                libc::recv(
+                    self.stream.as_raw_fd(),
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if count >= 0 {
+                if count > 0 {
+                    self.boundary = false;
+                    #[cfg(test)]
+                    if let Some(progress) = &self.progress {
+                        let _ = progress.send(count as usize);
+                    }
+                }
+                return Ok(count as usize);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(error);
+            }
+            let mut descriptors = [
+                libc::pollfd {
+                    fd: self.stream.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: self.event.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            #[cfg(test)]
+            if let Some(progress) = &self.progress {
+                let _ = progress.send(0);
+            }
+            // SAFETY: both descriptors and the two-entry array remain live.
+            let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), 2, timeout) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+            if descriptors[1].revents != 0 {
+                let mut signals = [0; 128];
+                while std::io::Read::read(&mut self.event, &mut signals).is_ok_and(|n| n > 0) {}
+            }
+        }
+    }
+}
+
+pub(crate) fn write_before(
+    stream: &UnixStream,
+    mut bytes: &[u8],
+    deadline: std::time::Instant,
+) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::TimedOut))?;
+        // SAFETY: send reads only the supplied live slice on an owned descriptor.
+        let count = unsafe {
+            libc::send(
+                stream.as_raw_fd(),
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if count > 0 {
+            bytes = &bytes[count as usize..];
+            continue;
+        }
+        if count == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        if error.kind() != std::io::ErrorKind::WouldBlock {
+            return Err(error);
+        }
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: poll references one live descriptor.
+        if unsafe {
+            libc::poll(
+                &mut descriptor,
+                1,
+                remaining
+                    .as_millis()
+                    .saturating_add(1)
+                    .min(i32::MAX as u128) as i32,
+            )
+        } < 0
+        {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn socket_status_flags(stream: &UnixStream) -> std::io::Result<(i32, bool)> {
+    // SAFETY: F_GETFL reads flags of the live, borrowed socket descriptor.
+    let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((flags, flags & libc::O_NONBLOCK != 0))
+}
+
 pub(crate) struct DeadlineStream {
     stream: UnixStream,
     deadline: std::time::Instant,
 }
 
 impl DeadlineStream {
+    pub(crate) fn set_deadline(&mut self, deadline: std::time::Instant) {
+        self.deadline = deadline;
+    }
+
     #[cfg(test)]
     pub(crate) fn from_connected(
         stream: UnixStream,
@@ -1580,6 +1825,36 @@ impl DarwinSystem {
         }
     }
 
+    /// Signal only a freshly revalidated birth/UID/group/session identity.
+    /// Callers additionally verify the retained executable and scope ownership.
+    pub(crate) fn signal_exact_process(
+        self,
+        expected: &ProcessCensusEntry,
+        signal: libc::c_int,
+    ) -> Result<(), std::io::Error> {
+        let current = self.bsd_process_identity(expected.pid)?;
+        if expected.pid <= 1
+            || expected.birth != Some((current.start_tvsec, current.start_tvusec))
+            || current.uid != expected.uid
+            || current.process_group_id != expected.process_group_id
+            || current.session_id != expected.session_id
+        {
+            return Err(std::io::Error::other(
+                "process identity changed before signal",
+            ));
+        }
+        let pid = libc::pid_t::try_from(expected.pid)
+            .map_err(|_| std::io::Error::other("invalid PID"))?;
+        // SAFETY: the exact positive PID was checked above; no pointer crosses FFI.
+        if unsafe { libc::kill(pid, signal) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     pub fn signal_process_group(
         self,
         pgid: u32,
@@ -1689,6 +1964,23 @@ impl DarwinSystem {
         // SAFETY: waitpid receives a concrete PID and a pointer to one live
         // integer. WNOHANG prevents this cleanup check from blocking.
         unsafe { libc::waitpid(pid, std::ptr::addr_of_mut!(status), libc::WNOHANG) == pid }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reap_test_child(
+        self,
+        child: &Child,
+    ) -> Result<std::process::ExitStatus, std::io::Error> {
+        let pid = libc::pid_t::try_from(child.id())
+            .map_err(|_| std::io::Error::other("invalid test Child PID"))?;
+        let mut status = 0;
+        // SAFETY: the test supplies its actual Child. Waiting on this positive
+        // PID consumes only that child's status, without populating Child's
+        // own cache, so the real ECHILD owner path can be exercised.
+        if unsafe { libc::waitpid(pid, std::ptr::addr_of_mut!(status), 0) } != pid {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(<std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(status))
     }
 
     pub fn lock_byte_timeout(

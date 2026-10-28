@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Black-box caller defaults, migration and pre-effect retirement checks without runtime launch."""
+"""Caller defaults, migration, retirement and generic Profile admission separation."""
 from __future__ import annotations
 
 import argparse
@@ -10,6 +10,9 @@ import tempfile
 from pathlib import Path
 
 import native_codex
+from test_runtime_admission import validate as validate_runtime_admission
+from test_trusted_host_setup_cli import (validate as validate_trusted_host_setup,
+                                         validate_member_recovery)
 from run_native_integrated_acceptance import TURN_TIMEOUT, overwrite_fixture_file
 from schema_support import assert_valid, validator
 
@@ -133,8 +136,16 @@ def validate(binary: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
-    validate(parser.parse_args().binary.resolve(strict=True))
-    print("Caller cutover CLI checks passed")
+    parser.add_argument("--trusted-host-setup-only", action="store_true")
+    arguments = parser.parse_args()
+    binary = arguments.binary.resolve(strict=True)
+    if not arguments.trusted_host_setup_only:
+        validate(binary)
+        validate_runtime_admission(binary)
+    validate_trusted_host_setup(binary)
+    validate_member_recovery(binary)
+    print("Trusted host setup CLI checks passed" if arguments.trusted_host_setup_only
+          else "Caller cutover CLI checks passed")
     return 0
 
 

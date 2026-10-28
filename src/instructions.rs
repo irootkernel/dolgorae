@@ -84,13 +84,20 @@ impl RoleCapture {
 
 /// Trusted preparation input, separate from frozen facade request shapes.
 /// Paths are explicit instruction-home components, never inferred from aliases.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum SelectedInstructionSource {
     Inline(String),
     File(Vec<String>),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SelectedNamedSource {
     pub name: String,
     pub source: SelectedInstructionSource,
@@ -633,7 +640,7 @@ struct CheckedDirectory {
     parent: Option<(usize, OsString)>,
 }
 
-fn validate_directory_components(components: &[String]) -> Result<(), MachineError> {
+pub(crate) fn validate_directory_components(components: &[String]) -> Result<(), MachineError> {
     if components.is_empty()
         || components.len() > 64
         || components.iter().any(|component| {
@@ -934,7 +941,17 @@ pub fn validate_role_name(name: &str) -> Result<(), MachineError> {
 pub fn require_discovery_control(
     binding: &crate::global_runtime::GlobalProfileBinding,
 ) -> Result<(), MachineError> {
-    if binding.caller_workspace_supported() {
+    require_discovery_qualification(binding.caller_workspace_supported())
+}
+
+pub(crate) fn require_accepted_discovery_control(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+) -> Result<(), MachineError> {
+    require_discovery_qualification(binding.accepted_caller_workspace_supported())
+}
+
+fn require_discovery_qualification(qualified: bool) -> Result<(), MachineError> {
+    if qualified {
         return Ok(());
     }
     Err(MachineError::new(

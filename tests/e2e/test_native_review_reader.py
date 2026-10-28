@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import run_native_review_reader as probe
+from test_native_workspace_policy_fixture import code_advertisement, custom_result
 
 
 def responses() -> probe.ReaderResponses:
@@ -41,15 +42,12 @@ def main() -> int:
     fixture = responses()
     user = {"type": "message", "role": "user", "content": [
         {"type": "input_text", "text": "fixture-step-1: read the index candidate once"}]}
-    fixture.respond({"input": [user]})
-    wrong = {"type": "function_call_output", "call_id": "foreign-call", "output": "forged"}
-    rejected(lambda: fixture.respond({"input": [wrong]}))
+    fixture.respond({"input": [user, code_advertisement()]})
+    rejected(lambda: fixture.respond(custom_result("foreign-call", {"bounded-review-call-1": "forged"})))
     fixture = responses()
-    fixture.respond({"input": [user]})
-    substituted = {"type": "function_call_output", "call_id": "bounded-review-call-1",
-                   "output": json.dumps({"encoding": "base64", "content": "d29ya3RyZWUK",
-                                         "receipt": {"side": "after", "byte_length": 8}})}
-    rejected(lambda: fixture.respond({"input": [substituted]}))
+    fixture.respond({"input": [user, code_advertisement()]})
+    substituted = json.dumps({"encoding": "base64", "content": "d29ya3RyZWUK", "receipt": {"side": "after", "byte_length": 8}})
+    rejected(lambda: fixture.respond(custom_result("bounded-review-call-1", {"bounded-review-call-1": substituted})))
     fixture = responses()
     fixture.posts = 4
     rejected(lambda: fixture.respond({"input": [user]}))

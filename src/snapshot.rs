@@ -42,6 +42,362 @@ struct CaptureSources {
     runtime_record: Option<WorkerRuntimeRecord>,
 }
 
+/// Run/source facts for the delegation service's enclosing read transaction.
+/// Capture reads no ledger prefix and performs no nested retry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemberRunObservation {
+    sources: Option<MemberRunSources>,
+    #[cfg(test)]
+    fixture: Option<String>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemberRunSources {
+    manifest: RunManifest,
+    projection: RunStateProjection,
+    controller: ControllerBinding,
+    runtime_record: Option<WorkerRuntimeRecord>,
+    generation: u64,
+    supervisor: Option<(RunManifest, ControllerBinding)>,
+    writer_revision: u64,
+    selection: String,
+    files: Vec<crate::ledger_generation::ObservationFileIdentity>,
+    run_files: Vec<crate::ledger_generation::ObservationFileIdentity>,
+}
+impl MemberRunObservation {
+    pub(crate) fn read(
+        state_root: &Path,
+        run_id: Uuid,
+        supervisor_id: Option<Uuid>,
+        budget: &mut crate::ledger::ObservationBudget,
+    ) -> Result<Self, MachineError> {
+        budget
+            .check()
+            .map_err(|e| crate::ledger::observation_error(run_id, 0, e))?;
+        let store = RunStore::new(SystemWorkspacePlatform, state_root);
+        let manifest = store.load_manifest(run_id)?;
+        let projection = store.load_state_projection(run_id)?;
+        let controller = store.load_controller_binding_from_manifest(&manifest)?;
+        let path = runtime_record_path(&runtime_root(state_root), run_id)
+            .map_err(|e| internal_runtime(format!("{e:?}")))?;
+        let runtime_record = match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(internal_runtime(e.to_string())),
+            Ok(_) => Some(
+                read_runtime_record(&path, DarwinSystem.current_uid())
+                    .map_err(|e| internal_runtime(format!("{e:?}")))?,
+            ),
+        };
+        if runtime_record
+            .as_ref()
+            .is_some_and(|r| r.identity.run_id != run_id)
+        {
+            return Err(internal_runtime(
+                "runtime identity crossed the member Run".to_owned(),
+            ));
+        }
+        if runtime_record.as_ref().is_some_and(|record| {
+            record.identity.workspace_id != manifest.workspace_id
+                || record.identity.run_generation != projection.run_generation
+                || record.control_recovery_required
+        }) {
+            return Err(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "member runtime does not match its current Run observation",
+                false,
+                serde_json::json!({"required_action":"restore_state"}),
+            ));
+        }
+        let supervisor = supervisor_id
+            .map(|id| {
+                Ok::<_, MachineError>((
+                    store.load_manifest(id)?,
+                    store.load_controller_binding(id)?,
+                ))
+            })
+            .transpose()?;
+        let writer = WriterStore::new(
+            state_root,
+            &manifest.workspace_id,
+            DarwinSystem.current_uid(),
+        );
+        let writer_revision = if writer.record_exists() {
+            writer.load()?.authority_revision
+        } else {
+            0
+        };
+        let (generation, selection, files) = crate::ledger_generation::observation_selection(
+            &state_root.join("runs").join(run_id.to_string()),
+            run_id,
+            budget,
+        )
+        .map_err(|e| {
+            crate::ledger::observation_error(run_id, projection.ledger_head.sequence, e)
+        })?;
+        let mut run_files = Vec::new();
+        for id in std::iter::once(run_id).chain(supervisor_id) {
+            let root = state_root.join("runs").join(id.to_string());
+            for name in ["manifest.json", "controller.json", "state.json"] {
+                let path = root.join(name);
+                match crate::ledger_generation::observation_file_identity(&path) {
+                    Ok(identity) => run_files.push(identity),
+                    Err(crate::ledger::LedgerError::Io(e))
+                        if name == "state.json" && e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(crate::ledger::observation_error(
+                            id,
+                            projection.ledger_head.sequence,
+                            e,
+                        ));
+                    }
+                }
+            }
+        }
+        if runtime_record.is_some() {
+            run_files.push(
+                crate::ledger_generation::observation_file_identity(&path).map_err(|e| {
+                    crate::ledger::observation_error(run_id, projection.ledger_head.sequence, e)
+                })?,
+            );
+        }
+        Ok(Self {
+            sources: Some(MemberRunSources {
+                manifest,
+                projection,
+                controller,
+                runtime_record,
+                generation,
+                supervisor,
+                writer_revision,
+                selection,
+                files,
+                run_files,
+            }),
+            #[cfg(test)]
+            fixture: None,
+        })
+    }
+    pub(crate) fn complete_ledger(
+        &self,
+        state_root: &Path,
+        budget: &mut crate::ledger::ObservationBudget,
+    ) -> Result<ObservedLedger, MachineError> {
+        let source = self
+            .sources
+            .as_ref()
+            .ok_or_else(|| internal_runtime("fixture has no authoritative history".to_owned()))?;
+        let run_id = source.manifest.run_id;
+        let head = &source.projection.ledger_head;
+        let root = state_root.join("runs").join(run_id.to_string());
+        let ledger = crate::ledger::ObservedLedger::open_complete_bounded(
+            &root,
+            run_id,
+            head.sequence,
+            budget,
+        )
+        .map_err(|e| crate::ledger::observation_error(run_id, head.sequence, e))?;
+        if ledger.records().last().map_or(
+            crate::audit::GENESIS_PREVIOUS_HASH,
+            crate::audit::AuditRecord::hash,
+        ) != head.hash
+        {
+            return Err(state_conflict(
+                run_id,
+                source.projection.lifecycle,
+                "delegation_observation",
+            ));
+        }
+        let replayed = crate::ledger::project_observation(run_id, ledger.records(), budget)
+            .map_err(|e| crate::ledger::observation_error(run_id, head.sequence, e))?;
+        if replayed != source.projection {
+            return Err(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "Run projection differs from its complete verified history",
+                false,
+                serde_json::json!({"required_action":"restore_state"}),
+            ));
+        }
+        Ok(ledger)
+    }
+    pub(crate) fn interaction_context(
+        &self,
+    ) -> Result<
+        (
+            &RunManifest,
+            &RunStateProjection,
+            &ControllerBinding,
+            Option<u64>,
+            u64,
+        ),
+        MachineError,
+    > {
+        let source = self
+            .sources
+            .as_ref()
+            .ok_or_else(|| internal_runtime("fixture has no authoritative history".to_owned()))?;
+        Ok((
+            &source.manifest,
+            &source.projection,
+            &source.controller,
+            source
+                .runtime_record
+                .as_ref()
+                .and_then(|r| r.app_server_epoch),
+            source.writer_revision,
+        ))
+    }
+    pub(crate) fn matches_stamp(&self, stamp: &ProjectionStamp) -> bool {
+        self.sources.as_ref().is_some_and(|source| {
+            stamp.run_state_revision == source.projection.ledger_head.sequence
+                && stamp.captured_head_cursor == source.projection.ledger_head.sequence.to_string()
+                && stamp.writer_state_revision == source.writer_revision
+                && stamp.interaction_state_revision <= stamp.run_state_revision
+        }) || cfg!(test) && self.sources.is_none()
+    }
+    pub(crate) fn matches_manifest(&self, manifest: &RunManifest) -> bool {
+        self.sources
+            .as_ref()
+            .is_some_and(|sources| sources.manifest == *manifest)
+            || cfg!(test) && self.sources.is_none()
+    }
+    pub(crate) fn matches_supervisor(&self, controller: &ControllerBinding) -> bool {
+        self.sources.as_ref().is_some_and(|sources| {
+            sources
+                .supervisor
+                .as_ref()
+                .is_some_and(|(_, actual)| actual == controller)
+        }) || cfg!(test) && self.sources.is_none()
+    }
+    #[cfg(test)]
+    pub(crate) fn differing_components(&self) -> Vec<(&'static str, Self)> {
+        let mut variants = Vec::new();
+        macro_rules! differing {
+            ($name:literal,$change:expr) => {{
+                let mut changed = self.clone();
+                $change(changed.sources.as_mut().unwrap());
+                variants.push(($name, changed));
+            }};
+        }
+        differing!("manifest fingerprint", |s: &mut MemberRunSources| s
+            .manifest
+            .created_at =
+            "2026-10-26T00:00:01.000000Z".to_owned());
+        differing!("Run generation", |s: &mut MemberRunSources| s
+            .projection
+            .run_generation +=
+            1);
+        differing!("lifecycle", |s: &mut MemberRunSources| s
+            .projection
+            .lifecycle =
+            RunLifecycle::Paused);
+        differing!("active Turn", |s: &mut MemberRunSources| s
+            .projection
+            .active_turn_id =
+            Some("other-turn".to_owned()));
+        differing!("projection revision", |s: &mut MemberRunSources| s
+            .projection
+            .ledger_head
+            .sequence +=
+            1);
+        differing!("head hash", |s: &mut MemberRunSources| s
+            .projection
+            .ledger_head
+            .hash =
+            "f".repeat(64));
+        differing!("writer revision", |s: &mut MemberRunSources| s
+            .writer_revision +=
+            1);
+        differing!("Controller identity", |s: &mut MemberRunSources| s
+            .controller
+            .identity
+            .controller_id =
+            Uuid::now_v7());
+        differing!("Controller generation", |s: &mut MemberRunSources| s
+            .controller
+            .identity
+            .generation +=
+            1);
+        differing!(
+            "Controller binding fingerprint",
+            |s: &mut MemberRunSources| s.controller.capability_sha256 = "f".repeat(64)
+        );
+        differing!("selected generation", |s: &mut MemberRunSources| s
+            .generation +=
+            1);
+        differing!("selection fingerprint", |s: &mut MemberRunSources| s
+            .selection =
+            "f".repeat(64));
+        differing!("selected source inode", |s: &mut MemberRunSources| s
+            .files[0]
+            .inode +=
+            1);
+        differing!("selected source length", |s: &mut MemberRunSources| {
+            let file = s
+                .files
+                .iter_mut()
+                .find(|f| f.path.ends_with("audit.jsonl"))
+                .unwrap();
+            file.length += 1;
+        });
+        differing!("same-size source ctime", |s: &mut MemberRunSources| {
+            let file = s
+                .files
+                .iter_mut()
+                .find(|f| f.path.ends_with("audit.jsonl"))
+                .unwrap();
+            file.changed.1 += 1;
+        });
+        differing!("Run file identity", |s: &mut MemberRunSources| s
+            .run_files[0]
+            .inode +=
+            1);
+        if self.sources.as_ref().unwrap().runtime_record.is_some() {
+            differing!("control socket epoch", |s: &mut MemberRunSources| s
+                .runtime_record
+                .as_mut()
+                .unwrap()
+                .control_socket_epoch +=
+                1);
+            differing!("App Server epoch", |s: &mut MemberRunSources| s
+                .runtime_record
+                .as_mut()
+                .unwrap()
+                .app_server_epoch =
+                Some(2));
+            differing!("runtime fingerprint", |s: &mut MemberRunSources| s
+                .runtime_record
+                .as_mut()
+                .unwrap()
+                .binary_sha256 =
+                "f".repeat(64));
+        }
+        if self.sources.as_ref().unwrap().supervisor.is_some() {
+            differing!("root Controller binding", |s: &mut MemberRunSources| s
+                .supervisor
+                .as_mut()
+                .unwrap()
+                .1
+                .identity
+                .generation +=
+                1);
+            differing!("root manifest fingerprint", |s: &mut MemberRunSources| s
+                .supervisor
+                .as_mut()
+                .unwrap()
+                .0
+                .created_at =
+                "2026-10-26T00:00:01.000000Z".to_owned());
+        }
+        variants
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture(fingerprint: String) -> Self {
+        Self {
+            sources: None,
+            fixture: Some(fingerprint),
+        }
+    }
+}
+
 impl RunSnapshot {
     /// Authorize against the current binding and the captured observation.
     /// Protected readers call this both before and after reading their material.

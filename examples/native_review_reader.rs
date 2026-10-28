@@ -148,11 +148,24 @@ fn main() {
         assert_eq!(reopened.review_id(), review_id);
         if step == 1 {
             reopened.check_acceptance().unwrap();
+            // The inner native call has its own ID, separate from the JavaScript carrier.
+            let mut reads = fs::read_dir(
+                state
+                    .join("direct-reviews")
+                    .join(review_id.to_string())
+                    .join("reads"),
+            )
+            .unwrap();
+            let issued = reads.next().unwrap().unwrap();
+            assert!(reads.next().is_none(), "expected one original read receipt");
+            let issued: Value = serde_json::from_slice(&fs::read(issued.path()).unwrap()).unwrap();
+            assert_eq!(issued["thread_id"], accepted.thread_id);
+            assert_eq!(issued["turn_id"], accepted.turn_id);
             let response = reopened
                 .replay_read(
                     &accepted.thread_id,
                     &accepted.turn_id,
-                    "bounded-review-call-1",
+                    issued["call_id"].as_str().unwrap(),
                     &CandidateReadRequest {
                         side: "after".to_owned(),
                         path: "file.txt".to_owned(),
@@ -161,6 +174,7 @@ fn main() {
                     },
                 )
                 .unwrap();
+            assert_eq!(response["receipt"], issued["receipt"]);
             original_receipt = response["receipt"].clone();
             let verdict = json!({"summary":"Original index content verified","findings":[],"criterion_assessments":[{"criterion_id":"candidate","status":"met","explanation":"Read admitted index bytes","evidence":[{"basis":"candidate","description":"Index candidate","path":"file.txt","line_start":1,"line_end":1,"context_id":null,"read_receipt_id":original_receipt["receipt_id"]}],"remaining_gap":null}],"evidence_limits":["Sampled index and HEAD fingerprints; no snapshot isolation."],"overall_assessment":"requirements_met"});
             validate_verdict(&verdict.to_string(), &request, &reopened).unwrap();

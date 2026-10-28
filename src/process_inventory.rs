@@ -872,6 +872,40 @@ pub fn retire_pid(pid: u32) -> Result<(), MachineError> {
 /// so a locator-missing Run with any remaining registration lost it without
 /// that cleanup. Profile-wide registrations name no Run and are not this
 /// generation's.
+/// Retirement cannot adopt an actor registered to a different Run/profile.
+pub(crate) fn require_retirement_ownership(
+    run_id: Uuid,
+    processes: &[crate::darwin::ProcessCensusEntry],
+) -> Result<(), MachineError> {
+    let directory = root()?;
+    for entry in fs::read_dir(&directory).map_err(|e| unsafe_state(e.to_string()))? {
+        let path = entry.map_err(|e| unsafe_state(e.to_string()))?.path();
+        if path.extension().and_then(|v| v.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(record) = read_record_if_present(&path)? else {
+            continue;
+        };
+        if let Some(process) = record.process
+            && let Some(owned) = processes.iter().find(|p| p.pid == process.pid)
+        {
+            // A stale registration cannot claim a later PID birth. It remains
+            // retained inventory evidence and is never rewritten here.
+            if owned.birth == Some((process.start_tvsec, process.start_tvusec))
+                && owned.uid == process.uid
+                && owned.process_group_id == process.process_group_id
+                && owned.session_id == process.session_id
+                && record.run_id != Some(run_id)
+            {
+                return Err(unsafe_state(
+                    "retirement scope includes a foreign registered actor",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn run_registration_count(run_id: Uuid) -> Result<usize, MachineError> {
     let directory = root()?;
     let mut count = 0_usize;

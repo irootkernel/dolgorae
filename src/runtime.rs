@@ -16,7 +16,8 @@ pub fn caller_capabilities(
         .map(|name| {
             let home = crate::paths::DolgoraeHome::system()?;
             crate::global_profile::require_generation(&home)?;
-            crate::global_runtime::ResolvedGlobalProfile::resolve(&home, name)?.prepare(&home)
+            crate::global_runtime::ResolvedGlobalProfile::resolve(&home, name)?
+                .prepare_qualified(&home)
         })
         .transpose()?;
     let qualified = binding

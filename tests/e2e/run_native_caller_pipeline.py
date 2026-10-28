@@ -15,11 +15,11 @@ from run_live_instruction_discovery import checked_codex, executable_identity, i
 from run_native_workspace_policy_fixture import ScriptedResponses, fixture_config
 
 OPT_IN = "DOLGORAE_RUN_NATIVE_CALLER_PIPELINE"
-CODEX_VERSION = "0.159.3"
-CODEX_SHA256 = "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878"
+CODEX_VERSION = "0.164.0"
+CODEX_SHA256 = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
 
 
-def campaign(driver: Path, codex: Path) -> dict[str, object]:
+def campaign(driver: Path, codex: Path, *, default_variant: str | None = None) -> dict[str, object]:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit native caller pipeline opt-in required")
     if executable_identity(codex)["sha256"] != CODEX_SHA256:
@@ -36,8 +36,17 @@ def campaign(driver: Path, codex: Path) -> dict[str, object]:
         environment[OPT_IN] = "1"
         checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
         fixture = ScriptedResponses()
+        if default_variant is not None:
+            if default_variant not in DEFAULT_FEATURE_VARIANTS:
+                raise ValueError("unknown default-feature variant")
+            private_file(scratch / "default-feature-variant", default_variant.encode())
         for name in ("fixture-a", "fixture-b"):
-            private_file(scratch / name / "config.toml", b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n' + fixture_config(fixture.base_url))
+            config=b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n' + fixture_config(fixture.base_url)
+            if default_variant == "config-enable":
+                config += b'\n[features]\nshell_snapshot = true\n'
+            elif default_variant is None:
+                config += b'\n[features]\nshell_snapshot = false\n'
+            private_file(scratch / name / "config.toml", config)
             private_file(scratch / name / "AGENTS.md", b"Permitted isolated native Profile guidance.\n")
         private_file(scratch / "fixture-owned", b"native-caller-pipeline/v1\n")
         private_file(scratch / "home" / "AGENTS.md", b"Conflicting isolated ancestor instructions.\n")
@@ -53,6 +62,8 @@ def campaign(driver: Path, codex: Path) -> dict[str, object]:
             raise ValueError("native caller pipeline observation shape invalid")
         if (scratch / "cleanup-result").read_bytes() != b"complete\n":
             raise ValueError("native caller pipeline cleanup incomplete")
+        if default_variant is not None:
+            require_default_feature_observation(observations.get("default_feature_startup"), default_variant)
         observations.update(external_provider_requests=0, loopback_posts=fixture.posts,
                             real_account_or_credentials_used=False, executable_sha256=CODEX_SHA256,
                             codex_version=CODEX_VERSION, profile_capability_mutated=False)
@@ -71,6 +82,39 @@ def campaign(driver: Path, codex: Path) -> dict[str, object]:
                               "cleanup_complete": cleanup.is_file() and cleanup.read_bytes() == b"complete\n"}), file=sys.stderr)
 
 
+DEFAULT_FEATURE_VARIANTS = ("default", "config-enable", "argv-enable", "ordered-overrides")
+
+
+def require_default_feature_observation(value, variant: str) -> None:
+    if not isinstance(value, dict) or value.get("variant") != variant or value.get("effective_shell_snapshot") is not False or value.get("quiescent_startup") is not True:
+        raise ValueError("actual default-feature behavior unproved")
+    launch=value.get("accepted_launch", {})
+    if ("shell_snapshot" not in launch.get("disabled_features", [])
+            or value.get("recomputed_launch_digest") != launch.get("launch_contract_sha256")
+            or value.get("recomputed_server_key") != launch.get("server_key")
+            or not isinstance(value.get("actual_pid"), int) or value["actual_pid"] <= 0
+            or not isinstance(value.get("actual_command"), str) or not value["actual_command"]
+            or not isinstance(value.get("run_launch_digest"), str)
+            or value.get("shared_feature_observation", {}).get("enabled") is not False
+            or value.get("dedicated_feature_observation", {}).get("enabled") is not False
+            or value.get("shared_feature_observation", {}).get("name") != "shell_snapshot"
+            or value.get("dedicated_feature_observation", {}).get("name") != "shell_snapshot"
+            or value.get("dedicated_argv", [])[:len(launch.get("normalized_argv", []))] != launch.get("normalized_argv")):
+        raise ValueError("actual argv/accepted launch binding unproved")
+    argv=launch.get("normalized_argv", [])
+    decisions=[a == "--enable" for a,b in zip(argv,argv[1:]) if a in ("--enable","--disable") and b == "shell_snapshot"]
+    if not decisions or decisions[-1] is not False or "--disable shell_snapshot" not in value["actual_command"]:
+        raise ValueError("actual final shell_snapshot disabling unproved")
+
+
+def default_feature_campaign(driver: Path, codex: Path) -> dict[str, object]:
+    if os.environ.get(OPT_IN) != "1":
+        raise ValueError("explicit native caller pipeline opt-in required")
+    observations=[campaign(driver,codex,default_variant=v) for v in DEFAULT_FEATURE_VARIANTS]
+    return {"schema":"dolgorae.default-feature-startup/v1","variants":observations,"passed":True,
+            "external_provider_requests":0,"native_model_turns":0,"existing_quiescence_rules_unchanged":True}
+
+
 def main() -> int:
     if os.environ.get(OPT_IN) != "1":
         print("native caller pipeline requires explicit opt-in")
@@ -78,9 +122,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--driver", type=Path, required=True)
     parser.add_argument("--codex", type=Path, required=True)
+    parser.add_argument("--default-feature-startup-only", action="store_true")
     args = parser.parse_args()
     try:
-        observations = campaign(args.driver.resolve(strict=True), args.codex.resolve(strict=True))
+        selected=default_feature_campaign if args.default_feature_startup_only else campaign
+        observations = selected(args.driver.resolve(strict=True), args.codex.resolve(strict=True))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         print(json.dumps({"schema": "dolgorae.native-caller-pipeline-failure/v1", "passed": False}))
         return 1

@@ -114,8 +114,9 @@ unexpected mutation to the repository maintainers before retrying.
 campaign. Set `DOLGORAE_RUN_NATIVE_INTEGRATED_ACCEPTANCE=1` and point
 `DOLGORAE_CODEX_BIN` to the pinned Codex executable. It exercises the production
 CLI with isolated homes, Profiles, credentials, and caller workspaces, using
-at most 17 Turns and 34 loopback Responses requests, plus a separate successor
-campaign with two Turns and four requests. It never loads a real
+at most 17 Turns and 34 loopback Responses requests, plus the existing successor
+case with five Turns and 23 requests (19 base plus four required continuation
+exchanges). It never loads a real
 account or sends requests to an external provider. Its isolated Profile disables
 optional Codex plugins and verifies the captured setting so background plugin
 downloads cannot determine startup readiness. Plugin-enabled startup is outside
@@ -146,11 +147,47 @@ unchanged receipts, returned rounds and the preserved uncertain guard. Test
 hooks inject owned filesystem or SQL faults after qualified acquisition.
 Acquisition, dispatch and close use production code, including native
 qualification.
+The successor case uses three actual Primary Turns for spawn, assignment/await
+and consumer inspection/Record/Accept around the two original Writer Turns.
+Their real Root/Turn/call provenance comes through registered managed tools.
+The pinned Codex advertises those nested tools through custom `functions.exec`.
+The fixture awaits them in raw JavaScript and consumes only the correlated
+custom return and its deliberately emitted results. Outer cell IDs and test
+labels remain separate from native inner tool identity. Executor commands use
+the same carrier and require a structured terminal exit and exact output.
+Only the successor explicitly selects its declared `gpt-5.6-luna`/`low` model;
+the main program keeps omitted model/effort inputs to exercise native defaults.
+The five local dispatch-failure controls retain their acquisition/index hooks;
+the two Writer requests retain the live Writer/index check before each model
+request. The formal member captures the selected formal contract as a dependency;
+the ordinary member captures the ordinary Executor guidance without that formal
+dependency. Both retain their close and retirement checks.
+
+The remaining consumer composition uses the selected read-only Aquarium source
+archive and selected Podway executable as explicit inputs. Ordinary v3
+assignments are prepared and rendered by Aquarium's shipped helpers; ordinary
+delivery keeps its actual evidence and gaps without requiring a formal receipt.
+Declared formal v1 work retains its selected instructions, complete package and
+accepted native task bindings. Primary delivery acceptance, Podway's structural
+receipt, Action completion and an independent semantic assessment are separate
+obligations. A custom fixture Procedure alone does not qualify Aquarium.
+Supply the selected executable and archive through `--podway` and
+`--aquarium-source`, or `DOLGORAE_TEST_PODWAY_BIN` and
+`DOLGORAE_TEST_AQUARIUM_SOURCE` when invoking the existing Make target. The
+fixture checks their pinned identities and keeps extraction in its private root.
+This source-defined trace still requires frozen-candidate native qualification;
+its expected counts are not a passing runtime result.
+
 Cleanup uses the fixture's Operator to interrupt only its confirmed Profile,
 then requires process-inventory absence before removing the fixture. It does
 not project modern Runs through the frozen public-v1 adapter.
 Failures retain their owned fixture for diagnosis; they do not retry
 automatically. This campaign is outside the default gate.
+Successor failure cleanup releases managed/external members through their own
+settlement owner, including closed Runs whose membership still needs release,
+before closing the Root and retiring its Profile. It retains typed cleanup
+outcomes and requires process absence; legacy Close cannot substitute for a
+successor release.
 
 New Roles are Markdown files at `~/.dolgorae/roles/<name>/AGENTS.md`; common
 instructions come from `~/.dolgorae/home/AGENTS.md`. Treat their contents as
@@ -388,6 +425,142 @@ This section supplies planning requirements, not an install command or runtime
 authorization. The verification owner defines separately authorized host probes
 and final-pair native/real-account qualification.
 
+### Current host and runtime executable selection
+
+The private setup commands are administrative operations, not model tools:
+
+```text
+dolgorae __trusted-specialist-host owner-config-create --workspace PATH --owner-config PRIVATE_ROOT/owner.json --request PRIVATE_REQUEST --operator-fd FD --controller-fd FD
+dolgorae __trusted-specialist-host namespace-setup --owner-config PRIVATE_ROOT/owner.json --operator-fd FD --controller-fd FD
+dolgorae __trusted-specialist-host host-state-init --owner-config PRIVATE_ROOT/owner.json --operator-fd FD --controller-fd FD
+```
+
+Use an existing current-user-owned 0700 physical private root outside the
+workspace. Keep the configured Controller file and isolated native-host root
+inside it, with private permissions and no aliases. The protected request holds
+route/executable selection, owner/scope, caller references and adapter provenance;
+it contains no credential bytes. Every step requires the current Operator and
+the matching Controller. Repeating an interrupted step validates the original
+configuration/birth; inconsistent partial state requires recovery. Success is an
+exit status. Failures print only a bounded safe code, without input, paths or
+binding material. These commands do not install or launch a native host. Ordinary
+hook/delivery/lookup never complete missing setup. Host installation, configuration
+changes and actual host execution still require their own authorization.
+
+Use Codex CLI `0.164.0`
+(`d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf`) and Claude
+Code `2.1.310`
+(`ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd`) for
+TASK-077 qualification. Verify the executable hash before use and select an
+explicit absolute path. The [runtime qualification
+owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
+separates these current executable pins from the historical H1 route
+identifiers. Original accepted bindings retain their executable; missing or
+changed bytes require recovery without fallback. Generic Profile doctor probes,
+start/restart/stop and migration retain tested/unverified compatibility admission;
+exact current pins gate only new
+qualified-mechanism admissions. A failed migration restores the
+original snapshot under its durable migration owner. Installation, native
+execution and account use retain their separate authorization boundaries.
+
+### Explicit administrative member recovery
+
+If recovery reports a history or transport failure, inspect the authoritative
+member/task getters before another administrative action. A lost reply does not
+prove that settlement failed. Do not retry blindly or create a replacement task;
+retain the original accepted key and Thread/Turn. The Worker can hand its quiet
+background reader to the history command without a native wake-up RPC. A partial
+message that cannot finish within the operation budget closes the connection;
+accepted active work follows the existing outcome-unknown recovery path.
+
+
+Use the original protected owner configuration and exact accepted scope, member
+and task. Pass current Operator and owner Controller credentials by inherited
+private descriptors; keep those descriptors and paths out of model traffic.
+
+```text
+dolgorae __trusted-specialist-host member-recover --owner-config PRIVATE_ROOT/owner.json --scope-ref SCOPE --member-ref MEMBER --task-ref TASK --operator-fd FD --controller-fd FD
+```
+
+This explicit administrative call is effectful and remains separate from member-release
+convergence and close continuation. Empty stdout and exit0 mean the call completed. Errors print only the existing bounded code on stderr and
+exit4. Use the original collect/identity getters afterwards; success alone is no
+result acceptance or qualified export. If the recovery reply is lost, observe
+those getters before deciding on another explicit action. No automatic retry,
+new assignment key or replacement task is implied.
+
+Managed recovery requires original retained assignment provenance and the current
+Root owner; it never accepts model-built context or exposes a member credential.
+Missing recorded Turn remains DF-023. Ordinary terminal evidence without the
+existing reconciliation/fresh-history proof remains DF-024. Storage/integrity
+faults require restoring the original state; lost write streams retain their
+existing unavailable marker. This command neither installs nor qualifies a host
+and does not authorize unrelated native, account or consumer operations.
+
+### Private source preparation
+
+After explicit owner, namespace and host-state setup, use the same Operator
+and Controller FDs for the private preparation commands:
+
+```text
+dolgorae __trusted-specialist-host preparation-init --owner-config PRIVATE_ROOT/owner.json --operator-fd FD --controller-fd FD
+dolgorae __trusted-specialist-host provisioning-prepare --owner-config PRIVATE_ROOT/owner.json --request PRIVATE_REQUEST --output PRIVATE_OUTPUT/identity.json --operator-fd FD --controller-fd FD
+dolgorae __trusted-specialist-host assignment-prepare --owner-config PRIVATE_ROOT/owner.json --request PRIVATE_REQUEST --output PRIVATE_OUTPUT/identity.json --operator-fd FD --controller-fd FD
+dolgorae __trusted-specialist-host preparation-project --owner-config PRIVATE_ROOT/owner.json --request PRIVATE_LOOKUP --output PRIVATE_OUTPUT/identity.json --operator-fd FD --controller-fd FD
+```
+
+Requests are current-user-owned 0600 files in physical 0700 directories.
+The output directory must be separate from the protected owner root. Publication
+is exclusive; a retained identical output may be read again, while changed or
+partial output is preserved and refused. Output contains only the existing
+provisioning sources identity or accepted task identity, never private selection,
+paths, registration identifiers or credentials. A lost output does not imply
+product acceptance; projection reads the original immutable preparation.
+
+Provisioning input contains `role_name`, explicit `role`, `dependencies`,
+`selected_guidance`, the complete `profile_binding` and `admission` policy.
+Each source is tagged `kind: inline` with string `value`, or `kind: file` with
+an array of instruction-home components in `value`. Named sources contain
+`name` and `source`. No Role-name or digest-based discovery occurs.
+Assignment input contains `namespace`, canonical UUIDv7 `member_ref`, complete
+`task`, `execution_intent`, `deadline_seconds` and explicit nullable `target`
+with `kind` and optional `revision`. Its scope must be owned by the configured
+Controller; managed scope must be the configured Root/session. Projection
+lookup uses `kind: provisioning` plus `sources`, or `kind: assignment` plus
+`namespace`. Pass only the projected identity in existing facade fields.
+
+Keep original selectors and files for fresh calls. Changes after preparation
+are refused before product intent; accepted replay uses retained product bytes
+and the original receipt even after source removal or ref movement. Missing,
+foreign or corrupt preparation state requires explicit recovery, never normal
+path repair. These commands do not install host configuration, launch a host,
+admit a task or qualify consumer integration.
+
+### Native delivery and managed connection
+
+After explicit setup and source preparation, the host launches one newline stdio process and invokes the synchronous hook before each tool call:
+
+```text
+dolgorae __trusted-specialist-host host-hook --owner-config PRIVATE_ROOT/owner.json
+dolgorae __trusted-specialist-host host-mcp --owner-config PRIVATE_ROOT/owner.json
+dolgorae __trusted-specialist-host host-lookup --owner-config PRIVATE_ROOT/owner.json --session ORIGINAL_NATIVE_SESSION --call ORIGINAL_NATIVE_CALL
+dolgorae __trusted-specialist-host managed-connect --owner-config PRIVATE_ROOT/owner.json --operator-fd FD --controller-fd FD
+```
+
+Keep the owner path in private host configuration. The hook receives the original `PreToolUse` JSON on stdin and permits dispatch only after durable binding. Codex supplies the original `threadId` and `callId` in the tool-call metadata. Claude must use the dynamic `dolgorae` server; its hook output carries the opaque binding only in private updated input. The MCP process removes that carrier before checking public arguments. Never place a Controller file, owner path or binding token in model arguments. Installation and host configuration require separate authority.
+
+For initialized notifications and ping, omit params or send an object; optional `_meta` must be an object. Request metadata may contain a string or integer `progressToken`; notification metadata is an untyped dictionary. Additional protocol metadata is ignored and grants no authority. Explicit null params are invalid. Tool listing accepts metadata and returns one complete page without a cursor.
+
+MCP request IDs must be strings or integers. Null request IDs are refused before initialization or dispatch; notifications omit the ID. An error response may still use null when its request ID is unknown.
+
+The MCP session returns its supported `2025-06-18` version to a valid version proposal, then receives `notifications/initialized` before `tools/list` or `tools/call`. Only the configured external tool names are advertised. Public requests retain the 16 MiB raw and canonical allowance and frozen field limits. Invalid framing, notifications and missing native proof cannot dispatch product operations. EOF ends transport without cancelling tasks, releasing members or stopping Profiles.
+
+For managed calls, select a managed owner for the existing Root/session and run `managed-connect` under its current Root Controller and Operator. New Root Threads advertise `dolgorae_specialists_native` and
+`dolgorae_specialist_consumer` alongside the orchestration tool. Accepted
+`dolgorae_specialists` registrations retain their full public response path. Their native Worker supplies Root, Thread, Turn, tool call and generation; model scope strings must match that Root. Existing Thread tool sets are retained on reconnect; legacy Threads are not replaced. The original orchestration tool retains its behavior.
+
+After response loss, retain the native session/call and public operation key. `host-lookup` observes the original K namespace, performs a fresh R observation or reads the original S owner. A repeated ambiguous K or S call cannot start a replacement effect. Missing or inconsistent protected state requires explicit recovery. Active delegation-identity observation still requires the consistent disposition boundary; a pending-interaction placeholder cannot prove idle. Durable released identities use the existing terminal proof. Full native and consumer qualification remains required before product support is accepted.
+
 ## Planned v0.1.4 artifact and evidence handoffs
 
 The [alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md#execution-order-and-dependencies)
@@ -473,3 +646,90 @@ configuration, workspace identity, database or ledger invalidates relevant reuse
 Use authoritative lifecycle and operation lookup for mutation or recovery proof;
 a display result never proves that uncertain work is absent. Response deadlines
 bound waiting and preserve accepted effects and their original identity.
+
+The selected Codex receiver limits a reassembled WebSocket message to 64 MiB. Some full collect responses allowed by the producer exceed that limit after native JSON-string wrapping. Bounded outgoing frames preserve those responses but do not resolve this receiver compatibility gap. Treat that case as unsupported pending a reviewed resolution; do not shrink the result or infer native acceptance from sender completion.
+
+## Read-only delegation disposition
+
+Use the existing host or managed tool's `collect_external_specialist_task` or
+`collect_specialist_task` request with the original accepted member and task
+references. The corresponding `get_*_delegation_identity` request observes the
+same complete result and obtains the versioned identity proof. The protected
+owner and trusted caller scope supply authority. Copied references confer no
+authority. Each read is fresh, and its proof describes one shared instant.
+
+Pending interaction or owned work prevents an idle export. A
+`DISPOSITION_NOT_IDLE` response requires observing or awaiting the original work;
+collection does not answer an interaction or settle a task. Three source motions,
+unobservable history or cumulative budget exhaustion return `RECOVERY_REQUIRED`
+with `RecoveryNeeded` and `restore_state`. Preserve original state and use the
+owning diagnostic/recovery boundary under its existing authority. Do not delete
+state, create a new key, redispatch work or assume that a failed observation
+means the original task had no effect.
+
+The observation shares 512 MiB, 1,000,000 decoded records and 300,000 ms across
+at most three attempts, with the existing per-line limit. It never repairs or
+releases state. Full result bytes and their digest remain part of the checked
+identity; native receiver compatibility and actual consumer acceptance require
+their separate qualification.
+
+### Private consumer setup
+
+After explicit namespace and host-state setup, use the existing
+`__trusted-specialist-host consumer-init` administration entrypoint with
+`--owner-config`, `--request`, `--operator-fd` and `--controller-fd`. Both
+inherited authority carriers are required. The request is a mode-0600 JSON file
+in a physical mode-0700 directory outside the workspace. Native-only setup is
+`{"kind":"native_only"}` and opens no Podway workspace. Delegated setup uses
+`{"kind":"delegated","connection":{...}}`; the connection supplies the exact
+executable path and `sha256:` digest, contract manifest digest, physical
+worktree, workspace/session/attempt UUIDs, placement, qualified adapter ID and
+version, and permitted item IDs. Existing protected caller scope must agree.
+The connection is immutable. Ordinary calls cannot create or repair missing
+consumer state.
+
+A delegated task must retain its original complete work package as an accepted
+context. The composer verifies it against the current selected package before
+recording or accepting. Inspect original evidence, prepare with a caller-known
+request ID, inspect the frozen input, then supply the explicit `record` or
+`accept` decision. Keep that request ID for response-loss recovery. Status uses
+the original Podway key and receipt before current observation. An uncertain
+request never starts another mutation automatically. Historical success remains
+visible when current applicability becomes stale or a later read fails.
+
+Explicit external native registration selects `specialist_native` and
+`specialist_consumer` on the existing host-mcp/host-hook transport. Existing
+`specialist` registrations keep their full public response path. Native
+presentation retains every small authoritative candidate/member/receipt fact,
+including the configuration digest needed for hire or spawn. A collected result
+also supplies a task-bound inspection selection. Original pages use a compact
+ASCII header and a separate original-text block, initially at most 1024 UTF8
+bytes. Inspection does not require sequential acknowledgement. The private
+presentation preserves semantic classification and effects through later
+presentation failure.
+
+Native registration is implemented; actual selected-host model-history and
+consumer qualification remain separate acceptance obligations. The opt-in
+`tests/e2e/run_native_production_host.py` owns the original eighteen scenarios
+per selected host. Its trace-only mode executes no host. Execution binds native
+images, product/driver bytes, model configuration and each row's trace, forwards
+actual MCP negotiation, and compares current correlated next-HTTP tool results
+with independent fixture originals. Its existing opted-in executable uses the
+production host handlers and the same executable image for preparation, Worker
+control and native delivery. The ordinary CLI image is recorded separately;
+mixed-image lifecycle calls cannot qualify this path. After the writable producer
+settles, its verified owner returns the writer through the existing authorized
+release operation before fresh idle export. Limits remain 90 seconds, eight combined
+host/executor/count-token POSTs, 32 deliveries and 4 MiB per input, plus a
+separate 30-second owned cleanup. Raw observations remain private runtime data.
+
+The integrated acceptance entrypoint also accepts
+`--default-feature-startup-only`. This separate mode checks omission,
+configuration enable, raw argv enable and repeated override order against the
+accepted launch hash/key, actual process argv, shared and Dedicated native
+feature readback and unchanged quiescent startup. It does not replace the
+existing pre-disabled regression. Each variant starts and normally closes one
+Run; the full caller-pipeline mode retains the separate writer/replay/recovery
+regression. Qualified fixture cleanup selects the retained
+accepted binding and uses the existing operator-authorized non-interrupting
+stop; generic name-based Profile commands retain their generic contract.
