@@ -1626,8 +1626,26 @@ event modules validate the hash-bound persisted event representation together;
 transport modules never reconstruct authority from diagnostic text.
 
 The adapter preserves `recognized_unsupported` as a distinct Interaction
-support value. Profile model normalization rejects duplicate IDs, duplicate or
-empty effort tokens, and zero or multiple defaults before either adapter emits
+support value. Historical unsupported records stay readable. Successor
+permission/MCP requests use the existing Turn Coordinator, durable journal,
+Controller authorization and protected resolution receipts. The worker is the
+immediate decline policy owner when delegated work has no declared answer owner
+or fixed read-only policy forbids the requested authority. Public-v2 interaction
+adapters format the checked typed payloads and submit through the same semantic
+mutation path; they never manufacture child Controller credentials. Client event
+v2 and audit v3 isolate the new opened-event kind vocabulary from retained
+v1/v2 records. Activity producers redact before journal append and use the
+journal's existing append-time Writer/server observation boundary.
+
+The producer marks an unrepresentable MCP request before appending its opened
+record. Complete member observation validates the closed policy-only payload
+and reduces its actual later decision through the same request correlation as
+a form. An interrupted append sequence remains an open interaction; a marker
+never proves response delivery, terminal completion, idle disposition, or
+Writer release.
+
+Profile model normalization rejects duplicate IDs, duplicate or empty effort
+tokens, and zero or multiple defaults before either adapter emits
 a profile; `ModelCapability.is_default` is the only default-model source.
 
 Profile observation may execute the existing finite Codex version and schema

@@ -92,7 +92,7 @@ fn get(
     project::run_projection(&snapshot, &facts)
 }
 
-fn submit_operation(
+fn run_operation_context(
     identity: &domain::ControllerIdentity,
     workspace_id: &str,
     run_id: uuid::Uuid,
@@ -110,13 +110,18 @@ fn submit_operation(
     }))
 }
 
-fn submit_error(
+fn operation_error(
     mut error: MachineError,
     operation: &serde_json::Value,
     accepted: bool,
 ) -> MachineError {
+    if error.code == "CONTROLLER_MISMATCH" {
+        return error;
+    }
     let mut details = error.details.as_object().cloned().unwrap_or_default();
     details.insert("public_v2_operation".into(), operation.clone());
+    let accepted =
+        accepted || details.get("public_v2_accepted") == Some(&serde_json::Value::Bool(true));
     details.insert("public_v2_accepted".into(), accepted.into());
     details.insert("run_id".into(), operation["run_id"].clone());
     error.details = serde_json::Value::Object(details);
@@ -165,23 +170,38 @@ fn mutate(
         carrier: backend.controller(&controller(carrier))?,
         operation,
     };
-    let operation_identity = if let RunMutationOperation::Submit { request, .. } = &input.operation
-    {
-        let binding = crate::controller::load_reconciled_controller_binding(
-            &backend.home().workspace_root(&input.expected_workspace_id),
-            input.run_id,
-        )?;
-        let identity = crate::controller::authorize_controller(
-            input.run_id,
-            "run.submit",
-            &binding,
-            &input.carrier,
-        )?;
-        Some(submit_operation(
+    let keyed = match &input.operation {
+        RunMutationOperation::Submit { request, .. } => {
+            Some(("run.submit", request.idempotency_key.as_str()))
+        }
+        RunMutationOperation::PublicRespond {
+            idempotency_key, ..
+        } => Some(("run.respond", idempotency_key.as_str())),
+        _ => None,
+    };
+    let mut resolution_lookup = None;
+    let operation_identity = if let Some((verb, key)) = keyed {
+        let root = backend.home().workspace_root(&input.expected_workspace_id);
+        let binding = crate::controller::load_reconciled_controller_binding(&root, input.run_id)?;
+        let identity =
+            crate::controller::authorize_controller(input.run_id, verb, &binding, &input.carrier)?;
+        if verb == "run.respond" {
+            let run = input.run_id.to_string();
+            let namespace = crate::operation::Namespace::delegation(
+                &identity,
+                &input.expected_workspace_id,
+                Some(("run", &run)),
+                "resolve_interaction",
+                key,
+            )
+            .map_err(|r| invalid("operation", r))?;
+            resolution_lookup = Some((root, input.run_id, namespace));
+        }
+        Some(run_operation_context(
             &identity,
             &input.expected_workspace_id,
             input.run_id,
-            &request.idempotency_key,
+            key,
         )?)
     } else {
         None
@@ -195,7 +215,36 @@ fn mutate(
     };
     result
         .map_err(|error| match operation_identity.as_ref() {
-            Some(identity) => submit_error(error, identity, false),
+            Some(identity) if error.code != "CONTROLLER_MISMATCH" => {
+                let accepted = resolution_lookup
+                    .as_ref()
+                    .is_some_and(|(root, run, namespace)| {
+                        let checked = (|| {
+                            let credential = backend.controller(&controller(carrier))?;
+                            let snapshot = RunSnapshot::load(root, *run, 0)?;
+                            snapshot.authorize_current_controller(
+                                root,
+                                &credential,
+                                "run.respond",
+                            )?;
+                            let ledger = snapshot.observed_ledger(root)?;
+                            let result =
+                                crate::public_resolution::lookup(ledger.records(), namespace)
+                                    .map_err(|_| {
+                                        invalid("lookup", "resolution history is inconsistent")
+                                    })?;
+                            snapshot.authorize_current_controller(
+                                root,
+                                &credential,
+                                "run.respond",
+                            )?;
+                            Ok::<_, MachineError>(result["state"] == "accepted")
+                        })();
+                        checked.unwrap_or(false)
+                    });
+                operation_error(error, identity, accepted)
+            }
+            Some(_) => error,
             None => error,
         })
         .map(|receipt| (receipt, operation_identity))
@@ -326,9 +375,11 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         && !matches!(wire_code, "WRITER_BUSY" | "IDEMPOTENCY_CONFLICT");
     let accepted_submit =
         method == "RunService.SubmitTurn" && error.details["public_v2_accepted"] == true;
-    let accepted = accepted_start || accepted_submit;
+    let accepted_resolve = method == "InteractionService.ResolveInteraction"
+        && error.details["public_v2_accepted"] == true;
+    let accepted = accepted_start || accepted_submit || accepted_resolve;
     let unknown = mutating
-        && !accepted
+        && (!accepted || accepted_resolve)
         && matches!(
             wire_code,
             "INTERNAL_ERROR"
@@ -364,7 +415,7 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         } else {
             pb::FailureClassification::Rejected
         } as i32,
-        action: if unknown || accepted_submit {
+        action: if unknown || accepted_submit || accepted_resolve {
             pb::RequiredClientAction::ReconcileOperation
         } else if recovery {
             pb::RequiredClientAction::RecoverRun
@@ -374,7 +425,7 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
             pb::RequiredClientAction::FixRequest
         } as i32,
         retry_classification: pb::RetryClassification::Forbidden as i32,
-        recovery_classification: if unknown || accepted_submit {
+        recovery_classification: if unknown || accepted_submit || accepted_resolve {
             pb::RecoveryClassification::ReconcileRequired
         } else if recovery {
             pb::RecoveryClassification::SnapshotRequired
@@ -756,6 +807,9 @@ fn start_inner(
 }
 
 const METHODS: &[&str] = &[
+    "InteractionService.ListPendingInteractions",
+    "InteractionService.GetControllerInteraction",
+    "InteractionService.ResolveInteraction",
     "OperationService.LookupOperation",
     "RuntimeService.ListProfileDiagnostics",
     "ControllerService.VerifyController",
@@ -798,7 +852,7 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
             }
             Ok(pb::GetCapabilitiesResponse {
                 context:Some(context(backend)),dolgorae_version:env!("CARGO_PKG_VERSION").into(),
-                protocol:Some(pb::ProtocolCapabilities {rpc_protocol_version:2,minimum_client_protocol_version:2,maximum_client_protocol_version:2,machine_protocol_version:5,event_protocol_version:1,timeline_protocol_version:2,event_projection_version:2,grpc_error_detail_version:2,projection_profiles:vec![1,2]}),
+                protocol:Some(pb::ProtocolCapabilities {rpc_protocol_version:2,minimum_client_protocol_version:2,maximum_client_protocol_version:2,machine_protocol_version:5,event_protocol_version:2,timeline_protocol_version:2,event_projection_version:2,grpc_error_detail_version:2,projection_profiles:vec![1,2]}),
                 supported_methods:METHODS.iter().map(|s|(*s).into()).collect(),
                 descriptor_sha256:crate::jcs::sha256_hex(crate::protocol::PUBLIC_V2_DESCRIPTOR),
                 contract_manifest_sha256:crate::jcs::sha256_hex(include_bytes!("../docs/protocol/dolgorae-gul-consumer-v2.json")),
@@ -810,6 +864,7 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
                 native_subagents:Some(pb::NativeSubagentCapabilities {lifecycle_observation:pb::SupportState::Unverified as i32,disable_enforcement:pb::SupportState::Supported as i32,quiescence_tracking:pb::SupportState::Unverified as i32,enabled:false,safe_reason:"successor configurations disable native subagents by default; enabled configurations require a dedicated lane".into()}),
                 access_policy_transition:1,
                 independent_run_concurrency:Some(pb::IndependentRunConcurrencyCapabilities {basic_same_home_coexistence:1,storage_and_long_duration:3,resource_warning_live_dedicated:6}),
+                interactions:Some(pb::InteractionCapabilities {known_kinds:vec![1,2,3,4,5,6,7],items:(1..=7).map(|kind|pb::InteractionCapability{kind,support:if kind==6||kind==7 {pb::InteractionSupport::RecognizedUnsupported as i32}else{pb::InteractionSupport::Supported as i32}}).collect(),maximum_response_bytes:1048576,maximum_safe_payload_bytes:8388608}),
                 native_subagent_policy:pb::NativeSubagentPolicy::Disabled as i32,
                 profile_launch_mode:pb::ProfileLaunchMode::DolgoraeOwnedDirectExecutable as i32,
                 bounds:Some(pb::SuccessorBounds {captured_source_bytes:65536,dependencies:64,selected_guidance:64,source_alias_bytes:128,group_tasks:64,group_manifest_bytes:1048576,findings_per_source:64,merge_inputs:64,merged_artifact_bytes:33554432,inline_result_bytes:1048576,artifact_bytes:33554432,chunk_bytes:1048576,per_run_artifact_bytes:268435456,stream_envelopes:32,stream_bytes:4194304,stream_stall_ms:5000,timeline_page_bytes:4194304,pool_servers_max:16,dedicated_generations_max:32,action_rounds_max:32,ledger_generation_bytes:536870912,ledger_generation_records:1000000}),
@@ -862,7 +917,11 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
             let value = backend.list_profiles(old::ListProfilesRequest::default())?;
             Ok(pb::ListProfilesResponse {
                 context: Some(context(backend)),
-                items: value.items.into_iter().map(profile).collect(),
+                items: value
+                    .items
+                    .into_iter()
+                    .map(|p| profile(p, backend))
+                    .collect(),
             })
         })
     }
@@ -877,7 +936,7 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
             })?;
             Ok(pb::GetProfileResponse {
                 context: Some(context(backend)),
-                profile: value.profile.map(profile),
+                profile: value.profile.map(|p| profile(p, backend)),
             })
         })
     }
@@ -944,7 +1003,19 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
         )
     }
 }
-fn profile(p: old::ProfileProjection) -> pb::ProfileProjection {
+fn profile(p: old::ProfileProjection, backend: &dyn ModernGatewayBackend) -> pb::ProfileProjection {
+    let mut supported_interaction_kinds = p.supported_interaction_kinds.clone();
+    let qualified = crate::global_runtime::ResolvedGlobalProfile::resolve(backend.home(), &p.name)
+        .and_then(|p| p.prepare_qualified(backend.home()))
+        .is_ok_and(|p| p.caller_workspace_supported());
+    if qualified {
+        supported_interaction_kinds.extend([
+            pb::InteractionKind::PermissionRequest as i32,
+            pb::InteractionKind::McpElicitation as i32,
+        ]);
+        supported_interaction_kinds.sort_unstable();
+        supported_interaction_kinds.dedup();
+    }
     pb::ProfileProjection {
         name: p.name,
         server_key: p.server_key,
@@ -969,7 +1040,7 @@ fn profile(p: old::ProfileProjection) -> pb::ProfileProjection {
                 support: b.support,
                 mechanisms: b.mechanisms,
             }),
-        supported_interaction_kinds: p.supported_interaction_kinds,
+        supported_interaction_kinds,
         native_subagents: p.native_subagents.map(|n| pb::NativeSubagentCapabilities {
             lifecycle_observation: n.lifecycle_observation,
             disable_enforcement: n.disable_enforcement,
@@ -1108,7 +1179,7 @@ impl pb::run_service_server::RunService for GatewayTransport {
                 ..
             }) = receipt.response
             else {
-                return Err(submit_error(
+                return Err(operation_error(
                     MachineError::new(
                         "INTERNAL_ERROR",
                         "turn admission returned no receipt",
@@ -1139,7 +1210,7 @@ impl pb::run_service_server::RunService for GatewayTransport {
                     correlation_id: operation_id.to_string(),
                 })
             })()
-            .map_err(|error| submit_error(error, &operation, true))
+            .map_err(|error| operation_error(error, &operation, true))
         })
     }
     async fn interrupt_turn(
@@ -1893,10 +1964,11 @@ impl pb::operation_service_server::OperationService for GatewayTransport {
                 let kind = match pb::OperationKind::try_from(original.operation_kind) {
                     Ok(pb::OperationKind::StartRun) => "start_run",
                     Ok(pb::OperationKind::SubmitTurn) => "submit_turn",
+                    Ok(pb::OperationKind::ResolveInteraction) => "resolve_interaction",
                     _ => {
                         return Err(invalid(
                             "operation_kind",
-                            "this public lookup supports Run startup and Submit",
+                            "this public lookup supports Run startup, Submit and Resolve",
                         ));
                     }
                 };
@@ -1937,6 +2009,37 @@ impl pb::operation_service_server::OperationService for GatewayTransport {
                             &carrier,
                             &original.idempotency_key,
                         )?
+                    }
+                    (Some(pb::caller_scope::Aggregate::RunId(run)), "resolve_interaction") => {
+                        let run_id = uuid(run, "run_id")?;
+                        let snapshot = RunSnapshot::load(&root, run_id, 0)?;
+                        if snapshot.manifest.workspace_id != scope.workspace_id {
+                            return Err(invalid("caller_scope", "workspace differs"));
+                        }
+                        snapshot.authorize_current_controller(
+                            &root,
+                            &carrier,
+                            "run.lookup_operation",
+                        )?;
+                        let namespace = crate::operation::Namespace::delegation(
+                            &binding.identity,
+                            &scope.workspace_id,
+                            Some(("run", run)),
+                            "resolve_interaction",
+                            &original.idempotency_key,
+                        )
+                        .map_err(|r| invalid("operation", r))?;
+                        let ledger = snapshot.observed_ledger(&root)?;
+                        let value = crate::public_resolution::lookup(ledger.records(), &namespace)
+                            .map_err(|_| {
+                                invalid("lookup", "public resolution history is inconsistent")
+                            })?;
+                        snapshot.authorize_current_controller(
+                            &root,
+                            &carrier,
+                            "run.lookup_operation",
+                        )?;
+                        value
                     }
                     _ => {
                         return Err(invalid(
@@ -2042,6 +2145,674 @@ impl pb::operation_service_server::OperationService for GatewayTransport {
     }
 }
 
+fn interaction_summary(value: old::InteractionSummary) -> pb::InteractionSummary {
+    pb::InteractionSummary {
+        interaction_id: value.interaction_id,
+        run_id: value.run_id,
+        kind: value.kind,
+        status: value.status,
+        safe_title: value.safe_title,
+        controller_kind: value.controller_kind,
+        requires_user_escalation: value.requires_user_escalation,
+        contains_protected_input: value.contains_protected_input,
+        created_at: value.created_at,
+        expires_at: value.expires_at,
+        resolved_at: value.resolved_at,
+        state_revision: value.state_revision,
+    }
+}
+
+fn interaction_payload(
+    value: old::controller_interaction::Payload,
+) -> pb::controller_interaction::Payload {
+    use old::controller_interaction::Payload as O;
+    use pb::controller_interaction::Payload as N;
+    match value {
+        O::CommandApproval(v) => N::CommandApproval(pb::CommandApprovalInteraction {
+            title: v.title,
+            message: v.message,
+            command: v.command,
+            cwd: v.cwd.map(|p| pb::PathProjection {
+                value: p.value.map(|v| match v {
+                    old::path_projection::Value::Utf8Path(p) => {
+                        pb::path_projection::Value::Utf8Path(p)
+                    }
+                    old::path_projection::Value::OpaquePath(p) => {
+                        pb::path_projection::Value::OpaquePath(p)
+                    }
+                }),
+            }),
+            reason: v.reason,
+        }),
+        O::FileChangeApproval(v) => N::FileChangeApproval(pb::FileChangeApprovalInteraction {
+            title: v.title,
+            message: v.message,
+            reason: v.reason,
+            snapshot_sha256: v.snapshot_sha256,
+            snapshot_revision: v.snapshot_revision,
+            representation: v.representation.map(|r| match r {
+                old::file_change_approval_interaction::Representation::InlineChanges(c) => {
+                    pb::file_change_approval_interaction::Representation::InlineChanges(
+                        pb::InlineFileChanges {
+                            items: c
+                                .items
+                                .into_iter()
+                                .map(|c| pb::FileChangeProjection {
+                                    path: c.path.map(interaction_path),
+                                    kind: c.kind,
+                                    unified_diff: c.unified_diff,
+                                    move_path: c.move_path.map(interaction_path),
+                                })
+                                .collect(),
+                        },
+                    )
+                }
+                old::file_change_approval_interaction::Representation::ChangeArtifact(a) => {
+                    pb::file_change_approval_interaction::Representation::ChangeArtifact(
+                        pb::ArtifactRef {
+                            artifact_id: a.artifact_id,
+                            kind: a.kind,
+                            visibility: a.visibility,
+                            media_type: a.media_type,
+                            byte_length: a.byte_length,
+                            sha256: a.sha256,
+                        },
+                    )
+                }
+            }),
+        }),
+        O::UserInput(v) => N::UserInput(pb::UserInputInteraction {
+            is_blocking: v.is_blocking,
+            questions: v
+                .questions
+                .into_iter()
+                .map(|q| pb::InteractionQuestion {
+                    id: q.id,
+                    header: q.header,
+                    question: q.question,
+                    allows_other: q.allows_other,
+                    is_secret: q.is_secret,
+                    options: q.options.map(|o| pb::InteractionOptions {
+                        items: o
+                            .items
+                            .into_iter()
+                            .map(|o| pb::InteractionOption {
+                                label: o.label,
+                                description: o.description,
+                            })
+                            .collect(),
+                    }),
+                })
+                .collect(),
+        }),
+        O::Unsupported(v) => N::Unsupported(pb::UnsupportedInteraction {
+            original_kind: v.original_kind,
+            reason: v.reason,
+        }),
+    }
+}
+fn interaction_path(p: old::PathProjection) -> pb::PathProjection {
+    pb::PathProjection {
+        value: p.value.map(|v| match v {
+            old::path_projection::Value::Utf8Path(p) => pb::path_projection::Value::Utf8Path(p),
+            old::path_projection::Value::OpaquePath(p) => pb::path_projection::Value::OpaquePath(p),
+        }),
+    }
+}
+
+fn current_interaction(
+    root: &std::path::Path,
+    snapshot: &RunSnapshot,
+    id: &str,
+) -> Result<crate::interaction::Interaction, MachineError> {
+    let id = uuid(id, "interaction_id")?;
+    let interaction = crate::interaction::durable_interactions_from_ledger(
+        &snapshot.observed_ledger(root)?,
+        snapshot.manifest.run_id,
+        snapshot.stamp.run_state_revision,
+    )?
+    .into_iter()
+    .map(|(v, _)| crate::interaction::Interaction::parse(v, snapshot.manifest.run_id))
+    .collect::<Result<Vec<_>, _>>()?
+    .into_iter()
+    .find(|v| v.request_id == id)
+    .ok_or_else(|| {
+        MachineError::interaction_not_found(
+            snapshot.manifest.run_id,
+            id,
+            "interaction is not present in this Run",
+        )
+    })?;
+    crate::interaction_payload::validate(&interaction)?;
+    Ok(interaction)
+}
+
+fn protected_resolution_receipt(
+    root: &std::path::Path,
+    snapshot: &RunSnapshot,
+    interaction: &crate::interaction::Interaction,
+    key: &str,
+) -> Result<uuid::Uuid, MachineError> {
+    let ledger = snapshot.observed_ledger(root)?;
+    let run = snapshot.manifest.run_id.to_string();
+    let namespace = crate::operation::Namespace::delegation(
+        &snapshot.controller_authority()?.identity,
+        &snapshot.manifest.workspace_id,
+        Some(("run", &run)),
+        "resolve_interaction",
+        key,
+    )
+    .map_err(|r| invalid("resolution", r))?;
+    let lookup = crate::public_resolution::lookup(ledger.records(), &namespace)
+        .map_err(|_| invalid("resolution", "public resolution history is inconsistent"))?;
+    if lookup["state"] == "accepted" {
+        if lookup["accepted_subjects"]["interaction_ref"] != interaction.request_id.to_string() {
+            return Err(crate::turn::TurnError::IdempotencyConflict {
+                recorded: lookup["receipt"]["accepted_input_digest"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim_start_matches("sha256:")
+                    .into(),
+                observed: crate::jcs::sha256_hex(interaction.request_id.to_string().as_bytes()),
+            }
+            .into_machine_error(&crate::turn::TurnFailureContext {
+                run_id: snapshot.manifest.run_id,
+                profile: snapshot.manifest.profile.profile_name.clone(),
+                thread_id: Some(interaction.thread_id.clone()),
+                turn_id: Some(interaction.turn_id.clone()),
+            }));
+        }
+        return uuid(
+            lookup["receipt"]["operation_ref"].as_str().unwrap_or(""),
+            "resolution_receipt",
+        );
+    }
+    let mut upstream = None;
+    let mut winning = None;
+    for record in ledger.records() {
+        if !matches!(
+            record.kind(),
+            crate::audit::AuditKind::ApprovalRequested | crate::audit::AuditKind::ApprovalDecided
+        ) {
+            continue;
+        }
+        let bytes = crate::jcs::canonicalize(record.payload())
+            .map_err(|_| invalid("resolution", "invalid durable receipt"))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| invalid("resolution", "invalid durable receipt"))?;
+        if record.kind() == crate::audit::AuditKind::ApprovalRequested
+            && value["interaction"]["request_id"] == interaction.request_id.to_string()
+        {
+            upstream = value["upstream_request_id"].as_u64();
+            winning = None;
+        }
+        if record.kind() == crate::audit::AuditKind::ApprovalDecided
+            && upstream.is_some()
+            && value["request_id"]
+                .as_str()
+                .and_then(|v| v.parse::<u64>().ok())
+                == upstream
+        {
+            winning = Some(value);
+        }
+    }
+    let value = winning.ok_or_else(|| invalid("resolution", "missing durable receipt"))?;
+    if value["idempotency_key"] != key {
+        return Err(MachineError::new(
+            "INTERACTION_ALREADY_RESOLVED",
+            "interaction already has a winning response",
+            false,
+            serde_json::json!({"run_id":snapshot.manifest.run_id,"request_id":interaction.request_id}),
+        ));
+    }
+    let receipt:crate::public_resolution::Receipt=serde_json::from_value(value["public_resolution"].clone()).map_err(|_|MachineError::new("RUN_STATE_CONFLICT","historical resolution has no public operation identity; retain its original receipt",false,serde_json::json!({"run_id":snapshot.manifest.run_id,"state":snapshot.projection.lifecycle.as_str(),"operation":"run.respond"})))?;
+    receipt
+        .validate()
+        .map_err(|_| invalid("resolution", "invalid public receipt"))?;
+    let run = snapshot.manifest.run_id.to_string();
+    let namespace = crate::operation::Namespace::delegation(
+        &snapshot.controller_authority()?.identity,
+        &snapshot.manifest.workspace_id,
+        Some(("run", &run)),
+        "resolve_interaction",
+        key,
+    )
+    .map_err(|r| invalid("resolution", r))?;
+    if receipt.mutation_envelope.namespace != namespace
+        || receipt.accepted_subjects.interaction_ref.as_deref()
+            != Some(interaction.request_id.to_string().as_str())
+        || value["resolution_receipt_id"] != receipt.operation_ref.to_string()
+    {
+        return Err(invalid("resolution", "public receipt authority differs"));
+    }
+    Ok(receipt.operation_ref)
+}
+
+fn erase_answer(answer: &mut pb::InteractionAnswer) {
+    use zeroize::Zeroize as _;
+    for value in &mut answer.answers {
+        value.question_id.zeroize();
+        value.selected_labels.zeroize();
+        if let Some(text) = &mut value.text {
+            text.zeroize();
+        }
+    }
+    answer.granted_permissions.zeroize();
+    if let Some(reference) = &mut answer.protected_input {
+        reference.absolute_file_path.zeroize();
+    }
+}
+
+struct ProtectedTypedAnswer(pb::InteractionAnswer);
+impl Drop for ProtectedTypedAnswer {
+    fn drop(&mut self) {
+        erase_answer(&mut self.0);
+    }
+}
+
+fn typed_decision(
+    interaction: &crate::interaction::Interaction,
+    answer: &pb::InteractionAnswer,
+) -> Result<&'static str, MachineError> {
+    let invalid = || {
+        invalid(
+            "answer",
+            "decision or fields do not match the typed interaction",
+        )
+    };
+    let decision = match pb::InteractionDecision::try_from(answer.decision) {
+        Ok(pb::InteractionDecision::AcceptOnce) => "accept_once",
+        Ok(pb::InteractionDecision::Decline) => "decline",
+        Ok(pb::InteractionDecision::Cancel) => "cancel",
+        _ => return Err(invalid()),
+    };
+    let fields_match = match interaction.kind.as_str() {
+        "user_input" => decision == "accept_once" && answer.granted_permissions.is_empty(),
+        "mcp_elicitation" => {
+            let payload: crate::successor_interaction::McpPayload =
+                serde_json::from_value(interaction.payload.clone()).map_err(|_| invalid())?;
+            !(payload.policy_only.is_some() && decision == "accept_once")
+                && answer.granted_permissions.is_empty()
+                && (decision == "accept_once" || answer.answers.is_empty())
+        }
+        "permission_request" => {
+            answer.answers.is_empty()
+                && (decision == "accept_once" || answer.granted_permissions.is_empty())
+        }
+        "command_execution_approval" | "file_change_approval" => {
+            answer.answers.is_empty() && answer.granted_permissions.is_empty()
+        }
+        _ => false,
+    };
+    if !fields_match {
+        return Err(invalid());
+    }
+    if answer.protected_input.is_some()
+        && (decision != "accept_once"
+            || !answer.answers.is_empty()
+            || !answer.granted_permissions.is_empty()
+            || !interaction
+                .observer_summary(crate::interaction::InteractionStatus::Pending)?
+                .contains_protected_input)
+    {
+        return Err(invalid());
+    }
+    Ok(decision)
+}
+
+fn resolution_intent(
+    interaction: &crate::interaction::Interaction,
+    answer: &pb::InteractionAnswer,
+    thread_generation: u64,
+) -> Result<crate::public_resolution::Intent, MachineError> {
+    let protected = interaction
+        .observer_summary(crate::interaction::InteractionStatus::Pending)?
+        .contains_protected_input;
+    let decision = typed_decision(interaction, answer)?;
+    let answers = if protected {
+        Vec::new()
+    } else {
+        if answer.protected_input.is_some() {
+            return Err(invalid("answer", "ordinary input requires typed answers"));
+        }
+        let mut source = answer.answers.iter().collect::<Vec<_>>();
+        if interaction.kind == "user_input" {
+            let questions: crate::interaction::UserInput =
+                serde_json::from_value(interaction.payload.clone())
+                    .map_err(|_| invalid("answer", "questions are invalid"))?;
+            source.sort_by_key(|a| {
+                questions
+                    .questions
+                    .iter()
+                    .position(|q| q.id == a.question_id)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        source
+            .into_iter()
+            .map(|a| crate::public_resolution::Answer {
+                question_id: a.question_id.clone(),
+                selected_labels: a.selected_labels.clone(),
+                text: a.text.clone(),
+            })
+            .collect()
+    };
+    let intent = crate::public_resolution::Intent {
+        schema: crate::public_resolution::INTENT_SCHEMA.into(),
+        body: crate::public_resolution::Body {
+            run_ref: interaction.run_id.to_string(),
+            interaction_ref: interaction.request_id.to_string(),
+            turn_ref: interaction.turn_id.clone(),
+            thread_generation,
+            decision: decision.into(),
+            granted_permissions: if protected {
+                Vec::new()
+            } else {
+                answer.granted_permissions.clone()
+            },
+            protected_input_present: answer.protected_input.is_some(),
+            answers,
+        },
+    };
+    intent
+        .validate()
+        .map_err(|_| invalid("answer", "normalized public answer is invalid"))?;
+    Ok(intent)
+}
+
+fn typed_answer(
+    interaction: &crate::interaction::Interaction,
+    answer: pb::InteractionAnswer,
+) -> Result<serde_json::Value, MachineError> {
+    use prost::Message as _;
+    use serde_json::json;
+    let mut guard = ProtectedTypedAnswer(answer);
+    let answer = &mut guard.0;
+    if answer.encoded_len() > crate::interaction::MAX_RESPONSE_BYTES {
+        return Err(crate::interaction::response_too_large(
+            interaction.run_id,
+            &interaction.request_id.to_string(),
+            answer.encoded_len(),
+            "typed response exceeds 1 MiB",
+        ));
+    }
+    let invalid = || {
+        MachineError::new(
+            "INTERACTION_RESPONSE_INVALID",
+            "answer does not match the typed interaction",
+            false,
+            json!({"request_id":interaction.request_id}),
+        )
+    };
+    let decision = typed_decision(interaction, answer)?;
+    if let Some(reference) = answer.protected_input.take() {
+        if !answer.answers.is_empty() || !answer.granted_permissions.is_empty() {
+            return Err(invalid());
+        }
+        let bytes = crate::interaction::read_protected_answer(
+            &reference.absolute_file_path,
+            reference.maximum_bytes,
+        )?;
+        return crate::semantic::decode_response(&bytes, "protected_input");
+    }
+    match interaction.kind.as_str() {
+        "permission_request" if answer.answers.is_empty() => Ok(
+            json!({"decision":decision,"granted_permissions":std::mem::take(&mut answer.granted_permissions)}),
+        ),
+        "command_execution_approval" | "file_change_approval"
+            if answer.answers.is_empty() && answer.granted_permissions.is_empty() =>
+        {
+            Ok(json!({"decision":decision}))
+        }
+        "user_input" | "mcp_elicitation" if answer.granted_permissions.is_empty() => {
+            let mut answers = serde_json::Map::new();
+            for mut value in std::mem::take(&mut answer.answers) {
+                if value.question_id.is_empty() || answers.contains_key(&value.question_id) {
+                    return Err(invalid());
+                }
+                if let Some(text) = value.text.take() {
+                    value.selected_labels.push(text);
+                }
+                let body = if interaction.kind == "user_input" {
+                    json!({"answers":value.selected_labels})
+                } else {
+                    if value.selected_labels.len() != 1 {
+                        return Err(invalid());
+                    }
+                    json!(value.selected_labels.remove(0))
+                };
+                answers.insert(value.question_id, body);
+            }
+            if interaction.kind == "user_input" {
+                Ok(json!({"answers":answers}))
+            } else {
+                Ok(json!({"decision":decision,"answers":answers}))
+            }
+        }
+        _ => Err(invalid()),
+    }
+}
+
+#[tonic::async_trait]
+impl pb::interaction_service_server::InteractionService for GatewayTransport {
+    async fn list_pending_interactions(
+        &self,
+        request: Request<pb::ListPendingInteractionsRequest>,
+    ) -> Result<Response<pb::ListPendingInteractionsResponse>, Status> {
+        execute!(
+            self,
+            request,
+            "InteractionService.ListPendingInteractions",
+            backend,
+            {
+                let (root, snapshot) =
+                    protected_snapshot(backend, required(request.run.as_ref(), "run")?)?;
+                let page =
+                    crate::gateway_observation::list_pending(&root, &snapshot, backend.context())?;
+                Ok(pb::ListPendingInteractionsResponse {
+                    context: Some(context(backend)),
+                    items: page.items.into_iter().map(interaction_summary).collect(),
+                    stamp: Some(project::stamp(&snapshot.stamp)),
+                })
+            }
+        )
+    }
+    async fn get_controller_interaction(
+        &self,
+        request: Request<pb::GetControllerInteractionRequest>,
+    ) -> Result<Response<pb::GetControllerInteractionResponse>, Status> {
+        execute!(
+            self,
+            request,
+            "InteractionService.GetControllerInteraction",
+            backend,
+            {
+                let (root, snapshot) =
+                    protected_snapshot(backend, required(request.run.as_ref(), "run")?)?;
+                let carrier = backend.controller(&controller(required(
+                    request.controller.as_ref(),
+                    "controller",
+                )?))?;
+                snapshot.authorize_current_controller(&root, &carrier, "run.interaction.get")?;
+                let interaction = current_interaction(&root, &snapshot, &request.interaction_id)?;
+                let value = if interaction.schema_version == 1 {
+                    let value = crate::gateway_observation::get_interaction(
+                        &root,
+                        &snapshot,
+                        &request.interaction_id,
+                        &carrier,
+                        backend.context(),
+                    )?
+                    .interaction
+                    .ok_or_else(|| invalid("interaction", "missing checked interaction"))?;
+                    pb::ControllerInteraction {
+                        summary: value.summary.map(interaction_summary),
+                        response_schema_id: value.response_schema_id,
+                        stamp: Some(project::stamp(&snapshot.stamp)),
+                        payload: value.payload.map(interaction_payload),
+                        decisions: value.decisions,
+                    }
+                } else {
+                    let summary = interaction.summary(&snapshot)?;
+                    let payload = if interaction.kind == "permission_request" {
+                        let p: crate::successor_interaction::PermissionPayload =
+                            serde_json::from_value(interaction.payload.clone())
+                                .map_err(|_| invalid("payload", "invalid permission"))?;
+                        pb::controller_interaction::Payload::Permission(pb::PermissionInteraction {
+                            title: p.title,
+                            reason: p.reason,
+                            requested_permissions: p.requested_permissions,
+                        })
+                    } else {
+                        let p: crate::successor_interaction::McpPayload =
+                            serde_json::from_value(interaction.payload.clone())
+                                .map_err(|_| invalid("payload", "invalid MCP form"))?;
+                        pb::controller_interaction::Payload::McpElicitation(
+                            pb::McpElicitationInteraction {
+                                title: p.title,
+                                server_name: p.server_name,
+                                questions: p
+                                    .questions
+                                    .into_iter()
+                                    .map(|q| pb::InteractionQuestion {
+                                        id: q.id,
+                                        header: q.header,
+                                        question: q.question,
+                                        allows_other: q.is_other,
+                                        is_secret: q.is_secret,
+                                        options: q.options.map(|o| pb::InteractionOptions {
+                                            items: o
+                                                .into_iter()
+                                                .map(|o| pb::InteractionOption {
+                                                    label: o.label,
+                                                    description: o.description,
+                                                })
+                                                .collect(),
+                                        }),
+                                    })
+                                    .collect(),
+                            },
+                        )
+                    };
+                    pb::ControllerInteraction {
+                        summary: Some(interaction_summary(summary)),
+                        response_schema_id: interaction.response_schema,
+                        stamp: Some(project::stamp(&snapshot.stamp)),
+                        payload: Some(payload),
+                        decisions: vec![1, 2, 3],
+                    }
+                };
+                snapshot.authorize_current_controller(&root, &carrier, "run.interaction.get")?;
+                Ok(pb::GetControllerInteractionResponse {
+                    context: Some(context(backend)),
+                    interaction: Some(value),
+                })
+            }
+        )
+    }
+    async fn resolve_interaction(
+        &self,
+        request: Request<pb::ResolveInteractionRequest>,
+    ) -> Result<Response<pb::ResolveInteractionResponse>, Status> {
+        execute!(
+            self,
+            request,
+            "InteractionService.ResolveInteraction",
+            backend,
+            {
+                let mut request = request;
+                let mut protected_answer =
+                    ProtectedTypedAnswer(request.answer.take().unwrap_or_default());
+                let reference = required(request.run.as_ref(), "run")?;
+                let (root, snapshot) = protected_snapshot(backend, reference)?;
+                let carrier_ref = required(request.controller.as_ref(), "controller")?;
+                let carrier = backend.controller(&controller(carrier_ref))?;
+                snapshot.authorize_current_controller(&root, &carrier, "run.respond")?;
+                let operation_context = run_operation_context(
+                    &snapshot.controller_authority()?.identity,
+                    &snapshot.manifest.workspace_id,
+                    snapshot.manifest.run_id,
+                    &request.idempotency_key,
+                )?;
+                (|| {
+                let interaction = current_interaction(&root, &snapshot, &request.interaction_id)?;
+                if interaction.status == "pending"
+                    && (!interaction.pending_at(&snapshot)
+                        || request.expected_interaction_revision
+                            != snapshot.stamp.interaction_state_revision
+                        || request.expected_turn_id != interaction.turn_id
+                        || Some(request.expected_thread_generation)
+                            != snapshot.captured_effective_policy.thread_generation)
+                {
+                    return Err(MachineError::new(
+                        "INTERACTION_STALE",
+                        "interaction authority or observation changed",
+                        false,
+                        serde_json::json!({"run_id":snapshot.manifest.run_id,"request_id":interaction.request_id}),
+                    ));
+                }
+                if interaction.status == "resolved"
+                    && interaction
+                        .resolution
+                        .as_ref()
+                        .is_some_and(|v| v["contained_secret"] == true)
+                {
+                    let receipt = protected_resolution_receipt(
+                        &root,
+                        &snapshot,
+                        &interaction,
+                        &request.idempotency_key,
+                    )?;
+                    erase_answer(&mut protected_answer.0);
+                    snapshot.authorize_current_controller(&root, &carrier, "run.respond")?;
+                    let mut context = context(backend);
+                    context.operation_id = Some(receipt.to_string());
+                    return Ok(pb::ResolveInteractionResponse {
+                        context: Some(context),
+                        interaction_id: request.interaction_id,
+                        status: pb::InteractionStatus::Resolved as i32,
+                        resolution_receipt: receipt.to_string(),
+                    });
+                }
+                let intent = resolution_intent(
+                    &interaction,
+                    &protected_answer.0,
+                    request.expected_thread_generation,
+                )?;
+                let response = typed_answer(&interaction, std::mem::take(&mut protected_answer.0))?;
+                let (receipt, _) = mutate(
+                    backend,
+                    reference,
+                    carrier_ref,
+                    request.expected_run_revision,
+                    RunMutationOperation::PublicRespond {
+                        request_id: request.interaction_id.clone(),
+                        idempotency_key: request.idempotency_key,
+                        response,
+                        intent,
+                    },
+                )?;
+                let Some(crate::worker::ControlResponseV1::Responded {
+                    resolution_receipt_id: Some(id),
+                    ..
+                }) = receipt.response
+                else {
+                    return Err(MachineError::new("INTERNAL_ERROR","resolution receipt is unavailable",false,serde_json::json!({"run_id":snapshot.manifest.run_id})));
+                };
+                let mut context = context(backend);
+                context.operation_id = Some(id.to_string());
+                Ok(pb::ResolveInteractionResponse {
+                    context: Some(context),
+                    interaction_id: request.interaction_id,
+                    status: pb::InteractionStatus::Resolved as i32,
+                    resolution_receipt: id.to_string(),
+                })
+                })().map_err(|error|operation_error(error,&operation_context,false))
+            }
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2104,11 +2875,11 @@ mod tests {
         };
         let workspace = "a".repeat(64);
         let operation =
-            submit_operation(&controller, &workspace, run_id, "original-submit").unwrap();
+            run_operation_context(&controller, &workspace, run_id, "original-submit").unwrap();
         let error = crate::worker::WorkerProtocolError::Io
             .machine_error(run_id, std::path::Path::new("private-path-canary"));
         let status = error_status(
-            &submit_error(error, &operation, false),
+            &operation_error(error, &operation, false),
             "RunService.SubmitTurn",
         );
         let failed = detail(&status, "submit-transport");
@@ -2148,7 +2919,7 @@ mod tests {
         .unwrap_err();
         let accepted = detail(
             &error_status(
-                &submit_error(projection_error, &operation, true),
+                &operation_error(projection_error, &operation, true),
                 "RunService.SubmitTurn",
             ),
             "accepted-projection",
@@ -2165,6 +2936,150 @@ mod tests {
         assert_eq!(
             accepted.operation.unwrap().idempotency_key,
             "original-submit"
+        );
+    }
+
+    #[test]
+    fn resolve_errors_keep_authorized_original_operation_and_uncertainty() {
+        let run = uuid::Uuid::now_v7();
+        let identity = domain::ControllerIdentity {
+            controller_id: uuid::Uuid::now_v7(),
+            kind: domain::ControllerKind::Automation,
+            instance_id: "resolve-error".into(),
+            subject_id: None,
+            generation: 3,
+        };
+        let operation =
+            run_operation_context(&identity, &"a".repeat(64), run, "original-resolve").unwrap();
+        for (code, accepted, effect) in [
+            ("TRANSPORT_FAILURE", false, pb::EffectState::Unresolved),
+            (
+                "INTERACTION_OUTCOME_UNKNOWN",
+                true,
+                pb::EffectState::Unresolved,
+            ),
+            ("RUN_STATE_CONFLICT", true, pb::EffectState::Accepted),
+        ] {
+            let error = MachineError::new(
+                code,
+                "private-body-canary",
+                false,
+                serde_json::json!({"run_id":run}),
+            );
+            let status = error_status(
+                &operation_error(error, &operation, accepted),
+                "InteractionService.ResolveInteraction",
+            );
+            let detail = detail(&status, "resolve-recovery");
+            assert_eq!(detail.effect, effect as i32);
+            assert_eq!(
+                detail.action,
+                pb::RequiredClientAction::ReconcileOperation as i32
+            );
+            let original = detail.operation.unwrap();
+            assert_eq!(
+                original.operation_kind,
+                pb::OperationKind::ResolveInteraction as i32
+            );
+            assert_eq!(original.idempotency_key, "original-resolve");
+            assert_eq!(
+                original.caller_scope.unwrap().aggregate,
+                Some(pb::caller_scope::Aggregate::RunId(run.to_string()))
+            );
+            assert!(!format!("{status:?}").contains("private-body-canary"));
+        }
+        let error = MachineError::new(
+            "CONTROLLER_MISMATCH",
+            "refused",
+            false,
+            serde_json::json!({"run_id":run}),
+        );
+        let detail = detail(
+            &error_status(
+                &operation_error(error, &operation, false),
+                "InteractionService.ResolveInteraction",
+            ),
+            "resolve-unauthorized",
+        );
+        assert!(detail.operation.is_none());
+        assert!(detail.idempotency_key.is_none());
+    }
+
+    #[test]
+    fn policy_only_mcp_rejects_accept_before_protected_carrier_read() {
+        let raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/interaction-v2/interaction-v2-mcp-policy-only.valid.json"
+        ))
+        .unwrap();
+        let run_id = serde_json::from_value(raw["run_id"].clone()).unwrap();
+        let interaction = crate::interaction::Interaction::parse(raw, run_id).unwrap();
+        let answer = pb::InteractionAnswer {
+            decision: pb::InteractionDecision::AcceptOnce as i32,
+            protected_input: Some(pb::ProtectedInputRef {
+                absolute_file_path: "/must-not-be-read".into(),
+                maximum_bytes: 1,
+            }),
+            ..Default::default()
+        };
+        assert!(resolution_intent(&interaction, &answer, 1).is_err());
+        assert_eq!(
+            typed_answer(&interaction, answer).unwrap_err().code,
+            "INVALID_ARGUMENT"
+        );
+        for decision in [
+            pb::InteractionDecision::Decline,
+            pb::InteractionDecision::Cancel,
+        ] {
+            assert!(
+                typed_answer(
+                    &interaction,
+                    pb::InteractionAnswer {
+                        decision: decision as i32,
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn typed_user_answers_reject_unknown_decisions_and_unused_fields_before_carrier_read() {
+        let records = crate::worker::tests::response_authority_records(true);
+        let raw = crate::jcs::canonicalize(records[0].payload()).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let interaction = crate::interaction::Interaction::parse(
+            value["interaction"].clone(),
+            records[0].run_id(),
+        )
+        .unwrap();
+        for decision in [0, 2, 3, 99] {
+            let answer = pb::InteractionAnswer {
+                decision,
+                protected_input: Some(pb::ProtectedInputRef {
+                    absolute_file_path: "/must-not-be-read".into(),
+                    maximum_bytes: 1,
+                }),
+                ..Default::default()
+            };
+            assert!(resolution_intent(&interaction, &answer, 1).is_err());
+            assert_eq!(
+                typed_answer(&interaction, answer).unwrap_err().code,
+                "INVALID_ARGUMENT"
+            );
+        }
+        let answer = pb::InteractionAnswer {
+            decision: 1,
+            granted_permissions: vec!["irrelevant".into()],
+            protected_input: Some(pb::ProtectedInputRef {
+                absolute_file_path: "/must-not-be-read".into(),
+                maximum_bytes: 1,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            typed_answer(&interaction, answer).unwrap_err().code,
+            "INVALID_ARGUMENT"
         );
     }
 

@@ -9,6 +9,12 @@ development commits.
 
 ### Added
 
+- Route current permission and protected MCP forms through public-v2 Controller decisions,
+  with immediate policy declines for private ownerless or fixed read-only work.
+- Preserve protected receipt replay and historical unsupported records, and publish redacted
+  command, workspace-change and runtime-error activity from the execution journal.
+- Recover public-v2 resolution acknowledgements through the original scoped operation key.
+
 - Serve negotiated public-v2 modern Runs and Session reads with accepted provisioning and safe mixed-manifest observation.
 - Pool fixed read-only members with immutable subagent policy, bounded admission and dedicated-generation capacity diagnostics.
 

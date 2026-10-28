@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/event-delivery/v2",
+  "title": "Dolgorae successor event delivery",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "projection",
+    "replay",
+    "record"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "kind": {
+      "const": "event"
+    },
+    "projection": {
+      "enum": [
+        "minimal",
+        "operational"
+      ]
+    },
+    "replay": {
+      "type": "boolean"
+    },
+    "record": {
+      "oneOf": [
+        {
+          "$ref": "https://dolgorae.local/schema/client-event-record/v1"
+        },
+        {
+          "$ref": "https://dolgorae.local/schema/client-event-record/v2"
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "projection": {
+          "const": "minimal"
+        },
+        "record": {
+          "allOf": [
+            {
+              "$ref": "#/properties/record"
+            },
+            {
+              "properties": {
+                "type": {
+                  "enum": [
+                    "run.state_changed",
+                    "turn.state_changed",
+                    "response.final",
+                    "interaction.opened",
+                    "interaction.resolved",
+                    "runtime.error",
+                    "writer.state_changed",
+                    "recovery.required"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "projection": {
+          "const": "operational"
+        },
+        "record": {
+          "$ref": "#/properties/record"
+        }
+      }
+    }
+  ]
+}

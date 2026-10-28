@@ -804,3 +804,31 @@ No requests reach an external provider or real account. Group/50-task and final 
 load qualification remain separate later work. Failures retain the original
 fixture and cleanup result; successful cleanup retires owned Profiles before
 removing the fixture.
+
+### Current permission and MCP interactions
+
+Public-v2 clients list safe summaries, fetch the full typed request with the
+current Run Controller, and resolve it using that Controller and the captured
+request, Turn and revision. Permission grants are exact requested subsets,
+limited to contained filesystem reads or currently authorized Writer paths for
+one Turn. Supported MCP forms contain bounded string, enum or boolean fields.
+Network expansion, special/glob filesystem grants, URL elicitation and other
+unrepresentable forms receive an explicit policy decline.
+
+A disconnected direct Controller still owns its requests. A private Specialist
+with no declared answering route receives a durable typed decline during
+ingestion, without waiting for a client. Fixed read-only members also decline.
+The worker keeps draining until actual terminal evidence arrives; an interrupt
+acknowledgement or decline alone does not prove completion. An uncertain write
+retains the original recovery obligation.
+
+Permission/MCP responses and secret user input use opaque resolution receipts.
+After response loss, retry the winning key under current Controller authority
+to obtain that receipt. The provider does not compare replacement protected
+content or reopen its file. A different key cannot replace the winning response.
+Public-v2 `OperationService.LookupOperation` recovers the safe accepted
+resolution receipt by the original Run, Controller principal/generation and key.
+Historical decisions without a public operation identity remain unresolved.
+Observer summaries and push events never carry the request or answer body.
+Machine interaction/detail output and event streams select v6 when they carry
+new v2 content; retained v1 history remains readable without rewriting it.

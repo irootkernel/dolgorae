@@ -1057,6 +1057,42 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
         Ok(())
     }
 
+    pub(crate) fn append_activity_event(
+        &mut self,
+        payload: &serde_json::Value,
+        run_generation: u64,
+    ) -> Result<(), LedgerError> {
+        let Some(context) = self.event_context.clone() else {
+            return Ok(());
+        };
+        let invalid =
+            || LedgerError::InvalidEvent("safe activity lacks typed Turn provenance".into());
+        let data = serde_json::from_value(payload["data"].clone()).map_err(|_| invalid())?;
+        self.append_client_event(
+            ClientEventRecord {
+                schema_version: 1,
+                event_schema_version: 1,
+                cursor: self.next_sequence().to_string(),
+                event_id: Uuid::now_v7(),
+                timestamp: self.clock.timestamp(),
+                workspace_id: context.workspace_id,
+                run_id: self.run_id,
+                thread_id: Some(
+                    payload["thread_id"]
+                        .as_str()
+                        .ok_or_else(invalid)?
+                        .to_owned(),
+                ),
+                turn_id: Some(payload["turn_id"].as_str().ok_or_else(invalid)?.to_owned()),
+                server_key: context.server_key,
+                server_epoch: context.server_epoch,
+                data,
+            },
+            run_generation,
+            AppendDurability::Required,
+        )
+    }
+
     pub fn append_client_event(
         &mut self,
         record: ClientEventRecord,

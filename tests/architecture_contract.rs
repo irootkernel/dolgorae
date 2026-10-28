@@ -252,6 +252,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "interaction",
             &[
+                "public_resolution",
                 "audit",
                 "domain",
                 "ledger",
@@ -261,12 +262,24 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "projection",
                 "run",
                 "interaction_payload",
+                "workspace",
             ][..],
         ),
         (
             "interaction_payload",
-            &["domain", "interaction", "machine", "workspace"][..],
+            &[
+                "domain",
+                "interaction",
+                "machine",
+                "workspace",
+                "successor_interaction",
+            ][..],
         ),
+        (
+            "public_resolution",
+            &["audit", "domain", "jcs", "operation", "turn"][..],
+        ),
+        ("successor_interaction", &["interaction", "turn"][..]),
         ("cli", &[][..]),
         (
             "conformance",
@@ -768,6 +781,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "semantic",
             &[
+                "public_resolution",
                 "app_server",
                 "artifact",
                 "audit",
@@ -866,6 +880,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "turn",
             &[
+                "public_resolution",
                 "consumer_bridge",
                 "native_consumer",
                 "app_server",
@@ -887,6 +902,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "writer",
                 "host_invocation",
                 "specialist_facade",
+                "event",
+                "successor_interaction",
             ][..],
         ),
         (
@@ -931,6 +948,8 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "worker",
             &[
+                "operation",
+                "public_resolution",
                 "native_consumer",
                 "app_server",
                 "artifact",
@@ -975,6 +994,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "workspace",
                 "writer",
                 "managed_specialist",
+                "interaction",
             ][..],
         ),
         (
@@ -1156,6 +1176,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "gateway_v2",
             &[
+                "public_resolution",
                 "controller",
                 "darwin",
                 "delegation_identity",
@@ -1185,6 +1206,10 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "worker",
                 "workspace",
                 "writer",
+                "audit",
+                "interaction",
+                "interaction_payload",
+                "successor_interaction",
             ][..],
         ),
         (

@@ -1,0 +1,4236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/v014-identities/v1",
+  "title": "Dolgorae v0.1.4 closed successor identities",
+  "oneOf": [
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/role_snapshot"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/instruction_identity"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/admitted_configuration"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_task"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/mutation_envelope"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/complete_result"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/group_assignment"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/merged_findings"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_result"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/error"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/trusted_invocation_context"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/delegation_identity"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/structured_findings"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/merged_output"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/group_coverage"
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 71,
+      "x-maxUtf8Bytes": 71,
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "opaque_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "x-maxUtf8Bytes": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "uuid7": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 36,
+      "x-maxUtf8Bytes": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "safe_code": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "x-maxUtf8Bytes": 128,
+      "pattern": "^[A-Z][A-Z0-9_]*$"
+    },
+    "alias": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "x-maxUtf8Bytes": 256,
+      "pattern": "^[^/\\\\\\u0000-\\u001f\\u007f]+$"
+    },
+    "bytes_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "byte_length",
+        "sha256"
+      ],
+      "properties": {
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sha256": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        }
+      }
+    },
+    "named_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "content"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/alias"
+        },
+        "content": {
+          "allOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+            },
+            {
+              "properties": {
+                "byte_length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65536
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "instruction_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "digest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.instruction-identity/v1"
+        },
+        "digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        }
+      }
+    },
+    "context_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "identity",
+        "content",
+        "media_type"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "accepted_context",
+            "artifact",
+            "review_target"
+          ]
+        },
+        "identity": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "content": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        }
+      }
+    },
+    "image_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content",
+        "media_type",
+        "detail"
+      ],
+      "properties": {
+        "content": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        },
+        "media_type": {
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif"
+          ]
+        },
+        "detail": {
+          "enum": [
+            "auto",
+            "low",
+            "high"
+          ]
+        }
+      }
+    },
+    "change_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "path",
+        "old_path",
+        "before",
+        "after",
+        "before_mode",
+        "after_mode"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "add",
+            "modify",
+            "delete",
+            "rename"
+          ]
+        },
+        "path": {
+          "$ref": "https://dolgorae.local/schema/review-target/v2#/$defs/safe_relative_path"
+        },
+        "old_path": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/review-target/v2#/$defs/safe_relative_path"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "before": {
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+                },
+                {
+                  "properties": {
+                    "byte_length": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 8388608
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "after": {
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+                },
+                {
+                  "properties": {
+                    "byte_length": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 8388608
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "before_mode": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "after_mode": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "add"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "old_path": {
+                "const": null
+              },
+              "before": {
+                "const": null
+              },
+              "before_mode": {
+                "const": null
+              },
+              "after": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "delete"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "old_path": {
+                "const": null
+              },
+              "after": {
+                "const": null
+              },
+              "after_mode": {
+                "const": null
+              },
+              "before": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "modify"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "old_path": {
+                "const": null
+              },
+              "before": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+              },
+              "after": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "rename"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "old_path": {
+                "$ref": "https://dolgorae.local/schema/review-target/v2#/$defs/safe_relative_path"
+              },
+              "before": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+              },
+              "after": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "scope_kind": {
+      "enum": [
+        "external_engagement",
+        "orchestrated_session",
+        "workspace",
+        "run",
+        "profile"
+      ]
+    },
+    "result_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope_kind",
+        "scope_ref",
+        "worker_ref",
+        "task_ref",
+        "role_snapshot_digest",
+        "agent_configuration_digest",
+        "accepted_task_digest"
+      ],
+      "properties": {
+        "scope_kind": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/scope_kind"
+        },
+        "scope_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "worker_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "task_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "role_snapshot_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "agent_configuration_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "accepted_task_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        }
+      }
+    },
+    "role_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "role_body",
+        "dependencies",
+        "selected_guidance"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.role-snapshot/v1"
+        },
+        "role_body": {
+          "allOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+            },
+            {
+              "properties": {
+                "byte_length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65536
+                }
+              }
+            }
+          ]
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/named_source"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "selected_guidance": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/named_source"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      },
+      "x-invariants": [
+        "All source content is nonempty valid UTF-8 without NUL. Dependencies sort by unique UTF-8 alias; selected guidance preserves explicit order and unique aliases."
+      ],
+      "x-aggregateSourceByteLimit": 65536
+    },
+    "instruction_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "core_version",
+        "core",
+        "common",
+        "role_snapshot_digest",
+        "dependency_order",
+        "guidance_order",
+        "composition_version",
+        "composition"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.instruction-identity/v1"
+        },
+        "core_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "core": {
+          "allOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+            },
+            {
+              "properties": {
+                "byte_length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              }
+            }
+          ]
+        },
+        "common": {
+          "allOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+            },
+            {
+              "properties": {
+                "byte_length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65536
+                }
+              }
+            }
+          ]
+        },
+        "role_snapshot_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "dependency_order": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/alias"
+          },
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "guidance_order": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/alias"
+          },
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "composition_version": {
+          "const": "core-common-role-dependencies-guidance-lf2/v1"
+        },
+        "composition": {
+          "allOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+            },
+            {
+              "properties": {
+                "byte_length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              }
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "Core, common, Role, dependencies and guidance are joined with exactly two LF bytes. Accepted source ceiling excludes core/separators. Source order must exactly match the retained Role snapshot."
+      ],
+      "x-aggregateSourceByteLimit": 65536
+    },
+    "admitted_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "profile_binding_schema",
+        "profile_binding_digest",
+        "model",
+        "effort",
+        "purpose_kind",
+        "purpose_label",
+        "required_capabilities",
+        "execution_lane",
+        "requested_access",
+        "required_assurance",
+        "native_subagent_policy",
+        "instruction_identity_digest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.admitted-configuration/v1"
+        },
+        "profile_binding_schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "profile_binding_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
+        "purpose_kind": {
+          "enum": [
+            "interactive",
+            "planning",
+            "implementation",
+            "review",
+            "research",
+            "discussion",
+            "workflow_stage",
+            "other"
+          ]
+        },
+        "purpose_label": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-maxUtf8Bytes": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required_capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "x-maxUtf8Bytes": 128
+          },
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "execution_lane": {
+          "enum": [
+            "dedicated",
+            "shared_readonly"
+          ]
+        },
+        "requested_access": {
+          "enum": [
+            "read_only",
+            "canonical_workspace_write"
+          ]
+        },
+        "required_assurance": {
+          "enum": [
+            "best_effort_personal_alpha",
+            "verified_thread_scoped_control",
+            "strong_process_containment"
+          ]
+        },
+        "native_subagent_policy": {
+          "enum": [
+            "enabled",
+            "disabled"
+          ]
+        },
+        "instruction_identity_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "execution_lane": {
+                "const": "shared_readonly"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "requested_access": {
+                "const": "read_only"
+              },
+              "native_subagent_policy": {
+                "const": "disabled"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "accepted_task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "purpose",
+        "task_body_schema",
+        "task_body",
+        "contexts",
+        "images",
+        "expected_output_schema",
+        "execution_intent",
+        "admitted_model",
+        "admitted_effort",
+        "role_snapshot_digest",
+        "agent_configuration_digest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.accepted-task/v1"
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "x-maxUtf8Bytes": 64
+        },
+        "task_body_schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "task_body": {
+          "allOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+            },
+            {
+              "properties": {
+                "byte_length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              }
+            }
+          ]
+        },
+        "contexts": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/context_ref"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/image_ref"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "expected_output_schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "execution_intent": {
+          "enum": [
+            "read_only",
+            "canonical_workspace_write"
+          ]
+        },
+        "admitted_model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "admitted_effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
+        "role_snapshot_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "agent_configuration_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        }
+      }
+    },
+    "mutation_envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "request_schema",
+        "operation_kind",
+        "workspace_ref",
+        "scope_kind",
+        "scope_ref",
+        "controller_principal",
+        "controller_generation",
+        "idempotency_key",
+        "trusted_invocation_ref",
+        "request_body"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.mutation-envelope/v1"
+        },
+        "request_schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "operation_kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
+        "workspace_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "scope_kind": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/scope_kind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "controller_principal": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "controller_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "trusted_invocation_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_body": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope_kind": {
+                "const": null
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scope_ref": {
+                "const": null
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "scope_ref": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "submit_turn"
+              }
+            },
+            "required": [
+              "operation_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "scope_kind": {
+                "const": "run"
+              },
+              "scope_ref": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+              }
+            }
+          }
+        }
+      ],
+      "x-invariants": [
+        "Protected interaction answers, their hashes, Controller secret bytes, expected revision and transport IDs are excluded. MCP requires trusted_invocation_ref supplied outside model arguments."
+      ]
+    },
+    "complete_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "source",
+        "terminal_outcome",
+        "final_response",
+        "structured_output_schema",
+        "structured_output",
+        "changes",
+        "attachments",
+        "safe_failure_code"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.complete-result/v1"
+        },
+        "source": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/result_source"
+        },
+        "terminal_outcome": {
+          "enum": [
+            "completed",
+            "failed",
+            "cancelled",
+            "expired"
+          ]
+        },
+        "final_response": {
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+                },
+                {
+                  "properties": {
+                    "byte_length": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 33554432
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structured_output_schema": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "x-maxUtf8Bytes": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structured_output": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/change_ref"
+          },
+          "minItems": 0,
+          "maxItems": 20000
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/context_ref"
+          },
+          "minItems": 0,
+          "maxItems": 20000
+        },
+        "safe_failure_code": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/safe_code"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "terminal_outcome": {
+                "const": "completed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "safe_failure_code": {
+                "const": null
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "structured_output_schema": {
+                "const": null
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "structured_output": {
+                "const": null
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "structured_output": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+              }
+            }
+          }
+        }
+      ],
+      "x-limits": {
+        "inline_final_response_bytes": 1048576,
+        "final_response_artifact_bytes": 33554432,
+        "individual_change_artifact_bytes": 8388608,
+        "artifact_chunk_bytes": 1048576,
+        "per_run_artifact_bytes": 268435456
+      },
+      "x-invariants": [
+        "Only authoritative terminal acceptance creates this identity. References identify complete validated bytes; previews never substitute. Changes sort by path/old_path/kind; attachments sort by kind/identity."
+      ]
+    },
+    "group_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_key",
+        "role_snapshot_digest",
+        "agent_configuration_digest",
+        "accepted_task_digest"
+      ],
+      "properties": {
+        "entry_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "role_snapshot_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "agent_configuration_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "accepted_task_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        }
+      }
+    },
+    "group_assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "scope_kind",
+        "scope_ref",
+        "entries"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.group-assignment/v1"
+        },
+        "scope_kind": {
+          "enum": [
+            "external_engagement",
+            "orchestrated_session"
+          ]
+        },
+        "scope_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/group_entry"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        }
+      },
+      "x-maxEncodedBytes": 1048576,
+      "x-invariants": [
+        "Entries sort by unique UTF-8 entry_key. Complete encoded manifest is at most 1 MiB; accepted before any dispatch."
+      ]
+    },
+    "merged_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_key",
+        "worker_ref",
+        "task_ref",
+        "role_snapshot_digest",
+        "agent_configuration_digest",
+        "accepted_task_digest",
+        "state",
+        "result_digest",
+        "safe_failure_code"
+      ],
+      "properties": {
+        "entry_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "worker_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role_snapshot_digest": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agent_configuration_digest": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "accepted_task_digest": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "completed",
+            "failed",
+            "cancelled",
+            "expired",
+            "unknown",
+            "missing"
+          ]
+        },
+        "result_digest": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "safe_failure_code": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/safe_code"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "unknown",
+                  "missing"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result_digest": {
+                "const": null
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "result_digest": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "completed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "safe_failure_code": {
+                "const": null
+              }
+            }
+          }
+        }
+      ]
+    },
+    "merged_findings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "algorithm",
+        "group_assignment_digest",
+        "sources",
+        "merged_output"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.merged-findings/v1"
+        },
+        "algorithm": {
+          "const": "merge-exact-findings-v1"
+        },
+        "group_assignment_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/merged_source"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "merged_output": {
+          "allOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+            },
+            {
+              "properties": {
+                "byte_length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 33554432
+                }
+              }
+            }
+          ]
+        }
+      },
+      "x-maxContentBytes": 33554432,
+      "x-invariants": [
+        "Sources sort by unique entry_key. Unknown/missing/failed sources remain coverage. No model call or free-text similarity establishes equivalence."
+      ]
+    },
+    "lookup_namespace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_principal",
+        "controller_generation",
+        "workspace_ref",
+        "scope_kind",
+        "scope_ref",
+        "operation_kind",
+        "idempotency_key"
+      ],
+      "properties": {
+        "controller_principal": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "controller_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "workspace_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "scope_kind": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/scope_kind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation_kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        }
+      }
+    },
+    "accepted_subjects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_ref",
+        "member_ref",
+        "task_ref",
+        "group_ref",
+        "result_ref",
+        "merge_ref",
+        "engagement_ref",
+        "maintenance_ref",
+        "provisioning_ref",
+        "turn_ref",
+        "interaction_ref"
+      ],
+      "properties": {
+        "run_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "member_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "group_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "merge_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "engagement_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maintenance_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provisioning_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turn_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "interaction_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "operation_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_ref",
+        "namespace",
+        "accepted_input_digest",
+        "accepted_subjects",
+        "receipt_digest",
+        "accepted_revision",
+        "result_digest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.operation-receipt/v1"
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "namespace": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_namespace"
+        },
+        "accepted_input_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "accepted_subjects": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/receipt_subjects"
+        },
+        "receipt_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "accepted_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "result_digest": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "properties": {
+            "namespace": {
+              "properties": {
+                "operation_kind": {
+                  "enum": [
+                    "start_run",
+                    "submit_turn",
+                    "fork_run",
+                    "create_write_continuation",
+                    "resolve_interaction",
+                    "install_provisioning",
+                    "open_external_engagement",
+                    "hire_external_specialist",
+                    "assign_external_specialist_task",
+                    "spawn_specialist",
+                    "assign_specialist_task",
+                    "assign_group",
+                    "merge_group_results",
+                    "assign_synthesis"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "start_run"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "run_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "submit_turn"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "run_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  },
+                  "turn_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "fork_run"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "run_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "create_write_continuation"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "run_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "resolve_interaction"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "run_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  },
+                  "turn_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  },
+                  "interaction_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "install_provisioning"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "provisioning_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "open_external_engagement"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "engagement_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "hire_external_specialist"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "member_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "assign_external_specialist_task"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "task_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "spawn_specialist"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "member_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "assign_specialist_task"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "task_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "assign_group"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "group_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "merge_group_results"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "merge_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "assign_synthesis"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "task_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "x-invariants": [
+        "Receipt and lookup namespace, operation_ref, accepted_input_digest and accepted_subjects are exact equal retained facts; no reconstructed inputs or foreign subject substitution."
+      ]
+    },
+    "lookup_accepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "namespace",
+        "state",
+        "operation_ref",
+        "accepted_input_digest",
+        "receipt",
+        "accepted_subjects",
+        "current_outcome",
+        "result_ref",
+        "result_digest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.operation-lookup/v1"
+        },
+        "namespace": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_namespace"
+        },
+        "state": {
+          "const": "accepted"
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "accepted_input_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "receipt": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"
+        },
+        "accepted_subjects": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/receipt_subjects"
+        },
+        "current_outcome": {
+          "enum": [
+            "pending",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+            "expired",
+            "unknown"
+          ]
+        },
+        "result_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result_digest": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "properties": {
+            "namespace": {
+              "properties": {
+                "operation_kind": {
+                  "enum": [
+                    "start_run",
+                    "submit_turn",
+                    "fork_run",
+                    "create_write_continuation",
+                    "resolve_interaction",
+                    "install_provisioning",
+                    "open_external_engagement",
+                    "hire_external_specialist",
+                    "assign_external_specialist_task",
+                    "spawn_specialist",
+                    "assign_specialist_task",
+                    "assign_group",
+                    "merge_group_results",
+                    "assign_synthesis"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "start_run"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "run_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "submit_turn"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "run_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  },
+                  "turn_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "fork_run"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "run_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "create_write_continuation"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "run_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "resolve_interaction"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "run_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  },
+                  "turn_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  },
+                  "interaction_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "install_provisioning"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "provisioning_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "open_external_engagement"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "engagement_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "hire_external_specialist"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "member_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "assign_external_specialist_task"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "task_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "spawn_specialist"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "member_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "assign_specialist_task"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "task_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "assign_group"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "group_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "merge_group_results"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "merge_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "namespace": {
+                "properties": {
+                  "operation_kind": {
+                    "const": "assign_synthesis"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "accepted_subjects": {
+                "properties": {
+                  "task_ref": {
+                    "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "x-invariants": [
+        "Receipt and lookup namespace, operation_ref, accepted_input_digest and accepted_subjects are exact equal retained facts; no reconstructed inputs or foreign subject substitution."
+      ]
+    },
+    "lookup_not_accepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "namespace",
+        "state",
+        "operation_ref",
+        "input_digest",
+        "refusal_code",
+        "durable_refusal_revision",
+        "exact_key_retry_permitted"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.operation-lookup/v1"
+        },
+        "namespace": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_namespace"
+        },
+        "state": {
+          "const": "not_accepted"
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "input_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "refusal_code": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/safe_code"
+        },
+        "durable_refusal_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "exact_key_retry_permitted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "lookup_unresolved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "namespace",
+        "state",
+        "operation_ref",
+        "known_subjects",
+        "effect",
+        "required_action"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.operation-lookup/v1"
+        },
+        "namespace": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_namespace"
+        },
+        "state": {
+          "const": "unresolved"
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "known_subjects": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_subjects"
+        },
+        "effect": {
+          "const": "unresolved"
+        },
+        "required_action": {
+          "enum": [
+            "reconcile_operation",
+            "recover_run",
+            "restore_state",
+            "resume_maintenance"
+          ]
+        }
+      }
+    },
+    "absence_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authoritative",
+        "complete",
+        "retained_namespace_generation",
+        "durable_watermark",
+        "tombstones_checked",
+        "matching_operation",
+        "matching_tombstone"
+      ],
+      "properties": {
+        "authoritative": {
+          "const": true
+        },
+        "complete": {
+          "const": true
+        },
+        "retained_namespace_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "durable_watermark": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "tombstones_checked": {
+          "const": true
+        },
+        "matching_operation": {
+          "const": false
+        },
+        "matching_tombstone": {
+          "const": false
+        }
+      }
+    },
+    "lookup_absent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "namespace",
+        "state",
+        "proof"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.operation-lookup/v1"
+        },
+        "namespace": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_namespace"
+        },
+        "state": {
+          "const": "absent"
+        },
+        "proof": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/absence_proof"
+        }
+      }
+    },
+    "lookup_result": {
+      "oneOf": [
+        {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_accepted"
+        },
+        {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_not_accepted"
+        },
+        {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_unresolved"
+        },
+        {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_absent"
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "code",
+        "operation_kind",
+        "operation_ref",
+        "effect",
+        "classification",
+        "required_action",
+        "retry_new_key"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.successor-error/v1"
+        },
+        "code": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/safe_code"
+        },
+        "operation_kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
+        "operation_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effect": {
+          "enum": [
+            "none",
+            "accepted",
+            "unresolved"
+          ]
+        },
+        "classification": {
+          "enum": [
+            "Rejected",
+            "RetrySameKey",
+            "Unknown",
+            "RecoveryNeeded"
+          ]
+        },
+        "required_action": {
+          "enum": [
+            "fix_request",
+            "lookup_original_key",
+            "replay_same_key",
+            "reconcile_operation",
+            "recover_run",
+            "restore_state",
+            "renegotiate",
+            "resume_maintenance",
+            "none"
+          ]
+        },
+        "retry_new_key": {
+          "const": false
+        },
+        "subjects": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/error_subjects"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "const": "Rejected"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "effect": {
+                "const": "none"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "const": "Unknown"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "effect": {
+                "const": "unresolved"
+              },
+              "required_action": {
+                "enum": [
+                  "lookup_original_key",
+                  "reconcile_operation",
+                  "restore_state"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "const": "RetrySameKey"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "required_action": {
+                "const": "replay_same_key"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "const": "RecoveryNeeded"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "required_action": {
+                "enum": [
+                  "reconcile_operation",
+                  "recover_run",
+                  "restore_state",
+                  "resume_maintenance"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "x-invariants": [
+        "Authorized known subject identities are retained independently of a keyed operation reference. State-based mutations recover the same task/member/engagement/maintenance target without fabricating an idempotency key. Missing malformed mutation details remain Unknown under client policy."
+      ]
+    },
+    "error_subjects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_ref",
+        "member_ref",
+        "task_ref",
+        "group_ref",
+        "result_ref",
+        "merge_ref",
+        "engagement_ref",
+        "maintenance_ref",
+        "provisioning_ref"
+      ],
+      "properties": {
+        "run_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "member_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "group_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "merge_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "engagement_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maintenance_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provisioning_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turn_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "interaction_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "trusted_invocation_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "invocation_ref",
+        "host_route",
+        "state_generation",
+        "accepted_public_input_digest",
+        "native_event_digest",
+        "server_binding",
+        "tool_binding"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.trusted-invocation-context/v1"
+        },
+        "invocation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "host_route": {
+          "enum": [
+            "codex-0.160.0",
+            "claude-code-2.1.295"
+          ]
+        },
+        "state_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "accepted_public_input_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "native_event_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "server_binding": {
+          "const": "dolgorae"
+        },
+        "tool_binding": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        }
+      },
+      "x-invariants": [
+        "Created by protected native hook before dispatch; not model-supplied. Opaque capability bytes are never present in this safe record. Missing/corrupt state cannot be recreated by delivery/lookup."
+      ]
+    },
+    "caller_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_ref",
+        "podway_workspace_ref",
+        "podway_session_ref",
+        "podway_attempt_ref",
+        "delegated_placement_ref",
+        "max_rounds"
+      ],
+      "properties": {
+        "binding_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "podway_workspace_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "podway_session_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "podway_attempt_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "delegated_placement_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "max_rounds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        }
+      }
+    },
+    "disposition_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "observed_after_result_digest",
+        "membership_revision",
+        "workload_revision",
+        "running",
+        "queued",
+        "claimed",
+        "dispatching",
+        "unresolved",
+        "pending_interaction",
+        "cleanup_pending",
+        "release_receipt"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "idle",
+            "released"
+          ]
+        },
+        "observed_after_result_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "membership_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "workload_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "running": {
+          "const": 0
+        },
+        "queued": {
+          "const": 0
+        },
+        "claimed": {
+          "const": 0
+        },
+        "dispatching": {
+          "const": 0
+        },
+        "unresolved": {
+          "const": 0
+        },
+        "pending_interaction": {
+          "const": false
+        },
+        "cleanup_pending": {
+          "const": false
+        },
+        "release_receipt": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/member_release_proof"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "released"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "release_receipt": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/member_release_proof"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "release_receipt": {
+                "const": null
+              }
+            }
+          }
+        }
+      ]
+    },
+    "external_delegation_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "mapping_contract",
+        "adapter_id",
+        "adapter_version",
+        "binding_ref",
+        "primary_host",
+        "scope_kind",
+        "scope_ref",
+        "supervisor_ref",
+        "worker_ref",
+        "task_ref",
+        "role_ref",
+        "role_body_sha256",
+        "role_body_byte_length",
+        "role_snapshot_digest",
+        "instruction_identity_digest",
+        "agent_configuration_digest",
+        "accepted_task_digest",
+        "result_digest",
+        "complete_result",
+        "caller_scope",
+        "rounds_used",
+        "accepted_assignments",
+        "unresolved_assignments",
+        "worker_disposition",
+        "disposition_proof"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.delegation-identity/v1"
+        },
+        "mapping_contract": {
+          "const": "dolgorae.podway-external/v1"
+        },
+        "adapter_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
+        "adapter_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
+        "binding_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "primary_host": {
+          "const": "external"
+        },
+        "scope_kind": {
+          "const": "external_engagement"
+        },
+        "scope_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "supervisor_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "worker_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "task_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "role_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "role_body_sha256": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "x-maxUtf8Bytes": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "role_body_byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "role_snapshot_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "instruction_identity_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "agent_configuration_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "accepted_task_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "result_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "complete_result": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/complete_result"
+        },
+        "caller_scope": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/caller_scope"
+        },
+        "rounds_used": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "accepted_assignments": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "unresolved_assignments": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "worker_disposition": {
+          "enum": [
+            "idle",
+            "released"
+          ]
+        },
+        "disposition_proof": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/disposition_proof"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "worker_disposition": {
+                "const": "idle"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "disposition_proof": {
+                "properties": {
+                  "state": {
+                    "const": "idle"
+                  },
+                  "release_receipt": {
+                    "const": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "worker_disposition": {
+                "const": "released"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "disposition_proof": {
+                "properties": {
+                  "state": {
+                    "const": "released"
+                  },
+                  "release_receipt": {
+                    "allOf": [
+                      {
+                        "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/member_release_proof"
+                      },
+                      {
+                        "properties": {
+                          "operation_kind": {
+                            "const": "release_external_specialist"
+                          },
+                          "scope_kind": {
+                            "const": "external_engagement"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "managed_delegation_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "mapping_contract",
+        "adapter_id",
+        "adapter_version",
+        "binding_ref",
+        "primary_host",
+        "scope_kind",
+        "scope_ref",
+        "supervisor_ref",
+        "worker_ref",
+        "task_ref",
+        "role_ref",
+        "role_body_sha256",
+        "role_body_byte_length",
+        "role_snapshot_digest",
+        "instruction_identity_digest",
+        "agent_configuration_digest",
+        "accepted_task_digest",
+        "result_digest",
+        "complete_result",
+        "caller_scope",
+        "rounds_used",
+        "accepted_assignments",
+        "unresolved_assignments",
+        "worker_disposition",
+        "disposition_proof"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.delegation-identity/v1"
+        },
+        "mapping_contract": {
+          "const": "dolgorae.podway-managed/v1"
+        },
+        "adapter_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
+        "adapter_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-maxUtf8Bytes": 128
+        },
+        "binding_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "primary_host": {
+          "const": "managed"
+        },
+        "scope_kind": {
+          "const": "orchestrated_session"
+        },
+        "scope_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "supervisor_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "worker_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "task_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "role_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "role_body_sha256": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "x-maxUtf8Bytes": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "role_body_byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "role_snapshot_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "instruction_identity_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "agent_configuration_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "accepted_task_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "result_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "complete_result": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/complete_result"
+        },
+        "caller_scope": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/caller_scope"
+        },
+        "rounds_used": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "accepted_assignments": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "unresolved_assignments": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "worker_disposition": {
+          "enum": [
+            "idle",
+            "released"
+          ]
+        },
+        "disposition_proof": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/disposition_proof"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "worker_disposition": {
+                "const": "idle"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "disposition_proof": {
+                "properties": {
+                  "state": {
+                    "const": "idle"
+                  },
+                  "release_receipt": {
+                    "const": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "worker_disposition": {
+                "const": "released"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "disposition_proof": {
+                "properties": {
+                  "state": {
+                    "const": "released"
+                  },
+                  "release_receipt": {
+                    "allOf": [
+                      {
+                        "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/member_release_proof"
+                      },
+                      {
+                        "properties": {
+                          "operation_kind": {
+                            "const": "release_specialist"
+                          },
+                          "scope_kind": {
+                            "const": "orchestrated_session"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "delegation_identity": {
+      "oneOf": [
+        {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/external_delegation_identity"
+        },
+        {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/managed_delegation_identity"
+        }
+      ],
+      "x-invariants": [
+        "All fields are executor-accepted facts. rounds_used=accepted_assignments+unresolved_assignments\u2264caller_scope.max_rounds across the entire scope. Result and disposition facts must agree; disposition proof is acquired after final result under owning serialization. Primary semantic acceptance and Podway structural acceptance are separate."
+      ]
+    },
+    "await_predicate": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "any",
+                "all"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "k"
+          ],
+          "properties": {
+            "kind": {
+              "const": "k"
+            },
+            "k": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            }
+          }
+        }
+      ],
+      "x-invariants": [
+        "k must not exceed accepted group size; timeout observes without cancellation."
+      ]
+    },
+    "evidence_ref": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "commit",
+            "blob",
+            "path",
+            "line_start",
+            "line_end"
+          ],
+          "properties": {
+            "kind": {
+              "const": "git_blob"
+            },
+            "commit": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "x-maxUtf8Bytes": 64,
+              "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+            },
+            "blob": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "x-maxUtf8Bytes": 64,
+              "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+            },
+            "path": {
+              "$ref": "https://dolgorae.local/schema/review-target/v2#/$defs/safe_relative_path"
+            },
+            "line_start": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "line_end": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "object"
+          ],
+          "properties": {
+            "kind": {
+              "const": "git_object"
+            },
+            "object": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "x-maxUtf8Bytes": 64,
+              "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "identity",
+            "content"
+          ],
+          "properties": {
+            "kind": {
+              "const": "accepted_context"
+            },
+            "identity": {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            "content": {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "url",
+            "content"
+          ],
+          "properties": {
+            "kind": {
+              "const": "url"
+            },
+            "url": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "x-maxUtf8Bytes": 4096,
+              "format": "uri"
+            },
+            "content": {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+            }
+          }
+        }
+      ]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding_key",
+        "claim",
+        "kind",
+        "stance",
+        "confidence",
+        "evidence",
+        "covered_questions",
+        "limitations"
+      ],
+      "properties": {
+        "finding_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "claim": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192,
+          "x-maxUtf8Bytes": 8192
+        },
+        "kind": {
+          "enum": [
+            "defect",
+            "requirement",
+            "risk",
+            "observation"
+          ]
+        },
+        "stance": {
+          "enum": [
+            "supports",
+            "opposes",
+            "neutral"
+          ]
+        },
+        "confidence": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/evidence_ref"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "covered_questions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "x-maxUtf8Bytes": 128
+          },
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-maxUtf8Bytes": 4096
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      }
+    },
+    "structured_findings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "findings",
+        "covered_questions",
+        "limitations"
+      ],
+      "properties": {
+        "schema": {
+          "const": "structured_findings_v1"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/finding"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "covered_questions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "x-maxUtf8Bytes": 128
+          },
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-maxUtf8Bytes": 4096
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      }
+    },
+    "merged_finding_variant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding",
+        "source_entry_keys"
+      ],
+      "properties": {
+        "finding": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/finding"
+        },
+        "source_entry_keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "x-maxUtf8Bytes": 256
+          },
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true
+        }
+      }
+    },
+    "merged_finding_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding_key",
+        "variants",
+        "conflict"
+      ],
+      "properties": {
+        "finding_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/merged_finding_variant"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "conflict": {
+          "type": "boolean"
+        }
+      }
+    },
+    "merged_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "algorithm",
+        "groups",
+        "coverage"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.merged-findings-output/v1"
+        },
+        "algorithm": {
+          "const": "merge-exact-findings-v1"
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/merged_finding_set"
+          },
+          "minItems": 0,
+          "maxItems": 4096
+        },
+        "coverage": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/merged_source"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        }
+      },
+      "x-maxEncodedBytes": 33554432,
+      "x-maxInputFindings": 4096,
+      "x-invariants": [
+        "conflict is true exactly when a key has multiple inequivalent variants. Equivalence compares every checked finding content field; provenance is never discarded."
+      ]
+    },
+    "group_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "group_ref",
+        "group_assignment_digest",
+        "sources",
+        "complete",
+        "next_cursor"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.group-coverage/v1"
+        },
+        "group_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "group_assignment_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/merged_source"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "x-maxUtf8Bytes": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-maxEncodedBytes": 4194304,
+      "x-invariants": [
+        "Complete coverage accounts for every accepted group entry including failed, unknown and missing sources. Cursor is opaque; large bodies use complete artifact references."
+      ]
+    },
+    "receipt_subjects": {
+      "allOf": [
+        {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_subjects"
+        },
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "run_ref": {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                }
+              }
+            },
+            {
+              "properties": {
+                "member_ref": {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                }
+              }
+            },
+            {
+              "properties": {
+                "task_ref": {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                }
+              }
+            },
+            {
+              "properties": {
+                "group_ref": {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                }
+              }
+            },
+            {
+              "properties": {
+                "result_ref": {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                }
+              }
+            },
+            {
+              "properties": {
+                "merge_ref": {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                }
+              }
+            },
+            {
+              "properties": {
+                "engagement_ref": {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                }
+              }
+            },
+            {
+              "properties": {
+                "maintenance_ref": {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                }
+              }
+            },
+            {
+              "properties": {
+                "provisioning_ref": {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                }
+              }
+            },
+            {
+              "properties": {
+                "turn_ref": {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                }
+              }
+            },
+            {
+              "properties": {
+                "interaction_ref": {
+                  "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "public_task_criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "criterion_id",
+        "text",
+        "context_ids"
+      ],
+      "properties": {
+        "criterion_id": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 128
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "x-maxUtf8Bytes": 8192
+        },
+        "context_ids": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "x-maxUtf8Bytes": 128
+          }
+        }
+      }
+    },
+    "public_structured_task_body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "brief",
+        "context",
+        "criteria",
+        "constraints"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.structured-task/v1"
+        },
+        "brief": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536,
+          "x-maxUtf8Bytes": 65536
+        },
+        "context": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/context_ref"
+          }
+        },
+        "criteria": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/public_task_criterion"
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 8192,
+            "x-maxUtf8Bytes": 8192
+          },
+          "maxItems": 64
+        }
+      },
+      "x-maxEncodedBytes": 16777216
+    },
+    "public_assign_synthesis_normalized_body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "member_ref",
+        "merged_findings_digest",
+        "merged_input",
+        "assignment"
+      ],
+      "properties": {
+        "member_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "merged_findings_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "merged_input": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        },
+        "assignment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "task_body",
+            "accepted_task_identity",
+            "deadline_seconds"
+          ],
+          "properties": {
+            "task_body": {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/public_structured_task_body"
+            },
+            "accepted_task_identity": {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_task",
+              "properties": {
+                "task_body_schema": {
+                  "const": "dolgorae.structured-task/v1"
+                }
+              }
+            },
+            "deadline_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600
+            }
+          }
+        }
+      },
+      "x-invariants": [
+        "The accepted task_body BytesRef binds complete JCS public StructuredTaskBody bytes, including ordered context, criteria and constraints. Accepted contexts match the complete public context references; merged_input binds the immutable merged findings. Normalization does not change task bytes or discard unknown fields."
+      ]
+    },
+    "member_release_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_ref",
+        "operation_kind",
+        "workspace_ref",
+        "scope_kind",
+        "scope_ref",
+        "member_ref",
+        "run_ref",
+        "controller_principal",
+        "controller_generation",
+        "terminal_membership_revision",
+        "settled_workload_revision"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.member-release-proof/v1"
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "operation_kind": {
+          "enum": [
+            "release_external_specialist",
+            "release_specialist"
+          ]
+        },
+        "workspace_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "scope_kind": {
+          "enum": [
+            "external_engagement",
+            "orchestrated_session"
+          ]
+        },
+        "scope_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "member_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "run_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "controller_principal": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "controller_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "terminal_membership_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "settled_workload_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "release_external_specialist"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scope_kind": {
+                "const": "external_engagement"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "release_specialist"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scope_kind": {
+                "const": "orchestrated_session"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "x-digestEncoding": "SHA256(UTF8(exact domain) || LF || RFC8785-JCS(closed object)); lowercase sha256: wire representation",
+  "x-invariants": [
+    "Every listed digest field is required; null is explicit. Reject duplicate keys, lone surrogates, lexical floats, invalid UTF-8 and unknown fields. Integers are unsigned and at most 2^53-1. JSON Schema annotations require executor-side semantic verification. No schema declaration activates runtime support."
+  ]
+}

@@ -112,6 +112,26 @@ sources are preserved. After a partial publication failure, inspect new files
 and replan rather than replaying an assumed transaction. Migration does not
 authorize policy installation or service startup.
 
+## Answer a current interaction
+
+Use public-v2 typed list/get/resolve or the selected binary's protected
+`run interaction get` and `run respond` path under the current Run Controller.
+Fetch the current request before a new answer and preserve its Turn, generation
+and revision fences. Permission grants are exact contained Turn-scoped subsets;
+fixed read-only members cannot acquire Write. Supported MCP forms use bounded
+string, enum and boolean questions. Other runtime variants receive a typed
+policy decline. Private delegated children without a declared answer route are
+declined during ingestion; never expose their credentials to a model.
+
+After protected response loss, retain the original key and read its receipt.
+Do not automatically resend secret input. A winning-key retry returns the
+opaque receipt without reopening a protected file or comparing replacement
+content. Direct Controller disconnect does not create an ownerless request.
+The [Machine v6 contract](resources/protocol/dolgorae-machine-v6.schema.json)
+carries new interaction v2 and event v2 output; historical v1
+unsupported records retain their readers. Decline or interrupt acknowledgement
+requires later terminal evidence before claiming completion.
+
 ## Read a retained Submit operation
 
 Use `run lookup-operation` only when the exact selected binary exposes it and

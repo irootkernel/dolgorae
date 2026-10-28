@@ -92,6 +92,7 @@ enum ProofKind {
     Approval,
     UserInput,
     Unsupported,
+    ProtectedDecision,
 }
 
 impl ProofKind {
@@ -100,6 +101,7 @@ impl ProofKind {
             "command_execution_approval" | "file_change_approval" => Ok(Self::Approval),
             "user_input" => Ok(Self::UserInput),
             "unsupported_request" => Ok(Self::Unsupported),
+            "permission_request" | "mcp_elicitation" => Ok(Self::ProtectedDecision),
             _ => Err(invalid("closed proof interaction kind")),
         }
     }
@@ -224,6 +226,34 @@ fn proof_resolution(
                     },
             )
         }
+        Some("protected_decision") => (
+            Some(ProofKind::ProtectedDecision),
+            "resolved",
+            keys(&[
+                "outcome",
+                "decision",
+                "contained_secret",
+                "answer_count",
+                "resolution_receipt_id",
+                "policy_cause",
+            ]) && value["contained_secret"] == true
+                && matches!(
+                    value["decision"].as_str(),
+                    Some("accept_once" | "decline" | "cancel")
+                )
+                && value["answer_count"].as_u64().is_some_and(|n| n <= 64)
+                && proof_uuid(&value["resolution_receipt_id"])
+                && (value["policy_cause"].is_null()
+                    || (value["decision"] == "decline"
+                        && matches!(
+                            value["policy_cause"].as_str(),
+                            Some(
+                                "SPECIALIST_INTERACTION_UNSUPPORTED"
+                                    | "READ_ONLY_POLICY"
+                                    | "RUNTIME_VARIANT_UNSUPPORTED"
+                            )
+                        ))),
+        ),
         Some("stale") => (
             None,
             "stale",
@@ -277,6 +307,19 @@ fn proof_decision(value: &Value, kind: Option<ProofKind>) -> Result<(), MachineE
     {
         return Err(invalid("interaction decision date and key"));
     }
+    if let Some(raw) = value.get("public_resolution") {
+        let receipt: crate::public_resolution::Receipt = serde_json::from_value(raw.clone())
+            .map_err(|_| invalid("public resolution receipt"))?;
+        receipt
+            .validate()
+            .map_err(|_| invalid("public resolution receipt"))?;
+        if value["resolution_receipt_id"] != receipt.operation_ref.to_string()
+            || value["idempotency_key"] != receipt.mutation_envelope.namespace.idempotency_key
+            || receipt.contains_protected_input != (resolution["contained_secret"] == true)
+        {
+            return Err(invalid("public resolution linkage"));
+        }
+    }
     let digest = value.get("response_sha256").unwrap_or(&Value::Null);
     let receipt = value.get("resolution_receipt_id").unwrap_or(&Value::Null);
     // restore_interaction_resolutions and approval_decisions retain early v2
@@ -287,6 +330,10 @@ fn proof_decision(value: &Value, kind: Option<ProofKind>) -> Result<(), MachineE
     match resolution["outcome"].as_str() {
         Some("stale") if digest.is_null() && receipt.is_null() => {}
         Some("approval") if proof_digest(digest) => {}
+        Some("protected_decision")
+            if digest.is_null()
+                && receipt == &resolution["resolution_receipt_id"]
+                && proof_uuid(receipt) => {}
         Some("answered")
             if digest == &resolution["answer_digest"]
                 && receipt == &resolution["resolution_receipt_id"] => {}
@@ -403,6 +450,7 @@ pub(crate) fn complete_pending(
                     && interaction.pending_at_context(PendingContext {
                         run_generation: projection.run_generation,
                         controller_id: controller.identity.controller_id,
+                        controller_generation: controller.identity.generation,
                         control_mode: manifest.control_mode,
                         app_server_epoch: Some(interaction.server_epoch),
                         active_turn_id: projection.active_turn_id.as_deref(),
@@ -419,6 +467,7 @@ pub(crate) fn complete_pending(
                 let pending = interaction.pending_at_context(PendingContext {
                     run_generation: projection.run_generation,
                     controller_id: controller.identity.controller_id,
+                    controller_generation: controller.identity.generation,
                     control_mode: manifest.control_mode,
                     app_server_epoch,
                     active_turn_id: projection.active_turn_id.as_deref(),
@@ -452,6 +501,107 @@ pub(crate) fn complete_pending(
     ))
 }
 
+pub(crate) fn read_protected_answer(
+    path: &str,
+    maximum: u64,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, MachineError> {
+    use crate::workspace::WorkspacePlatform as _;
+    use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let invalid = || {
+        MachineError::invalid_argument(
+            "protected_input",
+            "expected a private regular file with a bounded response",
+        )
+    };
+    if !Path::new(path).is_absolute() || maximum == 0 || maximum > MAX_RESPONSE_BYTES as u64 {
+        return Err(invalid());
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| invalid())?;
+    let metadata = file.metadata().map_err(|_| invalid())?;
+    if !metadata.is_file()
+        || metadata.uid() != crate::workspace::SystemWorkspacePlatform.current_uid()
+        || metadata.mode() & 0o077 != 0
+        || metadata.len() > maximum
+    {
+        return Err(invalid());
+    }
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    file.take(maximum + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid())?;
+    if bytes.len() as u64 > maximum {
+        return Err(invalid());
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn response_is_protected(
+    records: &[crate::audit::AuditRecord],
+    upstream: u64,
+) -> Result<bool, MachineError> {
+    response_protection_for(records, upstream, None)
+}
+
+pub(crate) fn response_protection_for(
+    records: &[crate::audit::AuditRecord],
+    upstream: u64,
+    public_id: Option<&str>,
+) -> Result<bool, MachineError> {
+    for record in records
+        .iter()
+        .rev()
+        .filter(|r| r.kind() == AuditKind::ApprovalRequested)
+    {
+        let bytes = crate::jcs::canonicalize(record.payload())
+            .map_err(|_| invalid("protected response authority"))?;
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| invalid("protected response authority"))?;
+        if value["upstream_request_id"].as_u64() != Some(upstream) {
+            continue;
+        }
+        let interaction = Interaction::parse(value["interaction"].clone(), record.run_id())?;
+        crate::interaction_payload::validate(&interaction)?;
+        if let Some(id) = public_id
+            && id != interaction.request_id.to_string()
+        {
+            return Err(MachineError::interaction_not_found(
+                record.run_id(),
+                id,
+                "public interaction does not own this upstream response",
+            ));
+        }
+        return Ok(interaction
+            .observer_summary(if interaction.status == "pending" {
+                InteractionStatus::Pending
+            } else {
+                InteractionStatus::Resolved
+            })?
+            .contains_protected_input);
+    }
+    let run_id = records
+        .last()
+        .ok_or_else(|| invalid("missing authoritative interaction history"))?
+        .run_id();
+    Err(MachineError::interaction_not_found(
+        run_id,
+        upstream,
+        "interaction metadata is required before response admission",
+    ))
+}
+
+pub(crate) fn protected_response_identity(response: &Value) -> Value {
+    let decision = response
+        .get("decision")
+        .and_then(Value::as_str)
+        .filter(|d| matches!(*d, "accept_once" | "decline" | "cancel"));
+    json!({"protected_input":true,"decision":decision})
+}
+
 pub(crate) fn response_too_large(
     run_id: impl serde::Serialize,
     request_id: &str,
@@ -482,6 +632,8 @@ pub(crate) struct Interaction {
     pub(crate) request_id: Uuid,
     pub(crate) run_id: Uuid,
     pub(crate) controller_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) controller_generation: Option<u64>,
     pub(crate) control_mode: crate::domain::ControlMode,
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
@@ -502,7 +654,20 @@ impl Interaction {
     pub(crate) fn parse(value: Value, run_id: Uuid) -> Result<Self, MachineError> {
         let interaction: Self =
             serde_json::from_value(value).map_err(|_| invalid("normalized interaction DTO"))?;
-        if interaction.schema_version != 1
+        if !matches!(interaction.schema_version, 1 | 2)
+            || (interaction.schema_version == 2
+                && (!matches!(
+                    interaction.kind.as_str(),
+                    "permission_request" | "mcp_elicitation"
+                ) || interaction
+                    .controller_generation
+                    .is_none_or(|n| n == 0 || n > crate::domain::MAX_JCS_SAFE_INTEGER)))
+            || (interaction.schema_version == 1
+                && (interaction.controller_generation.is_some()
+                    || matches!(
+                        interaction.kind.as_str(),
+                        "permission_request" | "mcp_elicitation"
+                    )))
             || interaction.request_id.get_version_num() != 7
             || interaction.run_id != run_id
             || interaction.controller_id.get_version_num() != 7
@@ -524,6 +689,8 @@ impl Interaction {
                     | "file_change_approval"
                     | "user_input"
                     | "unsupported_request"
+                    | "permission_request"
+                    | "mcp_elicitation"
             )
             || !matches!(
                 interaction.status.as_str(),
@@ -563,6 +730,7 @@ impl Interaction {
         self.pending_at_context(PendingContext {
             run_generation: snapshot.projection.run_generation,
             controller_id: snapshot.controller.controller_id,
+            controller_generation: snapshot.controller.generation,
             control_mode: snapshot.manifest.control_mode,
             app_server_epoch: snapshot.app_server_epoch,
             active_turn_id: snapshot.projection.active_turn_id.as_deref(),
@@ -574,6 +742,9 @@ impl Interaction {
         self.status == "pending"
             && self.run_generation == context.run_generation
             && self.controller_id == context.controller_id
+            && self
+                .controller_generation
+                .is_none_or(|n| n == context.controller_generation)
             && self.control_mode == context.control_mode
             && context.app_server_epoch == Some(self.server_epoch)
             && context.active_turn_id == Some(&self.turn_id)
@@ -587,17 +758,20 @@ impl Interaction {
         &self,
         status: InteractionStatus,
     ) -> Result<ObserverSummary, MachineError> {
-        let protected = self.kind == "user_input"
-            && serde_json::from_value::<UserInput>(self.payload.clone())
-                .map_err(|_| invalid("user input questions"))?
-                .questions
-                .iter()
-                .any(|question| question.is_secret);
+        let protected = matches!(self.kind.as_str(), "permission_request" | "mcp_elicitation")
+            || self.kind == "user_input"
+                && serde_json::from_value::<UserInput>(self.payload.clone())
+                    .map_err(|_| invalid("user input questions"))?
+                    .questions
+                    .iter()
+                    .any(|question| question.is_secret);
         let title = match (status, self.kind.as_str(), protected) {
             (InteractionStatus::Stale, _, _) => "Interaction stale",
             (InteractionStatus::Resolved, _, _) => "Interaction resolved",
             (_, "command_execution_approval", _) => "Command approval requested",
             (_, "file_change_approval", _) => "File change approval requested",
+            (_, "permission_request", _) => "Permission approval requested",
+            (_, "mcp_elicitation", _) => "MCP input requested",
             (_, "user_input", true) => "Protected input requested",
             (_, "user_input", false) => "User input requested",
             _ => return Err(invalid("observer-safe interaction title")),
@@ -614,6 +788,7 @@ impl Interaction {
 struct PendingContext<'a> {
     run_generation: u64,
     controller_id: Uuid,
+    controller_generation: u64,
     control_mode: crate::domain::ControlMode,
     app_server_epoch: Option<u64>,
     active_turn_id: Option<&'a str>,
@@ -633,14 +808,14 @@ pub(crate) struct ObserverSummary {
     pub(crate) requires_user_escalation: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UserInput {
     pub(crate) is_blocking: bool,
     pub(crate) questions: Vec<Question>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Question {
     pub(crate) id: String,
@@ -651,7 +826,7 @@ pub(crate) struct Question {
     pub(crate) options: Option<Vec<QuestionOption>>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct QuestionOption {
     pub(crate) label: String,
@@ -690,11 +865,31 @@ mod tests {
         PendingContext {
             run_generation: interaction.run_generation,
             controller_id: interaction.controller_id,
+            controller_generation: 1,
             control_mode: interaction.control_mode,
             app_server_epoch: Some(interaction.server_epoch),
             active_turn_id: Some("turn"),
             lifecycle: RunLifecycle::WaitingInteraction,
         }
+    }
+
+    #[test]
+    fn successor_pending_requires_current_controller_generation_and_epoch() {
+        let mut interaction = pending_interaction();
+        interaction.schema_version = 2;
+        interaction.kind = "permission_request".into();
+        interaction.controller_generation = Some(3);
+        let mut current = matching_context(&interaction);
+        current.controller_generation = 3;
+        assert!(interaction.pending_at_context(current.clone()));
+        current.controller_generation = 2;
+        assert!(!interaction.pending_at_context(current.clone()));
+        current.controller_generation = 3;
+        current.app_server_epoch = Some(interaction.server_epoch + 1);
+        assert!(!interaction.pending_at_context(current.clone()));
+        current.app_server_epoch = Some(interaction.server_epoch);
+        current.active_turn_id = Some("foreign-turn");
+        assert!(!interaction.pending_at_context(current));
     }
 
     #[test]

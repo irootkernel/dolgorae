@@ -188,7 +188,10 @@ impl AuditRecord {
             _ => Err(AuditError::InvalidStructure),
         };
         let schema_version = number("schema_version")?;
-        if !matches!((schema_version, entries.len()), (1, 9) | (2, 9 | 10)) {
+        if !matches!(
+            (schema_version, entries.len()),
+            (1, 9) | (2, 9 | 10) | (3, 10)
+        ) {
             return Err(AuditError::InvalidStructure);
         }
         let sequence = number("sequence")?;
@@ -212,7 +215,7 @@ impl AuditRecord {
             AuditKind::MutationAdmitted | AuditKind::MutationCompleted
         );
         if (schema_version == 1 && admission_kind)
-            || (schema_version == 2
+            || (matches!(schema_version, 2 | 3)
                 && ((admission_kind && entries.len() != 9)
                     || (!admission_kind && entries.len() != 10)))
         {
@@ -227,7 +230,7 @@ impl AuditRecord {
         if kind == AuditKind::PayloadUnrepresentable && !is_unrepresentable_payload(&payload) {
             return Err(AuditError::InvalidPayload);
         }
-        let client_projection = if schema_version == 2 && !admission_kind {
+        let client_projection = if matches!(schema_version, 2 | 3) && !admission_kind {
             let bytes = canonicalize(field("client_projection")?)?;
             let projection: crate::event::StampedClientEvent = if kind == AuditKind::ClientEvent {
                 crate::event::StampedClientEvent {
@@ -239,6 +242,11 @@ impl AuditRecord {
             } else {
                 serde_json::from_slice(&bytes).map_err(|_| AuditError::InvalidStructure)?
             };
+            if (schema_version == 2 && projection.record.schema_version != 1)
+                || (schema_version == 3 && projection.record.schema_version != 2)
+            {
+                return Err(AuditError::InvalidStructure);
+            }
             projection
                 .validate(run_id, sequence, &timestamp)
                 .map_err(|_| AuditError::InvalidStructure)?;
@@ -379,7 +387,11 @@ impl AuditRecord {
         {
             return Err(AuditError::InvalidStructure);
         }
-        self.schema_version = 2;
+        self.schema_version = if projection.record.schema_version == 2 {
+            3
+        } else {
+            2
+        };
         self.client_projection = Some(projection);
         self.hash = sha256_hex(&canonicalize(&self.lossless(false))?);
         Ok(self)

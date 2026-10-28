@@ -363,7 +363,7 @@ fn interaction_pending_at(state_root: &Path, run_id: Uuid) -> Result<Value, Mach
         let summary =
             interaction.observer_summary(crate::interaction::InteractionStatus::Pending)?;
         items.push(json!({
-            "schema_version": 1,
+            "schema_version": interaction.schema_version,
             "request_id": interaction.request_id,
             "run_id": run_id,
             "kind": interaction.kind,
@@ -2373,6 +2373,12 @@ pub enum RunMutationOperation {
         idempotency_key: String,
         response: Value,
     },
+    PublicRespond {
+        request_id: String,
+        idempotency_key: String,
+        response: Value,
+        intent: crate::public_resolution::Intent,
+    },
 }
 
 pub struct RunMutationInput {
@@ -3165,6 +3171,21 @@ impl CoreSemanticService {
             }
             RunMutationOperation::AcquireWriter => (RunVerb::AcquireWrite, Prepared::Plain, false),
             RunMutationOperation::ReleaseWriter => (RunVerb::ReleaseWrite, Prepared::Plain, false),
+            RunMutationOperation::PublicRespond {
+                request_id,
+                idempotency_key,
+                response,
+                intent,
+            } => (
+                RunVerb::Respond,
+                Prepared::PublicRespond {
+                    request_id: resolve_public_interaction_id(&state_root, run_id, &request_id)?,
+                    idempotency_key,
+                    response,
+                    intent,
+                },
+                false,
+            ),
             RunMutationOperation::Respond {
                 request_id,
                 idempotency_key,
@@ -8482,7 +8503,7 @@ fn run_control_admitted_with_lifecycle(
             lifecycle,
         );
         if let Err(error) = acquired {
-            if error.code == "WRITER_BUSY" {
+            if matches!(error.code.as_str(), "WRITER_BUSY" | "RUN_BUSY") {
                 abort_prepared_turn_admission(
                     view,
                     state_root,
@@ -13721,6 +13742,12 @@ enum Prepared {
         idempotency_key: String,
         response: Value,
     },
+    PublicRespond {
+        request_id: u64,
+        idempotency_key: String,
+        response: Value,
+        intent: crate::public_resolution::Intent,
+    },
 }
 
 impl Prepared {
@@ -13778,6 +13805,21 @@ impl Prepared {
                 caller: None,
                 request,
             },
+            Prepared::PublicRespond {
+                request_id,
+                idempotency_key,
+                response,
+                intent,
+            } => ControlRequestV1::PublicResolution {
+                intent,
+                request: Box::new(ControlRequestV1::Respond {
+                    expected,
+                    caller: None,
+                    request_id,
+                    idempotency_key,
+                    response,
+                }),
+            },
             Prepared::Respond {
                 request_id,
                 idempotency_key,
@@ -13790,6 +13832,45 @@ impl Prepared {
                 response,
             },
         }
+    }
+
+    fn normalized_request_in(
+        &self,
+        verb: RunVerb,
+        records: &[crate::audit::AuditRecord],
+    ) -> Result<Value, MachineError> {
+        if let Self::PublicRespond {
+            request_id,
+            idempotency_key,
+            response,
+            intent,
+        } = self
+        {
+            let protected = crate::interaction::response_protection_for(
+                records,
+                *request_id,
+                Some(&intent.body.interaction_ref),
+            )?;
+            let mut safe = intent.clone();
+            safe.redact(protected);
+            let base = Self::Respond {
+                request_id: *request_id,
+                idempotency_key: idempotency_key.clone(),
+                response: response.clone(),
+            }
+            .normalized_request_in(verb, records)?;
+            return Ok(json!({"operation":"public_resolution","intent":safe,"request":base}));
+        }
+        let mut value = self.normalized_request(verb);
+        if let Self::Respond { request_id, .. } = self
+            && crate::interaction::response_is_protected(records, *request_id)?
+        {
+            let response = &mut value["response"];
+            let safe = crate::interaction::protected_response_identity(response);
+            crate::turn::zeroize_protected_json(response);
+            *response = safe;
+        }
+        Ok(value)
     }
 
     fn normalized_request(&self, verb: RunVerb) -> Value {
@@ -13806,6 +13887,9 @@ impl Prepared {
                 json!({"operation":"send","request":request,"timeout_ms":timeout_ms})
             }
             Self::Turn { request, .. } => json!({"operation":"submit","request":request}),
+            Self::PublicRespond { .. } => {
+                unreachable!("public resolution identity requires authoritative records")
+            }
             Self::Respond {
                 request_id,
                 idempotency_key,
@@ -25238,7 +25322,12 @@ fn begin_prepared_mutation(
                 }
                 let mut ledger = crate::ledger::Ledger::open(run_root(state_root, run_id), run_id)
                     .map_err(|error| internal(error.to_string()))?;
-                let request = prepared.normalized_request(verb);
+                let request = prepared.normalized_request_in(
+                    verb,
+                    ledger
+                        .durable_records()
+                        .map_err(|e| internal(e.to_string()))?,
+                )?;
                 let bytes = canonicalize(
                     &parse(&request.to_string()).map_err(|error| internal(error.to_string()))?,
                 )
@@ -25265,9 +25354,28 @@ struct PreparedMutationIdentity<'a> {
 }
 
 impl crate::mutation_admission::MutationRequest for PreparedMutationIdentity<'_> {
+    fn mutation_request_identity_in(
+        &self,
+        records: &[crate::audit::AuditRecord],
+    ) -> Result<crate::mutation_admission::MutationRequestIdentity, MachineError> {
+        let value = self.prepared.normalized_request_in(self.verb, records)?;
+        let bytes = canonicalize(&parse(&value.to_string()).map_err(|e| internal(e.to_string()))?)
+            .map_err(|e| internal(e.to_string()))?;
+        Ok(crate::mutation_admission::MutationRequestIdentity::new(
+            sha256_hex(&bytes),
+            self.verb.operation_name(),
+            matches!(self.prepared, Prepared::Turn {request,..} if request.write),
+            &[],
+        ))
+    }
     fn mutation_request_identity(
         &self,
     ) -> Result<crate::mutation_admission::MutationRequestIdentity, MachineError> {
+        if matches!(self.prepared, Prepared::PublicRespond { .. }) {
+            return Err(internal(
+                "public resolution identity requires authoritative records",
+            ));
+        }
         let request = self.prepared.normalized_request(self.verb);
         let bytes = canonicalize(
             &parse(&request.to_string()).map_err(|error| internal(error.to_string()))?,
@@ -25459,6 +25567,47 @@ mod mutation_admission_tests {
     use super::*;
     use crate::mutation_admission::{MutationRequest, active_mutation_admission};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn prepared_response_identity_preserves_only_nonsecret_body_comparison() {
+        use crate::mutation_admission::MutationRequest as _;
+        let body = |text: &str| Prepared::Respond {
+            request_id: 79,
+            idempotency_key: "key".into(),
+            response: json!({"answers":{"q":{"answers":[text]}}}),
+        };
+        let first = body("one-secret");
+        let second = body("other-secret");
+        for secret in [true, false] {
+            let records = crate::worker::tests::response_authority_records(secret);
+            let a = PreparedMutationIdentity {
+                verb: RunVerb::Respond,
+                prepared: &first,
+            }
+            .mutation_request_identity_in(&records)
+            .unwrap();
+            let b = PreparedMutationIdentity {
+                verb: RunVerb::Respond,
+                prepared: &second,
+            }
+            .mutation_request_identity_in(&records)
+            .unwrap();
+            assert_eq!(a.request_sha256() == b.request_sha256(), secret);
+        }
+        let records = crate::worker::tests::response_authority_records(true);
+        let missing = Prepared::Respond {
+            request_id: 80,
+            idempotency_key: "key".into(),
+            response: json!({"answers":"never-fingerprint"}),
+        };
+        assert_eq!(
+            missing
+                .normalized_request_in(RunVerb::Respond, &records)
+                .unwrap_err()
+                .code,
+            "INTERACTION_NOT_FOUND"
+        );
+    }
 
     #[test]
     fn writer_admission_requires_live_writer_capable_operation_from_current_controller() {
@@ -27871,6 +28020,10 @@ pub(crate) mod successor_fixture {
     }
 
     impl SuccessorMember {
+        pub(crate) fn shared_readonly() -> Self {
+            Self::with_runtime_lane("read_only", "review", true, false, "shared_readonly")
+        }
+
         pub(crate) fn new() -> Self {
             Self::with_access("canonical_workspace_write")
         }
@@ -27900,6 +28053,16 @@ pub(crate) mod successor_fixture {
         }
 
         fn with_runtime(access: &str, purpose: &str, qualified: bool, historical: bool) -> Self {
+            Self::with_runtime_lane(access, purpose, qualified, historical, "dedicated")
+        }
+
+        fn with_runtime_lane(
+            access: &str,
+            purpose: &str,
+            qualified: bool,
+            historical: bool,
+            lane: &str,
+        ) -> Self {
             let root = std::env::temp_dir().join(format!("dolgorae-successor-{}", Uuid::now_v7()));
             for directory in [
                 root.clone(),
@@ -27982,7 +28145,7 @@ pub(crate) mod successor_fixture {
                     purpose_kind: purpose.to_owned(),
                     purpose_label: None,
                     required_capabilities: Vec::new(),
-                    execution_lane: "dedicated".to_owned(),
+                    execution_lane: lane.to_owned(),
                     // Writable admission: the capture gate refuses a
                     // canonical-workspace-write task whose admitted access is
                     // read-only.
@@ -29268,6 +29431,10 @@ pub(crate) mod successor_fixture {
     }
 
     impl ManagedMember {
+        pub(crate) fn shared_readonly() -> Self {
+            Self::with_runtime_lane("read_only", "review", true, false, "shared_readonly")
+        }
+
         pub(crate) fn new() -> Self {
             Self::with_access("read_only")
         }
@@ -29301,6 +29468,16 @@ pub(crate) mod successor_fixture {
         }
 
         fn with_runtime(access: &str, purpose: &str, qualified: bool, historical: bool) -> Self {
+            Self::with_runtime_lane(access, purpose, qualified, historical, "dedicated")
+        }
+
+        fn with_runtime_lane(
+            access: &str,
+            purpose: &str,
+            qualified: bool,
+            historical: bool,
+            lane: &str,
+        ) -> Self {
             use crate::specialist_policy::{
                 InstalledSpecialistPolicy, InstalledSpecialistRole, RoleSource,
                 RoleSourceReference, RoleSourceScope,
@@ -29386,7 +29563,7 @@ pub(crate) mod successor_fixture {
                     purpose_kind: purpose.to_owned(),
                     purpose_label: None,
                     required_capabilities: Vec::new(),
-                    execution_lane: "dedicated".to_owned(),
+                    execution_lane: lane.to_owned(),
                     requested_access: access.to_owned(),
                     required_assurance: "best_effort_personal_alpha".to_owned(),
                     native_subagent_policy: "disabled".to_owned(),
@@ -30326,6 +30503,7 @@ pub(crate) mod successor_fixture {
             manifest.start_operation_receipt = None;
             manifest.instructions = capture.clone().into();
             manifest.purpose = configuration.purpose.clone();
+            manifest.execution_lane = configuration.execution_lane;
             manifest.agent_configuration = configuration.clone();
             if primary {
                 manifest.control_mode = ControlMode::DirectInteractive;
@@ -31175,6 +31353,10 @@ pub(crate) mod successor_review_tests {
         member: Member,
     }
     impl Scene {
+        pub(crate) fn shared_readonly(managed: bool) -> Self {
+            Self::with_runtime(managed, None, false, false, true)
+        }
+
         pub(crate) fn new(managed: bool) -> Self {
             Self::with_case(managed, None)
         }
@@ -31203,11 +31385,11 @@ pub(crate) mod successor_review_tests {
             Self::with_access(managed, case, false)
         }
         pub(crate) fn historical(managed: bool) -> Self {
-            Self::with_runtime(managed, None, false, true)
+            Self::with_runtime(managed, None, false, true, false)
         }
 
         fn with_access(managed: bool, case: Option<usize>, writable: bool) -> Self {
-            Self::with_runtime(managed, case, writable, false)
+            Self::with_runtime(managed, case, writable, false, false)
         }
 
         fn with_runtime(
@@ -31215,9 +31397,12 @@ pub(crate) mod successor_review_tests {
             case: Option<usize>,
             writable: bool,
             historical: bool,
+            shared_readonly: bool,
         ) -> Self {
             let member = if managed {
-                let member = if historical {
+                let member = if shared_readonly {
+                    ManagedMember::shared_readonly()
+                } else if historical {
                     ManagedMember::historical()
                 } else if writable {
                     ManagedMember::writable()
@@ -31247,7 +31432,9 @@ pub(crate) mod successor_review_tests {
 
                 Member::Managed(Box::new((member, controller, carrier)))
             } else {
-                Member::External(Box::new(if historical {
+                Member::External(Box::new(if shared_readonly {
+                    SuccessorMember::shared_readonly()
+                } else if historical {
                     SuccessorMember::historical()
                 } else if writable {
                     SuccessorMember::new()
@@ -31973,6 +32160,63 @@ pub(crate) mod successor_review_tests {
                     }
                 }
             }
+        }
+        pub(crate) fn interaction_observation(&self) -> Result<bool, MachineError> {
+            let request = service::MemberCleanupObservation {
+                view: self.view(),
+                state_root: self.state_root(),
+                owner: self.owner(),
+                member_ref: self.manifest().run_id,
+            };
+            let mut budget = crate::ledger::ObservationBudget::default();
+            let source = super::member_run_observation(request, &mut budget)?;
+            super::member_interaction_observation(request, &source, &mut budget)
+                .map(|(pending, _)| pending)
+        }
+
+        pub(crate) fn assert_policy_only_prefix_pending(&self, head: u64) {
+            let manifest = self.manifest();
+            let ledger = crate::ledger::ObservedLedger::open(
+                &run_root(self.state_root(), manifest.run_id),
+                manifest.run_id,
+                head,
+            )
+            .unwrap();
+            let budget = crate::ledger::ObservationBudget::default();
+            let projection =
+                crate::ledger::project_observation(manifest.run_id, ledger.records(), &budget)
+                    .unwrap();
+            assert_eq!(projection.lifecycle, RunLifecycle::WaitingInteraction);
+            assert_eq!(projection.active_turn_id.as_deref(), Some("turn-1"));
+            let controller = RunStore::new(SystemWorkspacePlatform, self.state_root())
+                .load_controller_binding_from_manifest(manifest)
+                .unwrap();
+            assert!(
+                crate::interaction::complete_pending(
+                    &ledger,
+                    manifest,
+                    &projection,
+                    &controller,
+                    Some(1),
+                    &budget,
+                    crate::interaction_payload::validate,
+                )
+                .unwrap()
+                .0
+            );
+            let request = ledger
+                .records()
+                .iter()
+                .rev()
+                .find(|r| r.kind() == AuditKind::ApprovalRequested)
+                .unwrap();
+            let payload = audit_value(request).unwrap();
+            assert_eq!(payload["interaction"]["status"], "pending");
+            assert_eq!(
+                payload["interaction"]["payload"]["policy_only"],
+                "RUNTIME_VARIANT_UNSUPPORTED"
+            );
+            assert!(payload["interaction"]["resolution"].is_null());
         }
         pub(crate) fn evidence(
             &self,
@@ -39077,6 +39321,46 @@ mod caller_lane_gate_tests {
                     interaction["resolution"] =
                         json!({"outcome":"method_not_found","reply_code":-32601});
                 }
+                Some(
+                    "mcp_empty" | "mcp_null" | "mcp_marker" | "mcp_questions" | "mcp_title"
+                    | "mcp_server" | "mcp_accept",
+                ) => {
+                    interaction["schema_version"] = json!(2);
+                    interaction["controller_generation"] =
+                        json!(manifest.controller.identity.generation);
+                    interaction["kind"] = json!("mcp_elicitation");
+                    interaction["response_schema"] =
+                        json!("dolgorae.interaction.mcp-elicitation/v2");
+                    interaction["available_decisions"] = json!(["decline", "cancel"]);
+                    let example: Value = serde_json::from_str(include_str!(
+                        "../docs/protocol/examples/interaction-v2/interaction-v2-mcp-policy-only.valid.json"
+                    )).unwrap();
+                    interaction["payload"] = example["payload"].clone();
+                    match variant.unwrap() {
+                        "mcp_empty" => {
+                            interaction["payload"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("policy_only");
+                            interaction["available_decisions"] =
+                                json!(["accept_once", "decline", "cancel"]);
+                        }
+                        "mcp_null" => interaction["payload"]["policy_only"] = Value::Null,
+                        "mcp_marker" => interaction["payload"]["policy_only"] = json!("UNKNOWN"),
+                        "mcp_questions" => interaction["payload"]["questions"] = json!([{}]),
+                        "mcp_title" => {
+                            interaction["payload"]["title"] = json!("unknown-secret-fixture")
+                        }
+                        "mcp_server" => {
+                            interaction["payload"]["server_name"] = json!("unknown-secret-fixture")
+                        }
+                        "mcp_accept" => {
+                            interaction["available_decisions"] =
+                                json!(["accept_once", "decline", "cancel"])
+                        }
+                        _ => unreachable!(),
+                    }
+                }
                 Some("payload") => interaction["payload"] = json!({}),
                 Some("generation") => {
                     interaction["run_generation"] = json!(projection.run_generation.max(1) + 1)
@@ -39965,6 +40249,13 @@ mod caller_lane_gate_tests {
                 "nullable",
                 "controller_encoding",
                 "generation",
+                "mcp_empty",
+                "mcp_null",
+                "mcp_marker",
+                "mcp_questions",
+                "mcp_title",
+                "mcp_server",
+                "mcp_accept",
             ] {
                 let (target, task) = observation_target(managed);
                 append_observation_motion(&target.state_root, target.member_ref);

@@ -247,7 +247,10 @@ impl std::fmt::Display for EventError {
 
 impl ClientEventRecord {
     pub(crate) fn validate(&self, run_id: Uuid, sequence: u64) -> Result<(), EventError> {
-        if self.schema_version != 1 || self.event_schema_version != 1 {
+        if !matches!(
+            (self.schema_version, self.event_schema_version),
+            (1, 1) | (2, 2)
+        ) {
             return Err(invalid("unsupported event schema version"));
         }
         if self.cursor != sequence.to_string() {
@@ -282,6 +285,11 @@ impl ClientEventRecord {
             return Err(invalid(
                 "event type requires exact thread and turn identities",
             ));
+        }
+        if self.schema_version == 1
+            && matches!(&self.data,ClientEventData::InteractionOpened(p) if matches!(p.interaction_kind.as_str(),"permission_request"|"mcp_elicitation"))
+        {
+            return Err(invalid("successor interaction requires event v2"));
         }
         self.data.validate(self.run_id)
     }
@@ -348,6 +356,8 @@ impl ClientEventData {
                             | "file_change_approval"
                             | "user_input"
                             | "unsupported_request"
+                            | "permission_request"
+                            | "mcp_elicitation"
                     )
                 {
                     return Err(invalid("interaction-opened payload is invalid"));
@@ -662,7 +672,7 @@ pub(crate) fn project_audit_event(
             let outcome = match resolution["outcome"].as_str() {
                 Some("answered") => "answered",
                 Some("stale") => "stale",
-                Some("approval") => match resolution["decision"].as_str() {
+                Some("approval" | "protected_decision") => match resolution["decision"].as_str() {
                     Some("accept_once") => "accepted",
                     Some("decline") => "declined",
                     Some("cancel") => "cancelled",
@@ -713,9 +723,10 @@ pub(crate) fn project_audit_event(
         }
         _ => return Ok(None),
     };
+    let successor = matches!(&data,ClientEventData::InteractionOpened(p) if matches!(p.interaction_kind.as_str(),"permission_request"|"mcp_elicitation"));
     let record = ClientEventRecord {
-        schema_version: 1,
-        event_schema_version: 1,
+        schema_version: if successor { 2 } else { 1 },
+        event_schema_version: if successor { 2 } else { 1 },
         cursor: audit.sequence().to_string(),
         event_id: Uuid::now_v7(),
         timestamp: audit.timestamp().to_owned(),

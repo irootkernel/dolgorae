@@ -7,8 +7,8 @@
 // their module imports unused. Product builds retain their normal lint policy.
 #[allow(unused_imports)]
 mod product;
-pub(crate) use product::codex_socket;
 pub use product::*;
+pub(crate) use product::{codex_socket, public_resolution};
 #[path = "accepted_legacy_fixture.rs"]
 mod fixture;
 

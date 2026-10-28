@@ -1,0 +1,1970 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/successor-state/v1",
+  "title": "Dolgorae individually versioned successor state selection",
+  "oneOf": [
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/instruction_snapshot"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/agent_configuration"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/modern_run_manifest"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/run_state"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/operation_intent"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/protected_invocation"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/group_record"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/merge_record"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/pool_configuration"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/pool_state"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/queue_state"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/lifecycle_state"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/generation_manifest"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/maintenance_state"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/content_tombstone"
+    },
+    {
+      "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/member_release_operation"
+    }
+  ],
+  "$defs": {
+    "captured_named_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "source"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/alias"
+        },
+        "source": {
+          "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/source_capture"
+        }
+      }
+    },
+    "instruction_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "core_prefix_version",
+        "core_prefix_sha256",
+        "common",
+        "role",
+        "composition_sha256",
+        "dependencies",
+        "selected_guidance",
+        "role_snapshot",
+        "role_snapshot_digest",
+        "instruction_identity",
+        "instruction_identity_digest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.instructions/v3"
+        },
+        "core_prefix_version": {
+          "const": 2
+        },
+        "core_prefix_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "common": {
+          "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/source_capture"
+        },
+        "role": {
+          "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/role_capture"
+        },
+        "composition_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/captured_named_source"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "selected_guidance": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/captured_named_source"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "role_snapshot": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/role_snapshot"
+        },
+        "role_snapshot_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "instruction_identity": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/instruction_identity"
+        },
+        "instruction_identity_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        }
+      },
+      "x-invariants": [
+        "Accepted common/Role/dependency/guidance bodies and hashes match the complete closed identities; aggregate UTF-8 bytes\u226465536, excluding core and separators.",
+        "Source aliases/order/composition follow instruction-identity/v1. Recovery reconstructs only accepted bytes; no source reloading or in-place legacy rewrite."
+      ]
+    },
+    "agent_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "selected_profile",
+        "global_profile_binding_sha256",
+        "model",
+        "default_effort",
+        "purpose",
+        "required_capabilities",
+        "role_reference",
+        "instructions",
+        "execution_lane",
+        "required_assurance",
+        "native_subagent_policy",
+        "requested_access",
+        "admitted_configuration",
+        "agent_configuration_digest"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 4
+        },
+        "selected_profile": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/selected_profile"
+        },
+        "global_profile_binding_sha256": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/global_profile_binding_sha256"
+        },
+        "model": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/model"
+        },
+        "default_effort": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/default_effort"
+        },
+        "purpose": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/purpose"
+        },
+        "required_capabilities": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/required_capabilities"
+        },
+        "role_reference": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/role_reference"
+        },
+        "instructions": {
+          "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/instruction_snapshot"
+        },
+        "execution_lane": {
+          "enum": [
+            "dedicated",
+            "shared_readonly"
+          ]
+        },
+        "required_assurance": {
+          "$ref": "https://dolgorae.local/schema/agent-configuration/v2#/properties/required_assurance"
+        },
+        "native_subagent_policy": {
+          "enum": [
+            "enabled",
+            "disabled"
+          ]
+        },
+        "requested_access": {
+          "enum": [
+            "read_only",
+            "canonical_workspace_write"
+          ]
+        },
+        "admitted_configuration": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/admitted_configuration"
+        },
+        "agent_configuration_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        }
+      },
+      "x-invariants": [
+        "Retained Profile binding and captured instructions match admitted_configuration. Its digest is immutable; later default effort applies to future task admissions.",
+        "Current writer/verification facts never enter admitted configuration identity."
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "execution_lane": {
+                "const": "shared_readonly"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "requested_access": {
+                "const": "read_only"
+              },
+              "native_subagent_policy": {
+                "const": "disabled"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "modern_run_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "workspace_id",
+        "canonical_workspace",
+        "workspace_mode",
+        "start_baseline",
+        "created_at",
+        "initial_access",
+        "control_mode",
+        "execution_lane",
+        "requested_assurance",
+        "achieved_assurance",
+        "profile",
+        "global_profile_binding",
+        "agent_configuration",
+        "profile_capability_snapshot",
+        "app_server",
+        "dolgorae",
+        "model",
+        "initial_reasoning_effort",
+        "default_reasoning_effort",
+        "instructions",
+        "controller",
+        "purpose",
+        "parent_ref",
+        "required_capabilities",
+        "thread_id",
+        "fork_provenance",
+        "write_continuation_provenance",
+        "aggregate_binding",
+        "audit",
+        "compatibility",
+        "requested_access",
+        "selected_role",
+        "start_contract",
+        "creation_mode",
+        "admitted_configuration_digest",
+        "start_operation_receipt"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 4
+        },
+        "run_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/run_id"
+        },
+        "workspace_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/workspace_id"
+        },
+        "canonical_workspace": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/canonical_workspace"
+        },
+        "workspace_mode": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/workspace_mode"
+        },
+        "start_baseline": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/start_baseline"
+        },
+        "created_at": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/created_at"
+        },
+        "initial_access": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/initial_access"
+        },
+        "control_mode": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/control_mode"
+        },
+        "execution_lane": {
+          "enum": [
+            "dedicated",
+            "shared_readonly"
+          ]
+        },
+        "requested_assurance": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/requested_assurance"
+        },
+        "achieved_assurance": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/achieved_assurance"
+        },
+        "profile": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/profile"
+        },
+        "global_profile_binding": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/global_profile_binding"
+        },
+        "agent_configuration": {
+          "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/agent_configuration"
+        },
+        "profile_capability_snapshot": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/profile_capability_snapshot"
+        },
+        "app_server": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/app_server"
+        },
+        "dolgorae": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/dolgorae"
+        },
+        "model": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/model"
+        },
+        "initial_reasoning_effort": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/initial_reasoning_effort"
+        },
+        "default_reasoning_effort": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/default_reasoning_effort"
+        },
+        "instructions": {
+          "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/instruction_snapshot"
+        },
+        "controller": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/controller"
+        },
+        "purpose": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/purpose"
+        },
+        "parent_ref": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/parent_ref"
+        },
+        "required_capabilities": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/required_capabilities"
+        },
+        "thread_id": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/thread_id"
+        },
+        "fork_provenance": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/fork_provenance"
+        },
+        "write_continuation_provenance": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/write_continuation_provenance"
+        },
+        "aggregate_binding": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/aggregate_binding"
+        },
+        "audit": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/audit"
+        },
+        "compatibility": {
+          "$ref": "https://dolgorae.local/schema/run-manifest/v2#/properties/compatibility"
+        },
+        "requested_access": {
+          "enum": [
+            "read-only",
+            "writable"
+          ]
+        },
+        "selected_role": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "maxLength": 64
+        },
+        "start_contract": {
+          "const": "caller_workspace/v1"
+        },
+        "creation_mode": {
+          "enum": [
+            "read_only",
+            "writable"
+          ]
+        },
+        "admitted_configuration_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "start_operation_receipt": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "Retained base manifest provenance fields retain their original meaning. creation_mode is immutable selection, distinct from current effective access and writer authority.",
+        "Accepted configuration/instructions and digest fields agree. Fixed shared_readonly creation cannot acquire write authority. Existing manifest/v3 remains readable and is not rewritten."
+      ]
+    },
+    "run_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_variant",
+        "control_mode",
+        "purpose",
+        "execution_lane",
+        "effective_policy",
+        "writer_authority",
+        "server_lane",
+        "workload_background_state",
+        "requested_assurance",
+        "achieved_assurance",
+        "instruction_contract",
+        "lineage",
+        "creation_mode",
+        "admitted_configuration_digest",
+        "queue_revision",
+        "pool_lease_ref",
+        "lifecycle_operation_ref",
+        "schema_version"
+      ],
+      "properties": {
+        "state_variant": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/state_variant"
+        },
+        "control_mode": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/control_mode"
+        },
+        "purpose": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/purpose"
+        },
+        "execution_lane": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/execution_lane"
+        },
+        "effective_policy": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/effective_policy"
+        },
+        "writer_authority": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/writer_authority"
+        },
+        "server_lane": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/server_lane"
+        },
+        "workload_background_state": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/workload_background_state"
+        },
+        "requested_assurance": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/assurance"
+        },
+        "achieved_assurance": {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/assurance"
+        },
+        "instruction_contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "core_prefix_version",
+            "instruction_identity_digest"
+          ],
+          "properties": {
+            "schema": {
+              "const": "dolgorae.instructions/v3"
+            },
+            "core_prefix_version": {
+              "const": 2
+            },
+            "instruction_identity_digest": {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+            }
+          }
+        },
+        "lineage": {
+          "oneOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/lineage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "creation_mode": {
+          "enum": [
+            "read_only",
+            "writable"
+          ]
+        },
+        "admitted_configuration_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "queue_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "pool_lease_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lifecycle_operation_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "const": 2
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "https://dolgorae.local/schema/run-state/v1#/$defs/semantic_constraints"
+        }
+      ]
+    },
+    "operation_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "operation_ref",
+        "mutation_envelope",
+        "mutation_envelope_digest",
+        "expected_revision",
+        "trusted_invocation",
+        "state",
+        "accepted_subjects",
+        "receipt",
+        "definitive_refusal"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "mutation_envelope": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/mutation_envelope"
+        },
+        "mutation_envelope_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trusted_invocation": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/trusted_invocation_context"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "accepted",
+            "resolved_not_accepted",
+            "unresolved"
+          ]
+        },
+        "accepted_subjects": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_subjects"
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "definitive_refusal": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/safe_code"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "accepted"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"
+              },
+              "definitive_refusal": {
+                "const": null
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "resolved_not_accepted"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "const": null
+              },
+              "definitive_refusal": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/safe_code"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "prepared",
+                  "unresolved"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "const": null
+              },
+              "definitive_refusal": {
+                "const": null
+              }
+            }
+          }
+        }
+      ],
+      "x-invariants": [
+        "Intent precedes effect; receipt and accepted identity commit before acknowledgement. Same accepted key replays original receipt before testing expected revision. No deadline or content retirement deletes retained operation identity."
+      ]
+    },
+    "protected_invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "context",
+        "namespace",
+        "native_session_ref",
+        "native_turn_ref",
+        "native_tool_use_ref",
+        "opaque_binding_secret_digest",
+        "state",
+        "operation_ref",
+        "receipt"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.protected-invocation-state/v1"
+        },
+        "context": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/trusted_invocation_context"
+        },
+        "namespace": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_namespace"
+        },
+        "native_session_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "native_turn_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "native_tool_use_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "opaque_binding_secret_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "accepted",
+            "resolved_not_accepted",
+            "unresolved"
+          ]
+        },
+        "operation_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "Protected current-user 0700/0600 state. Initialization is explicit. Digest of private capability remains protected; raw capability bytes never enter this safe reference schema or exported artifacts. Missing/corrupt state causes refusal or uncertainty, never automatic replacement."
+      ]
+    },
+    "group_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_key",
+        "member_ref",
+        "task_ref",
+        "state",
+        "operation_ref"
+      ],
+      "properties": {
+        "entry_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "member_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "provisioning",
+            "queued",
+            "dispatching",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+            "expired",
+            "unknown"
+          ]
+        },
+        "operation_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "group_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "group_ref",
+        "manifest",
+        "manifest_digest",
+        "receipt",
+        "revision",
+        "entries",
+        "input_captures"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.group-state/v1"
+        },
+        "group_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "manifest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/group_assignment"
+        },
+        "manifest_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "receipt": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/group_link"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "input_captures": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/group_input_capture"
+          }
+        }
+      },
+      "x-invariants": [
+        "Entries correspond exactly once to immutable manifest entries. Partial progress never mutates manifest or erases unknown member/task linkage.",
+        "Exactly one immutable validated group_task_input capture per manifest entry, with complete chunked bytes and provisioning snapshot pinned before receipt. Each capture chunk is at most8MiB and per-Run quota/capacity is reserved before acceptance. Recovery never reads original paths."
+      ]
+    },
+    "merge_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "merge_ref",
+        "group_ref",
+        "identity",
+        "merged_findings_digest",
+        "complete_output",
+        "receipt",
+        "synthesis_task_refs"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.merge-state/v1"
+        },
+        "merge_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "group_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "identity": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/merged_findings"
+        },
+        "merged_findings_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "complete_output": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        },
+        "receipt": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"
+        },
+        "synthesis_task_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      },
+      "x-invariants": [
+        "Merge is deterministic and does not invoke a model. Synthesis references separately accepted tasks with independent round and result accounting."
+      ]
+    },
+    "pool_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "readonly_server_limit",
+        "dedicated_generation_cap",
+        "sixth_generation_warning",
+        "native_subagent_default"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.pool-configuration/v1"
+        },
+        "readonly_server_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "dedicated_generation_cap": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "sixth_generation_warning": {
+          "const": 6
+        },
+        "native_subagent_default": {
+          "const": "disabled"
+        }
+      },
+      "x-defaults": {
+        "readonly_server_limit": 1,
+        "dedicated_generation_cap": 8
+      },
+      "x-invariants": [
+        "Lowering a cap refuses additional admission; it never terminates accepted work. Pool grouping requires exact account/Profile/process-static configuration compatibility."
+      ]
+    },
+    "pool_member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_ref",
+        "accepted_configuration_digest",
+        "server_generation_ref",
+        "lane",
+        "access",
+        "native_subagent_policy",
+        "lease_ref",
+        "state",
+        "workload_state"
+      ],
+      "properties": {
+        "run_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "accepted_configuration_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "server_generation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "lane": {
+          "const": "shared_readonly"
+        },
+        "access": {
+          "const": "read_only"
+        },
+        "native_subagent_policy": {
+          "const": "disabled"
+        },
+        "lease_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "active",
+            "passivating",
+            "passivated",
+            "activating",
+            "unknown"
+          ]
+        },
+        "workload_state": {
+          "enum": [
+            "idle",
+            "queued",
+            "running",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "pool_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "pool_ref",
+        "compatibility_digest",
+        "configuration",
+        "revision",
+        "server_generation_refs",
+        "members"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.pool-state/v1"
+        },
+        "pool_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "compatibility_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "configuration": {
+          "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/pool_configuration"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "server_generation_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+          },
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/pool_member"
+          },
+          "minItems": 0,
+          "maxItems": 4096
+        }
+      },
+      "x-invariants": [
+        "Owned server generations\u2264configured K. One member passivation cannot stop another; shutdown requires whole-generation proof. No pooled member can become writable."
+      ]
+    },
+    "queue_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_ref",
+        "accepted_task",
+        "accepted_task_digest",
+        "complete_task_body",
+        "caller_scope",
+        "state",
+        "priority",
+        "enqueued_sequence",
+        "deadline_at",
+        "lease_expires_at",
+        "dispatch_operation_ref"
+      ],
+      "properties": {
+        "task_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "accepted_task": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_task"
+        },
+        "accepted_task_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "complete_task_body": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        },
+        "caller_scope": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/caller_scope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "claimed",
+            "dispatching",
+            "accepted",
+            "unknown",
+            "terminal",
+            "proved_not_dispatched"
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "enqueued_sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "deadline_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "x-maxUtf8Bytes": 64,
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lease_expires_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "x-maxUtf8Bytes": 64,
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dispatch_operation_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "Selected collaboration policy owns priority/aging/fairness/backpressure. Lease expiry cannot revoke accepted or unknown Turn; activation never redispatches uncertain work."
+      ]
+    },
+    "queue_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "scope_kind",
+        "scope_ref",
+        "revision",
+        "collaboration_policy_digest",
+        "capacity",
+        "entries"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.queue-state/v1"
+        },
+        "scope_kind": {
+          "enum": [
+            "external_engagement",
+            "orchestrated_session"
+          ]
+        },
+        "scope_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "collaboration_policy_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "capacity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/queue_entry"
+          },
+          "minItems": 0,
+          "maxItems": 4096
+        }
+      },
+      "x-invariants": [
+        "Entries\u2264selected policy capacity. Accepted task bytes and uncertainty survive restart."
+      ]
+    },
+    "lifecycle_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_ref",
+        "run_ref",
+        "generation",
+        "owner_ref",
+        "state",
+        "close_receipt",
+        "active_turn_ref",
+        "unresolved_interactions",
+        "background_state",
+        "writer_settled",
+        "cleanup_required",
+        "required_action"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.lifecycle-operation/v1"
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "run_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "owner_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "state": {
+          "enum": [
+            "requested",
+            "interrupting",
+            "settling",
+            "terminal",
+            "cleanup_failed",
+            "recovery_needed"
+          ]
+        },
+        "close_receipt": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "active_turn_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unresolved_interactions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "background_state": {
+          "enum": [
+            "idle",
+            "active",
+            "unknown"
+          ]
+        },
+        "writer_settled": {
+          "type": "boolean"
+        },
+        "cleanup_required": {
+          "type": "boolean"
+        },
+        "required_action": {
+          "enum": [
+            "none",
+            "reconcile_operation",
+            "recover_run",
+            "restore_state"
+          ]
+        }
+      },
+      "x-invariants": [
+        "SETTLING has a live advancing durable owner. Interrupt acknowledgement is not terminal proof. Failed cleanup cannot retract successful close receipt. Generation handoff requires proved absence of old activity/interaction/writer authority."
+      ]
+    },
+    "segment_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_ref",
+        "content",
+        "first_sequence",
+        "last_sequence",
+        "previous_chain_hash",
+        "terminal_chain_hash"
+      ],
+      "properties": {
+        "segment_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "content": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        },
+        "first_sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "last_sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "previous_chain_hash": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "terminal_chain_hash": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        }
+      }
+    },
+    "generation_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "generation",
+        "record_schema",
+        "checkpoint",
+        "segments",
+        "chain_hash",
+        "durable_watermark",
+        "record_count",
+        "byte_count",
+        "finalization_reserved_bytes",
+        "retained_receipt_index"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.ledger-generation-manifest/v1"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "record_schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "checkpoint": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/segment_ref"
+          },
+          "minItems": 0,
+          "maxItems": 4096
+        },
+        "chain_hash": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "durable_watermark": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "record_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "byte_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 536870912
+        },
+        "finalization_reserved_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "retained_receipt_index": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        }
+      },
+      "x-invariants": [
+        "Reader pins exactly one immutable manifest; no mixed generation reads. Recovery/finalization may consume retained reserve over ordinary admission bounds without bypassing integrity checks."
+      ]
+    },
+    "maintenance_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_ref",
+        "plan",
+        "state",
+        "old_manifest",
+        "new_manifest",
+        "lifecycle_lock_held",
+        "ledger_writer_lock_held",
+        "admission_closed",
+        "live_writers",
+        "unknown_workload",
+        "reader_pinned_generations",
+        "recovery_referenced_generations",
+        "protected_content",
+        "retained_receipt_count",
+        "automatic_deletion",
+        "operator_id",
+        "operator_generation"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.maintenance-state/v1"
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "plan": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/maintenance_plan"
+        },
+        "state": {
+          "enum": [
+            "planned",
+            "preparing",
+            "files_synced",
+            "manifest_switched",
+            "completed",
+            "recovery_needed"
+          ]
+        },
+        "old_manifest": {
+          "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/generation_manifest"
+        },
+        "new_manifest": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/generation_manifest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lifecycle_lock_held": {
+          "type": "boolean"
+        },
+        "ledger_writer_lock_held": {
+          "type": "boolean"
+        },
+        "admission_closed": {
+          "type": "boolean"
+        },
+        "live_writers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unknown_workload": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "reader_pinned_generations": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "minItems": 0,
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "recovery_referenced_generations": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "minItems": 0,
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "protected_content": {
+          "type": "array",
+          "items": {
+            "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+          },
+          "minItems": 0,
+          "maxItems": 4096
+        },
+        "retained_receipt_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "automatic_deletion": {
+          "const": false
+        },
+        "operator_id": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "operator_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "preparing",
+                  "files_synced",
+                  "manifest_switched"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "lifecycle_lock_held": {
+                "const": true
+              },
+              "ledger_writer_lock_held": {
+                "const": true
+              },
+              "admission_closed": {
+                "const": true
+              },
+              "live_writers": {
+                "const": 0
+              },
+              "unknown_workload": {
+                "const": 0
+              }
+            }
+          }
+        }
+      ],
+      "x-invariants": [
+        "Lock order: lifecycle then ledger writer. Sync checkpoint/segments and directories before atomic manifest switch. Before switch select old; after switch validate/select new. Retain old generations for reader/recovery pins. Explicit GC dry-run never deletes accepted identity/receipt metadata.",
+        "operation_ref equals original plan.plan_ref; durable original operator/workspace/generation binding precedes effects and survives generation retirement."
+      ]
+    },
+    "content_tombstone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "content",
+        "source",
+        "result_digest",
+        "retired_by_operation_ref",
+        "availability",
+        "required_action"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.content-tombstone/v1"
+        },
+        "content": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        },
+        "source": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/result_source"
+        },
+        "result_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "retired_by_operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "availability": {
+          "const": "retired"
+        },
+        "required_action": {
+          "const": "none"
+        }
+      }
+    },
+    "audit_record_v2": {
+      "$ref": "https://dolgorae.local/schema/audit-record/v2"
+    },
+    "profile_membership_v2": {
+      "$ref": "https://dolgorae.local/schema/profile-membership/v2"
+    },
+    "workspace_record_v1": {
+      "$ref": "https://dolgorae.local/schema/workspace-record/v1"
+    },
+    "profile_server_state_v2": {
+      "$ref": "https://dolgorae.local/schema/profile-server-state/v2"
+    },
+    "group_input_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_key",
+        "content",
+        "capture_ref",
+        "provisioning_ref"
+      ],
+      "properties": {
+        "entry_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-maxUtf8Bytes": 256
+        },
+        "content": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/bytes_ref"
+        },
+        "provisioning_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "capture_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        }
+      }
+    },
+    "member_release_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation_ref",
+        "operation_kind",
+        "workspace_ref",
+        "scope_kind",
+        "scope_ref",
+        "member_ref",
+        "run_ref",
+        "controller_principal",
+        "controller_generation",
+        "admitted_membership_revision",
+        "owner_ref",
+        "progress",
+        "safe_failure_code",
+        "required_action",
+        "terminal_membership_revision",
+        "settled_workload_revision"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.member-release-operation/v1"
+        },
+        "operation_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "operation_kind": {
+          "enum": [
+            "release_external_specialist",
+            "release_specialist"
+          ]
+        },
+        "workspace_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "scope_kind": {
+          "enum": [
+            "external_engagement",
+            "orchestrated_session"
+          ]
+        },
+        "scope_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "member_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "run_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "controller_principal": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+        },
+        "controller_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "admitted_membership_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "owner_ref": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "progress": {
+          "enum": [
+            "requested",
+            "settling",
+            "terminal",
+            "cleanup_failed",
+            "recovery_needed"
+          ]
+        },
+        "safe_failure_code": {
+          "anyOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/safe_code"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required_action": {
+          "enum": [
+            "none",
+            "reconcile_operation",
+            "recover_run",
+            "restore_state"
+          ]
+        },
+        "terminal_membership_revision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "settled_workload_revision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "release_external_specialist"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scope_kind": {
+                "const": "external_engagement"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operation_kind": {
+                "const": "release_specialist"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scope_kind": {
+                "const": "orchestrated_session"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "progress": {
+                "enum": [
+                  "terminal"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "terminal_membership_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "settled_workload_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "safe_failure_code": {
+                "const": null
+              },
+              "required_action": {
+                "const": "none"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "progress": {
+                "enum": [
+                  "requested",
+                  "settling"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "terminal_membership_revision": {
+                "const": null
+              },
+              "settled_workload_revision": {
+                "const": null
+              },
+              "safe_failure_code": {
+                "const": null
+              },
+              "required_action": {
+                "const": "none"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "progress": {
+                "enum": [
+                  "cleanup_failed",
+                  "recovery_needed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "terminal_membership_revision": {
+                "const": null
+              },
+              "settled_workload_revision": {
+                "const": null
+              },
+              "safe_failure_code": {
+                "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/safe_code"
+              },
+              "required_action": {
+                "enum": [
+                  "reconcile_operation",
+                  "recover_run",
+                  "restore_state"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "x-generationSelection": {
+    "modern_run_manifest": "3 -> 4",
+    "agent_configuration": "3 -> 4",
+    "instructions": "2 -> 3",
+    "run_state": "1 -> 2",
+    "idempotency_intent": "1 -> 2",
+    "audit_record": "2 unchanged",
+    "profile_membership": "2 unchanged",
+    "workspace_record": "1 unchanged",
+    "profile_server_state": "2 unchanged",
+    "workspace_engagement_store": "5 -> 6",
+    "orchestration_extension": "3 unchanged",
+    "member_release_operation": "dolgorae.member-release-operation/v1 (new record)"
+  },
+  "x-compatibility": [
+    "Old generations retain supported read/collect/close/recovery through their original schemas. No silent in-place migration or downgrade is promised.",
+    "New sidecars bind existing membership/audit/process facts without changing those record shapes. Schema publication does not implement a production Store."
+  ]
+}

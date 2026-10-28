@@ -108,6 +108,23 @@ pub(crate) fn validate(interaction: &Interaction) -> Result<(), MachineError> {
             "dolgorae.interaction.file-change-approval/v1",
             &["accept_once", "decline", "cancel"][..],
         ),
+        "permission_request" => (
+            "dolgorae.interaction.permission/v2",
+            &["accept_once", "decline", "cancel"][..],
+        ),
+        "mcp_elicitation" => {
+            let value: crate::successor_interaction::McpPayload =
+                serde_json::from_value(interaction.payload.clone())
+                    .map_err(|_| invalid("MCP payload"))?;
+            (
+                "dolgorae.interaction.mcp-elicitation/v2",
+                if value.policy_only.is_some() {
+                    &["decline", "cancel"][..]
+                } else {
+                    &["accept_once", "decline", "cancel"][..]
+                },
+            )
+        }
         "user_input" => ("dolgorae.interaction.user-input/v1", &[][..]),
         "unsupported_request" => ("dolgorae.interaction.unsupported/v1", &[][..]),
         _ => return Err(invalid("closed normalized interaction kind")),
@@ -123,6 +140,62 @@ pub(crate) fn validate(interaction: &Interaction) -> Result<(), MachineError> {
         return Err(invalid("interaction response schema and exact decisions"));
     }
     match interaction.kind.as_str() {
+        "permission_request" => {
+            let value: crate::successor_interaction::PermissionPayload =
+                serde_json::from_value(interaction.payload.clone())
+                    .map_err(|_| invalid("permission payload"))?;
+            bounded(&value.title, 512)?;
+            bounded(&value.reason, 4096)?;
+            if value.requested_permissions.len() > 64 {
+                return Err(invalid("permission count"));
+            }
+            let mut seen = BTreeSet::new();
+            for token in value.requested_permissions {
+                bounded(&token, 4352)?;
+                if !seen.insert(token) {
+                    return Err(invalid("unique permission identifiers"));
+                }
+            }
+        }
+        "mcp_elicitation" => {
+            let value: crate::successor_interaction::McpPayload =
+                serde_json::from_value(interaction.payload.clone())
+                    .map_err(|_| invalid("MCP payload"))?;
+            bounded(&value.title, 4096)?;
+            bounded(&value.server_name, 512)?;
+            if value.policy_only.is_some()
+                && (value.title != "MCP input"
+                    || !value.server_name.is_empty()
+                    || !value.questions.is_empty())
+            {
+                return Err(invalid("closed policy-only MCP payload"));
+            }
+            if value.questions.len() > 64
+                || (value.policy_only.is_none()
+                    && interaction.status == "pending"
+                    && value.questions.is_empty())
+            {
+                return Err(invalid("MCP question count"));
+            }
+            let mut ids = BTreeSet::new();
+            for q in value.questions {
+                bounded(&q.id, 128)?;
+                bounded(&q.header, 512)?;
+                bounded(&q.question, 4096)?;
+                if q.id.is_empty() || !q.is_secret || !ids.insert(q.id) {
+                    return Err(invalid("protected MCP question"));
+                }
+                if let Some(options) = q.options {
+                    if options.len() > 32 {
+                        return Err(invalid("MCP option count"));
+                    }
+                    for option in options {
+                        bounded(&option.label, 256)?;
+                        bounded(&option.description, 4096)?;
+                    }
+                }
+            }
+        }
         "command_execution_approval" => {
             let value: CommandApprovalPayload = serde_json::from_value(interaction.payload.clone())
                 .map_err(|_| invalid("command approval payload"))?;
@@ -228,4 +301,59 @@ pub(crate) fn validate(interaction: &Interaction) -> Result<(), MachineError> {
         _ => return Err(invalid("closed normalized interaction kind")),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_only_mcp_is_closed_and_does_not_relax_ordinary_pending_forms() {
+        let raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/interaction-v2/interaction-v2-mcp-policy-only.valid.json"
+        ))
+        .unwrap();
+        let run_id = serde_json::from_value(raw["run_id"].clone()).unwrap();
+        let interaction = Interaction::parse(raw.clone(), run_id).unwrap();
+        validate(&interaction).unwrap();
+        for field in [
+            "policy_only",
+            "null_marker",
+            "object_marker",
+            "title",
+            "server_name",
+            "questions",
+            "decisions",
+        ] {
+            let mut changed = Interaction::parse(raw.clone(), run_id).unwrap();
+            match field {
+                "policy_only" => changed.payload[field] = json!("UNKNOWN"),
+                "object_marker" => {
+                    changed.payload["policy_only"] = json!({"RUNTIME_VARIANT_UNSUPPORTED":null})
+                }
+                "null_marker" => {
+                    let supported: serde_json::Value = serde_json::from_str(include_str!(
+                        "../docs/protocol/examples/interaction-v2/interaction-v2-mcp.valid.json"
+                    ))
+                    .unwrap();
+                    changed.payload = supported["payload"].clone();
+                    changed.payload["policy_only"] = serde_json::Value::Null;
+                    changed.available_decisions.insert(0, "accept_once".into());
+                }
+                "title" | "server_name" => changed.payload[field] = json!("secret-canary"),
+                "questions" => changed.payload[field] = json!([{}]),
+                "decisions" => changed.available_decisions.insert(0, "accept_once".into()),
+                _ => unreachable!(),
+            }
+            assert!(validate(&changed).is_err(), "{field}");
+        }
+        let mut ordinary = interaction;
+        ordinary
+            .payload
+            .as_object_mut()
+            .unwrap()
+            .remove("policy_only");
+        ordinary.available_decisions.insert(0, "accept_once".into());
+        assert!(validate(&ordinary).is_err());
+    }
 }

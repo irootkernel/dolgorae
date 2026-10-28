@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "request_id": "018f0000-0000-7000-8000-000000000001",
+  "run_id": "018f0000-0000-7000-8000-000000000002",
+  "controller_id": "018f0000-0000-7000-8000-000000000003",
+  "controller_generation": 1,
+  "control_mode": "managed_agent",
+  "thread_id": "fixture-thread",
+  "turn_id": "fixture-turn",
+  "item_id": null,
+  "run_generation": 1,
+  "server_epoch": 1,
+  "kind": "mcp_elicitation",
+  "status": "pending",
+  "payload": {
+    "title": "MCP input",
+    "server_name": "",
+    "questions": [],
+    "policy_only": "RUNTIME_VARIANT_UNSUPPORTED"
+  },
+  "available_decisions": [
+    "decline",
+    "cancel"
+  ],
+  "response_schema": "dolgorae.interaction.mcp-elicitation/v2",
+  "opened_at": "2026-10-01T00:00:00.000000Z",
+  "resolved_at": null,
+  "resolution": null
+}

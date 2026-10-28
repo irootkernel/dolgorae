@@ -20,6 +20,9 @@ MARKDOWN_FILES = {
     "references/recovery.md",
 }
 SCHEMA_ROOTS = (
+    "dolgorae-public-resolution-v2.schema.json",
+    "dolgorae-machine-v6.schema.json",
+    "dolgorae-interaction-decision-v2.schema.json",
     "dolgorae-specialist-review-tool-v4.schema.json",
     "dolgorae-external-specialist-facade-v4.schema.json",
     "dolgorae-machine-v4.schema.json",

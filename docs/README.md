@@ -46,7 +46,16 @@ hash-bound historical client projections and mutation admission/completion.
 existing client event record to its append-time aggregate revisions. The
 [ledger conformance registry](protocol/dolgorae-ledger-conformance-v1.json)
 identifies each accepted record version and its kind extensions; these persisted
-contracts do not alter the frozen public-v1 Protobuf or descriptor.
+contracts do not alter the frozen public-v1 Protobuf or descriptor. Current
+permission/MCP requests use [interaction v2](protocol/dolgorae-interaction-v2.schema.json)
+and [protected decisions v2](protocol/dolgorae-interaction-decision-v2.schema.json).
+[Public resolution v2](protocol/dolgorae-public-resolution-v2.schema.json) owns
+the private actor intent and atomic durable lookup receipt.
+Their opened-event vocabulary uses [event v2](protocol/dolgorae-event-record-v2.schema.json),
+[stamps v2](protocol/dolgorae-stamped-client-event-v2.schema.json), and
+[audit v3](protocol/dolgorae-audit-record-v3.schema.json), alongside retained
+readers. [Machine v6](protocol/dolgorae-machine-v6.schema.json) carries the new
+observer/detail output without changing earlier Machine envelopes.
 
 ## Precedence and synchronization
 

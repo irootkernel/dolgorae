@@ -52,6 +52,12 @@ impl MutationRequestIdentity {
 
 pub(crate) trait MutationRequest {
     fn mutation_request_identity(&self) -> Result<MutationRequestIdentity, MachineError>;
+    fn mutation_request_identity_in(
+        &self,
+        _records: &[crate::audit::AuditRecord],
+    ) -> Result<MutationRequestIdentity, MachineError> {
+        self.mutation_request_identity()
+    }
 }
 
 fn internal(reason: impl Into<String>) -> MachineError {
@@ -160,7 +166,8 @@ pub(crate) fn admit_mutation<
     expected_state_revision: u64,
     request: &R,
 ) -> Result<MutationAdmission, MachineError> {
-    let identity = request.mutation_request_identity()?;
+    let identity =
+        request.mutation_request_identity_in(ledger.durable_records().map_err(ledger_failure)?)?;
     admit_mutation_digest(
         ledger,
         controller_id,
@@ -247,7 +254,8 @@ pub(crate) fn validate_mutation_admission<
     request: &R,
 ) -> Result<(), MachineError> {
     let projection = ledger.projection().map_err(ledger_failure)?;
-    let identity = request.mutation_request_identity()?;
+    let identity =
+        request.mutation_request_identity_in(ledger.durable_records().map_err(ledger_failure)?)?;
     let Some(active) = active_mutation_admission(ledger)? else {
         return Err(state_conflict(
             projection.run_id,
@@ -283,7 +291,8 @@ pub(crate) fn abort_prepared_turn_admission<
     controller_id: Uuid,
     request: &R,
 ) -> Result<(), MachineError> {
-    let identity = request.mutation_request_identity()?;
+    let identity =
+        request.mutation_request_identity_in(ledger.durable_records().map_err(ledger_failure)?)?;
     let projection = ledger.projection().map_err(ledger_failure)?;
     let active = active_mutation_admission(ledger)?;
     let Some(active) = active.filter(|active| {

@@ -1,0 +1,6 @@
+{
+  "decision": "accept_once",
+  "granted_permissions": [
+    "filesystem_read:fixture.txt"
+  ]
+}

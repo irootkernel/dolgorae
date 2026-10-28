@@ -1590,6 +1590,7 @@ async fn run_server_with_accept(
         .add_service(crate::protocol::public_v2::orchestration_service_server::OrchestrationServiceServer::new(service.clone()))
         .add_service(crate::protocol::public_v2::controller_service_server::ControllerServiceServer::new(service.clone()))
         .add_service(crate::protocol::public_v2::artifact_service_server::ArtifactServiceServer::new(service.clone()))
+        .add_service(crate::protocol::public_v2::interaction_service_server::InteractionServiceServer::new(service.clone()).max_decoding_message_size(12 * 1024 * 1024).max_encoding_message_size(12 * 1024 * 1024))
         .serve_with_incoming_shutdown(
             tokio_stream::wrappers::ReceiverStream::new(receiver),
             async move {

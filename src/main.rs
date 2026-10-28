@@ -551,7 +551,12 @@ fn execute(cli: Cli) -> ExitCode {
                         serde_json::to_string_pretty(&data).expect("typed interaction")
                     );
                 } else {
-                    render_json(&SuccessEnvelope::new(command_name, data));
+                    let successor = data["schema_version"] == 2;
+                    let mut envelope = SuccessEnvelope::new(command_name, data);
+                    if successor {
+                        envelope.schema_version = 6;
+                    }
+                    render_json(&envelope);
                 }
                 ExitCode::SUCCESS
             }
@@ -888,14 +893,27 @@ fn execute(cli: Cli) -> ExitCode {
         // machine object: SPEC-006 has it emit one envelope per durable record
         // through the head captured at command start, then the `end` frame.
         Ok(SemanticResult::RunStream(objects)) => {
-            for data in objects {
+            let successor = objects.iter().any(|v| {
+                v.pointer("/record/schema_version")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(2)
+            });
+            for mut data in objects {
+                if successor && data["kind"] == "event" {
+                    data["schema_version"] = json!(2);
+                }
+
                 if cli.human {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&data).expect("typed semantic result")
                     );
                 } else {
-                    render_json(&SuccessEnvelope::new(command_name, data));
+                    let mut envelope = SuccessEnvelope::new(command_name, data);
+                    if successor {
+                        envelope.schema_version = 6;
+                    }
+                    render_json(&envelope);
                 }
             }
             ExitCode::SUCCESS
@@ -929,8 +947,15 @@ fn execute(cli: Cli) -> ExitCode {
                     (true, "run.release_write") => "run.release-write",
                     _ => command_name,
                 };
+                let successor = command_name == "run.pending"
+                    && data
+                        .get("items")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|items| items.iter().any(|v| v["schema_version"] == 2));
                 let mut envelope = SuccessEnvelope::new(name, data);
-                if modern {
+                if successor {
+                    envelope.schema_version = 6;
+                } else if modern {
                     envelope.schema_version = 4;
                 }
                 render_json(&envelope);

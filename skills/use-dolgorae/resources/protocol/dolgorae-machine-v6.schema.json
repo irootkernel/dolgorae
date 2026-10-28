@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/machine-output/v6",
+  "title": "Dolgorae successor interaction and event machine output v6",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "command",
+    "invocation_id",
+    "data"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 6
+    },
+    "ok": {
+      "const": true
+    },
+    "command": {
+      "enum": [
+        "run.pending",
+        "run.interaction.get",
+        "run.events"
+      ]
+    },
+    "invocation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "data": {}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "run.pending"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "items"
+            ],
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "$ref": "https://dolgorae.local/schema/interaction-summary/v1"
+                    },
+                    {
+                      "$ref": "https://dolgorae.local/schema/interaction-summary/v2"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "run.interaction.get"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "https://dolgorae.local/schema/interaction/v2"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "run.events"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "oneOf": [
+              {
+                "$ref": "https://dolgorae.local/schema/event-delivery/v2"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "cursor",
+                  "state"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "heartbeat"
+                  },
+                  "cursor": {
+                    "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/cursor_zero"
+                  },
+                  "state": {
+                    "enum": [
+                      "starting",
+                      "idle",
+                      "running",
+                      "waiting_interaction",
+                      "reconciliation_required",
+                      "paused",
+                      "closed",
+                      "start_failed",
+                      "outcome_unknown"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "cursor"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "end"
+                  },
+                  "cursor": {
+                    "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/cursor_zero"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

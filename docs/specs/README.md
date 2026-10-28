@@ -2852,7 +2852,7 @@ maps stable server requests as follows:
   snapshot records a successful pinned live round trip; it becomes
   `waiting_interaction`;
 - `item/permissions/requestApproval` and `mcpServer/elicitation/request` are
-  recognized but unsupported in v1. Dolgorae MUST persist an immediately
+  recognized but unsupported in the historical v1 interaction contract. Dolgorae MUST persist an immediately
   resolved `unsupported_request` interaction, reply JSON-RPC method-not-found,
   and keep draining the turn. They MUST NOT appear in `run pending`. Connector
   approval remains unavailable.
@@ -2959,6 +2959,96 @@ that nevertheless arrives is handled by the recognized-unsupported rule above.
 
 The pinned server's session-scoped approval value remains an observed wire
 capability but is not exposed as v1 public input.
+
+### Successor permission and MCP interactions
+
+Successor Runs admitted with the caller-workspace or fixed read-only execution
+policy use `dolgorae.interaction.permission/v2` and
+`dolgorae.interaction.mcp-elicitation/v2`, independently of the retained v1
+unsupported records. The normalized persisted interaction and observer summary
+use version 2 only for these kinds. Existing command, file and user-input
+contracts retain their versions and behavior.
+
+The current Run Controller owns public responses. The request ID, Run, active
+Turn, run generation, Controller generation and server epoch MUST still match
+at admission and at the worker effect. Delegated child Controller credentials
+remain private. Where no declared answering owner exists, the worker owns an
+explicit immediate policy decline: it persists the typed decision during request
+ingestion before responding upstream, without waiting for a client or a later
+scheduling cycle. Durable I/O and upstream delivery still take time. A direct
+Controller remains the answer owner while disconnected. Fixed read-only
+members likewise decline;
+a permission answer MUST NOT promote a member or grant Writer authority.
+Decline leaves the accepted Turn running until actual terminal evidence arrives.
+A known pre-dispatch Writer or policy-readback busy refusal settles only its
+exact prepared Turn admission through the existing no-dispatch abort proof.
+It preserves the current Writer and strict quiescence requirements.
+An uncertain response delivery follows ordinary `OUTCOME_UNKNOWN` recovery and
+MUST NOT replay the protected response.
+
+Permission requests expose bounded exact grant identifiers and accept only a
+subset of the requested permissions allowed by the current access policy, with
+Turn scope. MCP form requests expose typed questions and accept validated form
+answers, decline or cancel. An unrepresentable runtime variant receives a typed
+policy decline, rather than a fabricated form or method-not-found history.
+An unrepresentable MCP request is persisted as a pending version-2 MCP
+interaction with `policy_only: "RUNTIME_VARIANT_UNSUPPORTED"`, an empty
+`questions` array, the fixed title `MCP input`, and an empty `server_name`.
+This representation retains no unknown variant content. It offers only
+`decline` and `cancel`; it cannot authorize acceptance. It remains pending
+until the actual durable decision or an existing explicit stale transition.
+The decision records the actual owner-specific policy cause. Ordinary MCP
+forms omit `policy_only` and retain their existing question validation.
+
+Both families treat response bodies as protected: durable decisions contain
+only a safe decision, answer count and opaque UUIDv7 receipt, with no content
+fingerprint. Same-key authenticated retry returns the receipt without comparing
+replacement content. Full requests are Controller-only; push and observer
+surfaces contain only fixed titles, kind, status, authority and timestamps.
+
+New public-v2 resolutions carry a checked `dolgorae.public-resolution-intent/v2`
+through the build-bound private actor wrapper. The actor validates the current
+request, Run, Turn, existing thread-generation witness, and authoritative
+Controller principal/generation before creating the frozen public-v2 normalized
+mutation envelope. Expected revisions remain admission fences. Ordinary answers
+retain question order, selected-label order and nullable text.
+
+The normalized ordinary-text ceiling is 65,536 UTF-8 bytes. Admission also
+follows the current per-kind response contract: retained
+`dolgorae.interaction.user-input/v1` requires each native answer string to be
+nonempty and at most 4,096 UTF-8 bytes, with its existing question and option
+checks.
+
+For authoritative protected input, answer and granted-permission arrays are empty in this identity;
+only the safe typed decision and actual protected-input carrier-presence fact
+remain.
+The receipt separately retains authoritative protection status; carrier presence
+does not classify an interaction as protected.
+
+The existing approval decision append atomically retains a separate
+`dolgorae.public-resolution-receipt/v2` alongside its winning resolution receipt.
+No accepted identity exists before that decision owns the response effect.
+A public Resolve key is unique within Run, Controller principal/generation and
+operation kind; it cannot resolve another interaction. Winning protected retries
+return the original receipt before current revision/Turn fences and do not read
+or compare replacement content. `LookupOperation` returns that authentic safe
+receipt without answer content. Historical decisions lacking the public identity
+remain readable and yield honest unresolved recovery; they never gain a fabricated
+mutation digest or authoritative absence. Upstream uncertainty remains visible,
+and completion requires matching actual terminal evidence.
+
+Permission/MCP opened events use `client-event-record/v2` and
+`stamped-client-event/v2`; audit v3 binds these successor projections. Existing
+audit v1/v2 and client-event v1 bytes retain their exact readers. Machine output v6 is selected
+for a pending/detail result containing interaction v2, or an event stream
+containing event-record v2. Its event-delivery v2 explicitly carries retained
+v1 and current v2 records; the selected stream uses one envelope version
+through its end marker. Other outputs retain their existing generations.
+
+Safe command activity redacts command text. Workspace changes contain only
+validated workspace-relative paths,
+and runtime failures use fixed safe codes and messages. All activity is appended
+through the same durable journal and append-time event context as Turn state.
 
 ## SPEC-010: Audit, Retention, and Deletion
 
@@ -5527,10 +5617,12 @@ means the provider supplied no deadline. `user_escalation_required` is
 `resolved` or `stale`; it is a deterministic delivery signal, not a prediction
 about whether a human will answer. `ControllerInteraction` MUST select
 exactly one typed payload matching `summary.kind`: command approval, file-change
-approval, user input, or recognized unsupported Interaction. Permission and MCP
-elicitation requests map to the unsupported payload; unavailable connector
-approval produces no Interaction. `response_schema_id` identifies only the
-accepted `ResolveInteraction.response_json` schema. Decisions use the closed
+approval, user input, permission, MCP elicitation, or historical recognized
+unsupported Interaction. Successor permission/MCP payloads follow SPEC-009;
+unavailable connector
+approval produces no Interaction. `response_schema_id` identifies the per-kind versioned decision contract
+accepted by the typed public-v2 `ResolveInteraction.answer`. The frozen v1
+adapter retains its separate `ResolveInteraction.response_json` input. Decisions use the closed
 `InteractionDecision` enum. A kind/payload mismatch, unspecified enum, or
 unknown future variant fails closed; no unversioned safe JSON payload exists.
 

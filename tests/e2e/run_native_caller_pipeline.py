@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import shutil
@@ -19,7 +21,86 @@ CODEX_VERSION = "0.164.0"
 CODEX_SHA256 = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
 
 
-def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1) -> dict[str, object]:
+class InteractionResponses(ScriptedResponses):
+    """Two current interaction Turns; responses stay on the owned loopback fixture."""
+    def __init__(self, workspace: Path):
+        super().__init__()
+        self.workspace = workspace
+        self.issued_cases = set()
+        self.completed_cases = set()
+        self.mcp_reply = threading.Event()
+        self.mcp_decision = None
+        owner = self
+        class McpHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+            def do_POST(self):
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 0 < size <= 65536 or self.headers.get("Authorization"):
+                    self.send_error(400); return
+                request = json.loads(self.rfile.read(size))
+                if "method" not in request:
+                    owner.mcp_decision = request.get("result", {}).get("action")
+                    owner.mcp_reply.set()
+                    self.send_response(202); self.end_headers(); return
+                method = request["method"]
+                if "id" not in request:
+                    self.send_response(202); self.end_headers(); return
+                if method == "initialize":
+                    result = {"protocolVersion": request["params"]["protocolVersion"], "capabilities": {"tools": {}}, "serverInfo": {"name":"task079-fixture","version":"1"}}
+                elif method == "tools/list":
+                    result = {"tools":[{"name":"ask","description":"Request one protected input.","inputSchema":{"type":"object","properties":{}}}]}
+                elif method == "tools/call":
+                    self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+                    message = {"jsonrpc":"2.0","id":7901,"method":"elicitation/create","params":{"message":"Protected fixture input","requestedSchema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}
+                    self.wfile.write(("event: message\ndata: " + json.dumps(message) + "\n\n").encode()); self.wfile.flush()
+                    if not owner.mcp_reply.wait(90):
+                        owner.failure = "mcp_reply_timeout"; return
+                    result = {"content":[{"type":"text","text":"Input decision received."}]}
+                    message = {"jsonrpc":"2.0","id":request["id"],"result":result}
+                    self.wfile.write(("event: message\ndata: " + json.dumps(message) + "\n\n").encode()); self.wfile.flush(); self.close_connection=True; return
+                else:
+                    self.send_error(400); return
+                body = json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result}).encode()
+                self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+        self.mcp_http = ThreadingHTTPServer(("127.0.0.1", 0), McpHandler)
+        self.mcp_worker = threading.Thread(target=self.mcp_http.serve_forever, daemon=True)
+        self.mcp_worker.start()
+
+    def respond(self, request):
+        from run_native_workspace_policy_fixture import code_call
+        with self.lock:
+            self.posts += 1
+            if self.posts > 6 or not isinstance(request, dict):
+                raise ValueError("interaction fixture request bound")
+            users = [v for v in request.get("input", []) if v.get("type")=="message" and v.get("role")=="user"]
+            text = json.dumps(users[-1]) if users else ""
+            case = "permission" if "TASK079 permission" in text else "mcp" if "TASK079 mcp" in text else None
+            if case is None:
+                raise ValueError("interaction task correlation")
+            if case not in self.issued_cases:
+                self.issued_cases.add(case)
+                name = "request_permissions" if case=="permission" else "mcp__fixture__ask"
+                args = {"permissions":{"file_system":{"read":[str(self.workspace)]}},"reason":"Bounded fixture read permission"} if case=="permission" else {}
+                if case == "permission":
+                    item = code_call(request, "task079-"+case, [(case,name,args)])
+                else:
+                    # The driver checks this configured server's actual native inventory.
+                    # Native deferred tools are callable without being in exec's static description.
+                    item = {"type":"custom_tool_call", "call_id":"task079-mcp", "name":"exec", "namespace":"functions", "input":"text({label:'mcp',result:await tools.mcp__fixture__ask({})});"}
+            else:
+                self.completed_cases.add(case)
+                item={"type":"message","role":"assistant","id":"task079-message-"+case,"content":[{"type":"output_text","text":"Done."}]}
+            identity = "task079-response-"+str(self.posts)
+            return [{"type":"response.created","response":{"id":identity}}, {"type":"response.output_item.done","item":item}, {"type":"response.completed","response":{"id":identity,"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}]
+
+    def close(self):
+        self.mcp_reply.set()
+        self.mcp_http.shutdown(); self.mcp_http.server_close(); self.mcp_worker.join(timeout=5)
+        super().close()
+
+
+def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1, interactions: bool = False, mcp_only: bool = False) -> dict[str, object]:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit native caller pipeline opt-in required")
     if executable_identity(codex)["sha256"] != CODEX_SHA256:
@@ -38,7 +119,7 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, r
             environment["DOLGORAE_NATIVE_READONLY_POOL"] = "1"
             private_file(scratch / "pool-limit", str(pool_limit).encode())
         checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
-        fixture = ScriptedResponses()
+        fixture = InteractionResponses(scratch / "home/workspace") if interactions else ScriptedResponses()
         if default_variant is not None:
             if default_variant not in DEFAULT_FEATURE_VARIANTS:
                 raise ValueError("unknown default-feature variant")
@@ -48,10 +129,14 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, r
             if readonly_pool and name == "fixture-b":
                 config += b'model_context_window = 65536\n'
             config += fixture_config(fixture.base_url)
+            if interactions:
+                config += (f'\n[mcp_servers.fixture]\nurl = "http://127.0.0.1:{fixture.mcp_http.server_port}/mcp"\ndefault_tools_approval_mode = "approve"\n').encode()
             if default_variant == "config-enable":
                 config += b'\n[features]\nshell_snapshot = true\n'
             elif default_variant is None:
                 config += b'\n[features]\nshell_snapshot = false\n'
+                if interactions:
+                    config += b'request_permissions_tool = true\ntool_search_always_defer_mcp_tools = false\n'
             private_file(scratch / name / "config.toml", config)
             private_file(scratch / name / "AGENTS.md", b"Permitted isolated native Profile guidance.\n")
         private_file(scratch / "fixture-owned", b"native-caller-pipeline/v1\n")
@@ -63,11 +148,15 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, r
             private_file(scratch / "pool-command", command.encode())
             fixture.prepare(command)
             fixture.instruction_markers = {"common": "Follow the current task and the selected Role", "role": "POOL_EXPLICIT_ROLE", "profile": "Permitted isolated native Profile guidance.", "project": "Conflicting isolated project instructions.", "ancestor": "Conflicting isolated ancestor instructions."}
+        if interactions:
+            private_file(scratch / "interaction-cases", b"mcp\n" if mcp_only else b"permission,mcp\n")
         result = subprocess.run([str(driver), str(scratch), str(codex)], env=environment,
                                 capture_output=True, text=True, timeout=300)
         private_file(scratch / "driver.stdout", result.stdout.encode())
         private_file(scratch / "driver.stderr", result.stderr.encode())
-        if result.returncode or fixture.failure or (not readonly_pool and fixture.posts):
+        if interactions:
+            private_file(scratch / "interaction-diagnostic.json", json.dumps({"failure":fixture.failure,"details":fixture.failure_details,"issued_cases":sorted(fixture.issued_cases),"completed_cases":sorted(fixture.completed_cases),"mcp_decision":fixture.mcp_decision,"posts":fixture.posts}).encode())
+        if result.returncode or fixture.failure or (not readonly_pool and not interactions and fixture.posts):
             raise ValueError("native caller pipeline failed; no automatic retry")
         if readonly_pool:
             if (fixture.result is None or fixture.result[0] == 0 or fixture.posts != 2
@@ -75,6 +164,8 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, r
                     or fixture.ambient_seen["project"] or fixture.ambient_seen["ancestor"]
                     or (scratch / "home" / "workspace" / "pool-write-denied").exists()):
                 raise ValueError("native pooled read-only or instruction suppression failed")
+        if interactions and (fixture.completed_cases != ({"mcp"} if mcp_only else {"permission", "mcp"}) or fixture.mcp_decision != "accept" or fixture.posts != (2 if mcp_only else 4)):
+            raise ValueError("native interaction routing incomplete")
         observations = json.loads(result.stdout)
         if observations.get("schema") != "dolgorae.native-caller-pipeline/v1":
             raise ValueError("native caller pipeline observation shape invalid")
@@ -144,11 +235,15 @@ def main() -> int:
     parser.add_argument("--codex", type=Path, required=True)
     parser.add_argument("--default-feature-startup-only", action="store_true")
     parser.add_argument("--readonly-pool", action="store_true")
+    parser.add_argument("--interactions", action="store_true")
+    parser.add_argument("--interactions-mcp-only", action="store_true")
     parser.add_argument("--pool-limit", type=int, choices=(1, 4), default=1)
     args = parser.parse_args()
     try:
         selected=default_feature_campaign if args.default_feature_startup_only else campaign
         kwargs = {"readonly_pool": True, "pool_limit": args.pool_limit} if args.readonly_pool else {}
+        if args.interactions or args.interactions_mcp_only:
+            kwargs = {"interactions": True, "mcp_only": args.interactions_mcp_only}
         observations = selected(args.driver.resolve(strict=True), args.codex.resolve(strict=True), **kwargs)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         print(json.dumps({"schema": "dolgorae.native-caller-pipeline-failure/v1", "passed": False}))

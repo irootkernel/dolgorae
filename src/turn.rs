@@ -634,6 +634,11 @@ pub struct AcceptedUserInput {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum JournalEntry {
+    SafeActivity {
+        thread_id: String,
+        turn_id: String,
+        data: crate::event::ClientEventData,
+    },
     Intent(OperationIntent),
     SubmitIdentity(Box<crate::operation::SubmitIdentity>),
     SubmitRefusal(crate::operation::SubmitRefusal),
@@ -675,6 +680,7 @@ pub enum JournalEntry {
         response_sha256: Option<String>,
         resolution_receipt_id: Option<Uuid>,
         resolved_at: String,
+        public_resolution: Option<Box<crate::public_resolution::Receipt>>,
         resolution: Value,
     },
     FileChangeSnapshot {
@@ -918,6 +924,11 @@ fn append_journal_payload<C: LedgerClock + 'static, F: FaultInjector + 'static>(
     payload: &Value,
     run_generation: u64,
 ) -> Result<(), TurnError> {
+    if kind == AuditKind::ClientEvent {
+        return ledger
+            .append_activity_event(payload, run_generation)
+            .map_err(journal_ledger_error);
+    }
     if kind == AuditKind::AppServerNotification {
         let raw =
             serde_json::to_vec(payload).map_err(|error| TurnError::Journal(error.to_string()))?;
@@ -959,6 +970,14 @@ fn bounded_diagnostic_text(value: &str) -> String {
 fn journal_record(entry: JournalEntry) -> Result<(AuditKind, Value), TurnError> {
     let (kind, payload) = {
         match entry {
+            JournalEntry::SafeActivity {
+                thread_id,
+                turn_id,
+                data,
+            } => (
+                AuditKind::ClientEvent,
+                Ok(serde_json::json!({"thread_id":thread_id,"turn_id":turn_id,"data":data})),
+            ),
             JournalEntry::CallerNativeIntent {
                 operation_id,
                 method,
@@ -1029,17 +1048,18 @@ fn journal_record(entry: JournalEntry) -> Result<(AuditKind, Value), TurnError> 
                 response_sha256,
                 resolution_receipt_id,
                 resolved_at,
+                public_resolution,
                 resolution,
             } => (
                 AuditKind::ApprovalDecided,
-                Ok(serde_json::json!({
-                    "request_id": request_id.to_string(),
-                    "idempotency_key": idempotency_key,
-                    "response_sha256": response_sha256,
-                    "resolution_receipt_id": resolution_receipt_id,
-                    "resolved_at": resolved_at,
-                    "resolution": resolution,
-                })),
+                Ok({
+                    let mut value = serde_json::json!({"request_id":request_id.to_string(),"idempotency_key":idempotency_key,"response_sha256":response_sha256,"resolution_receipt_id":resolution_receipt_id,"resolved_at":resolved_at,"resolution":resolution});
+                    if let Some(receipt) = public_resolution {
+                        value["public_resolution"] = serde_json::to_value(receipt)
+                            .map_err(|_| TurnError::InvalidInput("public receipt"))?;
+                    }
+                    value
+                }),
             ),
             JournalEntry::FileChangeSnapshot {
                 thread_id,
@@ -2002,6 +2022,8 @@ pub struct TurnCoordinator<S, J, A> {
     terminal_turn_ids: BTreeSet<String>,
     pending: BTreeMap<u64, Interaction>,
     resolved_interactions: BTreeMap<u64, InteractionResolution>,
+    public_request_ids: BTreeMap<u64, Uuid>,
+    public_resolutions: Vec<crate::public_resolution::Receipt>,
     file_change_snapshots: BTreeMap<(String, String, String), FileChangeSnapshot>,
     completed_item_count: usize,
     ignored_foreign: Vec<IgnoredForeignRequest>,
@@ -2044,6 +2066,9 @@ pub struct TurnCoordinator<S, J, A> {
     last_effective_policy: Option<crate::domain::EffectivePolicy>,
     caller_startup_phase: Option<&'static str>,
     caller_startup_failure: Option<Value>,
+    successor_interactions: bool,
+    controller_answers: bool,
+    activity_items: BTreeSet<(String, String, bool)>,
 }
 
 pub struct CoordinatorConfig {
@@ -2174,6 +2199,8 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             terminal_turn_ids: BTreeSet::new(),
             pending: BTreeMap::new(),
             resolved_interactions: BTreeMap::new(),
+            public_request_ids: BTreeMap::new(),
+            public_resolutions: Vec::new(),
             file_change_snapshots: BTreeMap::new(),
             completed_item_count: 0,
             ignored_foreign: Vec::new(),
@@ -2212,6 +2239,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             last_effective_policy: None,
             caller_startup_phase: None,
             caller_startup_failure: None,
+            successor_interactions: false,
+            controller_answers: false,
+            activity_items: BTreeSet::new(),
         };
         if coordinator.safety_policy == SessionSafetyPolicy::FixedReadOnly {
             if coordinator.sandbox != "read-only" || coordinator.approval_policy != "never" {
@@ -2296,6 +2326,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     #[must_use]
     pub fn pending_interactions(&self) -> Vec<&Interaction> {
         self.pending.values().collect()
+    }
+
+    pub(crate) fn enable_successor_interactions(&mut self, controller_answers: bool) {
+        self.successor_interactions = true;
+        self.controller_answers = controller_answers;
     }
 
     pub(crate) fn set_acceptance_controller(
@@ -2897,6 +2932,25 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         decisions: Vec<Value>,
     ) -> Result<(), TurnError> {
         for decision in decisions {
+            if let Some(raw) = decision.get("public_resolution") {
+                let receipt: crate::public_resolution::Receipt =
+                    serde_json::from_value(raw.clone())
+                        .map_err(|_| TurnError::Journal("public resolution receipt".into()))?;
+                receipt.validate()?;
+                if decision["resolution_receipt_id"] != receipt.operation_ref.to_string() {
+                    return Err(TurnError::Journal(
+                        "public resolution receipt linkage".into(),
+                    ));
+                }
+                if self
+                    .public_resolutions
+                    .iter()
+                    .any(|r| r.mutation_envelope.namespace == receipt.mutation_envelope.namespace)
+                {
+                    return Err(TurnError::Journal("duplicate public resolution key".into()));
+                }
+                self.public_resolutions.push(receipt);
+            }
             let request_id = decision
                 .get("request_id")
                 .and_then(Value::as_str)
@@ -4295,6 +4349,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             }
             "item/started" => {
                 self.observe_candidate_item(&params, false)?;
+                self.capture_safe_activity(&params, false)?;
                 if params.pointer("/item/type").and_then(Value::as_str) == Some("fileChange") {
                     let item = params.get("item").ok_or(TurnError::CorrelationMismatch)?;
                     self.capture_file_change_snapshot(
@@ -4317,6 +4372,14 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             }
             "item/completed" => {
                 self.capture_completed_item(&params)?;
+                Ok(None)
+            }
+            "error" => {
+                if params.get("threadId").and_then(Value::as_str) == self.thread_id.as_deref()
+                    && event_turn_id(&params) == self.active_turn_id.as_deref()
+                {
+                    self.runtime_error_activity()?;
+                }
                 Ok(None)
             }
             "turn/completed" => {
@@ -4429,6 +4492,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                         idempotency_key: String::new(),
                         response_sha256: None,
                         resolution_receipt_id: None,
+                        public_resolution: None,
                         resolved_at: SystemLedgerClock::default().timestamp(),
                         resolution: serde_json::json!({
                             "outcome": "stale",
@@ -4462,7 +4526,12 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         params: &Value,
     ) -> Result<(), TurnError> {
         let thread_id = params.get("threadId").and_then(Value::as_str);
-        let turn_id = event_turn_id(params);
+        let current_turn = self.active_turn_id.clone();
+        let turn_id = event_turn_id(params).or_else(|| {
+            (self.successor_interactions && method == "mcpServer/elicitation/request")
+                .then_some(current_turn.as_deref())
+                .flatten()
+        });
         // The Thread check comes before the method check on purpose: answering
         // an unsupported method that named another Thread would still be a
         // reply this connection has no authority to send into that Thread.
@@ -4490,10 +4559,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 | "item/fileChange/requestApproval"
                 | "item/tool/requestUserInput"
         );
-        let recognized_unsupported = matches!(
-            method,
-            "item/permissions/requestApproval" | "mcpServer/elicitation/request"
-        );
+        let successor =
+            self.successor_interactions && crate::successor_interaction::supported(method);
+        let supported = supported || successor;
+        let recognized_unsupported = crate::successor_interaction::supported(method) && !successor;
         if recognized_unsupported {
             let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) else {
                 return Err(TurnError::CorrelationMismatch);
@@ -4558,10 +4627,12 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 .respond_error(request_id, -32601, "method not supported")?;
             return Ok(());
         }
-        if matches!(
-            self.safety_policy,
-            SessionSafetyPolicy::ReviewerReadOnly | SessionSafetyPolicy::FixedReadOnly
-        ) {
+        if !successor
+            && matches!(
+                self.safety_policy,
+                SessionSafetyPolicy::ReviewerReadOnly | SessionSafetyPolicy::FixedReadOnly
+            )
+        {
             self.server.respond_error(
                 request_id,
                 -32000,
@@ -4617,8 +4688,49 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 request_id,
                 method: method.to_owned(),
             })?;
+        let policy = if successor {
+            let representable = if method == "item/permissions/requestApproval" {
+                crate::successor_interaction::permission(
+                    params,
+                    &self.cwd,
+                    self.writer_generation.is_some(),
+                )
+                .1
+            } else {
+                crate::successor_interaction::mcp(params).1
+            };
+            if !self.controller_answers {
+                Some("SPECIALIST_INTERACTION_UNSUPPORTED")
+            } else if matches!(
+                self.safety_policy,
+                SessionSafetyPolicy::FixedReadOnly | SessionSafetyPolicy::ReviewerReadOnly
+            ) {
+                Some("READ_ONLY_POLICY")
+            } else if !representable {
+                Some("RUNTIME_VARIANT_UNSUPPORTED")
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.public_request_ids
+            .insert(request_id, public_request_id);
         self.pending.insert(request_id, interaction);
         self.state = CoordinatorState::WaitingInteraction;
+        if let Some(cause) = policy {
+            let body = if method == "item/permissions/requestApproval" {
+                serde_json::json!({"decision":"decline","granted_permissions":[]})
+            } else {
+                serde_json::json!({"decision":"decline","answers":{}})
+            };
+            self.respond_with_policy(
+                request_id,
+                format!("policy:{public_request_id}"),
+                body,
+                Some(cause),
+            )?;
+        }
         Ok(())
     }
 
@@ -5086,6 +5198,35 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                         "dolgorae.interaction.file-change-approval/v1",
                     )
                 }
+                "item/permissions/requestApproval" => (
+                    "permission_request",
+                    serde_json::to_value(
+                        crate::successor_interaction::permission(
+                            &interaction.payload,
+                            &self.cwd,
+                            self.writer_generation.is_some(),
+                        )
+                        .0,
+                    )
+                    .map_err(|_| TurnError::CorrelationMismatch)?,
+                    serde_json::json!(["accept_once", "decline", "cancel"]),
+                    "dolgorae.interaction.permission/v2",
+                ),
+                "mcpServer/elicitation/request" => {
+                    let (payload, representable) =
+                        crate::successor_interaction::mcp(&interaction.payload);
+                    (
+                        "mcp_elicitation",
+                        serde_json::to_value(payload)
+                            .map_err(|_| TurnError::CorrelationMismatch)?,
+                        if representable {
+                            serde_json::json!(["accept_once", "decline", "cancel"])
+                        } else {
+                            serde_json::json!(["decline", "cancel"])
+                        },
+                        "dolgorae.interaction.mcp-elicitation/v2",
+                    )
+                }
                 "item/tool/requestUserInput" => (
                     "user_input",
                     normalize_user_input_payload(&interaction.payload, interaction.request_id)?,
@@ -5094,8 +5235,8 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 ),
                 _ => return Err(TurnError::CorrelationMismatch),
             };
-        Ok(serde_json::json!({
-            "schema_version": 1,
+        let mut normalized = serde_json::json!({
+            "schema_version": if crate::successor_interaction::supported(&interaction.method) {2} else {1},
             "request_id": public_request_id,
             "run_id": self.run_id,
             "controller_id": self.controller_id,
@@ -5113,7 +5254,15 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             "opened_at": SystemLedgerClock::default().timestamp(),
             "resolved_at": Value::Null,
             "resolution": Value::Null,
-        }))
+        });
+        if crate::successor_interaction::supported(&interaction.method) {
+            normalized["controller_generation"] = serde_json::json!(
+                self.acceptance_controller
+                    .as_ref()
+                    .map_or(1, |c| c.generation)
+            );
+        }
+        Ok(normalized)
     }
 
     /// Record a request that named a Thread this Run does not own, and answer
@@ -5197,11 +5346,215 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             .then(|| self.respond(request_id, idempotency_key.to_owned(), response.clone()))
     }
 
+    pub(crate) fn replay_public_response(
+        &self,
+        intent: &crate::public_resolution::Intent,
+        key: &str,
+    ) -> Result<Option<Uuid>, TurnError> {
+        let controller = self
+            .acceptance_controller
+            .as_ref()
+            .ok_or(TurnError::InvalidInput("public Controller is missing"))?;
+        let workspace = self
+            .journal
+            .workspace_ref()
+            .ok_or(TurnError::InvalidInput("public workspace is missing"))?;
+        let run = self.run_id.to_string();
+        let ns = crate::operation::Namespace::delegation(
+            controller,
+            workspace,
+            Some(("run", &run)),
+            "resolve_interaction",
+            key,
+        )
+        .map_err(TurnError::InvalidInput)?;
+        if let Some(receipt) = self
+            .public_resolutions
+            .iter()
+            .find(|r| r.mutation_envelope.namespace == ns)
+        {
+            if receipt.accepted_subjects.interaction_ref.as_deref()
+                != Some(intent.body.interaction_ref.as_str())
+                || receipt.accepted_subjects.run_ref.as_deref() != Some(run.as_str())
+            {
+                let target = self
+                    .public_request_ids
+                    .iter()
+                    .find_map(|(upstream, id)| {
+                        (id.to_string() == intent.body.interaction_ref)
+                            .then(|| self.pending.get(upstream))
+                            .flatten()
+                    })
+                    .ok_or(TurnError::InvalidInput("public interaction is not current"))?;
+                if intent.body.run_ref != run
+                    || intent.body.turn_ref != target.turn_id
+                    || intent.body.thread_generation != self.thread_generation
+                {
+                    return Err(TurnError::InteractionStale {
+                        request_id: target.request_id,
+                    });
+                }
+                let protected = crate::successor_interaction::supported(&target.method)
+                    || target.method == "item/tool/requestUserInput"
+                        && target.payload["questions"]
+                            .as_array()
+                            .is_some_and(|q| q.iter().any(|q| q["isSecret"] == true));
+                let mut safe = intent.clone();
+                safe.redact(protected);
+                let candidate = safe.receipt(ns, Uuid::now_v7(), protected)?;
+                return Err(TurnError::IdempotencyConflict {
+                    recorded: receipt
+                        .accepted_input_digest
+                        .trim_start_matches("sha256:")
+                        .into(),
+                    observed: candidate
+                        .accepted_input_digest
+                        .trim_start_matches("sha256:")
+                        .into(),
+                });
+            }
+            // The retained receipt records the authoritative protection choice.
+            // Its original receipt wins without looking at replacement content.
+            if receipt.contains_protected_input {
+                return Ok(Some(receipt.operation_ref));
+            }
+            let candidate = intent.receipt(ns, receipt.operation_ref, false)?;
+            if candidate.accepted_input_digest != receipt.accepted_input_digest {
+                return Err(TurnError::IdempotencyConflict {
+                    recorded: receipt
+                        .accepted_input_digest
+                        .trim_start_matches("sha256:")
+                        .into(),
+                    observed: candidate
+                        .accepted_input_digest
+                        .trim_start_matches("sha256:")
+                        .into(),
+                });
+            }
+            return Ok(Some(receipt.operation_ref));
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn respond_public(
+        &mut self,
+        request_id: u64,
+        key: String,
+        response: Value,
+        intent: crate::public_resolution::Intent,
+    ) -> Result<Option<Uuid>, TurnError> {
+        if let Some(receipt) = self.replay_public_response(&intent, &key)? {
+            return Ok(Some(receipt));
+        }
+        let pending = self
+            .pending
+            .get(&request_id)
+            .ok_or(TurnError::InteractionNotFound { request_id })?;
+        let protected = crate::successor_interaction::supported(&pending.method)
+            || pending.method == "item/tool/requestUserInput"
+                && pending.payload["questions"]
+                    .as_array()
+                    .is_some_and(|q| q.iter().any(|q| q["isSecret"] == true));
+        let b = &intent.body;
+        if self
+            .public_request_ids
+            .get(&request_id)
+            .map(Uuid::to_string)
+            .as_deref()
+            != Some(b.interaction_ref.as_str())
+            || b.run_ref != self.run_id.to_string()
+            || b.turn_ref != pending.turn_id
+            || b.thread_generation != self.thread_generation
+            || (!protected && b.protected_input_present)
+            || (protected && (!b.answers.is_empty() || !b.granted_permissions.is_empty()))
+        {
+            return Err(TurnError::InteractionStale { request_id });
+        }
+        if pending.method == "item/tool/requestUserInput" && b.decision != "accept_once" {
+            return Err(TurnError::InteractionResponseInvalid { request_id });
+        }
+        if !protected {
+            let expected = if pending.method == "item/tool/requestUserInput" {
+                let ids = pending.payload["questions"]
+                    .as_array()
+                    .ok_or(TurnError::InteractionResponseInvalid { request_id })?;
+                if ids.len() != b.answers.len()
+                    || ids
+                        .iter()
+                        .zip(&b.answers)
+                        .any(|(q, a)| q["id"] != a.question_id)
+                {
+                    return Err(TurnError::InteractionResponseInvalid { request_id });
+                }
+                let answers = b
+                    .answers
+                    .iter()
+                    .map(|a| {
+                        let mut values = a.selected_labels.clone();
+                        if let Some(text) = &a.text {
+                            values.push(text.clone());
+                        }
+                        (a.question_id.clone(), serde_json::json!({"answers":values}))
+                    })
+                    .collect::<serde_json::Map<_, _>>();
+                serde_json::json!({"answers":answers})
+            } else {
+                serde_json::json!({"decision":b.decision})
+            };
+            if expected != response || !b.granted_permissions.is_empty() {
+                return Err(TurnError::InteractionResponseInvalid { request_id });
+            }
+        } else if response["decision"]
+            .as_str()
+            .is_some_and(|d| d != b.decision)
+        {
+            return Err(TurnError::InteractionResponseInvalid { request_id });
+        }
+        let controller = self
+            .acceptance_controller
+            .as_ref()
+            .ok_or(TurnError::InvalidInput("public Controller is missing"))?;
+        let run = self.run_id.to_string();
+        let namespace = crate::operation::Namespace::delegation(
+            controller,
+            self.journal
+                .workspace_ref()
+                .ok_or(TurnError::InvalidInput("public workspace is missing"))?,
+            Some(("run", &run)),
+            "resolve_interaction",
+            &key,
+        )
+        .map_err(TurnError::InvalidInput)?;
+        let receipt = intent.receipt(namespace, Uuid::now_v7(), protected)?;
+        self.respond_recorded(request_id, key, response, None, Some(receipt))
+    }
+
     pub fn respond(
         &mut self,
         request_id: u64,
         idempotency_key: String,
         response: Value,
+    ) -> Result<Option<Uuid>, TurnError> {
+        self.respond_with_policy(request_id, idempotency_key, response, None)
+    }
+
+    fn respond_with_policy(
+        &mut self,
+        request_id: u64,
+        idempotency_key: String,
+        response: Value,
+        policy_cause: Option<&str>,
+    ) -> Result<Option<Uuid>, TurnError> {
+        self.respond_recorded(request_id, idempotency_key, response, policy_cause, None)
+    }
+
+    fn respond_recorded(
+        &mut self,
+        request_id: u64,
+        idempotency_key: String,
+        response: Value,
+        policy_cause: Option<&str>,
+        public_resolution: Option<crate::public_resolution::Receipt>,
     ) -> Result<Option<Uuid>, TurnError> {
         let response = ProtectedResponse(response);
         if idempotency_key.is_empty() || idempotency_key.len() > 256 {
@@ -5240,13 +5593,38 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             .get(&request_id)
             .cloned()
             .ok_or(TurnError::InteractionNotFound { request_id })?;
-        let (mut wire_response, contains_secret) =
-            validate_interaction_response(&interaction, &response.0)?;
+        let successor = crate::successor_interaction::supported(&interaction.method);
+        let (mut wire_response, contains_secret) = if successor {
+            if interaction.thread_id != self.thread_id.as_deref().unwrap_or("")
+                || interaction.turn_id != self.active_turn_id.as_deref().unwrap_or("")
+            {
+                return Err(TurnError::InteractionStale { request_id });
+            }
+            (
+                crate::successor_interaction::response(
+                    &interaction.method,
+                    &interaction.payload,
+                    &response.0,
+                    &self.cwd,
+                    self.writer_generation.is_some(),
+                    request_id,
+                )?,
+                true,
+            )
+        } else {
+            validate_interaction_response(&interaction, &response.0)?
+        };
         let response_sha256 = (!contains_secret)
             .then(|| interaction_response_digest(&response.0, request_id))
             .transpose()?;
-        let resolution_receipt_id = Some(Uuid::now_v7());
-        let resolution = if interaction.method == "item/tool/requestUserInput" {
+        let resolution_receipt_id = Some(
+            public_resolution
+                .as_ref()
+                .map_or_else(Uuid::now_v7, |r| r.operation_ref),
+        );
+        let resolution = if successor {
+            serde_json::json!({"outcome":"protected_decision","decision":response.0["decision"],"contained_secret":true,"answer_count":response.0.get("answers").and_then(Value::as_object).map_or(0,serde_json::Map::len),"resolution_receipt_id":resolution_receipt_id,"policy_cause":policy_cause})
+        } else if interaction.method == "item/tool/requestUserInput" {
             let answer_count = response
                 .0
                 .get("answers")
@@ -5271,9 +5649,13 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 idempotency_key: idempotency_key.clone(),
                 response_sha256: response_sha256.clone(),
                 resolution_receipt_id,
+                public_resolution: public_resolution.clone().map(Box::new),
                 resolved_at: SystemLedgerClock::default().timestamp(),
                 resolution,
             })?;
+        if let Some(receipt) = public_resolution {
+            self.public_resolutions.push(receipt);
+        }
         self.resolved_interactions.insert(
             request_id,
             InteractionResolution {
@@ -5331,6 +5713,91 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         Ok(())
     }
 
+    fn runtime_error_activity(&mut self) -> Result<(), TurnError> {
+        if let (Some(thread_id), Some(turn_id)) = (&self.thread_id, &self.active_turn_id) {
+            self.journal.append_and_sync(JournalEntry::SafeActivity {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                data: crate::event::ClientEventData::RuntimeError(
+                    crate::event::RuntimeErrorPayload {
+                        error_code: "RUNTIME_ERROR".into(),
+                        message: "The execution runtime reported a failure.".into(),
+                    },
+                ),
+            })?;
+        }
+        Ok(())
+    }
+
+    fn capture_safe_activity(&mut self, params: &Value, completed: bool) -> Result<(), TurnError> {
+        if params.get("threadId").and_then(Value::as_str) != self.thread_id.as_deref() {
+            return Ok(());
+        }
+        let turn_id = event_turn_id(params).ok_or(TurnError::CorrelationMismatch)?;
+        if self.active_turn_id.as_deref() != Some(turn_id) {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        let item = &params["item"];
+        let Some(kind) = item["type"].as_str() else {
+            return Ok(());
+        };
+        if !matches!(kind, "commandExecution" | "fileChange") {
+            return Ok(());
+        }
+        let id = item["id"]
+            .as_str()
+            .filter(|v| !v.is_empty() && v.len() <= 256)
+            .ok_or(TurnError::CorrelationMismatch)?;
+        if self.activity_items.len() >= MAX_TURN_ITEMS * 2 {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        if !self
+            .activity_items
+            .insert((turn_id.to_owned(), id.to_owned(), completed))
+        {
+            return Ok(());
+        }
+        let data = if kind == "commandExecution" {
+            if completed {
+                crate::event::ClientEventData::CommandCompleted(
+                    crate::event::CommandCompletedPayload {
+                        command: vec!["[redacted]".into()],
+                        exit_status: item.get("exitCode").and_then(Value::as_i64),
+                    },
+                )
+            } else {
+                crate::event::ClientEventData::CommandStarted(crate::event::CommandStartedPayload {
+                    command: vec!["[redacted]".into()],
+                })
+            }
+        } else if completed {
+            let snapshot = self
+                .file_change_snapshots
+                .get(&(
+                    self.thread_id
+                        .clone()
+                        .ok_or(TurnError::CorrelationMismatch)?,
+                    turn_id.to_owned(),
+                    id.to_owned(),
+                ))
+                .ok_or(TurnError::CorrelationMismatch)?;
+            crate::event::ClientEventData::WorkspaceChanges(crate::event::WorkspaceChangesPayload {
+                paths: snapshot.changes.iter().map(|c| c.path.clone()).collect(),
+                truncated: false,
+            })
+        } else {
+            return Ok(());
+        };
+        self.journal.append_and_sync(JournalEntry::SafeActivity {
+            thread_id: self
+                .thread_id
+                .clone()
+                .ok_or(TurnError::CorrelationMismatch)?,
+            turn_id: turn_id.to_owned(),
+            data,
+        })
+    }
+
     fn capture_completed_item(&mut self, params: &Value) -> Result<(), TurnError> {
         if self.completed_item_count >= MAX_TURN_ITEMS {
             return Err(TurnError::CorrelationMismatch);
@@ -5351,6 +5818,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
         params.get("item").ok_or(TurnError::CorrelationMismatch)?;
         self.observe_candidate_item(params, true)?;
+        self.capture_safe_activity(params, true)?;
         self.completed_item_count += 1;
         Ok(())
     }
@@ -5381,6 +5849,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         {
             self.state = CoordinatorState::OutcomeUnknown;
             return Err(TurnError::CorrelationMismatch);
+        }
+        if status == "failed" {
+            self.runtime_error_activity()?;
         }
         let effort = self
             .active_turn_effort
@@ -5416,6 +5887,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                     idempotency_key: String::new(),
                     response_sha256: None,
                     resolution_receipt_id: None,
+                    public_resolution: None,
                     resolved_at: SystemLedgerClock::default().timestamp(),
                     resolution: serde_json::json!({"outcome":"stale", "reason":"terminal_turn"}),
                 })?;
@@ -9728,6 +10200,339 @@ pub(crate) mod tests {
             .start_turn(request("key", DeliveryMode::Submit))
             .unwrap();
         coordinator
+    }
+
+    fn successor_request(method: &str) -> Value {
+        let params = if method == "item/permissions/requestApproval" {
+            serde_json::json!({"threadId":"thread-1","turnId":"turn-1","itemId":"permission","cwd":std::fs::canonicalize(std::env::temp_dir()).unwrap(),"permissions":{"fileSystem":{"read":["file.txt"]}}})
+        } else {
+            serde_json::json!({"threadId":"thread-1","turnId":"turn-1","serverName":"fixture","mode":"form","message":"private request canary","requestedSchema":{"type":"object","properties":{"q":{"type":"string","enum":["yes","no"]}}}})
+        };
+        serde_json::json!({"id":79,"method":method,"params":params})
+    }
+
+    #[test]
+    fn public_resolution_owns_atomic_identity_lookup_and_replay() {
+        struct ScopedJournal(MemoryJournal);
+        impl DurableTurnJournal for ScopedJournal {
+            fn append_and_sync(&mut self, e: JournalEntry) -> Result<(), TurnError> {
+                self.0.append_and_sync(e)
+            }
+            fn workspace_ref(&self) -> Option<&str> {
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            }
+        }
+        for protected in [false, true] {
+            let mut server = FakeServer::default();
+            server
+                .replies
+                .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+            server
+                .replies
+                .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+            let mut c = coordinator_with_journal(
+                server,
+                ThreadAttach::Start,
+                Box::new(RecordingDiagnostics::default()),
+                SessionSafetyPolicy::Standard,
+                None,
+                ScopedJournal(MemoryJournal::default()),
+            );
+            c.set_acceptance_controller(crate::domain::ControllerIdentity {
+                controller_id: c.controller_id,
+                kind: crate::domain::ControllerKind::HumanCli,
+                instance_id: "public-test".into(),
+                subject_id: None,
+                generation: 1,
+            });
+            c.start_turn(request("turn", DeliveryMode::Submit)).unwrap();
+            c.ingest(serde_json::json!({"id":79,"method":"item/tool/requestUserInput","params":{"threadId":"thread-1","turnId":"turn-1","questions":[{"id":"q","header":"Q","question":"Choose","isSecret":protected,"isOther":true}]}})).unwrap();
+            let intent = crate::public_resolution::Intent {
+                schema: crate::public_resolution::INTENT_SCHEMA.into(),
+                body: crate::public_resolution::Body {
+                    run_ref: c.run_id.to_string(),
+                    interaction_ref: c.public_request_ids[&79].to_string(),
+                    turn_ref: "turn-1".into(),
+                    thread_generation: c.thread_generation,
+                    decision: "accept_once".into(),
+                    granted_permissions: vec![],
+                    protected_input_present: false,
+                    answers: if protected {
+                        vec![]
+                    } else {
+                        vec![crate::public_resolution::Answer {
+                            question_id: "q".into(),
+                            selected_labels: vec!["choice".into()],
+                            text: None,
+                        }]
+                    },
+                },
+            };
+            let mut wrong_decision = intent.clone();
+            wrong_decision.body.decision = "decline".into();
+            assert!(matches!(
+                c.respond_public(
+                    79,
+                    "invalid-decision".into(),
+                    serde_json::json!({"answers":{"q":{"answers":["choice"]}}}),
+                    wrong_decision
+                ),
+                Err(TurnError::InteractionResponseInvalid { .. })
+            ));
+            let receipt = c
+                .respond_public(
+                    79,
+                    "answer".into(),
+                    serde_json::json!({"answers":{"q":{"answers":["choice"]}}}),
+                    intent.clone(),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(c.server.responses.len(), 1);
+            let stored = c.public_resolutions[0].clone();
+            assert_eq!(stored.operation_ref, receipt);
+            assert_eq!(stored.contains_protected_input, protected);
+            let mut replacement = intent.clone();
+            replacement.body.answers = vec![crate::public_resolution::Answer {
+                question_id: "q".into(),
+                selected_labels: vec![],
+                text: Some("choice".into()),
+            }];
+            if protected {
+                assert_eq!(
+                    c.replay_public_response(&replacement, "answer").unwrap(),
+                    Some(receipt)
+                );
+            } else {
+                assert!(matches!(
+                    c.replay_public_response(&replacement, "answer"),
+                    Err(TurnError::IdempotencyConflict { .. })
+                ));
+            }
+            c.ingest(serde_json::json!({"id":80,"method":"item/tool/requestUserInput","params":{"threadId":"thread-1","turnId":"turn-1","questions":[{"id":"q","header":"Q","question":"Choose","isSecret":protected,"isOther":true}]}})).unwrap();
+            let mut other = intent.clone();
+            other.body.interaction_ref = c.public_request_ids[&80].to_string();
+            assert!(matches!(
+                c.replay_public_response(&other, "answer"),
+                Err(TurnError::IdempotencyConflict { .. })
+            ));
+            let decisions = c
+                .journal
+                .0
+                .entries
+                .iter()
+                .filter_map(|e| {
+                    if matches!(e, JournalEntry::ApprovalDecided { .. }) {
+                        Some(journal_record(e.clone()).unwrap().1)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(decisions.len(), 1);
+            assert_eq!(
+                decisions[0]["public_resolution"]["operation_ref"],
+                receipt.to_string()
+            );
+            if protected {
+                assert!(decisions[0]["response_sha256"].is_null());
+                assert!(!decisions[0].to_string().contains("choice"));
+            }
+            let mut records = Vec::new();
+            for e in &c.journal.0.entries {
+                let (kind, payload) = journal_record(e.clone()).unwrap();
+                records.push(
+                    crate::audit::AuditRecord::new(
+                        records.len() as u64 + 1,
+                        "2026-10-01T00:00:00.000000Z",
+                        c.run_id,
+                        1,
+                        kind,
+                        crate::jcs::parse(&payload.to_string()).unwrap(),
+                        "0".repeat(64),
+                    )
+                    .unwrap(),
+                );
+            }
+            let lookup =
+                crate::public_resolution::lookup(&records, &stored.mutation_envelope.namespace)
+                    .unwrap();
+            assert_eq!(lookup["state"], "accepted");
+            assert_eq!(lookup["current_outcome"], "unknown");
+            assert_eq!(
+                lookup["accepted_subjects"]["interaction_ref"],
+                intent.body.interaction_ref
+            );
+            records.push(
+                crate::audit::AuditRecord::new(
+                    records.len() as u64 + 1,
+                    "2026-10-01T00:00:01.000000Z",
+                    c.run_id,
+                    1,
+                    AuditKind::TurnTerminal,
+                    crate::jcs::parse(r#"{"turn_id":"turn-1"}"#).unwrap(),
+                    "0".repeat(64),
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                crate::public_resolution::lookup(&records, &stored.mutation_envelope.namespace)
+                    .unwrap()["current_outcome"],
+                "completed"
+            );
+            c.public_resolutions.clear();
+            c.resolved_interactions.clear();
+            c.restore_interaction_resolutions(decisions.clone())
+                .unwrap();
+            assert_eq!(
+                c.replay_public_response(&intent, "answer").unwrap(),
+                Some(receipt)
+            );
+            let mut legacy = decisions[0].clone();
+            legacy.as_object_mut().unwrap().remove("public_resolution");
+            let legacy = crate::audit::AuditRecord::new(
+                1,
+                "2026-10-01T00:00:00.000000Z",
+                c.run_id,
+                1,
+                AuditKind::ApprovalDecided,
+                crate::jcs::parse(&legacy.to_string()).unwrap(),
+                "0".repeat(64),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::public_resolution::lookup(&[legacy], &stored.mutation_envelope.namespace)
+                    .unwrap()["state"],
+                "unresolved"
+            );
+        }
+    }
+
+    #[test]
+    fn successor_interactions_have_real_decisions_and_protected_receipt_replay() {
+        for method in [
+            "item/permissions/requestApproval",
+            "mcpServer/elicitation/request",
+        ] {
+            for decision in ["accept_once", "decline", "cancel"] {
+                let mut c = running_turn_with(&RecordingDiagnostics::default(), vec![]);
+                c.cwd = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+                c.enable_successor_interactions(true);
+                c.ingest(successor_request(method)).unwrap();
+                assert_eq!(c.state(), &CoordinatorState::WaitingInteraction);
+                let body = if method == "item/permissions/requestApproval" {
+                    serde_json::json!({"decision":decision,"granted_permissions":if decision=="accept_once" {vec!["filesystem_read:file.txt"]} else {vec![]}})
+                } else {
+                    serde_json::json!({"decision":decision,"answers":if decision=="accept_once" {serde_json::json!({"q":"yes"})} else {serde_json::json!({})}})
+                };
+                let receipt = c.respond(79, "original".into(), body).unwrap().unwrap();
+                assert_eq!(c.state(), &CoordinatorState::Running);
+                assert_eq!(c.server.responses.len(), 1);
+                assert_eq!(
+                    c.respond(
+                        79,
+                        "original".into(),
+                        serde_json::json!({"replacement":"secret canary"})
+                    )
+                    .unwrap(),
+                    Some(receipt)
+                );
+                assert!(matches!(
+                    c.respond(79, "other".into(), serde_json::json!({})),
+                    Err(TurnError::InteractionAlreadyResolved { .. })
+                ));
+                let decided = c
+                    .journal
+                    .entries
+                    .iter()
+                    .find_map(|v| {
+                        if let JournalEntry::ApprovalDecided {
+                            response_sha256,
+                            resolution,
+                            ..
+                        } = v
+                        {
+                            assert!(response_sha256.is_none());
+                            Some(resolution)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
+                assert_eq!(decided["decision"], decision);
+                assert_eq!(decided["outcome"], "protected_decision");
+                assert!(!decided.to_string().contains("yes"));
+                assert_eq!(c.active_turn_id(), Some("turn-1"));
+            }
+        }
+    }
+
+    #[test]
+    fn successor_ownerless_and_readonly_requests_decline_during_ingestion() {
+        for method in [
+            "item/permissions/requestApproval",
+            "mcpServer/elicitation/request",
+        ] {
+            for fixed in [false, true] {
+                let mut c = running_turn_with(&RecordingDiagnostics::default(), vec![]);
+                c.cwd = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+                c.enable_successor_interactions(fixed);
+                if fixed {
+                    c.safety_policy = SessionSafetyPolicy::FixedReadOnly;
+                }
+                c.ingest(successor_request(method)).unwrap();
+                assert!(c.pending.is_empty());
+                assert_eq!(c.state(), &CoordinatorState::Running);
+                assert_eq!(c.active_turn_id(), Some("turn-1"));
+                assert_eq!(c.server.responses.len(), 1);
+                assert!(c.journal.entries.iter().any(|e|matches!(e,JournalEntry::ApprovalDecided{resolution,..} if resolution["decision"]=="decline" && resolution["policy_cause"]==if fixed {"READ_ONLY_POLICY"} else {"SPECIALIST_INTERACTION_UNSUPPORTED"})));
+                assert!(!c.journal.entries.iter().any(|e| matches!(
+                    e,
+                    JournalEntry::Terminal { .. } | JournalEntry::WriterAccessChanged { .. }
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn successor_rejects_foreign_requests_and_unrequested_grants() {
+        let mut c = running_turn_with(&RecordingDiagnostics::default(), vec![]);
+        c.cwd = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        c.enable_successor_interactions(true);
+        let mut foreign = successor_request("item/permissions/requestApproval");
+        foreign["params"]["threadId"] = serde_json::json!("foreign");
+        c.ingest(foreign).unwrap();
+        assert!(c.server.responses.is_empty());
+        c.ingest(successor_request("item/permissions/requestApproval"))
+            .unwrap();
+        assert!(c.respond(79,"bad".into(),serde_json::json!({"decision":"accept_once","granted_permissions":["filesystem_write:file.txt"]})).is_err());
+        assert!(c.server.responses.is_empty());
+    }
+
+    #[test]
+    fn activity_producers_drop_command_and_runtime_bodies() {
+        let mut c = running_turn_with(&RecordingDiagnostics::default(), vec![]);
+        for completed in [false, true] {
+            c.ingest(serde_json::json!({"method":if completed {"item/completed"} else {"item/started"},"params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"commandExecution","id":"command","command":"private command canary","aggregatedOutput":"private output canary","exitCode":3}}})).unwrap();
+        }
+        c.ingest(serde_json::json!({"method":"error","params":{"threadId":"thread-1","turnId":"turn-1","error":{"message":"private error canary"}}})).unwrap();
+        let activities = c
+            .journal
+            .entries
+            .iter()
+            .filter_map(|v| {
+                if let JournalEntry::SafeActivity { data, .. } = v {
+                    Some(data)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(activities.len(), 3);
+        let encoded = serde_json::to_string(&activities).unwrap();
+        assert!(!encoded.contains("canary"));
+        assert!(encoded.contains("[redacted]"));
+        assert!(encoded.contains("runtime.error"));
     }
 
     fn input_request() -> Value {

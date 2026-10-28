@@ -2913,3 +2913,65 @@ fn an_event_page_publishes_its_head_and_refuses_a_cursor_beyond_it() {
     assert_eq!(details["requested_cursor"], (head + 1).to_string());
     assert_eq!(details["head_cursor"], head.to_string());
 }
+
+#[test]
+fn execution_activity_is_durable_redacted_ordered_and_replay_stable() {
+    use dolgorae::event::ClientEventData;
+    let run = Run::start(Behaviour::default());
+    let turn = accepted(&run.call(&run.submit("safe-activity")));
+    for completed in [false, true] {
+        run.server.emit(&json!({"method":if completed {"item/completed"}else{"item/started"},"params":{"threadId":"thread-1","turnId":turn,"item":{"type":"commandExecution","id":"command","command":"task079-command-canary","aggregatedOutput":"task079-output-canary","exitCode":0}}}));
+    }
+    run.server.emit(&json!({"method":"item/started","params":{"threadId":"thread-1","turnId":turn,"item":{"type":"fileChange","id":"change","changes":[{"path":"qa.txt","kind":{"type":"update","move_path":null},"diff":"@@ -1 +1 @@\n-old\n+new\n"}]}}}));
+    run.server.emit(&json!({"method":"item/completed","params":{"threadId":"thread-1","turnId":turn,"item":{"type":"fileChange","id":"change"}}}));
+    run.server.emit(&json!({"method":"error","params":{"threadId":"thread-1","turnId":turn,"willRetry":true,"error":{"message":"task079-runtime-canary"}}}));
+    run.server
+        .complete_turn(&turn, "completed", "safe terminal");
+    run.await_lifecycle("idle");
+    let ledger = run.ledger.lock().unwrap();
+    let events = ledger
+        .events_after(0, EventProjection::Operational, true)
+        .unwrap();
+    let activities = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.record.data,
+                ClientEventData::CommandStarted(_)
+                    | ClientEventData::CommandCompleted(_)
+                    | ClientEventData::WorkspaceChanges(_)
+                    | ClientEventData::RuntimeError(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(activities.len(), 4);
+    assert!(matches!(
+        activities[0].record.data,
+        ClientEventData::CommandStarted(_)
+    ));
+    assert!(matches!(
+        activities[1].record.data,
+        ClientEventData::CommandCompleted(_)
+    ));
+    assert!(matches!(
+        activities[2].record.data,
+        ClientEventData::WorkspaceChanges(_)
+    ));
+    assert!(matches!(
+        activities[3].record.data,
+        ClientEventData::RuntimeError(_)
+    ));
+    let encoded = serde_json::to_string(&events).unwrap();
+    assert!(!encoded.contains("canary"));
+    let replay = ledger
+        .events_after(0, EventProjection::Operational, true)
+        .unwrap();
+    for (first, second) in events.iter().zip(&replay) {
+        assert_eq!(first.record, second.record);
+    }
+    let cursors = events
+        .iter()
+        .map(|e| e.record.cursor.parse::<u64>().unwrap())
+        .collect::<Vec<_>>();
+    assert!(cursors.windows(2).all(|v| v[0] < v[1]));
+}

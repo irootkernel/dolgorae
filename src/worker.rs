@@ -4300,6 +4300,10 @@ impl WorkerHello {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlRequestV1 {
+    PublicResolution {
+        intent: crate::public_resolution::Intent,
+        request: Box<ControlRequestV1>,
+    },
     ControllerChecked {
         expected_controller_generation: u64,
         request: Box<ControlRequestV1>,
@@ -4543,7 +4547,8 @@ impl ControlRequestV1 {
             | Self::CheckedMutation { request, .. }
             | Self::BeginPreparedMutation { request, .. }
             | Self::AdmittedMutation { request, .. }
-            | Self::AbortPreparedMutation { request, .. } => request.expected(),
+            | Self::AbortPreparedMutation { request, .. }
+            | Self::PublicResolution { request, .. } => request.expected(),
             Self::Hello { expected }
             | Self::Status { expected }
             | Self::Shutdown { expected }
@@ -4572,6 +4577,10 @@ impl ControlRequestV1 {
     }
 
     fn valid_checked_mutation(&self) -> bool {
+        if let Self::PublicResolution { intent, request } = self {
+            return intent.schema == crate::public_resolution::INTENT_SCHEMA
+                && matches!(request.as_ref(), Self::Respond { .. });
+        }
         if let Self::ControllerChecked {
             expected_controller_generation,
             request,
@@ -4602,6 +4611,7 @@ impl ControlRequestV1 {
             Self::Send { .. }
                 | Self::Submit { .. }
                 | Self::Respond { .. }
+                | Self::PublicResolution { .. }
                 | Self::Interrupt { .. }
                 | Self::Pause { .. }
                 | Self::Resume { .. }
@@ -4622,7 +4632,8 @@ impl ControlRequestV1 {
             | Self::CheckedMutation { request, .. }
             | Self::BeginPreparedMutation { request, .. }
             | Self::AdmittedMutation { request, .. }
-            | Self::AbortPreparedMutation { request, .. } => request.caller(),
+            | Self::AbortPreparedMutation { request, .. }
+            | Self::PublicResolution { request, .. } => request.caller(),
             Self::Hello { .. } | Self::Status { .. } | Self::Shutdown { .. } => None,
             Self::RunStatus { caller, .. }
             | Self::Send { caller, .. }
@@ -4659,7 +4670,8 @@ impl ControlRequestV1 {
             | Self::CheckedMutation { request, .. }
             | Self::BeginPreparedMutation { request, .. }
             | Self::AdmittedMutation { request, .. }
-            | Self::AbortPreparedMutation { request, .. } => request.declare_caller(build),
+            | Self::AbortPreparedMutation { request, .. }
+            | Self::PublicResolution { request, .. } => request.declare_caller(build),
             Self::Hello { .. } | Self::Status { .. } | Self::Shutdown { .. } => {}
             Self::RunStatus { caller, .. }
             | Self::Send { caller, .. }
@@ -4719,6 +4731,7 @@ impl ControlRequestV1 {
                 | Self::Submit { .. }
                 | Self::ExternalSubmit { .. }
                 | Self::Respond { .. }
+                | Self::PublicResolution { .. }
                 | Self::Interrupt { .. }
                 | Self::ExternalInterrupt { .. }
                 | Self::InterruptTask { .. }
@@ -4758,7 +4771,8 @@ impl ControlRequestV1 {
             | Self::CheckedMutation { request, .. }
             | Self::BeginPreparedMutation { request, .. }
             | Self::AdmittedMutation { request, .. }
-            | Self::AbortPreparedMutation { request, .. } => request.operation_name(),
+            | Self::AbortPreparedMutation { request, .. }
+            | Self::PublicResolution { request, .. } => request.operation_name(),
             Self::Hello { .. } => "run.hello",
             Self::Status { .. } => "run.status",
             Self::Shutdown { .. } => "run.shutdown",
@@ -4814,6 +4828,60 @@ impl ControlRequestV1 {
 
 impl MutationRequest for ControlRequestV1 {
     fn mutation_request_identity(&self) -> Result<MutationRequestIdentity, MachineError> {
+        self.mutation_request_identity_with_protection(false)
+    }
+    fn mutation_request_identity_in(
+        &self,
+        records: &[crate::audit::AuditRecord],
+    ) -> Result<MutationRequestIdentity, MachineError> {
+        let protected = match self {
+            Self::Respond { request_id, .. } => {
+                crate::interaction::response_is_protected(records, *request_id)?
+            }
+            Self::PublicResolution { intent, request } => match request.as_ref() {
+                Self::Respond { request_id, .. } => crate::interaction::response_protection_for(
+                    records,
+                    *request_id,
+                    Some(&intent.body.interaction_ref),
+                )?,
+                _ => return Err(admission_internal("public resolution wrapper")),
+            },
+            _ => false,
+        };
+        self.mutation_request_identity_with_protection(protected)
+    }
+}
+
+impl ControlRequestV1 {
+    fn mutation_request_identity_with_protection(
+        &self,
+        protected: bool,
+    ) -> Result<MutationRequestIdentity, MachineError> {
+        if let Self::PublicResolution { intent, request } = self {
+            let mut safe = intent.clone();
+            safe.redact(protected);
+            let Self::Respond {
+                request_id,
+                idempotency_key,
+                response,
+                ..
+            } = request.as_ref()
+            else {
+                return Err(admission_internal("public resolution wrapper"));
+            };
+            let body = if protected {
+                crate::interaction::protected_response_identity(response)
+            } else {
+                response.clone()
+            };
+            let canonical=crate::operation::canonical(&serde_json::json!({"operation":"public_resolution","intent":safe,"request":{"operation":"respond","request_id":request_id,"idempotency_key":idempotency_key,"response":body}})).map_err(|_|admission_internal("public resolution identity"))?;
+            return Ok(MutationRequestIdentity::new(
+                crate::jcs::sha256_hex(&canonical),
+                "run.respond",
+                false,
+                &[],
+            ));
+        }
         let mut value =
             serde_json::to_value(self).map_err(|error| admission_internal(&error.to_string()))?;
         let object = value
@@ -4821,6 +4889,11 @@ impl MutationRequest for ControlRequestV1 {
             .ok_or_else(|| admission_internal("mutation request is not an object"))?;
         object.remove("expected");
         object.remove("caller");
+        if protected && let Some(response) = object.get_mut("response") {
+            let safe = crate::interaction::protected_response_identity(response);
+            crate::turn::zeroize_protected_json(response);
+            *response = safe;
+        }
         let canonical = crate::jcs::canonicalize(
             &crate::jcs::parse(&value.to_string())
                 .map_err(|error| admission_internal(&error.to_string()))?,
@@ -6091,6 +6164,7 @@ enum SessionCommand {
         request_id: u64,
         idempotency_key: String,
         response: Value,
+        public_intent: Option<crate::public_resolution::Intent>,
     },
     Interrupt,
     InterruptTask {
@@ -7763,6 +7837,20 @@ impl WorkerSession {
                         WorkerProtocolError::AppServerUnavailable
                     })?;
             }
+            if manifest.schema_version >= 3
+                && matches!(
+                    session.safety_policy,
+                    crate::turn::SessionSafetyPolicy::CallerWorkspace
+                        | crate::turn::SessionSafetyPolicy::FixedReadOnly
+                )
+            {
+                coordinator.enable_successor_interactions(
+                    manifest
+                        .aggregate_binding
+                        .as_ref()
+                        .is_none_or(|b| b.member_kind != AggregateMemberKind::Specialist),
+                );
+            }
             startup_phase = "state_restore";
             coordinator.restore_durable_state(
                 replayed.lifecycle,
@@ -8172,6 +8260,7 @@ impl WorkerSession {
                 request_id,
                 idempotency_key,
                 response,
+                public_intent: None,
             },
         )
     }
@@ -9840,10 +9929,18 @@ fn perform(
                 request_id,
                 idempotency_key,
                 response,
+                public_intent,
             } => {
-                if let Some(replayed) =
+                let replayed = if let Some(intent) = public_intent {
+                    match coordinator.replay_public_response(intent, idempotency_key) {
+                        Ok(Some(id)) => Some(Ok(Some(id))),
+                        Ok(None) => None,
+                        Err(e) => Some(Err(e)),
+                    }
+                } else {
                     coordinator.replay_response(*request_id, idempotency_key, response)
-                {
+                };
+                if let Some(replayed) = replayed {
                     return match replayed {
                         Ok(resolution_receipt_id) => {
                             if let Err(error) = settle_replayed_admission(
@@ -10500,7 +10597,12 @@ fn perform_command(
             request_id,
             idempotency_key,
             response,
-        } => match coordinator.respond(request_id, idempotency_key, response) {
+            public_intent,
+        } => match if let Some(intent) = public_intent {
+            coordinator.respond_public(request_id, idempotency_key, response, intent)
+        } else {
+            coordinator.respond(request_id, idempotency_key, response)
+        } {
             Ok(resolution_receipt_id) => ControlResponseV1::Responded {
                 request_id,
                 resolution_receipt_id,
@@ -13397,7 +13499,8 @@ fn serve_run_operation(
         | ControlRequestV1::CheckedMutation { .. }
         | ControlRequestV1::BeginPreparedMutation { .. }
         | ControlRequestV1::AdmittedMutation { .. }
-        | ControlRequestV1::AbortPreparedMutation { .. }) => {
+        | ControlRequestV1::AbortPreparedMutation { .. }
+        | ControlRequestV1::PublicResolution { .. }) => {
             let (expected_controller_generation, wrapped) = match wrapped {
                 ControlRequestV1::ControllerChecked {
                     expected_controller_generation,
@@ -13445,6 +13548,10 @@ fn serve_run_operation(
                 ),
                 ordinary => (None, None, Box::new(ordinary)),
             };
+            let (public_intent, request) = match *request {
+                ControlRequestV1::PublicResolution { intent, request } => (Some(intent), request),
+                ordinary => (None, Box::new(ordinary)),
+            };
             let (command, wait_budget) = match *request {
                 ControlRequestV1::Send {
                     request,
@@ -13474,6 +13581,7 @@ fn serve_run_operation(
                         request_id,
                         idempotency_key,
                         response,
+                        public_intent,
                     },
                     None,
                 ),
@@ -13686,6 +13794,110 @@ pub(crate) mod tests {
     /// The release owner's verdict separates a free lease, a verified
     /// witness and a confessed uncertainty — and never reports a held lease as
     /// free.
+    pub(crate) fn response_authority_records(secret: bool) -> Vec<crate::audit::AuditRecord> {
+        let run = Uuid::now_v7();
+        let value = serde_json::json!({"upstream_request_id":79,"interaction":{"schema_version":1,"request_id":Uuid::now_v7(),"run_id":run,"controller_id":Uuid::now_v7(),"control_mode":"managed_agent","thread_id":"thread","turn_id":"turn","item_id":null,"run_generation":1,"server_epoch":1,"kind":"user_input","status":"pending","payload":{"is_blocking":true,"questions":[{"id":"q","header":"Question","question":"Input","is_other":true,"is_secret":secret,"options":null}]},"available_decisions":[],"response_schema":"dolgorae.interaction.user-input/v1","opened_at":"2026-10-01T00:00:00.000000Z","resolved_at":null,"resolution":null}});
+        vec![
+            crate::audit::AuditRecord::new(
+                1,
+                "2026-10-01T00:00:00.000000Z",
+                run,
+                1,
+                crate::audit::AuditKind::ApprovalRequested,
+                crate::jcs::parse(&value.to_string()).unwrap(),
+                "0".repeat(64),
+            )
+            .unwrap(),
+        ]
+    }
+
+    #[test]
+    fn protected_response_admission_identity_uses_authoritative_metadata() {
+        let make = |body: &str| ControlRequestV1::Respond {
+            expected: identity(),
+            caller: None,
+            request_id: 79,
+            idempotency_key: "key".into(),
+            response: serde_json::json!({"answers":{"q":{"answers":[body]}}}),
+        };
+        let first = make("one-secret");
+        let mut second = make("other-secret");
+        // Identity includes the same physical worker context only outside its normalized body.
+        if let ControlRequestV1::Respond { expected, .. } = &mut second {
+            *expected = first.expected().clone();
+        }
+        let secret = response_authority_records(true);
+        assert_eq!(
+            first
+                .mutation_request_identity_in(&secret)
+                .unwrap()
+                .request_sha256(),
+            second
+                .mutation_request_identity_in(&secret)
+                .unwrap()
+                .request_sha256()
+        );
+        let ordinary = response_authority_records(false);
+        assert_ne!(
+            first
+                .mutation_request_identity_in(&ordinary)
+                .unwrap()
+                .request_sha256(),
+            second
+                .mutation_request_identity_in(&ordinary)
+                .unwrap()
+                .request_sha256()
+        );
+        let mut missing = make("never-fingerprint");
+        if let ControlRequestV1::Respond { request_id, .. } = &mut missing {
+            *request_id = 80;
+        }
+        assert_eq!(
+            missing
+                .mutation_request_identity_in(&secret)
+                .err()
+                .unwrap()
+                .code,
+            "INTERACTION_NOT_FOUND"
+        );
+        let raw = crate::jcs::canonicalize(secret[0].payload()).unwrap();
+        let authority: Value = serde_json::from_slice(&raw).unwrap();
+        let mut intent = crate::public_resolution::Intent {
+            schema: crate::public_resolution::INTENT_SCHEMA.into(),
+            body: crate::public_resolution::Body {
+                run_ref: secret[0].run_id().to_string(),
+                interaction_ref: authority["interaction"]["request_id"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                turn_ref: "turn".into(),
+                thread_generation: 1,
+                decision: "accept_once".into(),
+                granted_permissions: vec![],
+                protected_input_present: false,
+                answers: vec![],
+            },
+        };
+        let wrapped = ControlRequestV1::PublicResolution {
+            intent: intent.clone(),
+            request: Box::new(first.clone()),
+        };
+        assert!(wrapped.mutation_request_identity_in(&secret).is_ok());
+        intent.body.interaction_ref = Uuid::now_v7().to_string();
+        let stale = ControlRequestV1::PublicResolution {
+            intent,
+            request: Box::new(first),
+        };
+        assert_eq!(
+            stale
+                .mutation_request_identity_in(&secret)
+                .err()
+                .unwrap()
+                .code,
+            "INTERACTION_NOT_FOUND"
+        );
+    }
+
     #[test]
     fn the_lifecycle_owner_verdict_separates_free_verified_and_unprovable() {
         let root = std::env::temp_dir().join(format!("dolgorae-lifecycle-{}", Uuid::now_v7()));
@@ -18073,6 +18285,14 @@ pub(crate) mod tests {
             scene: &crate::semantic::successor_review_tests::Scene,
             history: serde_json::Value,
         ) -> Self {
+            Self::with_bootstrap(scene, history, reviewer_bootstrap())
+        }
+
+        fn with_bootstrap(
+            scene: &crate::semantic::successor_review_tests::Scene,
+            history: serde_json::Value,
+            bootstrap: WorkerSessionBootstrap,
+        ) -> Self {
             use std::io::Read as _;
             let raw = history.is_string();
             let history = if raw {
@@ -18104,6 +18324,17 @@ pub(crate) mod tests {
                 serde_json::json!({"method":"thread/name/set","respond":{"result":{}}}),
                 serde_json::json!({"method":"thread/read","respond":default_history}),
             ];
+            if bootstrap.safety_policy == SessionSafetyPolicy::FixedReadOnly {
+                steps.extend([
+                    serde_json::json!({"method":"config/read","respond":{"result":{
+                        "config":{"project_doc_max_bytes":0},
+                        "layers":[{"name":{"type":"sessionFlags"},"config":{"project_doc_max_bytes":0}}]
+                    }}}),
+                    serde_json::json!({"method":"experimentalFeature/list","respond":{"result":{
+                        "data":[{"name":"multi_agent","enabled":false}],"nextCursor":null
+                    }}}),
+                ]);
+            }
             if crate::delegation_service::qualified_successor_review(manifest) {
                 steps.push(serde_json::json!({"method":"thread/read","occurrence":1,"respond":{"result":{"thread":thread}}}));
             }
@@ -18179,7 +18410,7 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
                 fake,
                 session: None,
                 coordinator: None,
-                bootstrap: reviewer_bootstrap(),
+                bootstrap,
                 identity: identity(),
             };
             let mut readiness = [0; 6];
@@ -23482,6 +23713,147 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
             file_change_publication_dir(&plain, &fixture.state_root, fixture.manifest.run_id),
             None
         );
+    }
+
+    #[test]
+    fn successor_member_policy_declines_survive_complete_observation_and_terminal_settlement() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::shared_readonly(managed);
+            scene.prepare_worker_ledger();
+            let task = scene.accept_generic_task("interaction-policy");
+            let bootstrap = scene.worker_bootstrap(4, false, false);
+            assert_eq!(bootstrap.safety_policy, SessionSafetyPolicy::FixedReadOnly);
+            let text = "completed after policy decline";
+            let mut fixture = ReviewDispatchFixture::with_bootstrap(
+                &scene,
+                recovery_history(vec![review_agent_item(text)], "completed", Some("full")),
+                bootstrap,
+            );
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, "interaction-policy"),
+                ControlResponseV1::Accepted { .. }
+            ));
+            scene.mark_running(task.task_ref, "turn-1");
+            prepare_runtime_root(&runtime_root(scene.state_root()), fixture.identity.uid).unwrap();
+            crate::semantic::release_fixture::write_absent_worker_locator(
+                scene.state_root(),
+                &scene.manifest().workspace_id,
+                scene.manifest().run_id,
+            );
+            let requests = [
+                (
+                    "item/permissions/requestApproval",
+                    serde_json::json!({
+                        "cwd":fixture.bootstrap.cwd, "reason":"protected-permission-canary",
+                        "permissions":{"fileSystem":{"read":[fixture.bootstrap.cwd]}}
+                    }),
+                ),
+                (
+                    "mcpServer/elicitation/request",
+                    serde_json::json!({
+                        "mode":"form", "message":"protected-form-canary", "serverName":"fixture",
+                        "requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}}}
+                    }),
+                ),
+                (
+                    "mcpServer/elicitation/request",
+                    serde_json::json!({
+                        "mode":"url", "message":"protected-variant-canary", "serverName":"protected-server-canary",
+                        "url":"https://protected-url-canary.invalid/"
+                    }),
+                ),
+            ];
+            let mut policy_open_head = 0;
+            for (index, (method, mut params)) in requests.into_iter().enumerate() {
+                params["threadId"] = serde_json::json!("thread-1");
+                params["turnId"] = serde_json::json!("turn-1");
+                let coordinator = fixture.coordinator.as_mut().unwrap();
+                coordinator
+                    .ingest(serde_json::json!({"id":100+index,"method":method,"params":params}))
+                    .unwrap();
+                assert_eq!(coordinator.state(), &CoordinatorState::Running);
+                assert_eq!(scene.state(task.task_ref), "running");
+                assert!(!scene.interaction_observation().unwrap());
+                scene.observe(task.task_ref, false).unwrap();
+                assert_eq!(
+                    scene.observe(task.task_ref, true).unwrap_err().code,
+                    "COMPLETE_RESULT_UNAVAILABLE"
+                );
+                let ledger = coordinator.journal().ledger().lock().unwrap();
+                let records = ledger.durable_records().unwrap();
+                let decision = records
+                    .iter()
+                    .rev()
+                    .find(|r| r.kind() == crate::audit::AuditKind::ApprovalDecided)
+                    .unwrap();
+                let value: serde_json::Value =
+                    serde_json::from_slice(&crate::jcs::canonicalize(decision.payload()).unwrap())
+                        .unwrap();
+                assert_eq!(value["resolution"]["decision"], "decline");
+                assert_eq!(
+                    value["resolution"]["policy_cause"],
+                    "SPECIALIST_INTERACTION_UNSUPPORTED"
+                );
+                assert!(!value.to_string().contains("canary"));
+                assert!(!records.iter().any(|r| matches!(
+                    r.kind(),
+                    crate::audit::AuditKind::TurnTerminal | crate::audit::AuditKind::WriterAcquired
+                )));
+                if index == 2 {
+                    policy_open_head = decision.sequence() - 1;
+                    let opened = records
+                        .iter()
+                        .rev()
+                        .find(|r| r.kind() == crate::audit::AuditKind::ApprovalRequested)
+                        .unwrap();
+                    let value: serde_json::Value = serde_json::from_slice(
+                        &crate::jcs::canonicalize(opened.payload()).unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        value["interaction"]["payload"],
+                        serde_json::json!({
+                            "title":"MCP input", "server_name":"", "questions":[],
+                            "policy_only":"RUNTIME_VARIANT_UNSUPPORTED"
+                        })
+                    );
+                    assert!(!value.to_string().contains("canary"));
+                }
+            }
+            scene.assert_policy_only_prefix_pending(policy_open_head);
+            let terminal = fixture
+                .complete("turn-1", vec![review_agent_item(text)])
+                .unwrap()
+                .unwrap();
+            assert_eq!(terminal.status, "completed");
+            assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+            assert!(!scene.interaction_observation().unwrap());
+            scene.observe(task.task_ref, true).unwrap();
+            assert!(!scene.result(task.task_ref).to_string().contains("canary"));
+            let replies = fixture
+                .requests()
+                .into_iter()
+                .filter(|r| r.get("method").is_none())
+                .collect::<Vec<_>>();
+            assert!(replies.iter().any(|r| r["id"] == 100
+                && r["result"] == serde_json::json!({"permissions":{},"scope":"turn"})));
+            for id in [101, 102] {
+                assert!(replies.iter().any(|r| r["id"] == id
+                    && r["result"] == serde_json::json!({"action":"decline","content":null})));
+            }
+            let ledger = fixture
+                .coordinator
+                .as_ref()
+                .unwrap()
+                .journal()
+                .ledger()
+                .lock()
+                .unwrap();
+            let events = ledger
+                .events_after(0, crate::event::EventProjection::Operational, true)
+                .unwrap();
+            assert!(!serde_json::to_string(&events).unwrap().contains("canary"));
+        }
     }
 
     /// The drain's engagement detection and terminal funnel settle the

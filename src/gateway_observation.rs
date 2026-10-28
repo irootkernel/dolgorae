@@ -118,7 +118,10 @@ pub fn watch_page(
 }
 
 impl Interaction {
-    fn summary(&self, snapshot: &RunSnapshot) -> Result<pb::InteractionSummary, MachineError> {
+    pub(crate) fn summary(
+        &self,
+        snapshot: &RunSnapshot,
+    ) -> Result<pb::InteractionSummary, MachineError> {
         let status = match self.status.as_str() {
             "pending" if self.pending_at(snapshot) => pb::InteractionStatus::Pending,
             "pending" | "stale" => pb::InteractionStatus::Stale,

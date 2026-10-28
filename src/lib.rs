@@ -69,6 +69,7 @@ pub mod specialist_policy;
 pub mod specialist_stdio;
 pub mod storage_observation;
 pub mod successor_capture;
+pub(crate) mod successor_interaction;
 pub mod task_request;
 pub mod timeline;
 pub mod trusted_host;
@@ -96,3 +97,5 @@ pub(crate) mod consumer_bridge;
 pub(crate) mod native_consumer;
 #[allow(dead_code)]
 pub(crate) mod podway_client;
+
+pub(crate) mod public_resolution;

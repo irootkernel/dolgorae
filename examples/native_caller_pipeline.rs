@@ -407,7 +407,9 @@ fn campaign(root: &Path, codex: &Path) -> Value {
             )
             .unwrap();
     }
-    let credential = if std::env::var("DOLGORAE_NATIVE_READONLY_POOL").as_deref() == Ok("1") {
+    let credential = if std::env::var("DOLGORAE_NATIVE_READONLY_POOL").as_deref() == Ok("1")
+        || root.join("interaction-cases").exists()
+    {
         let directory = home.root().join("controller-carriers");
         fs::create_dir(&directory).unwrap();
         use std::os::unix::fs::PermissionsExt as _;
@@ -437,7 +439,9 @@ fn campaign(root: &Path, codex: &Path) -> Value {
     let state_root = home.workspace_root(&view.workspace_id);
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
     let result = std::panic::catch_unwind(|| {
-        if std::env::var("DOLGORAE_NATIVE_READONLY_POOL").as_deref() == Ok("1") {
+        if std::env::var("DOLGORAE_NATIVE_READONLY_POOL").as_deref() == Ok("1")
+            || root.join("interaction-cases").exists()
+        {
             return pool_campaign(root, &home, &view, &credential);
         }
         let first = start(&view, &credential, "fixture-a", "first", false)
@@ -652,6 +656,304 @@ fn campaign(root: &Path, codex: &Path) -> Value {
     result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
+fn interaction_cases(
+    root: &Path,
+    home: &DolgoraeHome,
+    view: &WorkspaceView,
+    credential: &Path,
+    runtime: &tokio::runtime::Runtime,
+    channel: tonic::transport::Channel,
+    controller: Option<dolgorae::protocol::public_v2::ControllerCarrierRef>,
+) -> Value {
+    use dolgorae::protocol::public_v2 as pb;
+    let started = start(view, credential, "fixture-a", "interaction-run", false)
+        .unwrap_or_else(|e| fail(root, "interaction startup", e));
+    let id = started.snapshot.manifest.run_id;
+    let run = Some(pb::RunRef {
+        workspace: Some(pb::WorkspaceRef {
+            absolute_path: view
+                .canonical_path
+                .to_path_buf()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .into(),
+            expected_workspace_id: view.workspace_id.clone(),
+        }),
+        run_id: id.to_string(),
+    });
+    let context = || {
+        Some(pb::RequestContext {
+            protocol_version: 2,
+            client_request_id: Uuid::now_v7().to_string(),
+            client_instance_id: "task079-native".into(),
+        })
+    };
+    let native_socket = dolgorae::worker::dedicated_server_socket_path(
+        dolgorae::workspace::WorkspacePlatform::current_uid(&SystemWorkspacePlatform),
+        id,
+        started.snapshot.projection.run_generation,
+    )
+    .unwrap();
+    let mut native =
+        dolgorae::app_server::JsonRpcConnection::connect(&native_socket, Duration::from_secs(10))
+            .unwrap();
+    native.request("initialize",json!({"clientInfo":{"name":"task079-inventory","version":"1"},"capabilities":{"experimentalApi":true}})).unwrap();
+    native.notify("initialized", json!({})).unwrap();
+    let inventory=native.request("mcpServerStatus/list",json!({"threadId":started.snapshot.projection.thread_id,"serverName":"fixture","detail":"toolsAndAuthOnly"})).unwrap();
+    assert!(
+        inventory["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["name"] == "fixture" && v["tools"].get("ask").is_some())
+    );
+    drop(native);
+    let identity = &started.snapshot.controller_authority().unwrap().identity;
+    let principal_value = json!({"controller_id":identity.controller_id,"kind":identity.kind,"instance_id":identity.instance_id,"subject_id":identity.subject_id});
+    let principal = format!(
+        "sha256:{}",
+        dolgorae::jcs::sha256_hex(
+            &dolgorae::jcs::canonicalize(
+                &dolgorae::jcs::parse(&principal_value.to_string()).unwrap()
+            )
+            .unwrap()
+        )
+    );
+    runtime.block_on(async {
+        let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+        let mut operations =
+            pb::operation_service_client::OperationServiceClient::new(channel.clone());
+        let mut interactions =
+            pb::interaction_service_client::InteractionServiceClient::new(channel);
+        let selected = fs::read_to_string(root.join("interaction-cases")).unwrap();
+        let selected = selected.trim().split(',').collect::<Vec<_>>();
+        for (index, case) in selected.iter().copied().enumerate() {
+            let current = runs
+                .get_run(pb::GetRunRequest {
+                    context: context(),
+                    run: run.clone(),
+                })
+                .await
+                .unwrap()
+                .into_inner()
+                .run
+                .unwrap();
+            if case == "mcp" && index > 0 {
+                let busy = runs
+                    .submit_turn(pb::SubmitTurnRequest {
+                        context: context(),
+                        run: run.clone(),
+                        controller: controller.clone(),
+                        idempotency_key: "mcp-write-refused".into(),
+                        write_intent: pb::WriteIntent::Write as i32,
+                        message: "TASK079 mcp".into(),
+                        expected_state_revision: current.state_revision,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap_err();
+                assert_eq!(busy.message(), "RUN_BUSY");
+            }
+            let current = runs
+                .get_run(pb::GetRunRequest {
+                    context: context(),
+                    run: run.clone(),
+                })
+                .await
+                .unwrap()
+                .into_inner()
+                .run
+                .unwrap();
+            runs.submit_turn(pb::SubmitTurnRequest {
+                context: context(),
+                run: run.clone(),
+                controller: controller.clone(),
+                idempotency_key: case.into(),
+                write_intent: pb::WriteIntent::Read as i32,
+                message: format!("TASK079 {case}"),
+                expected_state_revision: current.state_revision,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(90);
+            let summary = loop {
+                let page = interactions
+                    .list_pending_interactions(pb::ListPendingInteractionsRequest {
+                        context: context(),
+                        run: run.clone(),
+                    })
+                    .await
+                    .unwrap()
+                    .into_inner();
+                if let Some(item) = page.items.into_iter().next() {
+                    break item;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{case} did not open; fixture retained at {}",
+                    root.display()
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            assert_eq!(
+                summary.kind,
+                if case == "permission" {
+                    pb::InteractionKind::PermissionRequest
+                } else {
+                    pb::InteractionKind::McpElicitation
+                } as i32
+            );
+            assert!(summary.contains_protected_input);
+            let detail = interactions
+                .get_controller_interaction(pb::GetControllerInteractionRequest {
+                    context: context(),
+                    run: run.clone(),
+                    controller: controller.clone(),
+                    interaction_id: summary.interaction_id.clone(),
+                })
+                .await
+                .unwrap()
+                .into_inner()
+                .interaction
+                .unwrap();
+            let answer = match detail.payload.unwrap() {
+                pb::controller_interaction::Payload::Permission(p) => {
+                    assert!(!p.requested_permissions.is_empty());
+                    pb::InteractionAnswer {
+                        decision: 1,
+                        granted_permissions: p.requested_permissions,
+                        ..Default::default()
+                    }
+                }
+                pb::controller_interaction::Payload::McpElicitation(p) => {
+                    assert_eq!(p.questions.len(), 1);
+                    pb::InteractionAnswer {
+                        decision: 1,
+                        answers: vec![pb::QuestionAnswer {
+                            question_id: p.questions[0].id.clone(),
+                            selected_labels: vec![],
+                            text: Some("task079-protected-answer-canary".into()),
+                        }],
+                        ..Default::default()
+                    }
+                }
+                _ => panic!("wrong typed payload"),
+            };
+            let current = runs
+                .get_run(pb::GetRunRequest {
+                    context: context(),
+                    run: run.clone(),
+                })
+                .await
+                .unwrap()
+                .into_inner()
+                .run
+                .unwrap();
+            let thread = current.thread.unwrap();
+            let request = pb::ResolveInteractionRequest {
+                context: context(),
+                run: run.clone(),
+                controller: controller.clone(),
+                interaction_id: summary.interaction_id.clone(),
+                idempotency_key: format!("{case}-answer"),
+                answer: Some(answer),
+                expected_interaction_revision: detail.stamp.unwrap().interaction_state_revision,
+                expected_run_revision: current.state_revision,
+                expected_turn_id: current.active_turn.unwrap().turn_id,
+                expected_thread_generation: thread.thread_generation,
+            };
+            let receipt = interactions
+                .resolve_interaction(request.clone())
+                .await
+                .unwrap()
+                .into_inner();
+            let mut replay = request;
+            replay.answer = Some(pb::InteractionAnswer {
+                protected_input: Some(pb::ProtectedInputRef {
+                    absolute_file_path: "/not/read/on/receipt/replay".into(),
+                    maximum_bytes: 1,
+                }),
+                ..Default::default()
+            });
+            let replay = interactions
+                .resolve_interaction(replay)
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(receipt.resolution_receipt, replay.resolution_receipt);
+            let operation = pb::OperationRef {
+                caller_scope: Some(pb::CallerScope {
+                    controller_kind: dolgorae::gateway_projection_v2::controller_kind(identity.kind)
+                        as i32,
+                    principal_ref: principal.clone(),
+                    controller_generation: identity.generation,
+                    workspace_id: view.workspace_id.clone(),
+                    aggregate: Some(pb::caller_scope::Aggregate::RunId(id.to_string())),
+                }),
+                operation_kind: pb::OperationKind::ResolveInteraction as i32,
+                idempotency_key: format!("{case}-answer"),
+            };
+            let lookup = operations
+                .lookup_operation(pb::LookupOperationRequest {
+                    context: context(),
+                    controller: controller.clone(),
+                    operation: Some(operation.clone()),
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            let Some(pb::lookup_operation_response::Result::Accepted(accepted)) = lookup.result
+            else {
+                panic!("Resolve lookup lost authentic acceptance");
+            };
+            let accepted = accepted.receipt.unwrap();
+            assert_eq!(accepted.operation, Some(operation));
+            assert_eq!(accepted.receipt_id, receipt.resolution_receipt);
+            assert!(accepted.accepted_input_digest.starts_with("sha256:"));
+            let subjects = accepted.subjects.unwrap();
+            assert_eq!(subjects.run_id, Some(id.to_string()));
+            assert_eq!(subjects.interaction_id, Some(summary.interaction_id));
+            loop {
+                let current = runs
+                    .get_run(pb::GetRunRequest {
+                        context: context(),
+                        run: run.clone(),
+                    })
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .run
+                    .unwrap();
+                if current.lifecycle == pb::RunLifecycle::Idle as i32 {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "native terminal missing");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    });
+    let state = home
+        .workspace_root(&view.workspace_id)
+        .join("runs")
+        .join(id.to_string());
+    for entry in fs::read_dir(&state).unwrap().flatten() {
+        if entry.file_type().unwrap().is_file() {
+            let bytes = fs::read(entry.path()).unwrap();
+            assert!(
+                !bytes
+                    .windows(b"task079-protected-answer-canary".len())
+                    .any(|w| w == b"task079-protected-answer-canary")
+            );
+        }
+    }
+    let cases = fs::read_to_string(root.join("interaction-cases")).unwrap();
+    let permission = cases.trim().split(',').any(|v| v == "permission");
+    let mcp = cases.trim().split(',').any(|v| v == "mcp");
+    json!({"schema":"dolgorae.native-caller-pipeline/v1","mode":"interactions","public_v2_uds":true,"permission_accept":permission,"mcp_accept":mcp,"protected_receipt_replay":true,"native_turns":cases.trim().split(',').count(),"strict_write_reacquisition_refused":permission&&mcp,"pre_dispatch_admission_settled":permission&&mcp})
+}
+
 fn pool_campaign(
     root: &Path,
     home: &DolgoraeHome,
@@ -663,7 +965,7 @@ fn pool_campaign(
         ProvisioningAdmission, ProvisioningSources, capture_provisioning,
     };
     let pool_limit = fs::read_to_string(root.join("pool-limit"))
-        .unwrap()
+        .unwrap_or_else(|_| "1".into())
         .parse::<u32>()
         .unwrap();
     assert!([1, 4].contains(&pool_limit));
@@ -750,6 +1052,9 @@ fn pool_campaign(
                 })),
         )
         .unwrap();
+    if root.join("interaction-cases").exists() {
+        return interaction_cases(root, home, view, credential, &runtime, channel, controller);
+    }
     let mut transport = pb::run_service_client::RunServiceClient::new(channel.clone());
     let mut runtime_client = pb::runtime_service_client::RuntimeServiceClient::new(channel.clone());
     let mut operations = pb::operation_service_client::OperationServiceClient::new(channel.clone());
