@@ -1775,7 +1775,7 @@ where
     for task in store.external_active_tasks(engagement_id)? {
         let canonical_write = store.external_task_execution_intent(engagement_id, task.task_id)?
             == "canonical_workspace_write";
-        if task.state == "accepted" {
+        if matches!(task.state.as_str(), "accepted" | "queued") {
             if !store.external_task_deadline_expired(engagement_id, task.task_id)? {
                 continue;
             }
@@ -1786,7 +1786,7 @@ where
                 "expired",
                 Some("OPERATION_TIMEOUT"),
             )?;
-            if canonical_write {
+            if canonical_write && task.state != "queued" {
                 release_external_writer_safely(
                     view,
                     state_root,
@@ -4182,6 +4182,83 @@ mod tests {
             assert_eq!(permanent.code, "SPECIALIST_RESULT_INVALID");
             assert!(!permanent.retryable);
         }
+    }
+
+    #[test]
+    fn queued_canonical_write_expiry_preserves_an_active_tasks_writer() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        fixture.reserve_member_writer();
+        let active =
+            fixture.accept_and_dispatch_task("active-writer", "canonical_workspace_write", 600);
+        let mut store = fixture.store();
+        store
+            .transact(|tx| {
+                crate::engagement::mark_external_task_running_in(
+                    tx,
+                    fixture.engagement_id,
+                    active.task_ref,
+                    "active-turn",
+                    1,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        let queued = Uuid::now_v7();
+        let digest = "a".repeat(64);
+        store
+            .transact(|tx| {
+                crate::engagement::reserve_queued_external_task_in(
+                    tx,
+                    crate::engagement::ExternalTaskReservationCore {
+                        engagement_id: fixture.engagement_id,
+                        specialist_run_id: fixture.member_ref,
+                        task_id: queued,
+                        objective_sha256: Some(&digest),
+                        external_request_json: Some("{}"),
+                        request_json: "{}",
+                        request_sha256: &digest,
+                        execution_intent: "canonical_workspace_write",
+                        deadline_seconds: 1,
+                        now_ms: 1,
+                    },
+                    1,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        let before = fixture.writer_record();
+        reconcile_engagement_with(
+            &mut store,
+            &fixture.view,
+            &fixture.state_root,
+            fixture.engagement_id,
+            &fixture.owner,
+            |run| {
+                Ok(ControlResponseV1::Status {
+                    identity: worker_identity(run),
+                    lifecycle: "running".to_owned(),
+                    active_turn: Some("active-turn".to_owned()),
+                    last_terminal: None,
+                })
+            },
+            |_| panic!("running and queued tasks do not need terminal recovery"),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .external_task(fixture.engagement_id, queued)
+                .unwrap()
+                .state,
+            "expired"
+        );
+        assert_eq!(
+            store
+                .external_task(fixture.engagement_id, active.task_ref)
+                .unwrap()
+                .state,
+            "running"
+        );
+        assert_eq!(fixture.writer_record(), before);
     }
 
     #[test]

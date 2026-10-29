@@ -1236,7 +1236,7 @@ pub(crate) fn assign_external_with_source(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_external_specialist_task",
-        assign_external_specialist_task_in(scope, caller, port, request, Some(source)),
+        assign_external_specialist_task_in(scope, caller, port, request, Some(source), None),
     )
 }
 
@@ -1250,7 +1250,7 @@ pub(crate) fn assign_managed_with_source(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_specialist_task",
-        assign_specialist_task_in(scope, context, caller, port, request, Some(source)),
+        assign_specialist_task_in(scope, context, caller, port, request, Some(source), None),
     )
 }
 
@@ -1334,7 +1334,24 @@ pub fn assign_external_specialist_task(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_external_specialist_task",
-        assign_external_specialist_task_in(scope, caller, port, request, None),
+        assign_external_specialist_task_in(scope, caller, port, request, None, None),
+    )
+}
+
+/// Staged service entry for the central dispatcher integration. It performs the
+/// full capture, owner, intent, receipt and round acceptance, but never starts a
+/// Turn. The public facade deliberately continues to call the ready-only entry.
+#[allow(dead_code)]
+pub(crate) fn queue_external_specialist_task(
+    scope: &DelegationScope<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: AssignExternalSpecialistTask<'_>,
+    priority: u8,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    boundary(
+        "assign_external_specialist_task",
+        assign_external_specialist_task_in(scope, caller, port, request, None, Some(priority)),
     )
 }
 
@@ -1344,6 +1361,7 @@ fn assign_external_specialist_task_in(
     port: &dyn RunSettlementPort,
     request: AssignExternalSpecialistTask<'_>,
     source: Option<&dyn AssignmentSource>,
+    queued_priority: Option<u8>,
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     let key = checked_key(request.idempotency_key)?;
     if !(1..=MAX_ASSIGN_DEADLINE_SECONDS).contains(&request.deadline_seconds) {
@@ -1494,7 +1512,7 @@ fn assign_external_specialist_task_in(
         }
     };
     let acceptance = store.transact(|transaction| {
-        accept_assign(
+        accept_assign_in_mode(
             transaction,
             AssignAcceptance {
                 caller,
@@ -1519,6 +1537,7 @@ fn assign_external_specialist_task_in(
                 now_ms: now,
                 workspace_ref: &scope.view.workspace_id,
             },
+            queued_priority,
         )
     });
     let (receipt, _revision) = match acceptance {
@@ -1559,6 +1578,13 @@ fn assign_external_specialist_task_in(
             ));
         }
     };
+    if queued_priority.is_some() {
+        return accepted_boundary(
+            "assign_external_specialist_task",
+            Some(operation_ref),
+            assigned_observation(&store, &receipt),
+        );
+    }
     // The accepted identity and its bytes are durable; dispatch from them now.
     let outcome = port.dispatch_member_task(MemberTaskDispatch {
         view: scope.view,
@@ -2381,6 +2407,56 @@ pub struct SpawnSpecialist<'a> {
     pub expected_revision: Option<u64>,
 }
 
+/// Resolve a staged reuse request from a previously accepted provisioning
+/// snapshot. This records a selection receipt without hiring, spawning or
+/// changing membership. Live reuse-any remains gated with queue dispatch.
+#[allow(dead_code)]
+pub(crate) fn reuse_compatible_member(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    context: Option<&ManagedCallContext<'_>>,
+    provisioning_ref: &str,
+    key: &str,
+) -> Result<Option<(Uuid, Uuid)>, MachineError> {
+    let key = checked_key(key)?;
+    engagement::require_delegation_namespace(scope.state_root)?;
+    transport_owner(scope, owner, context, "reuse_specialist")?;
+    let mut store = open_store(scope)?;
+    if store
+        .accepted_install_receipt(&scope.view.workspace_id, provisioning_ref)?
+        .is_none()
+    {
+        return Err(provisioning_not_installed());
+    }
+    let snapshot = crate::provisioning::retained_snapshot(scope.state_root, provisioning_ref)?;
+    let (_, configuration) = snapshot.admitted_configuration()?;
+    let configuration_digest = crate::run::agent_configuration_digest(&configuration)
+        .map_err(|_| retained_source_invalid())?;
+    let body = json!({"provisioning_ref":provisioning_ref,"role_ref":snapshot.role_name(),
+        "configuration_sha256":configuration_digest,"requested_access":snapshot.admitted.requested_access});
+    let digest =
+        sha256_hex(&crate::operation::canonical(&body).map_err(|_| retained_source_invalid())?);
+    let owner = match owner {
+        SettlementOwner::External { engagement_id } => {
+            crate::assignment_queue::Owner::External(engagement_id)
+        }
+        SettlementOwner::Managed { session_id } => {
+            crate::assignment_queue::Owner::Managed(session_id)
+        }
+    };
+    store.transact(|tx| {
+        crate::assignment_queue::reuse(
+            tx,
+            owner,
+            key,
+            &digest,
+            snapshot.role_name(),
+            &configuration_digest,
+            &snapshot.admitted.requested_access,
+        )
+    })
+}
+
 /// Spawn one managed member from an installed provisioning snapshot (K).
 ///
 /// The retained snapshot is the only instruction source and the single admission
@@ -2792,7 +2868,24 @@ pub fn assign_specialist_task(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_specialist_task",
-        assign_specialist_task_in(scope, context, caller, port, request, None),
+        assign_specialist_task_in(scope, context, caller, port, request, None, None),
+    )
+}
+
+/// Managed counterpart of the staged queue service. Source identities still
+/// come from the authenticated native call, with no extra model arguments.
+#[allow(dead_code)]
+pub(crate) fn queue_specialist_task(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    port: &dyn RunSettlementPort,
+    request: AssignSpecialistTask<'_>,
+    priority: u8,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    boundary(
+        "assign_specialist_task",
+        assign_specialist_task_in(scope, context, caller, port, request, None, Some(priority)),
     )
 }
 
@@ -2803,6 +2896,7 @@ fn assign_specialist_task_in(
     port: &dyn RunSettlementPort,
     request: AssignSpecialistTask<'_>,
     source: Option<&dyn AssignmentSource>,
+    queued_priority: Option<u8>,
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     let key = checked_key(context.idempotency_key)?;
     checked_provenance(context.source_turn_id, context.source_tool_call_id)?;
@@ -3032,24 +3126,30 @@ fn assign_specialist_task_in(
                 "the member is not an active successor member",
             ));
         }
-        if let Err(error) = crate::orchestration::admit_successor_task(
-            transaction,
-            crate::orchestration::SuccessorTask {
-                session_id: context.session_id,
-                task_id,
-                member_run_id: request.member_ref,
-                internal_key: &internal_key,
-                request_sha256: &request_sha256,
-                request_json: &marker_json,
-                accepted_request_json: &accepted_json,
-                accepted_request_sha256: &accepted_sha256,
-                source_run_id: context.source_run_id,
-                source_turn_id: context.source_turn_id,
-                source_tool_call_id: context.source_tool_call_id,
-                deadline_origin_ms: now,
-                now_ms: now,
-            },
-        ) {
+        let queued_task = crate::orchestration::SuccessorTask {
+            session_id: context.session_id,
+            task_id,
+            member_run_id: request.member_ref,
+            internal_key: &internal_key,
+            request_sha256: &request_sha256,
+            request_json: &marker_json,
+            accepted_request_json: &accepted_json,
+            accepted_request_sha256: &accepted_sha256,
+            source_run_id: context.source_run_id,
+            source_turn_id: context.source_turn_id,
+            source_tool_call_id: context.source_tool_call_id,
+            deadline_origin_ms: now,
+            now_ms: now,
+        };
+        let admission = match queued_priority {
+            Some(priority) => crate::orchestration::admit_queued_successor_task(
+                transaction,
+                queued_task,
+                priority,
+            ),
+            None => crate::orchestration::admit_successor_task(transaction, queued_task),
+        };
+        if let Err(error) = admission {
             if definitive_managed_refusal(&error.code) {
                 return Err(assignment_refusal(
                     &error.code,
@@ -3163,6 +3263,13 @@ fn assign_specialist_task_in(
             ));
         }
     };
+    if queued_priority.is_some() {
+        return accepted_boundary(
+            "assign_specialist_task",
+            Some(operation_ref),
+            managed_assigned_observation(&broker, context.session_id, &receipt),
+        );
+    }
     // Dispatch the accepted task under the member's own Broker authority.
     let outcome = port.dispatch_managed_task(ManagedTaskDispatch {
         view: scope.view,
@@ -5655,9 +5762,18 @@ pub(crate) fn seed_retained_checked_assignment(
 
 /// Reserve the task, admit its accounting row, advance the member workload
 /// revision and accept the intent in one transaction.
+#[cfg(test)]
 fn accept_assign(
     transaction: &rusqlite::Transaction<'_>,
     request: AssignAcceptance<'_>,
+) -> Result<(OperationReceipt, u64), MachineError> {
+    accept_assign_in_mode(transaction, request, None)
+}
+
+fn accept_assign_in_mode(
+    transaction: &rusqlite::Transaction<'_>,
+    request: AssignAcceptance<'_>,
+    queued_priority: Option<u8>,
 ) -> Result<(OperationReceipt, u64), MachineError> {
     let scope_ref = request.engagement_id.to_string();
     let member = request.member_ref.to_string();
@@ -5680,23 +5796,25 @@ fn accept_assign(
         ));
     }
     let external_json = canonical_text(request.external_request_json)?;
-    let snapshot = match engagement::reserve_external_task_in(
-        transaction,
-        engagement::ExternalTaskReservationCore {
-            engagement_id: request.engagement_id,
-            specialist_run_id: request.member_ref,
-            task_id: request.task_id,
-            // The accepted-task digest is the retained task objective identity.
-            objective_sha256: Some(request.objective_sha256),
-            external_request_json: Some(&external_json),
-            request_json: request.request_json,
-            request_sha256: request.request_sha256,
-            execution_intent: request.execution_intent,
-            // The caller's requested deadline is retained verbatim.
-            deadline_seconds: request.deadline_seconds,
-            now_ms: request.now_ms,
-        },
-    ) {
+    let core = engagement::ExternalTaskReservationCore {
+        engagement_id: request.engagement_id,
+        specialist_run_id: request.member_ref,
+        task_id: request.task_id,
+        // The accepted-task digest is the retained task objective identity.
+        objective_sha256: Some(request.objective_sha256),
+        external_request_json: Some(&external_json),
+        request_json: request.request_json,
+        request_sha256: request.request_sha256,
+        execution_intent: request.execution_intent,
+        // The caller's requested deadline is retained verbatim.
+        deadline_seconds: request.deadline_seconds,
+        now_ms: request.now_ms,
+    };
+    let reservation = match queued_priority {
+        Some(priority) => engagement::reserve_queued_external_task_in(transaction, core, priority),
+        None => engagement::reserve_external_task_in(transaction, core),
+    };
+    let snapshot = match reservation {
         Ok(snapshot) => snapshot,
         Err(error) if definitive_admission_refusal(&error.code) => {
             return Err(assignment_refusal(
@@ -12552,6 +12670,828 @@ pub(crate) mod tests {
                 assert_eq!(scene.port.calls(), 0);
             }
         }
+    }
+
+    #[test]
+    fn staged_external_queue_preserves_receipts_rounds_order_and_dispatch_exclusion() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement, &candidate, "queue-hire");
+        let port = FakePort::new();
+        let caller = caller(16);
+        let first = queue_external_specialist_task(
+            &fixture.scope(),
+            &caller,
+            &port,
+            assign_request(engagement, member, "queued-first", "read_only"),
+            2,
+        )
+        .unwrap();
+        let second = queue_external_specialist_task(
+            &fixture.scope(),
+            &caller,
+            &port,
+            assign_request(engagement, member, "queued-second", "read_only"),
+            0,
+        )
+        .unwrap();
+        let replay = queue_external_specialist_task(
+            &fixture.scope(),
+            &caller,
+            &port,
+            assign_request(engagement, member, "queued-second", "read_only"),
+            0,
+        )
+        .unwrap();
+        assert_eq!(second.1, replay.1);
+        assert_eq!(port.calls(), 0);
+        assert!(
+            assign_external_specialist_task(
+                &fixture.scope(),
+                &caller,
+                &port,
+                assign_request(engagement, member, "live-cannot-bypass", "read_only")
+            )
+            .is_err()
+        );
+        assert_eq!(port.calls(), 0);
+
+        let first_id =
+            Uuid::parse_str(first.1.accepted_subjects.task_ref.as_deref().unwrap()).unwrap();
+        let second_id =
+            Uuid::parse_str(second.1.accepted_subjects.task_ref.as_deref().unwrap()).unwrap();
+        // A new checked connection reconstructs the same accepted queue.
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            2
+        );
+        let owner = crate::assignment_queue::Owner::External(engagement);
+        store
+            .transact(|tx| {
+                assert_eq!(
+                    crate::assignment_queue::next(tx, owner, member)?,
+                    Some(second_id)
+                );
+                assert_eq!(
+                    crate::assignment_queue::claim(tx, owner, member)?,
+                    Some(second_id)
+                );
+                // The first task cannot preempt the accepted claim.
+                assert_eq!(crate::assignment_queue::claim(tx, owner, member)?, None);
+                crate::engagement::cancel_successor_before_dispatch(
+                    tx,
+                    engagement,
+                    member,
+                    first_id,
+                    now_ms()?,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store.external_task(engagement, first_id).unwrap().state,
+            "cancelled"
+        );
+        let after = queue_external_specialist_task(
+            &fixture.scope(),
+            &caller,
+            &port,
+            assign_request(engagement, member, "queued-first", "read_only"),
+            2,
+        )
+        .unwrap();
+        assert_eq!(first.1, after.1);
+        assert_eq!(port.calls(), 0);
+    }
+
+    #[test]
+    fn staged_managed_queue_is_fifo_at_equal_priority_and_cannot_replay_unknown() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "queue-spawn", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let caller = caller(16);
+        let mut ids = Vec::new();
+        for key in ["queue-a", "queue-b"] {
+            let (_, receipt) = queue_specialist_task(
+                &fixture.scope(),
+                &fixture.managed_context(session, key),
+                &caller,
+                &port,
+                managed_assign(member, "Queued accepted work.", "read_only", None),
+                1,
+            )
+            .unwrap();
+            ids.push(
+                Uuid::parse_str(receipt.accepted_subjects.task_ref.as_deref().unwrap()).unwrap(),
+            );
+        }
+        assert_eq!(port.calls(), 1); // Spawn only; queue acceptance dispatched no Turn.
+        assert!(
+            fixture
+                .assign(
+                    session,
+                    "live-cannot-bypass",
+                    &caller,
+                    &port,
+                    managed_assign(member, "Cannot bypass queued work.", "read_only", None)
+                )
+                .is_err()
+        );
+        assert_eq!(port.calls(), 1);
+
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        let owner = crate::assignment_queue::Owner::Managed(session);
+        store
+            .transact(|tx| {
+                assert_eq!(
+                    crate::assignment_queue::next(tx, owner, member)?,
+                    Some(ids[0])
+                );
+                assert_eq!(
+                    crate::assignment_queue::claim(tx, owner, member)?,
+                    Some(ids[0])
+                );
+                tx.execute(
+                    "UPDATE brokered_tasks SET state='interrupted_unknown' WHERE task_id=?1",
+                    [ids[0].to_string()],
+                )
+                .unwrap();
+                assert_eq!(crate::assignment_queue::claim(tx, owner, member)?, None);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            2
+        );
+        assert_eq!(fixture.broker_task_rows(), 2);
+    }
+
+    #[test]
+    fn staged_queue_overflow_rolls_back_task_and_accounting_together() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement, &candidate, "bounded-hire");
+        let port = FakePort::new();
+        let caller = caller(16);
+        for index in 0..4 {
+            queue_external_specialist_task(
+                &fixture.scope(),
+                &caller,
+                &port,
+                assign_request(engagement, member, &format!("bounded-{index}"), "read_only"),
+                1,
+            )
+            .unwrap();
+        }
+        let refused = queue_external_specialist_task(
+            &fixture.scope(),
+            &caller,
+            &port,
+            assign_request(engagement, member, "bounded-overflow", "read_only"),
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "SPECIALIST_POLICY_DENIED");
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert_eq!(
+            crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+            4
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            4
+        );
+        assert_eq!(port.calls(), 0);
+    }
+
+    #[test]
+    fn staged_reuse_rejects_incompatible_snapshots_and_changed_request_keys() {
+        for managed in [false, true] {
+            let fixture = Fixture::new();
+            let scope_ref = if managed {
+                fixture.managed_session()
+            } else {
+                fixture.set_up_namespace();
+                fixture.open()
+            };
+            let candidate = fixture.install();
+            let mut other_sources = fixture.sources();
+            other_sources.role_name = "other-reviewer";
+            let other_role =
+                install_provisioning(&fixture.scope(), &other_sources, "other-role", None)
+                    .unwrap()
+                    .0;
+            let mut other_sources = fixture.sources();
+            other_sources.admission.effort = "medium".to_owned();
+            let other_configuration = install_provisioning(
+                &fixture.scope(),
+                &other_sources,
+                "other-configuration",
+                None,
+            )
+            .unwrap()
+            .0;
+            let other_access = fixture.install_write();
+            let snapshot = crate::provisioning::retained_snapshot(
+                &fixture.state_root,
+                &candidate.provisioning_ref,
+            )
+            .unwrap();
+            let (_, configuration) = snapshot.admitted_configuration().unwrap();
+            let digest = crate::run::agent_configuration_digest(&configuration).unwrap();
+            let role_snapshot = crate::provisioning::retained_snapshot(
+                &fixture.state_root,
+                &other_role.provisioning_ref,
+            )
+            .unwrap();
+            let configuration_snapshot = crate::provisioning::retained_snapshot(
+                &fixture.state_root,
+                &other_configuration.provisioning_ref,
+            )
+            .unwrap();
+            let (_, other_runtime_configuration) =
+                configuration_snapshot.admitted_configuration().unwrap();
+            let other_digest =
+                crate::run::agent_configuration_digest(&other_runtime_configuration).unwrap();
+            let access_snapshot = crate::provisioning::retained_snapshot(
+                &fixture.state_root,
+                &other_access.provisioning_ref,
+            )
+            .unwrap();
+            assert_ne!(role_snapshot.role_name(), snapshot.role_name());
+            assert_ne!(other_digest, digest);
+            assert_ne!(
+                access_snapshot.admitted.requested_access,
+                snapshot.admitted.requested_access
+            );
+            let port = FakePort::new();
+            let admitted = if managed {
+                fixture
+                    .spawn(scope_ref, &candidate, "compatible-member", None, &port)
+                    .unwrap()
+            } else {
+                hire_external_specialist(
+                    &fixture.scope(),
+                    &port,
+                    hire_request(scope_ref, &candidate, "compatible-member", None),
+                )
+                .unwrap()
+            };
+            let member = Uuid::parse_str(&admitted.member.member_ref).unwrap();
+            let original = (
+                member,
+                Uuid::parse_str(&admitted.receipt.operation_ref).unwrap(),
+            );
+            let caller = caller(16);
+            let owner = if managed {
+                queue_specialist_task(
+                    &fixture.scope(),
+                    &fixture.managed_context(scope_ref, "reuse-seed-work"),
+                    &caller,
+                    &port,
+                    managed_assign(member, "Retained queued work.", "read_only", None),
+                    1,
+                )
+                .unwrap();
+                SettlementOwner::Managed {
+                    session_id: scope_ref,
+                }
+            } else {
+                queue_external_specialist_task(
+                    &fixture.scope(),
+                    &caller,
+                    &port,
+                    assign_request(scope_ref, member, "reuse-seed-work", "read_only"),
+                    1,
+                )
+                .unwrap();
+                SettlementOwner::External {
+                    engagement_id: scope_ref,
+                }
+            };
+            let queue_owner = if managed {
+                crate::assignment_queue::Owner::Managed(scope_ref)
+            } else {
+                crate::assignment_queue::Owner::External(scope_ref)
+            };
+            let store = EngagementStore::open(&fixture.database()).unwrap();
+            let runs = fixture.state_root.join("runs");
+            fs::create_dir_all(&runs).unwrap();
+            fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).unwrap();
+            let counts = || {
+                (
+                    if managed {
+                        fixture.broker_member_rows()
+                    } else {
+                        fixture.member_rows()
+                    },
+                    fixture.run_directories(),
+                    fixture.intent_rows("hire_external_specialist")
+                        + fixture.intent_rows("spawn_specialist"),
+                    crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+                    port.calls(),
+                )
+            };
+            let before = counts();
+            assert_eq!(
+                crate::assignment_queue::reusable_member(
+                    store.connection(),
+                    queue_owner,
+                    snapshot.role_name(),
+                    &digest,
+                    &snapshot.admitted.requested_access,
+                )
+                .unwrap(),
+                Some(original)
+            );
+            // The accepted member stays intact; each request changes one
+            // compatibility field to a different accepted snapshot value.
+            for (role, configuration, access) in [
+                (
+                    role_snapshot.role_name(),
+                    digest.as_str(),
+                    snapshot.admitted.requested_access.as_str(),
+                ),
+                (
+                    snapshot.role_name(),
+                    other_digest.as_str(),
+                    snapshot.admitted.requested_access.as_str(),
+                ),
+                (
+                    snapshot.role_name(),
+                    digest.as_str(),
+                    access_snapshot.admitted.requested_access.as_str(),
+                ),
+            ] {
+                assert_eq!(
+                    crate::assignment_queue::reusable_member(
+                        store.connection(),
+                        queue_owner,
+                        role,
+                        configuration,
+                        access,
+                    )
+                    .unwrap(),
+                    None,
+                    "managed={managed}"
+                );
+            }
+            let context = managed.then(|| fixture.managed_context(scope_ref, "compatible-reuse"));
+            assert_eq!(
+                reuse_compatible_member(
+                    &fixture.scope(),
+                    owner,
+                    context.as_ref(),
+                    &candidate.provisioning_ref,
+                    "compatible-reuse",
+                )
+                .unwrap(),
+                Some(original)
+            );
+            let conflict = reuse_compatible_member(
+                &fixture.scope(),
+                owner,
+                context.as_ref(),
+                &other_configuration.provisioning_ref,
+                "compatible-reuse",
+            );
+            assert_eq!(conflict.unwrap_err().code, "IDEMPOTENCY_CONFLICT");
+            assert_eq!(
+                reuse_compatible_member(
+                    &fixture.scope(),
+                    owner,
+                    context.as_ref(),
+                    &candidate.provisioning_ref,
+                    "compatible-reuse",
+                )
+                .unwrap(),
+                Some(original)
+            );
+            assert_eq!(
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM assignment_member_reuses", [], |row| {
+                        row.get::<_, u64>(0)
+                    },)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(counts(), before);
+        }
+    }
+
+    #[test]
+    fn staged_queue_orders_absolute_deadlines_before_fifo_ties() {
+        for managed in [false, true] {
+            let fixture = Fixture::new();
+            let scope_ref = if managed {
+                fixture.managed_session()
+            } else {
+                fixture.set_up_namespace();
+                fixture.open()
+            };
+            let candidate = fixture.install();
+            let port = FakePort::new();
+            let admitted = if managed {
+                fixture
+                    .spawn(scope_ref, &candidate, "deadline-member", None, &port)
+                    .unwrap()
+            } else {
+                hire_external_specialist(
+                    &fixture.scope(),
+                    &port,
+                    hire_request(scope_ref, &candidate, "deadline-member", None),
+                )
+                .unwrap()
+            };
+            let member = Uuid::parse_str(&admitted.member.member_ref).unwrap();
+            let snapshot = crate::provisioning::retained_snapshot(
+                &fixture.state_root,
+                &candidate.provisioning_ref,
+            )
+            .unwrap();
+            let (_, configuration) = snapshot.admitted_configuration().unwrap();
+            let (accepted, _) = crate::successor_capture::capture_facade_task(
+                &configuration,
+                &plain_task("Order retained deadlines."),
+                "read_only",
+                None,
+            )
+            .unwrap();
+            let accepted_json = canonical_text(&accepted).unwrap();
+            let accepted_sha = sha256_hex(accepted_json.as_bytes());
+            let accepted_digest = accepted.digest().unwrap();
+            let ids = [Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()];
+            let owner = if managed {
+                crate::assignment_queue::Owner::Managed(scope_ref)
+            } else {
+                crate::assignment_queue::Owner::External(scope_ref)
+            };
+            let mut connection = rusqlite::Connection::open(fixture.database()).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let tx = &transaction;
+            (|| {
+                // Fixed acceptance times exercise the real store arithmetic:
+                // later insertion wins by deadline, then equal deadlines use FIFO.
+                for (task_id, origin, seconds) in
+                    [(ids[0], 1000, 600), (ids[1], 2000, 10), (ids[2], 3000, 9)]
+                {
+                    let marker = canonical_text(&successor_task_payload(&SuccessorTaskMarker {
+                        operation_ref: Uuid::now_v7(),
+                        member_ref: member,
+                        accepted_task_digest: &accepted_digest,
+                        execution_intent: "read_only",
+                        deadline_seconds: seconds,
+                    }))?;
+                    let marker_sha = sha256_hex(marker.as_bytes());
+                    if managed {
+                        crate::orchestration::admit_queued_successor_task(
+                            tx,
+                            crate::orchestration::SuccessorTask {
+                                session_id: scope_ref,
+                                task_id,
+                                member_run_id: member,
+                                internal_key: &format!("deadline:{task_id}"),
+                                request_sha256: &marker_sha,
+                                request_json: &marker,
+                                accepted_request_json: &accepted_json,
+                                accepted_request_sha256: &accepted_sha,
+                                source_run_id: scope_ref,
+                                source_turn_id: "deadline-source-turn",
+                                source_tool_call_id: "deadline-source-call",
+                                deadline_origin_ms: origin,
+                                now_ms: origin,
+                            },
+                            1,
+                        )?;
+                    } else {
+                        crate::engagement::reserve_queued_external_task_in(
+                            tx,
+                            crate::engagement::ExternalTaskReservationCore {
+                                engagement_id: scope_ref,
+                                specialist_run_id: member,
+                                task_id,
+                                objective_sha256: Some(&accepted_digest),
+                                external_request_json: Some(&marker),
+                                request_json: &accepted_json,
+                                request_sha256: &marker_sha,
+                                execution_intent: "read_only",
+                                deadline_seconds: seconds,
+                                now_ms: origin,
+                            },
+                            1,
+                        )?;
+                    }
+                }
+                let stored = ids.map(|id| {
+                    tx.query_row(
+                    "SELECT sequence,deadline_ms FROM assignment_queue_entries WHERE task_id=?1",
+                    [id.to_string()], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                ).unwrap()
+                });
+                assert!(stored[0].0 < stored[1].0 && stored[1].0 < stored[2].0);
+                assert_eq!(stored.map(|row| row.1), [601000, 12000, 12000]);
+                for expected in [ids[1], ids[2], ids[0]] {
+                    assert_eq!(
+                        crate::assignment_queue::next(tx, owner, member)?,
+                        Some(expected)
+                    );
+                    if managed {
+                        crate::orchestration::cancel_successor_before_dispatch(
+                            tx, scope_ref, member, expected, 4000,
+                        )?;
+                    } else {
+                        crate::engagement::cancel_successor_before_dispatch(
+                            tx, scope_ref, member, expected, 4000,
+                        )?;
+                    }
+                }
+                assert_eq!(crate::assignment_queue::next(tx, owner, member)?, None);
+                Ok::<(), MachineError>(())
+            })()
+            .unwrap();
+            transaction.rollback().unwrap();
+        }
+    }
+
+    #[test]
+    fn staged_reuse_is_snapshot_bound_idle_first_scoped_and_replay_stable() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement = fixture.open();
+        let candidate = fixture.install();
+        let first = fixture.hire_member(engagement, &candidate, "reuse-first");
+        let second = fixture.hire_member(engagement, &candidate, "reuse-second");
+        let port = FakePort::new();
+        let caller = caller(16);
+        queue_external_specialist_task(
+            &fixture.scope(),
+            &caller,
+            &port,
+            assign_request(engagement, first, "busy-first", "read_only"),
+            1,
+        )
+        .unwrap();
+        let owner = SettlementOwner::External {
+            engagement_id: engagement,
+        };
+        let chosen = reuse_compatible_member(
+            &fixture.scope(),
+            owner,
+            None,
+            &candidate.provisioning_ref,
+            "choose",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(chosen.0, second);
+        queue_external_specialist_task(
+            &fixture.scope(),
+            &caller,
+            &port,
+            assign_request(engagement, second, "busy-second-a", "read_only"),
+            1,
+        )
+        .unwrap();
+        queue_external_specialist_task(
+            &fixture.scope(),
+            &caller,
+            &port,
+            assign_request(engagement, second, "busy-second-b", "read_only"),
+            1,
+        )
+        .unwrap();
+        // Selection reads only retained snapshots, even after authors disappear.
+        fs::remove_dir_all(fixture.home_root.join("roles")).unwrap();
+        let replay = reuse_compatible_member(
+            &fixture.scope(),
+            owner,
+            None,
+            &candidate.provisioning_ref,
+            "choose",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(replay, chosen);
+        let current = reuse_compatible_member(
+            &fixture.scope(),
+            owner,
+            None,
+            &candidate.provisioning_ref,
+            "fresh",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(current.0, first);
+        assert_eq!(fixture.member_rows(), 2);
+        assert_eq!(port.calls(), 0);
+        let (empty, _) =
+            open_external_engagement(&fixture.scope(), "empty-reuse-scope", None).unwrap();
+        let empty = Uuid::parse_str(&empty.engagement_ref).unwrap();
+        let none = reuse_compatible_member(
+            &fixture.scope(),
+            SettlementOwner::External {
+                engagement_id: empty,
+            },
+            None,
+            &candidate.provisioning_ref,
+            "no-implicit-hire",
+        )
+        .unwrap();
+        assert_eq!(none, None);
+        assert_eq!(fixture.member_rows(), 2);
+    }
+
+    #[test]
+    fn staged_queue_corrupt_extension_fails_before_writable_open() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement, &candidate, "corrupt-hire");
+        queue_external_specialist_task(
+            &fixture.scope(),
+            &caller(4),
+            &FakePort::new(),
+            assign_request(engagement, member, "corrupt-task", "read_only"),
+            1,
+        )
+        .unwrap();
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute_batch("DROP TABLE assignment_member_reuses; PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(connection);
+        let before = fs::read(fixture.database()).unwrap();
+        assert_eq!(
+            EngagementStore::open(&fixture.database())
+                .err()
+                .unwrap()
+                .code,
+            "ORCHESTRATION_SCHEMA_UNSUPPORTED"
+        );
+        assert_eq!(
+            EngagementStore::open_read_only(&fixture.database())
+                .err()
+                .unwrap()
+                .code,
+            "ORCHESTRATION_SCHEMA_UNSUPPORTED"
+        );
+        assert_eq!(before, fs::read(fixture.database()).unwrap());
+    }
+
+    #[test]
+    fn staged_round_refusal_rolls_back_first_queue_migration_and_acceptance() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(engagement, &candidate, "round-hire");
+        let caller = caller(1);
+        let port = FakePort::new();
+        assign_external_specialist_task(
+            &fixture.scope(),
+            &caller,
+            &port,
+            assign_request(engagement, member, "round-used", "read_only"),
+        )
+        .unwrap();
+        let refused = queue_external_specialist_task(
+            &fixture.scope(),
+            &caller,
+            &port,
+            assign_request(engagement, member, "round-refused", "read_only"),
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "ROUNDS_EXHAUSTED");
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        let c = store.connection();
+        assert_eq!(
+            c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(crate::caller_scope::rounds_used(c, &caller).unwrap(), 1);
+        assert_eq!(
+            c.query_row(
+                "SELECT COUNT(*) FROM metadata WHERE key='assignment_queue_schema_version'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='assignment_queue_entries'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn staged_queue_enforces_target_and_aggregate_bounds_before_acceptance_commit() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let engagement = fixture.open();
+        let owner = crate::assignment_queue::Owner::External(engagement);
+        let mut connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        // These are preallocated task/Run identities inside an admission
+        // transaction. No incomplete task is committed by this boundary test.
+        let tx = connection.transaction().unwrap();
+        let target = Uuid::now_v7();
+        for index in 0..16 {
+            crate::assignment_queue::admit(
+                &tx,
+                &crate::assignment_queue::Entry {
+                    owner,
+                    task: Uuid::now_v7(),
+                    target,
+                    source: &format!("source-{}", index % 4),
+                    priority: 1,
+                    deadline_ms: 1000,
+                },
+            )
+            .unwrap();
+        }
+        assert!(
+            crate::assignment_queue::admit(
+                &tx,
+                &crate::assignment_queue::Entry {
+                    owner,
+                    task: Uuid::now_v7(),
+                    target,
+                    source: "new-source",
+                    priority: 1,
+                    deadline_ms: 1000,
+                }
+            )
+            .is_err()
+        );
+        tx.rollback().unwrap();
+        let tx = connection.transaction().unwrap();
+        for _ in 0..8 {
+            let target = Uuid::now_v7();
+            for index in 0..16 {
+                crate::assignment_queue::admit(
+                    &tx,
+                    &crate::assignment_queue::Entry {
+                        owner,
+                        task: Uuid::now_v7(),
+                        target,
+                        source: &format!("source-{}", index % 4),
+                        priority: 1,
+                        deadline_ms: 1000,
+                    },
+                )
+                .unwrap();
+            }
+        }
+        assert!(
+            crate::assignment_queue::admit(
+                &tx,
+                &crate::assignment_queue::Entry {
+                    owner,
+                    task: Uuid::now_v7(),
+                    target: Uuid::now_v7(),
+                    source: "new-source",
+                    priority: 1,
+                    deadline_ms: 1000,
+                }
+            )
+            .is_err()
+        );
+        tx.rollback().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM metadata WHERE key='assignment_queue_schema_version'",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

@@ -3901,6 +3901,13 @@ membership, mailbox, and audit history.
 
 ### Scheduling, Priority, and Backpressure
 
+Assignment queue admission and compatible reuse have a staged service boundary
+for both managed Sessions and External Engagements. It commits retained tasks,
+ordering and caller accounting together. The live tools continue to reject busy
+targets and unsupported reuse policies until the central dispatcher can execute
+those accepted queues under current owner authority. This staged boundary
+does not advertise lateral consultation or automatic activation.
+
 A target Run executes at most one Turn at a time. Collaboration queueing is
 owned by the Orchestration and Collaboration layer; low-level public `run send`
 and `run submit` keep their existing `RUN_BUSY` behavior.

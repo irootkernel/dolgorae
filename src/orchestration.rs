@@ -6485,7 +6485,7 @@ fn validate_event_chain_on(connection: &Connection, session_id: Uuid) -> Result<
     Ok(())
 }
 
-fn append_event(
+pub(crate) fn append_event(
     transaction: &Transaction<'_>,
     session_id: Uuid,
     kind: &str,
@@ -6859,18 +6859,76 @@ pub(crate) fn admit_successor_task(
     transaction: &Transaction<'_>,
     task: SuccessorTask<'_>,
 ) -> Result<(), MachineError> {
+    admit_successor_task_in_mode(transaction, task, None)
+}
+
+/// Staged queue admission; not advertised by the ready-only live tool.
+pub(crate) fn admit_queued_successor_task(
+    transaction: &Transaction<'_>,
+    task: SuccessorTask<'_>,
+    priority: u8,
+) -> Result<(), MachineError> {
+    admit_successor_task_in_mode(transaction, task, Some(priority))
+}
+
+fn admit_successor_task_in_mode(
+    transaction: &Transaction<'_>,
+    task: SuccessorTask<'_>,
+    priority: Option<u8>,
+) -> Result<(), MachineError> {
     checked(task.internal_key, 256, "idempotency_key")?;
     checked(task.source_turn_id, 256, "source_turn_id")?;
     checked(task.source_tool_call_id, 256, "source_tool_call_id")?;
     digest(task.request_sha256, "request_sha256")?;
     digest(task.accepted_request_sha256, "accepted_request_sha256")?;
+    if let Some(priority) = priority {
+        let marker: Value = serde_json::from_str(task.request_json).map_err(internal)?;
+        let deadline_seconds = marker["deadline_seconds"]
+            .as_u64()
+            .ok_or_else(|| integrity("queued task deadline is missing"))?;
+        let deadline_ms = task
+            .deadline_origin_ms
+            .checked_add(
+                i64::try_from(deadline_seconds)
+                    .map_err(internal)?
+                    .checked_mul(1000)
+                    .ok_or_else(|| integrity("task deadline overflows"))?,
+            )
+            .ok_or_else(|| integrity("task deadline overflows"))?;
+        crate::assignment_queue::admit(
+            transaction,
+            &crate::assignment_queue::Entry {
+                owner: crate::assignment_queue::Owner::Managed(task.session_id),
+                task: task.task_id,
+                target: task.member_run_id,
+                source: &task.source_run_id.to_string(),
+                priority,
+                deadline_ms,
+            },
+        )?;
+    }
+    let state = if priority.is_some() {
+        "queued"
+    } else {
+        let queued: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM brokered_tasks WHERE target_run_id=?1 AND state='queued')",
+            [task.member_run_id.to_string()], |row| row.get(0),
+        ).map_err(internal)?;
+        if queued {
+            return Err(session_conflict(
+                task.session_id,
+                "Specialist has queued work",
+            ));
+        }
+        "accepted"
+    };
     transaction
         .execute(
             "INSERT INTO brokered_tasks(
                task_id,session_id,idempotency_key,request_sha256,source_run_id,source_turn_id,
                source_tool_call_id,target_run_id,request_json,target_turn_id,result_json,
                result_sha256,result_artifact_id,state,safe_error_code,created_at_ms,updated_at_ms
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,NULL,NULL,NULL,'accepted',NULL,?10,?10)",
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,NULL,NULL,NULL,?11,NULL,?10,?10)",
             params![
                 task.task_id.to_string(),
                 task.session_id.to_string(),
@@ -6881,7 +6939,8 @@ pub(crate) fn admit_successor_task(
                 task.source_tool_call_id,
                 task.member_run_id.to_string(),
                 task.request_json,
-                task.now_ms
+                task.now_ms,
+                state
             ],
         )
         .map_err(|error| {
@@ -7006,7 +7065,7 @@ pub(crate) fn cancel_successor_before_dispatch(
         .execute(
             "UPDATE brokered_tasks SET state='cancelled',updated_at_ms=?4
          WHERE session_id=?1 AND target_run_id=?2 AND task_id=?3
-           AND state='accepted' AND target_turn_id IS NULL AND result_sha256 IS NULL
+           AND state IN ('accepted','queued') AND target_turn_id IS NULL AND result_sha256 IS NULL
            AND NOT EXISTS(SELECT 1 FROM dispatch_indexes WHERE task_id=?3)",
             params![
                 session_id.to_string(),
@@ -7022,6 +7081,11 @@ pub(crate) fn cancel_successor_before_dispatch(
             "task cancellation lost the dispatch boundary",
         ));
     }
+    crate::assignment_queue::remove(
+        transaction,
+        crate::assignment_queue::Owner::Managed(session_id),
+        task,
+    )?;
     append_event(
         transaction,
         session_id,
@@ -7059,6 +7123,11 @@ pub(crate) fn terminalize_successor_task(
             "task is not at a settlable dispatch boundary",
         ));
     }
+    crate::assignment_queue::remove(
+        transaction,
+        crate::assignment_queue::Owner::Managed(session_id),
+        task_id,
+    )?;
     append_event(
         transaction,
         session_id,

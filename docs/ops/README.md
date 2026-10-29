@@ -807,6 +807,13 @@ removing the fixture.
 
 ### Current permission and MCP interactions
 
+Assignment queues and reuse-any remain unavailable on live tool entrypoints
+until the central dispatcher is integrated. Their staged storage preserves
+accepted bytes, original receipts and conservative round accounting. An operator
+must use the current owning recovery path for unknown work; queue records do not
+prove that a Turn was absent or authorize redispatch. Keep pending task state
+when a dispatcher or owner capability is unavailable.
+
 Public-v2 clients list safe summaries, fetch the full typed request with the
 current Run Controller, and resolve it using that Controller and the captured
 request, Turn and revision. Permission grants are exact requested subsets,

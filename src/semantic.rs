@@ -2175,9 +2175,18 @@ fn cancel_accepted_member_task(
             SettlementOwner::External { .. } => accepted.digest()?,
             SettlementOwner::Managed { .. } => crate::jcs::sha256_hex(accepted_json.as_bytes()),
         };
-        if state != "accepted" || turn.is_some() || digest != expected
+        if !matches!(state.as_str(), "accepted" | "queued") || turn.is_some() || digest != expected
             || accepted.execution_intent != request.execution_intent {
             return Err(reconciliation_error("task_dispatch_not_excluded"));
+        }
+        if state == "queued" {
+            let owner = match request.owner {
+                SettlementOwner::External { engagement_id } => crate::assignment_queue::Owner::External(engagement_id),
+                SettlementOwner::Managed { session_id } => crate::assignment_queue::Owner::Managed(session_id),
+            };
+            if !crate::assignment_queue::contains(tx, owner, request.task_ref, request.member_ref)? {
+                return Err(reconciliation_error("task_dispatch_not_excluded"));
+            }
         }
         // Recover the original executor key from the accepted assignment, not
         // the cancellation call or an arbitrary absent Turn.
@@ -30934,6 +30943,66 @@ pub(crate) mod successor_review_tests {
                     .is_err()
             );
             assert_eq!(store.connection().query_row("SELECT COUNT(*) FROM result_content_refs WHERE owner_id=?1 AND owner_kind='dispatch_index'", [task.to_string()], |r|r.get::<_,u64>(0)).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn nondispatch_cancel_queued_tasks_require_exact_durable_owner_and_target() {
+        for managed in [false, true] {
+            for changed in [
+                None,
+                Some("scope_ref"),
+                Some("target_run_id"),
+                Some("task_id"),
+            ] {
+                let scene = Scene::new(managed);
+                let (task, receipt) = nondispatch_assignment(&scene, "queued-cancel", false);
+                let owner = match scene.owner() {
+                    service::SettlementOwner::Managed { session_id } => {
+                        crate::assignment_queue::Owner::Managed(session_id)
+                    }
+                    service::SettlementOwner::External { engagement_id } => {
+                        crate::assignment_queue::Owner::External(engagement_id)
+                    }
+                };
+                let mut store = scene.store();
+                store.transact(|tx| {
+                    crate::assignment_queue::admit(tx, &crate::assignment_queue::Entry {
+                        owner, task, target: scene.manifest().run_id,
+                        source: "cancel-fixture", priority: 1, deadline_ms: i64::MAX,
+                    })?;
+                    let table = if managed { "brokered_tasks" } else { "tasks" };
+                    tx.execute(&format!("UPDATE {table} SET state='queued' WHERE task_id=?1"), [task.to_string()])
+                        .map_err(|_| reconciliation_error("fixture_queue_state"))?;
+                    if let Some(column) = changed {
+                        tx.execute(&format!("UPDATE assignment_queue_entries SET {column}=?2 WHERE task_id=?1"),
+                            rusqlite::params![task.to_string(), Uuid::now_v7().to_string()])
+                            .map_err(|_| reconciliation_error("fixture_queue_identity"))?;
+                    }
+                    Ok(())
+                }).unwrap();
+                let before = nondispatch_facts(&scene, task);
+                let result = nondispatch_cancel(
+                    &scene,
+                    task,
+                    &SemanticRunSettlementPort {
+                        carrier: scene.carrier(),
+                    },
+                );
+                if changed.is_some() {
+                    assert!(result.is_err(), "{managed}/{changed:?}");
+                    assert_eq!(scene.state(task), "queued");
+                    assert_eq!(nondispatch_facts(&scene, task), before);
+                } else {
+                    result.unwrap();
+                    assert_eq!(scene.state(task), "cancelled");
+                    let current_receipt: String = store.connection().query_row(
+                        "SELECT receipt_json FROM delegation_operations WHERE idempotency_key='queued-cancel'",
+                        [], |row| row.get(0),
+                    ).unwrap();
+                    assert_eq!(current_receipt, receipt);
+                }
+            }
         }
     }
 

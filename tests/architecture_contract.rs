@@ -110,6 +110,10 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "turn",
             ][..],
         ),
+        (
+            "assignment_queue",
+            &["engagement", "jcs", "machine", "orchestration"][..],
+        ),
         ("app_server", &["darwin", "jcs", "turn"][..]),
         (
             "trusted_host",
@@ -356,6 +360,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "engagement",
             &[
+                "assignment_queue",
                 "controller",
                 "delegation_identity",
                 "domain",
@@ -537,6 +542,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "orchestration",
             &[
+                "assignment_queue",
                 "artifact",
                 "audit",
                 // `caller_scope` is test-only: the successor fixture writes one
@@ -607,6 +613,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "delegation_service",
             &[
+                "assignment_queue",
                 "caller_scope",
                 "delegation_identity",
                 // Direct-target metadata is admitted before a successor intent.
@@ -783,6 +790,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             &[
                 "public_resolution",
                 "app_server",
+                "assignment_queue",
                 "artifact",
                 "audit",
                 "caller_scope",

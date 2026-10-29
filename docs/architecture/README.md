@@ -2496,6 +2496,22 @@ Collaboration Exchanges are accepted only for one active Orchestration Session.
 
 ### Mailbox Scheduling and Virtual Actor Residency
 
+The staged assignment foundation records immutable queue ordering alongside the
+existing task acceptance transaction. Internal Session and External Engagement
+queues retain separate owner scopes, bounded source-target admission, inherited
+priority, deadlines and FIFO ties. The `assignment_queue_schema_version` extension
+is version 1; it does not replace the generation-6 namespace or its task receipts.
+Its first-use transaction replaces `one_active_external_task_per_member` to
+exclude `queued`; the version-1 marker distinguishes this shape, while
+`accepted`, `claimed`, `dispatching` and `running` remain unique per member.
+Ready-only live entrypoints remain gated until the central scheduler can dispatch
+queued work under current owner authority. Queue storage alone cannot authorize
+a Turn, reconstruct an external Controller capability or replay uncertain work.
+The shared `assignment_queue` module owns ordering and reuse records; the
+Engagement and Broker stores compose them with their task transactions and
+owner-specific event chains. Delegation Service owns source capture, scope
+authorization, immutable acceptance receipts and caller round accounting.
+
 The Mailbox Scheduler is event-driven and has no per-Specialist polling task.
 One in-memory dirty Run set coalesces mailbox changes, Turn completion,
 activation completion, and state changes. A single notification wakes the

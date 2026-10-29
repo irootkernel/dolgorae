@@ -84,6 +84,10 @@ pub mod darwin;
 
 pub mod session_policy;
 
+// Staged assignment foundation; the central scheduler owns live activation.
+#[allow(dead_code)]
+pub(crate) mod assignment_queue;
+
 // Internal adapter joins are wired into native transport at the next boundary.
 #[allow(dead_code)]
 pub(crate) mod source_binding;

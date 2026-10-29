@@ -25,10 +25,10 @@ integration. EPIC-018 is COMPLETE after successor requirements, checked contract
 and qualified H1 validation. EPIC-019 is COMPLETE.
 EPIC-023 is COMPLETE with Master's whole-Epic acceptance; TASK-090, TASK-091 and
 TASK-092 are COMPLETE. EPIC-020 and TASK-076 through TASK-079 are COMPLETE.
-EPIC-009, EPIC-021, and EPIC-022 remain PLANNED for v0.1.4, in that execution
-order. TASK-067 is COMPLETE;
+EPIC-009 is ACTIVE; EPIC-021 and EPIC-022 remain PLANNED for v0.1.4, in that
+execution order. TASK-067 is COMPLETE;
 TASK-068 through TASK-079 are COMPLETE;
-TASK-080 through TASK-089 remain PLANNED.
+TASK-080 is COMPLETE; TASK-081 through TASK-089 remain PLANNED.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -2702,7 +2702,7 @@ Epic acceptance: Delegation identity, MCP access, modern public operation, pool 
 
 ## EPIC-009: Brokered Specialist Collaboration
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
 
@@ -2716,7 +2716,7 @@ the original Epic's acceptance of the complete collaboration implementation.
 
 ### TASK-080: Queue Busy Targets and Reuse Compatible Members
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: EPIC-020 and TASK-079.
 

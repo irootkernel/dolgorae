@@ -3052,6 +3052,11 @@ impl EngagementStore {
                     ],
                 )
                 .map_err(internal)?;
+            crate::assignment_queue::remove(
+                &transaction,
+                crate::assignment_queue::Owner::External(engagement_id),
+                task_id,
+            )?;
             append_event(
                 &transaction,
                 engagement_id,
@@ -4444,6 +4449,24 @@ pub(crate) fn reserve_external_task_in(
     transaction: &Transaction<'_>,
     core: ExternalTaskReservationCore<'_>,
 ) -> Result<ExternalTaskSnapshot, MachineError> {
+    reserve_external_task_in_mode(transaction, core, None)
+}
+
+/// Staged queue admission; the live facade remains ready-only until the
+/// central scheduler owns dispatch and its external authority.
+pub(crate) fn reserve_queued_external_task_in(
+    transaction: &Transaction<'_>,
+    core: ExternalTaskReservationCore<'_>,
+    priority: u8,
+) -> Result<ExternalTaskSnapshot, MachineError> {
+    reserve_external_task_in_mode(transaction, core, Some(priority))
+}
+
+fn reserve_external_task_in_mode(
+    transaction: &Transaction<'_>,
+    core: ExternalTaskReservationCore<'_>,
+    priority: Option<u8>,
+) -> Result<ExternalTaskSnapshot, MachineError> {
     require_current(
         transaction,
         core.engagement_id,
@@ -4473,12 +4496,47 @@ pub(crate) fn reserve_external_task_in(
             "task execution intent exceeds the hired access",
         ));
     }
+    if let Some(priority) = priority {
+        let deadline_ms = core
+            .now_ms
+            .checked_add(
+                i64::try_from(core.deadline_seconds)
+                    .map_err(internal)?
+                    .checked_mul(1000)
+                    .ok_or_else(|| invalid("deadline", "overflow"))?,
+            )
+            .ok_or_else(|| invalid("deadline", "overflow"))?;
+        crate::assignment_queue::admit(
+            transaction,
+            &crate::assignment_queue::Entry {
+                owner: crate::assignment_queue::Owner::External(core.engagement_id),
+                task: core.task_id,
+                target: core.specialist_run_id,
+                source: &core.engagement_id.to_string(),
+                priority,
+                deadline_ms,
+            },
+        )?;
+    }
+    let state =
+        if priority.is_some() {
+            "queued"
+        } else {
+            let queued: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE specialist_run_id=?1 AND state='queued')",
+            [core.specialist_run_id.to_string()], |row| row.get(0),
+        ).map_err(internal)?;
+            if queued {
+                return Err(conflict("Specialist has queued work"));
+            }
+            "accepted"
+        };
     let inserted = transaction.execute(
         "INSERT INTO tasks(
            task_id,engagement_id,specialist_run_id,objective_sha256,state,
            external_request_ref_json,request_json,execution_intent,
            deadline_seconds,created_at_ms,updated_at_ms
-         ) VALUES(?1,?2,?3,?4,'accepted',?5,?6,?7,?8,?9,?9)",
+         ) VALUES(?1,?2,?3,?4,?10,?5,?6,?7,?8,?9,?9)",
         params![
             core.task_id.to_string(),
             core.engagement_id.to_string(),
@@ -4488,7 +4546,8 @@ pub(crate) fn reserve_external_task_in(
             core.request_json,
             core.execution_intent,
             i64::try_from(core.deadline_seconds).map_err(internal)?,
-            core.now_ms
+            core.now_ms,
+            state
         ],
     );
     if let Err(error) = inserted {
@@ -4509,7 +4568,7 @@ pub(crate) fn reserve_external_task_in(
     let result = ExternalTaskSnapshot {
         task_id: core.task_id,
         specialist_run_id: core.specialist_run_id,
-        state: "accepted".to_owned(),
+        state: state.to_owned(),
         turn_id: None,
         result_artifact_ref: None,
         result: None,
@@ -4589,6 +4648,11 @@ pub(crate) fn terminalize_external_task_in(
     if changed != 1 {
         return Ok(None);
     }
+    crate::assignment_queue::remove(
+        transaction,
+        crate::assignment_queue::Owner::External(core.engagement_id),
+        core.task_id,
+    )?;
     append_event(
         transaction,
         core.engagement_id,
@@ -4641,7 +4705,7 @@ pub(crate) fn cancel_successor_before_dispatch(
         .execute(
             "UPDATE tasks SET state='cancelled',updated_at_ms=?4
          WHERE engagement_id=?1 AND specialist_run_id=?2 AND task_id=?3
-           AND state='accepted' AND turn_id IS NULL AND result_sha256 IS NULL
+           AND state IN ('accepted','queued') AND turn_id IS NULL AND result_sha256 IS NULL
            AND NOT EXISTS(SELECT 1 FROM dispatch_indexes WHERE task_id=?3)",
             params![
                 engagement_id.to_string(),
@@ -4654,6 +4718,11 @@ pub(crate) fn cancel_successor_before_dispatch(
     if changed != 1 {
         return Err(conflict("task cancellation lost the dispatch boundary"));
     }
+    crate::assignment_queue::remove(
+        transaction,
+        crate::assignment_queue::Owner::External(engagement_id),
+        task,
+    )?;
     append_event(
         transaction,
         engagement_id,
@@ -5099,6 +5168,7 @@ impl GenerationProbe {
                 ));
             }
         }
+        crate::assignment_queue::validate_schema(&connection)?;
         if matches!(schema_generation, AdmittedGeneration::Legacy(_))
             && !connection
                 .query_row(
@@ -7618,7 +7688,7 @@ fn update_response<T: Serialize>(
     Ok(())
 }
 
-fn append_event(
+pub(crate) fn append_event(
     transaction: &Transaction<'_>,
     engagement_id: Uuid,
     kind: &str,
