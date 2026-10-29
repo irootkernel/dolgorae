@@ -727,8 +727,8 @@ fn run_admin_at(args: &[OsString], test_home: Option<&DolgoraeHome>) -> Result<(
         .and_then(|value| value.to_str())
         .ok_or_else(refusal)?;
     let mut values = std::collections::BTreeMap::new();
-    let mut rest = args[1..].chunks_exact(2);
-    for pair in &mut rest {
+    let (pairs, remainder) = args[1..].as_chunks::<2>();
+    for pair in pairs {
         let key = pair[0].to_str().ok_or_else(refusal)?;
         if !matches!(
             key,
@@ -746,7 +746,7 @@ fn run_admin_at(args: &[OsString], test_home: Option<&DolgoraeHome>) -> Result<(
             return Err(refusal());
         }
     }
-    if !rest.remainder().is_empty() {
+    if !remainder.is_empty() {
         return Err(refusal());
     }
     let get = |key| values.get(key).copied().ok_or_else(refusal);

@@ -131,7 +131,7 @@ fn hex_capability(text: &str) -> Result<Capability, MachineError> {
         return Err(refusal());
     }
     let mut bytes = [0_u8; 32];
-    for (n, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+    for (n, pair) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let part = std::str::from_utf8(pair).map_err(|_| refusal())?;
         bytes[n] = u8::from_str_radix(part, 16).map_err(|_| refusal())?;
     }
@@ -498,8 +498,8 @@ pub fn run(args: &[OsString]) -> Result<(), MachineError> {
     let operation = args.first().and_then(|s| s.to_str()).ok_or_else(refusal)?;
     let home = DolgoraeHome::system().map_err(|_| refusal())?;
     let mut values = std::collections::BTreeMap::new();
-    let mut pairs = args[1..].chunks_exact(2);
-    for pair in &mut pairs {
+    let (pairs, remainder) = args[1..].as_chunks::<2>();
+    for pair in pairs {
         let key = pair[0].to_str().ok_or_else(refusal)?;
         if !matches!(key, "--owner-config" | "--session" | "--call")
             || values.insert(key, &pair[1]).is_some()
@@ -507,7 +507,7 @@ pub fn run(args: &[OsString]) -> Result<(), MachineError> {
             return Err(refusal());
         }
     }
-    if !pairs.remainder().is_empty() {
+    if !remainder.is_empty() {
         return Err(refusal());
     }
     let path = Path::new(values.get("--owner-config").ok_or_else(refusal)?);
