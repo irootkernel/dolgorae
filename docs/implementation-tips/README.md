@@ -16,6 +16,23 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r tools/validation/requirements.txt
 ```
 
+TASK-081 has an isolated consultation component mode in the existing integrated
+native acceptance runner: `--collaboration-component-only`. It uses the normal
+`DOLGORAE_RUN_NATIVE_INTEGRATED_ACCEPTANCE=1` opt-in and pinned Codex executable.
+The mode prepares captured-policy test data and checks the Specialist dynamic
+tool through native Thread/Turn/call correlation, the production Worker
+dispatcher, durable admission, store-reopen replay and owned process retirement.
+It does not enable the live collaboration policy or qualify the later scheduler
+and result-delivery integration.
+
+Cargo build output and the accepted-legacy/gateway executable manifests follow
+`CARGO_TARGET_DIR` when it is set. The E2E helpers read those manifests from the
+same directory, and Make defaults `DOLGORAE_BIN` to its `debug/dolgorae` binary.
+Without the variable, the existing repository `target/` paths apply.
+Make passes relative output roots and paths containing spaces unchanged from
+the repository root. Native example drivers use the Cargo output root even
+when `DOLGORAE_BIN` explicitly selects a different main executable.
+
 Run the complete gate from the repository root:
 
 ```sh

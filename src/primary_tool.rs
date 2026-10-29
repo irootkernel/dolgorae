@@ -39,6 +39,7 @@ pub struct PrimaryCallContext {
 #[derive(Clone, Debug)]
 pub struct PrimaryToolContract {
     successor_enabled: bool,
+    collaboration: bool,
     tool_spec: Value,
 }
 
@@ -58,6 +59,7 @@ impl PrimaryToolContract {
             .collect::<Vec<_>>();
         Ok(Self {
             successor_enabled: false,
+            collaboration: false,
             tool_spec: serde_json::json!({
                 "type":"function",
                 "name":PRIMARY_TOOL_NAME,
@@ -73,16 +75,28 @@ impl PrimaryToolContract {
 
     #[must_use]
     pub const fn name(&self) -> &'static str {
-        PRIMARY_TOOL_NAME
+        if self.collaboration {
+            crate::collaboration::TOOL_NAME
+        } else {
+            PRIMARY_TOOL_NAME
+        }
     }
 
     #[must_use]
     pub fn tool_spec(&self) -> Value {
+        if self.collaboration {
+            return crate::collaboration::tool_spec();
+        }
         self.tool_spec.clone()
     }
 
     pub(crate) fn with_specialists(mut self) -> Self {
         self.successor_enabled = true;
+        self
+    }
+    pub(crate) fn for_collaboration(mut self) -> Self {
+        self.collaboration = true;
+        self.successor_enabled = false;
         self
     }
     pub(crate) fn allows_specialists(&self) -> bool {
@@ -126,6 +140,9 @@ impl PrimaryToolContract {
 
     #[must_use]
     pub fn error_result(&self, error: &MachineError) -> Value {
+        if self.collaboration {
+            return crate::collaboration::error_result(error);
+        }
         let (code, retryable, message) = match error.code.as_str() {
             "IDEMPOTENCY_CONFLICT" => (
                 "ORCHESTRATION_IDEMPOTENCY_CONFLICT",

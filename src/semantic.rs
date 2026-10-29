@@ -6308,6 +6308,8 @@ pub(crate) struct ProductionOrchestrationEffects<'a> {
     state_root: &'a Path,
     last_writer_release: Option<Uuid>,
     source_contract: crate::workspace::SourceIsolationContract,
+    #[cfg(test)]
+    pub(crate) context_resolutions: usize,
 }
 
 impl<'a> ProductionOrchestrationEffects<'a> {
@@ -6326,6 +6328,8 @@ impl<'a> ProductionOrchestrationEffects<'a> {
             state_root,
             last_writer_release: None,
             source_contract,
+            #[cfg(test)]
+            context_resolutions: 0,
         }
     }
 
@@ -6563,6 +6567,10 @@ impl crate::orchestration::OrchestrationAdapter for ProductionOrchestrationEffec
         source_run_id: Uuid,
         references: &[Uuid],
     ) -> Result<Vec<crate::orchestration::AcceptedTaskContext>, MachineError> {
+        #[cfg(test)]
+        {
+            self.context_resolutions += 1;
+        }
         self.resolve_primary_contexts(source_run_id, references)
     }
 
@@ -33189,12 +33197,10 @@ mod managed_write_tests {
             let app_socket =
                 crate::worker::dedicated_server_socket_path(identity.uid, identity.run_id, 1)
                     .unwrap();
-            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-            std::fs::set_permissions(
-                socket.parent().unwrap(),
-                std::fs::Permissions::from_mode(0o700),
-            )
-            .unwrap();
+            for parent in [socket.parent().unwrap(), app_socket.parent().unwrap()] {
+                std::fs::create_dir_all(parent).unwrap();
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
             let listener = UnixListener::bind(&socket).unwrap();
             fixture.sockets.push(socket.clone());
             let app_listener = UnixListener::bind(&app_socket).unwrap();

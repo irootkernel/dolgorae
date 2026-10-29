@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_binary() -> Path:
-    manifest = ROOT / "target/accepted-fixture-artifacts.json"
+    manifest = Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target"))) / "accepted-fixture-artifacts.json"
     for line in manifest.read_text().splitlines():
         value = json.loads(line)
         if value.get("reason") == "compiler-artifact" and value.get("executable") \

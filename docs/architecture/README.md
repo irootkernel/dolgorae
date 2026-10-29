@@ -1396,6 +1396,25 @@ writer, lifecycle, role, or credentials. The Primary Agent receives operational
 visibility and final Specialist results but is not required to relay each
 consultation body.
 
+The TASK-081 admission module reuses the native tool dispatcher with a
+Specialist-only contract. Worker generation and native Thread/Turn correlation
+precede semantic admission. The Orchestration Store composes the collaboration
+extension with its checked immediate transaction and event chain. The extension
+retains request/context bytes and root task priority; it never infers priority
+from model arguments. Managed queued-task acceptance captures the immutable
+root priority, source/root identities and accepted-task/request digests in the
+same transaction and hash chain. This authority survives proved dispatch and
+removal of the transient assignment ordering row. Admission verifies its
+retained digest and causal event before using the priority. Durable target activation markers survive a lost wake.
+The private extension captures the fixed SPEC-012 v1 default collaboration
+policy per Session and consumes its retained admission limits. It provides no
+policy override operation. Assignment queue priority uses 0 for interactive,
+1 for normal and 2 for background; an eventual orchestration-state projection
+maps these ordering values to the checked policy priority classes.
+The central scheduler and result outbox remain TASK-082 and TASK-083 work.
+The full checked orchestration-state export remains an integration obligation;
+this storage foundation adds no public exporter.
+
 ### CLI Front End
 
 The visible `dolgorae` invocation is short-lived. It:

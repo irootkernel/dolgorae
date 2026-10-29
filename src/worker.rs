@@ -6777,7 +6777,15 @@ impl PrimaryToolDispatcher for WorkerPrimaryToolDispatcher {
             .spawn(move || {
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     dispatch_reserved_primary_tool(&mailbox, call, |call| {
-                        if crate::native_consumer::managed_tool(&call.tool_name) {
+                        if call.tool_name == crate::collaboration::TOOL_NAME {
+                            crate::collaboration::dispatch(
+                                &state_root,
+                                call,
+                                mailbox.facts.run_id,
+                                run_generation,
+                                &workspace,
+                            )
+                        } else if crate::native_consumer::managed_tool(&call.tool_name) {
                             Ok(crate::managed_specialist::dispatch(
                                 &state_root,
                                 call,
@@ -7376,6 +7384,46 @@ pub struct TurnControlImage {
     pub path: PathBuf,
 }
 
+pub(crate) fn session_tool_contract(
+    state_root: &Path,
+    manifest: &crate::run::RunManifest,
+) -> Result<Option<(Uuid, crate::primary_tool::PrimaryToolContract)>, WorkerProtocolError> {
+    let primary_session_id = manifest.aggregate_binding.as_ref().and_then(|binding| {
+        (binding.aggregate_kind == AggregateKind::OrchestratedSession
+            && binding.member_kind == AggregateMemberKind::Primary
+            && binding.aggregate_id == manifest.run_id)
+            .then_some(binding.aggregate_id)
+    });
+    let collaboration_session_id = manifest.aggregate_binding.as_ref().and_then(|binding| {
+        (binding.aggregate_kind == AggregateKind::OrchestratedSession
+            && binding.member_kind == AggregateMemberKind::Specialist)
+            .then_some(binding.aggregate_id)
+    });
+    let collaboration_session_id = collaboration_session_id
+        .map(|session_id| {
+            crate::collaboration::enabled(state_root, session_id, manifest.run_id)
+                .map(|enabled| enabled.then_some(session_id))
+        })
+        .transpose()
+        .map_err(|_| WorkerProtocolError::LedgerReplay)?
+        .flatten();
+    primary_session_id
+        .or(collaboration_session_id)
+        .map(|session_id| {
+            let contract = crate::primary_tool::PrimaryToolContract::load()
+                .map_err(|_| WorkerProtocolError::LedgerReplay)?;
+            Ok((
+                session_id,
+                if collaboration_session_id.is_some() {
+                    contract.for_collaboration()
+                } else {
+                    contract.with_specialists()
+                },
+            ))
+        })
+        .transpose()
+}
+
 impl WorkerSession {
     pub fn connect(
         session: &WorkerSessionBootstrap,
@@ -7440,28 +7488,19 @@ impl WorkerSession {
                 );
                 WorkerProtocolError::LedgerReplay
             })?;
-        let primary_session_id = manifest.aggregate_binding.as_ref().and_then(|binding| {
-            (binding.aggregate_kind == AggregateKind::OrchestratedSession
-                && binding.member_kind == AggregateMemberKind::Primary
-                && binding.aggregate_id == facts.run_id)
-                .then_some(binding.aggregate_id)
-        });
-        let primary_tool = primary_session_id
-            .map(|session_id| {
-                Ok(PrimaryToolConfig {
+        let primary_tool =
+            session_tool_contract(state_root, &manifest)?.map(|(session_id, contract)| {
+                PrimaryToolConfig {
                     session_id,
-                    contract: crate::primary_tool::PrimaryToolContract::load()
-                        .map_err(|_| WorkerProtocolError::LedgerReplay)?
-                        .with_specialists(),
+                    contract,
                     dispatcher: Arc::new(WorkerPrimaryToolDispatcher {
                         run_generation,
                         workspace_id: workspace_id.to_owned(),
                         state_root: state_root.to_path_buf(),
                         mailbox: Arc::clone(&mailbox),
                     }),
-                })
-            })
-            .transpose()?;
+                }
+            });
         let successor_review = crate::delegation_service::qualified_successor_review(&manifest);
         let mut candidate_reader = if manifest.schema_version == 4 {
             if member_owner_for(&manifest).is_some() {

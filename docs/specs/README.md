@@ -3867,6 +3867,16 @@ to one Run and Turn, every collaboration-capable member MUST use a Dedicated
 Lane with a private bridge. A model invoking the public CLI or connecting to a
 peer Worker remains forbidden.
 
+TASK-081 supplies a staged production admission boundary. Its Specialist-only
+native tool derives source membership, the accepted source task, root task and
+priority from trusted runtime and retained state. A missing trusted priority
+rejects admission. Request retries are scoped by Session, source Run, Turn and
+call; changed input under that identity conflicts. Admission stores immutable
+request and context bytes, the exchange, target mailbox, causal event and durable
+activation marker together. Scheduling, actual activation, blocking waits and
+result delivery retain their later Task owners. Live collaboration policy
+remains gated until those owners and TASK-027 integration are complete.
+
 ### Durable Mailbox and Virtual Actor Activation
 
 Each brokered Specialist has a durable SQLite mailbox. The Specialist itself

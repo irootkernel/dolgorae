@@ -6123,6 +6123,19 @@ impl OrchestrationStore {
         crate::storage_observation::commit(transaction).map_err(internal)
     }
 
+    pub(crate) fn collaboration_connection(&self) -> Result<&Connection, MachineError> {
+        self.connection.check_identity()?;
+        Ok(&self.connection)
+    }
+
+    pub(crate) fn collaboration_state_root(&self) -> &Path {
+        &self.state_root
+    }
+
+    pub(crate) fn collaboration_transaction(&mut self) -> Result<Transaction<'_>, MachineError> {
+        self.transaction()
+    }
+
     fn transaction(&mut self) -> Result<Transaction<'_>, MachineError> {
         self.connection.check_identity()?;
         self.connection
@@ -6882,6 +6895,7 @@ fn admit_successor_task_in_mode(
     digest(task.request_sha256, "request_sha256")?;
     digest(task.accepted_request_sha256, "accepted_request_sha256")?;
     if let Some(priority) = priority {
+        crate::collaboration::capture_root_priority(transaction, &task, priority)?;
         let marker: Value = serde_json::from_str(task.request_json).map_err(internal)?;
         let deadline_seconds = marker["deadline_seconds"]
             .as_u64()

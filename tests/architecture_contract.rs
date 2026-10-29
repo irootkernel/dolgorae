@@ -51,6 +51,24 @@ fn orchestration_production_depends_on_the_adapter_trait() {
 fn source_module_dependencies_match_the_approved_graph() {
     let approved = BTreeMap::from([
         (
+            "collaboration",
+            &[
+                "delegation_identity",
+                "domain",
+                "engagement",
+                "jcs",
+                "machine",
+                "orchestration",
+                "run",
+                "semantic",
+                "storage_observation",
+                "successor_capture",
+                "task_request",
+                "turn",
+                "workspace",
+            ][..],
+        ),
+        (
             "specialist_stdio",
             &[
                 "consumer_bridge",
@@ -360,6 +378,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "engagement",
             &[
+                "collaboration",
                 "assignment_queue",
                 "controller",
                 "delegation_identity",
@@ -542,6 +561,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "orchestration",
             &[
+                "collaboration",
                 "assignment_queue",
                 "artifact",
                 "audit",
@@ -575,7 +595,12 @@ fn source_module_dependencies_match_the_approved_graph() {
         ),
         (
             "primary_tool",
-            &["native_consumer", "machine", "specialist_facade"][..],
+            &[
+                "collaboration",
+                "native_consumer",
+                "machine",
+                "specialist_facade",
+            ][..],
         ),
         ("live_transport", &["jcs", "machine", "primary_tool"][..]),
         ("live_transport_mcp", &["live_transport", "machine"][..]),
@@ -613,6 +638,12 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "delegation_service",
             &[
+                "worker", // Test-only production contract selection and dispatcher qualification.
+                // Native component qualification owns its test-only server group census.
+                "darwin",
+                "semantic",
+                "projection",
+                "collaboration",
                 "assignment_queue",
                 "caller_scope",
                 "delegation_identity",
@@ -888,6 +919,8 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "turn",
             &[
+                "run",
+                "collaboration",
                 "public_resolution",
                 "consumer_bridge",
                 "native_consumer",
@@ -956,6 +989,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "worker",
             &[
+                "collaboration",
                 "operation",
                 "public_resolution",
                 "native_consumer",

@@ -6,6 +6,7 @@ pub mod audit;
 pub mod caller_scope;
 pub mod cli;
 pub(crate) mod codex_socket;
+pub(crate) mod collaboration;
 pub mod conformance;
 pub mod controller;
 pub mod delegation_identity;

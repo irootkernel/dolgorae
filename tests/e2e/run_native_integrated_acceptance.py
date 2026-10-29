@@ -1352,6 +1352,90 @@ def successor_campaign(binary: Path, codex: Path, podway: Path | None = None,
                               "owned_fixture_retained":str(root)}), file=sys.stderr)
 
 
+class CollaborationResponses(ScriptedResponses):
+    """One Specialist tool call and its checked return from the pinned runtime."""
+    def __init__(self, root: Path):
+        super().__init__()
+        self.root = root
+        self.collaboration_result = None
+
+    def respond(self, request):
+        with self.lock:
+            self.posts += 1
+            if self.posts == 1:
+                arguments = json.loads((self.root / "collaboration-request.json").read_text())
+                item = code_call(request, "collaboration-component-call",
+                                 [("consult", "dolgorae_collaboration", arguments)])
+            elif self.posts == 2:
+                output = code_results(request, "collaboration-component-call", ["consult"])["consult"]
+                if not isinstance(output, str) or not output.isascii() or len(output.encode()) > 4096:
+                    raise ProbeCheckFailure("native_collaboration_return_shape_changed")
+                self.collaboration_result = json.loads(output)
+                if self.collaboration_result.get("operation") != "submit_consultation_result":
+                    raise ProbeCheckFailure("native_collaboration_return_unverified")
+                item = {"type":"message", "role":"assistant", "id":"collaboration-completed",
+                        "content":[{"type":"output_text", "text":"Done."}]}
+            else:
+                raise ProbeCheckFailure("native_collaboration_post_bound")
+            identity = "collaboration-response-" + str(self.posts)
+            return [{"type":"response.created", "response":{"id":identity}},
+                    {"type":"response.output_item.done", "item":item},
+                    {"type":"response.completed", "response":{"id":identity,
+                     "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}]
+
+
+def collaboration_component_campaign(codex: Path) -> dict[str, Any]:
+    if os.environ.get(OPT_IN) != "1" or executable_identity(codex)["sha256"] != CODEX_SHA256:
+        raise ValueError("collaboration component requires the opted-in qualified executable")
+    root = Path(tempfile.mkdtemp(prefix="dcc-", dir=os.environ["TMPDIR"])).resolve()
+    root.chmod(0o700)
+    fixture = None
+    passed = False
+    try:
+        for name in ("home", "tmp", "config", "cache", "profile"):
+            (root / name).mkdir(mode=0o700)
+        environment = isolated_environment(root)
+        environment[OPT_IN] = "1"
+        environment["DOLGORAE_NATIVE_COLLABORATION_COMPONENT"] = "1"
+        environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+        checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
+        command = shlex.split(os.environ.get("CARGO", "cargo")) + [
+            "rustc", "--locked", "--example", "native_successor_pipeline", "--",
+            "--cfg", "dolgorae_native_acceptance", "--cfg", "test"]
+        build = subprocess.run(command, cwd=PROTOCOL.parents[1], capture_output=True, text=True, timeout=600)
+        private_file(root / "build.stdout", build.stdout.encode())
+        private_file(root / "build.stderr", build.stderr.encode())
+        if build.returncode:
+            raise ProbeCheckFailure("collaboration_component_build_failed")
+        driver = root / "fixture-collaboration-driver"
+        shutil.copyfile(Path(os.environ.get("CARGO_TARGET_DIR", str(PROTOCOL.parents[1] / "target"))) / "debug/examples/native_successor_pipeline", driver)
+        driver.chmod(0o700)
+        fixture = CollaborationResponses(root)
+        private_file(root / "profile/config.toml", b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n'
+                     + fixture_config(fixture.base_url) + b"\n[features]\nplugins = false\nshell_snapshot = false\n")
+        result = subprocess.run([str(driver), str(root), str(codex)], env=environment,
+                                capture_output=True, text=True, timeout=180)
+        private_file(root / "driver.stdout", result.stdout.encode())
+        private_file(root / "driver.stderr", result.stderr.encode())
+        if result.returncode or fixture.failure:
+            raise ProbeCheckFailure("collaboration_component_driver_failed", {"exit":result.returncode,"posts":fixture.posts,"fixture_failure":fixture.failure})
+        value = json.loads(result.stdout)
+        if not value.get("passed") or fixture.posts != 2 or fixture.collaboration_result != json.loads((root / "collaboration-result.json").read_text()):
+            raise ProbeCheckFailure("collaboration_component_evidence_incomplete")
+        value.update(loopback_posts=fixture.posts, external_provider_requests=0,
+                     real_account_or_credentials_used=False, codex_sha256=CODEX_SHA256)
+        passed = True
+        return value
+    finally:
+        if fixture is not None:
+            fixture.close()
+        if passed:
+            shutil.rmtree(root)
+        else:
+            print(json.dumps({"schema":"dolgorae.native-collaboration-component-failure/v1",
+                              "owned_fixture_retained":str(root)}), file=sys.stderr)
+
+
 def main() -> int:
     if os.environ.get(OPT_IN) != "1":
         print("integrated native acceptance requires explicit opt-in")
@@ -1365,9 +1449,14 @@ def main() -> int:
     parser.add_argument("--default-feature-startup-only", action="store_true")
     parser.add_argument("--ordinary-close-only", action="store_true")
     parser.add_argument("--successor-only", action="store_true")
+    parser.add_argument("--collaboration-component-only", action="store_true")
     args = parser.parse_args()
     try:
-        if args.default_feature_startup_only:
+        if args.collaboration_component_only:
+            if args.default_feature_startup_only or args.successor_only or args.ordinary_close_only:
+                raise ValueError("collaboration component is a distinct mode")
+            result = collaboration_component_campaign(args.codex.resolve(strict=True))
+        elif args.default_feature_startup_only:
             if args.successor_only or args.ordinary_close_only:
                 raise ValueError("default-feature startup is a distinct mode")
             with patch.dict(os.environ, {caller.OPT_IN:"1"}):

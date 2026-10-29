@@ -9253,6 +9253,13 @@ pub(crate) mod tests {
         /// The managed authority is the root Run's Controller binding, so the
         /// session needs a real manifest carrying this fixture's Controller.
         fn managed_session(&self) -> Uuid {
+            self.managed_session_with_policy(managed_policy())
+        }
+
+        fn managed_session_with_policy(
+            &self,
+            policy: crate::specialist_policy::InstalledSpecialistPolicy,
+        ) -> Uuid {
             self.set_up_namespace();
             let root_run_id = Uuid::now_v7();
             for path in [self.state_root.clone(), self.state_root.join("runs")] {
@@ -9280,7 +9287,7 @@ pub(crate) mod tests {
                     root_run_id,
                     "session-bootstrap",
                     &"b".repeat(64),
-                    &managed_policy(),
+                    &policy,
                 )
                 .unwrap();
             store.mark_primary_intent(root_run_id).unwrap();
@@ -16990,5 +16997,1237 @@ pub(crate) mod tests {
             .unwrap_err();
             assert_eq!(refused.code, "SESSION_OWNER_MISMATCH", "{key}");
         }
+    }
+    fn collaboration_core(
+        fixture: &Fixture,
+        run: Uuid,
+        lifecycle: crate::domain::RunLifecycle,
+        turn: Option<&str>,
+    ) {
+        let root = crate::run::run_root(&fixture.state_root, run);
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut state = crate::projection::RunStateProjection::starting(run);
+        state.lifecycle = lifecycle;
+        state.run_generation = 1;
+        state.thread_id = Some("native-thread".into());
+        state.active_turn_id = turn.map(str::to_owned);
+        state.latest_turn_id = state.active_turn_id.clone();
+        let path = root.join("state.json");
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn collaboration_fixture() -> (
+        Fixture,
+        Uuid,
+        Uuid,
+        Uuid,
+        crate::orchestration::PrimaryCallContext,
+        Value,
+    ) {
+        let mut policy = managed_policy();
+        policy.roles[0].collaboration_source = true;
+        policy.roles[0].collaboration_target = true;
+        collaboration_fixture_policy(policy)
+    }
+
+    fn collaboration_prepare_source(
+        fixture: &Fixture,
+        session: Uuid,
+        source: Uuid,
+        port: &FakePort,
+        label: &str,
+        turn: &str,
+    ) -> crate::orchestration::PrimaryCallContext {
+        collaboration_prepare_source_for_caller(
+            fixture,
+            session,
+            source,
+            port,
+            label,
+            turn,
+            &caller(16),
+        )
+    }
+
+    fn collaboration_prepare_source_for_caller(
+        fixture: &Fixture,
+        session: Uuid,
+        source: Uuid,
+        port: &FakePort,
+        label: &str,
+        turn: &str,
+        caller: &crate::caller_scope::TrustedCallerScope,
+    ) -> crate::orchestration::PrimaryCallContext {
+        let (_, receipt) = queue_specialist_task(
+            &fixture.scope(),
+            &fixture.managed_context(session, label),
+            caller,
+            port,
+            managed_assign(source, "Consult the provisioned peer.", "read_only", None),
+            1,
+        )
+        .unwrap();
+        let task = receipt.accepted_subjects.task_ref.as_deref().unwrap();
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let task = Uuid::parse_str(task).unwrap();
+        let mut assignments = EngagementStore::open(&fixture.database()).unwrap();
+        assignments
+            .transact(|tx| {
+                assert_eq!(
+                    crate::assignment_queue::claim(
+                        tx,
+                        crate::assignment_queue::Owner::Managed(session),
+                        source
+                    )?,
+                    Some(task)
+                );
+                crate::orchestration::mark_successor_task_dispatching(
+                    tx,
+                    session,
+                    task,
+                    now_ms()?,
+                )?;
+                crate::orchestration::mark_successor_task_running(
+                    tx,
+                    session,
+                    task,
+                    turn,
+                    now_ms()?,
+                )?;
+                crate::assignment_queue::remove(
+                    tx,
+                    crate::assignment_queue::Owner::Managed(session),
+                    task,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM assignment_queue_entries WHERE task_id=?1",
+                    [task.to_string()],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        if !crate::run::run_root(&fixture.state_root, source)
+            .join("manifest.json")
+            .exists()
+        {
+            fixture.publish_member_manifest(session, source);
+        }
+        collaboration_core(
+            fixture,
+            source,
+            crate::domain::RunLifecycle::Running,
+            Some(turn),
+        );
+        crate::orchestration::PrimaryCallContext {
+            session_id: session,
+            source_run_id: source,
+            source_turn_id: turn.into(),
+            source_tool_call_id: "native-call".into(),
+            idempotency_key: "ignored-model-inaccessible-key".into(),
+        }
+    }
+
+    fn collaboration_fixture_policy(
+        policy: crate::specialist_policy::InstalledSpecialistPolicy,
+    ) -> (
+        Fixture,
+        Uuid,
+        Uuid,
+        Uuid,
+        crate::orchestration::PrimaryCallContext,
+        Value,
+    ) {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session_with_policy(policy);
+        let port = FakePort::new();
+        let source = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "collab-source", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let target = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "collab-target", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let context = collaboration_prepare_source(
+            &fixture,
+            session,
+            source,
+            &port,
+            "collab-root-task",
+            "native-turn",
+        );
+        collaboration_core(&fixture, session, crate::domain::RunLifecycle::Idle, None);
+        fixture.publish_member_manifest(session, target);
+        collaboration_core(&fixture, target, crate::domain::RunLifecycle::Idle, None);
+        let request = json!({"operation":"submit_consultation","target":{"run_id":target},"objective":"Inspect the retained evidence.","context_refs":[],"expected_output":["A bounded answer"],"blocking":false,"deadline_seconds":60});
+        (fixture, session, source, target, context, request)
+    }
+
+    #[test]
+    fn collaboration_production_contract_selection_preserves_scope_and_primary() {
+        let (fixture, session, source, _, _, _) = collaboration_fixture();
+        let runs = crate::run::RunStore::new(
+            crate::workspace::SystemWorkspacePlatform,
+            &fixture.state_root,
+        );
+        let manifest = runs.load_manifest(source).unwrap();
+        let select = |manifest: &crate::run::RunManifest| {
+            crate::worker::session_tool_contract(&fixture.state_root, manifest)
+        };
+        let (selected_session, contract) = select(&manifest).unwrap().unwrap();
+        assert_eq!(selected_session, session);
+        assert_eq!(contract.name(), crate::collaboration::TOOL_NAME);
+        let mut primary_controller = fixture.controller.clone();
+        primary_controller.identity.kind = crate::domain::ControllerKind::HumanCli;
+        let primary_id = Uuid::now_v7();
+        let mut primary = root_manifest(&fixture.view, &primary_controller, primary_id);
+        primary.control_mode = crate::domain::ControlMode::DirectInteractive;
+        primary.aggregate_binding = Some(crate::run::AggregateBinding {
+            aggregate_kind: crate::domain::AggregateKind::OrchestratedSession,
+            aggregate_id: primary_id,
+            member_kind: crate::run::AggregateMemberKind::Primary,
+            operation_id: Uuid::now_v7(),
+            policy_sha256: Some("b".repeat(64)),
+            role_reference: None,
+            role_snapshot_sha256: None,
+            agent_configuration_sha256: None,
+        });
+        runs.publish(&primary).unwrap();
+        let primary = runs.load_manifest(primary_id).unwrap();
+        assert_eq!(
+            select(&primary).unwrap().unwrap().1.name(),
+            "dolgorae_orchestration"
+        );
+        let mut external = manifest.clone();
+        external.aggregate_binding.as_mut().unwrap().aggregate_kind =
+            crate::domain::AggregateKind::ExternalSpecialistEngagement;
+        external.parent_ref.as_mut().unwrap().namespace =
+            "dolgorae.external-specialist-engagement.v1".into();
+        assert!(select(&external).unwrap().is_none());
+        assert!(
+            crate::worker::session_tool_contract(
+                &fixture.state_root.join("missing-authority"),
+                &manifest
+            )
+            .is_err()
+        );
+
+        // Each negative Role/lane variant is captured in a new Session, never
+        // edited into an already accepted immutable policy.
+        let mut policy = managed_policy();
+        policy.roles[0].collaboration_target = true;
+        let (disabled, _, member, _, _, _) = collaboration_fixture_policy(policy);
+        let manifest = crate::run::RunStore::new(
+            crate::workspace::SystemWorkspacePlatform,
+            &disabled.state_root,
+        )
+        .load_manifest(member)
+        .unwrap();
+        assert!(
+            crate::worker::session_tool_contract(&disabled.state_root, &manifest)
+                .unwrap()
+                .is_none()
+        );
+
+        let shared = Fixture::new();
+        let mut policy = managed_policy();
+        policy.roles[0].collaboration_source = true;
+        policy.roles[0].agent_configuration.execution_lane =
+            crate::domain::ExecutionLane::SharedReadonly;
+        let session = shared.managed_session_with_policy(policy);
+        let mut sources = shared.sources();
+        sources.admission.execution_lane = "shared_readonly".into();
+        let (candidate, _) =
+            install_provisioning(&shared.scope(), &sources, "shared-collaboration", None).unwrap();
+        let spawned = shared
+            .spawn(session, &candidate, "shared-member", None, &FakePort::new())
+            .unwrap();
+        let member = Uuid::parse_str(&spawned.member.member_ref).unwrap();
+        let snapshot =
+            crate::provisioning::retained_snapshot(&shared.state_root, &candidate.provisioning_ref)
+                .unwrap();
+        let facts = crate::orchestration::OrchestrationStore::open(&shared.state_root)
+            .unwrap()
+            .successor_member(session, member)
+            .unwrap()
+            .unwrap();
+        let manifest = member_manifest(
+            &shared.view,
+            &shared.controller,
+            member,
+            session,
+            facts.spawn_operation_id,
+            &snapshot,
+        );
+        assert!(
+            crate::worker::session_tool_contract(&shared.state_root, &manifest)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn collaboration_worker_binding_failures_never_admit_mail() {
+        let (fixture, _, source, target, context, request) = collaboration_fixture();
+        let original = crate::run::RunStore::new(
+            crate::workspace::SystemWorkspacePlatform,
+            &fixture.state_root,
+        )
+        .load_manifest(source)
+        .unwrap();
+        let path = crate::run::run_root(&fixture.state_root, source).join("manifest.json");
+        let original_bytes = fs::read(&path).unwrap();
+        for variant in ["thread", "turn", "source", "workspace", "external"] {
+            let mut call = crate::turn::PrimaryToolCall {
+                tool_name: crate::collaboration::TOOL_NAME.into(),
+                source_thread_id: "native-thread".into(),
+                request_id: 74,
+                run_generation: 1,
+                context: context.clone(),
+                payload: request.clone(),
+            };
+            let workspace = if variant == "workspace" {
+                "foreign-workspace"
+            } else {
+                &fixture.view.workspace_id
+            };
+            match variant {
+                "thread" => call.source_thread_id = "foreign-thread".into(),
+                "turn" => call.context.source_turn_id = "foreign-turn".into(),
+                "source" => call.context.source_run_id = target,
+                "external" => {
+                    let mut manifest = original.clone();
+                    manifest.aggregate_binding.as_mut().unwrap().aggregate_kind =
+                        crate::domain::AggregateKind::ExternalSpecialistEngagement;
+                    manifest.parent_ref.as_mut().unwrap().namespace =
+                        "dolgorae.external-specialist-engagement.v1".into();
+                    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+                    crate::run::RunStore::new(
+                        crate::workspace::SystemWorkspacePlatform,
+                        &fixture.state_root,
+                    )
+                    .load_manifest(source)
+                    .unwrap();
+                }
+                _ => {}
+            }
+            let worker = crate::worker::tests::PrimaryWorkerFixture::new(
+                &fixture.state_root,
+                source,
+                workspace,
+            );
+            worker.dispatcher.dispatch(call).unwrap();
+            let error = worker.completion().result.unwrap_err();
+            let safe = crate::collaboration::error_result(&error);
+            assert_eq!(safe["operation"], "collaboration_error", "{variant}");
+            assert_eq!(
+                safe["code"], "COLLABORATION_NOT_ALLOWED",
+                "{variant}: {error:?}"
+            );
+            assert_eq!(safe["retryable"], false, "{variant}");
+            fs::write(&path, &original_bytes).unwrap();
+        }
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_exchanges", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_mailbox", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn collaboration_provenance_and_retiring_fences_refuse_without_mail() {
+        let (fixture, session, _, target, context, request) = collaboration_fixture();
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let original: String = connection
+            .query_row(
+                "SELECT accepted_request_json FROM brokered_task_acceptances",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE brokered_task_acceptances SET accepted_request_json='{}'",
+                [],
+            )
+            .unwrap();
+        let mut store =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        assert!(crate::collaboration::admit(&mut store, &context, &request, &mut effects).is_err());
+        connection
+            .execute(
+                "UPDATE brokered_task_acceptances SET accepted_request_json=?1",
+                [&original],
+            )
+            .unwrap();
+        let (digest, bytes): (String, Vec<u8>) = connection.query_row("SELECT c.sha256,c.bytes FROM result_content c JOIN result_content_refs r USING(sha256) WHERE r.owner_kind='accepted_task' AND r.representation='task_body'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        connection
+            .execute(
+                "UPDATE result_content SET bytes=?1 WHERE sha256=?2",
+                rusqlite::params![b"changed accepted task".as_slice(), digest],
+            )
+            .unwrap();
+        assert!(crate::collaboration::admit(&mut store, &context, &request, &mut effects).is_err());
+        connection
+            .execute(
+                "UPDATE result_content SET bytes=?1 WHERE sha256=?2",
+                rusqlite::params![bytes, digest],
+            )
+            .unwrap();
+        // Use the actual release-owner transition. This is a current fence
+        // refusal test, not a claim to simulate a cross-store race.
+        let mut owner = EngagementStore::open(&fixture.database()).unwrap();
+        owner
+            .transact(|tx| {
+                crate::orchestration::mark_successor_member_retiring(tx, session, target, now_ms()?)
+            })
+            .unwrap();
+        assert_eq!(
+            crate::collaboration::admit(&mut store, &context, &request, &mut effects)
+                .unwrap_err()
+                .code,
+            "SPECIALIST_ROLE_UNAVAILABLE"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_exchanges", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_mailbox", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn collaboration_unavailable_operations_and_oversized_input_have_no_effects() {
+        let (fixture, _, _, _, context, request) = collaboration_fixture();
+        let mut store =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        let mut blocking = request.clone();
+        blocking["blocking"] = json!(true);
+        for payload in [
+            blocking,
+            json!({"operation":"collect_collaboration_results","limit":64}),
+        ] {
+            let error = crate::collaboration::admit(&mut store, &context, &payload, &mut effects)
+                .unwrap_err();
+            assert_eq!(error.code, "COLLABORATION_TRANSPORT_UNAVAILABLE");
+            assert_eq!(
+                crate::collaboration::error_result(&error)["retryable"],
+                false
+            );
+        }
+        let mut oversized = request;
+        oversized["objective"] = json!("x".repeat(65_500));
+        oversized["context_refs"] = json!([Uuid::now_v7()]);
+        assert!(oversized.to_string().len() > 65_536);
+        assert!(
+            crate::collaboration::admit(&mut store, &context, &oversized, &mut effects).is_err()
+        );
+        assert_eq!(effects.context_resolutions, 0);
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_exchanges", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn collaboration_authorized_large_artifact_context_retains_immutable_bytes() {
+        let (fixture, _, source, _, context, mut request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        let root = crate::run::run_root(&fixture.state_root, source);
+        let artifact = Uuid::now_v7();
+        let bytes = "authorized context\n".repeat(5_000).into_bytes();
+        assert!(bytes.len() > 65_536 && bytes.len() <= 262_144);
+        fs::create_dir_all(root.join("artifacts")).unwrap();
+        fs::set_permissions(root.join("artifacts"), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("artifacts").join(format!("{artifact}.bin"));
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut ledger = crate::ledger::Ledger::open(&root, source).unwrap();
+        ledger
+            .append_required_payload(
+                crate::audit::AuditKind::ThreadBound,
+                &json!({"thread_id":"native-thread","thread_generation":1}),
+                1,
+            )
+            .unwrap();
+        ledger.append_required_payload(crate::audit::AuditKind::TurnTerminal, &json!({"thread_id":"native-thread","turn_id":"prior-context-turn","status":"completed","effort":"high","usage":null,"final_response":{"kind":"artifact","artifact_id":artifact,"created_at":"2026-10-29T00:00:00.000000Z","byte_length":bytes.len(),"sha256":crate::jcs::sha256_hex(&bytes)}}), 1).unwrap();
+        ledger
+            .append_required_payload(
+                crate::audit::AuditKind::TurnStarted,
+                &json!({"turn_id":"native-turn","operation_id":Uuid::now_v7()}),
+                1,
+            )
+            .unwrap();
+        ledger.close().unwrap();
+        request["context_refs"] = json!([artifact]);
+        let mut store =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        crate::collaboration::admit(&mut store, &context, &request, &mut effects).unwrap();
+        assert_eq!(effects.context_resolutions, 1);
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let retained: String = connection
+            .query_row(
+                "SELECT context_json FROM collaboration_exchanges",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let retained: Value = serde_json::from_str(&retained).unwrap();
+        assert_eq!(retained[0]["content"].as_str().unwrap().as_bytes(), bytes);
+        fs::write(path, b"changed after artifact publication").unwrap();
+        let mut retry = context;
+        retry.source_tool_call_id = "changed-artifact-call".into();
+        assert!(crate::collaboration::admit(&mut store, &retry, &request, &mut effects).is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_exchanges", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn collaboration_safe_errors_distinguish_authority_capacity_and_infrastructure() {
+        for (code, retryable, expected_code, expected_retryable) in [
+            (
+                "COLLABORATION_NOT_ALLOWED",
+                false,
+                "COLLABORATION_NOT_ALLOWED",
+                false,
+            ),
+            (
+                "INVALID_ARGUMENT",
+                false,
+                "COLLABORATION_NOT_ALLOWED",
+                false,
+            ),
+            (
+                "IDEMPOTENCY_CONFLICT",
+                false,
+                "COLLABORATION_IDEMPOTENCY_CONFLICT",
+                false,
+            ),
+            (
+                "COLLABORATION_MAILBOX_FULL",
+                true,
+                "COLLABORATION_MAILBOX_FULL",
+                true,
+            ),
+            (
+                "COLLABORATION_MAILBOX_FULL",
+                false,
+                "COLLABORATION_MAILBOX_FULL",
+                false,
+            ),
+            (
+                "SPECIALIST_ROLE_UNAVAILABLE",
+                false,
+                "SPECIALIST_ROLE_UNAVAILABLE",
+                false,
+            ),
+            (
+                "TARGET_RUN_NOT_ACTIVE",
+                false,
+                "TARGET_RUN_NOT_ACTIVE",
+                false,
+            ),
+            (
+                "COLLABORATION_TRANSPORT_UNAVAILABLE",
+                false,
+                "COLLABORATION_TRANSPORT_UNAVAILABLE",
+                false,
+            ),
+            (
+                "INTERNAL_ERROR",
+                false,
+                "COLLABORATION_TRANSPORT_UNAVAILABLE",
+                true,
+            ),
+        ] {
+            let error = MachineError::new(
+                code,
+                "private SQL /secret/path capability-token",
+                retryable,
+                json!({"secret":"capability-token"}),
+            );
+            let safe = crate::collaboration::error_result(&error);
+            assert_eq!(safe["code"], expected_code);
+            assert_eq!(safe["retryable"], expected_retryable);
+            assert!(safe["message"].as_str().unwrap().len() <= 1024);
+            assert!(!safe.to_string().contains("/secret/path"));
+            assert!(!safe.to_string().contains("capability-token"));
+        }
+    }
+
+    #[test]
+    fn collaboration_fixed_target_and_session_caps_are_independent() {
+        fn sources() -> (
+            Fixture,
+            Uuid,
+            Vec<Uuid>,
+            Vec<crate::orchestration::PrimaryCallContext>,
+            Value,
+        ) {
+            let mut policy = managed_policy();
+            policy.roles[0].collaboration_source = true;
+            policy.roles[0].collaboration_target = true;
+            policy.roles[0].max_active_instances = 16;
+            policy.max_active_specialists = 16;
+            let (fixture, session, source, target, context, request) =
+                collaboration_fixture_policy(policy);
+            let port = FakePort::new();
+            let mut members = vec![source, target];
+            for n in 2..16 {
+                members.push(
+                    Uuid::parse_str(
+                        &fixture
+                            .spawn_member(session, &format!("capacity-member-{n}"), &port)
+                            .member
+                            .member_ref,
+                    )
+                    .unwrap(),
+                );
+            }
+            let mut contexts = vec![context];
+            for (n, member) in members.iter().enumerate().skip(1) {
+                contexts.push(collaboration_prepare_source(
+                    &fixture,
+                    session,
+                    *member,
+                    &port,
+                    &format!("capacity-root-{n}"),
+                    "native-turn",
+                ));
+            }
+            (fixture, session, members, contexts, request)
+        }
+        let (fixture, _, members, contexts, mut request) = sources();
+        let mut store =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        request["target"] = json!({"run_id":members[0]});
+        for context in contexts.iter().take(5).skip(1) {
+            for n in 0..4 {
+                let mut context = context.clone();
+                context.source_tool_call_id = format!("target-cap-{n}");
+                crate::collaboration::admit(&mut store, &context, &request, &mut effects).unwrap();
+            }
+        }
+        let error = crate::collaboration::admit(&mut store, &contexts[5], &request, &mut effects)
+            .unwrap_err();
+        assert_eq!(error.code, "COLLABORATION_MAILBOX_FULL");
+        assert!(error.retryable);
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_exchanges", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            16
+        );
+        drop(connection);
+        drop(store);
+
+        let (fixture, session, members, contexts, mut request) = sources();
+        let mut store =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        for (index, context) in contexts.iter().enumerate() {
+            for offset in 1..=8 {
+                let mut context = context.clone();
+                context.source_tool_call_id = format!("session-cap-{offset}");
+                request["target"] = json!({"run_id":members[(index+offset)%members.len()]});
+                crate::collaboration::admit(&mut store, &context, &request, &mut effects).unwrap();
+            }
+        }
+        let mut owner = EngagementStore::open(&fixture.database()).unwrap();
+        owner
+            .transact(|tx| {
+                let (task, _) = crate::orchestration::successor_task_for_turn(
+                    tx,
+                    session,
+                    members[0],
+                    "native-turn",
+                )?
+                .unwrap();
+                assert!(crate::orchestration::settle_successor_task_result(
+                    tx,
+                    session,
+                    task,
+                    "completed_not_delivered",
+                    None,
+                    None,
+                    now_ms()?
+                )?);
+                Ok(())
+            })
+            .unwrap();
+        let next = collaboration_prepare_source_for_caller(
+            &fixture,
+            session,
+            members[0],
+            &FakePort::new(),
+            "next-capacity-root",
+            "next-native-turn",
+            &crate::caller_scope::fixture_alt(16),
+        );
+        request["target"] = json!({"run_id":members[1]});
+        let error =
+            crate::collaboration::admit(&mut store, &next, &request, &mut effects).unwrap_err();
+        assert_eq!(error.code, "COLLABORATION_MAILBOX_FULL");
+        assert!(error.retryable);
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_exchanges", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            128
+        );
+        let max_target: u64 = connection.query_row("SELECT max(pending) FROM (SELECT count(*) pending FROM collaboration_exchanges GROUP BY target_run_id)", [], |r|r.get(0)).unwrap();
+        assert_eq!(max_target, 8);
+    }
+
+    #[test]
+    fn collaboration_native_worker_admission_is_durable_and_replays_without_duplicate_mail() {
+        let (fixture, session, source, target, context, request) = collaboration_fixture();
+        assert!(crate::collaboration::enabled(&fixture.state_root, session, source).unwrap());
+        let (first, envelope, _wire) = crate::turn::tests::native_worker_completion(
+            &fixture.state_root,
+            source,
+            &fixture.view.workspace_id,
+            &fixture.view.canonical_path.to_path_buf().unwrap(),
+            crate::collaboration::TOOL_NAME,
+            request.clone(),
+        )
+        .unwrap();
+        assert_eq!(envelope["success"], true, "{envelope}");
+        assert_eq!(first["operation"], "submit_consultation_result");
+        assert_eq!(first["target_run_id"], target.to_string());
+        assert!(!envelope.to_string().contains("capability"));
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let count = || {
+            connection
+                .query_row("SELECT count(*) FROM collaboration_exchanges", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(count(), 1);
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_mailbox", [], |row| row
+                    .get::<_, u64>(
+                    0
+                ))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT root_priority FROM collaboration_exchanges",
+                    [],
+                    |row| row.get::<_, u8>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM collaboration_activation_requests",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert!(
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root)
+                .unwrap()
+                .session(session)
+                .is_ok()
+        );
+        let mut store =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        let replay =
+            crate::collaboration::admit(&mut store, &context, &request, &mut effects).unwrap();
+        assert_eq!(first, replay);
+        assert_eq!(count(), 1);
+        let mut changed = request.clone();
+        changed["objective"] = json!("Changed body");
+        assert_eq!(
+            crate::collaboration::admit(&mut store, &context, &changed, &mut effects)
+                .unwrap_err()
+                .code,
+            "COLLABORATION_IDEMPOTENCY_CONFLICT"
+        );
+        drop(store);
+        let mut reopened =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        assert_eq!(
+            crate::collaboration::admit(&mut reopened, &context, &request, &mut effects).unwrap(),
+            first
+        );
+        collaboration_core(&fixture, session, crate::domain::RunLifecycle::Paused, None);
+        assert!(
+            crate::collaboration::admit(&mut reopened, &context, &request, &mut effects).is_err()
+        );
+        assert_eq!(count(), 1);
+    }
+
+    #[test]
+    fn collaboration_refuses_forged_scope_missing_priority_unsafe_target_and_request_shapes() {
+        let (fixture, session, source, target, context, request) = collaboration_fixture();
+        let mut store =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        for (key, value) in [
+            ("source_run_id", json!(source)),
+            ("idempotency_key", json!("forged")),
+            ("priority", json!("interactive")),
+            ("controller_principal", json!("secret")),
+        ] {
+            let mut forged = request.clone();
+            forged[key] = value;
+            assert!(
+                crate::collaboration::admit(&mut store, &context, &forged, &mut effects).is_err(),
+                "{key}"
+            );
+        }
+        for value in [
+            json!({"run_id":source}),
+            json!({"run_id":Uuid::now_v7()}),
+            json!({"run_id":target,"role_ref":"reviewer"}),
+        ] {
+            let mut forged = request.clone();
+            forged["target"] = value;
+            assert!(
+                crate::collaboration::admit(&mut store, &context, &forged, &mut effects).is_err()
+            );
+        }
+        let mut forged = context.clone();
+        forged.session_id = Uuid::now_v7();
+        assert!(crate::collaboration::admit(&mut store, &forged, &request, &mut effects).is_err());
+        for lifecycle in [
+            crate::domain::RunLifecycle::Paused,
+            crate::domain::RunLifecycle::Closed,
+            crate::domain::RunLifecycle::OutcomeUnknown,
+        ] {
+            collaboration_core(&fixture, target, lifecycle, None);
+            assert!(
+                crate::collaboration::admit(&mut store, &context, &request, &mut effects).is_err()
+            );
+        }
+        collaboration_core(&fixture, target, crate::domain::RunLifecycle::Idle, None);
+        let mut oversized = request.clone();
+        oversized["objective"] = json!("é".repeat(32768));
+        assert!(
+            crate::collaboration::admit(&mut store, &context, &oversized, &mut effects).is_err()
+        );
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection
+            .execute("DELETE FROM collaboration_root_priorities", [])
+            .unwrap();
+        assert!(crate::collaboration::admit(&mut store, &context, &request, &mut effects).is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_exchanges", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        let _ = session;
+    }
+    #[test]
+    fn collaboration_transactions_preserve_mail_on_failure_and_enforce_pair_capacity() {
+        let (fixture, _session, source, _target, mut context, request) = collaboration_fixture();
+        let mut store =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        context.source_tool_call_id = "kept-mail".into();
+        crate::collaboration::admit(&mut store, &context, &request, &mut effects).unwrap();
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        connection.execute_batch("CREATE TRIGGER refuse_activation BEFORE INSERT ON collaboration_activation_requests BEGIN SELECT RAISE(ABORT,'injected activation marker failure'); END;").unwrap();
+        let (safe, envelope, _) = crate::turn::tests::native_worker_completion(
+            &fixture.state_root,
+            source,
+            &fixture.view.workspace_id,
+            &fixture.view.canonical_path.to_path_buf().unwrap(),
+            crate::collaboration::TOOL_NAME,
+            request.clone(),
+        )
+        .unwrap();
+        assert_eq!(envelope["success"], false);
+        assert_eq!(safe["code"], "COLLABORATION_TRANSPORT_UNAVAILABLE");
+        assert_eq!(safe["retryable"], true);
+        assert!(
+            !safe
+                .to_string()
+                .contains("injected activation marker failure")
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_exchanges", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_mailbox", [], |row| row
+                    .get::<_, u64>(
+                    0
+                ))
+                .unwrap(),
+            1
+        );
+        connection
+            .execute_batch("DROP TRIGGER refuse_activation")
+            .unwrap();
+        for n in 1..4 {
+            context.source_tool_call_id = format!("mail-{n}");
+            crate::collaboration::admit(&mut store, &context, &request, &mut effects).unwrap();
+        }
+        assert_eq!(connection.query_row("SELECT count(DISTINCT payload_sha256) FROM orchestration_events WHERE kind='collaboration_queued'",[],|row|row.get::<_,u64>(0)).unwrap(),4);
+        context.source_tool_call_id = "mail-over-capacity".into();
+        assert_eq!(
+            crate::collaboration::admit(&mut store, &context, &request, &mut effects)
+                .unwrap_err()
+                .code,
+            "COLLABORATION_MAILBOX_FULL"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_mailbox", [], |row| row
+                    .get::<_, u64>(
+                    0
+                ))
+                .unwrap(),
+            4
+        );
+        connection
+            .execute(
+                "UPDATE collaboration_exchanges SET execution_state='succeeded'",
+                [],
+            )
+            .unwrap();
+        for n in 4..8 {
+            context.source_tool_call_id = format!("root-mail-{n}");
+            crate::collaboration::admit(&mut store, &context, &request, &mut effects).unwrap();
+            connection
+                .execute(
+                    "UPDATE collaboration_exchanges SET execution_state='succeeded'",
+                    [],
+                )
+                .unwrap();
+        }
+        context.source_tool_call_id = "root-mail-over-capacity".into();
+        let error =
+            crate::collaboration::admit(&mut store, &context, &request, &mut effects).unwrap_err();
+        assert_eq!(error.code, "COLLABORATION_MAILBOX_FULL");
+        assert!(!error.retryable);
+        assert_eq!(
+            crate::collaboration::error_result(&error)["retryable"],
+            false
+        );
+        let wait = json!({"operation":"await_consultations","exchange_ids":[Uuid::now_v7()],"return_when":"any","transport_wait_seconds":1});
+        assert_eq!(
+            crate::collaboration::admit(&mut store, &context, &wait, &mut effects)
+                .unwrap_err()
+                .code,
+            "COLLABORATION_TRANSPORT_UNAVAILABLE"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM collaboration_exchanges WHERE execution_state='succeeded'",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            8
+        );
+    }
+
+    #[test]
+    fn collaboration_native_worker_rejects_stale_generation_and_peer_lifecycle_arguments() {
+        let (fixture, _session, source, _target, _context, request) = collaboration_fixture();
+        let path = crate::run::run_root(&fixture.state_root, source).join("state.json");
+        let original = fs::read(&path).unwrap();
+        let mut projection: Value = serde_json::from_slice(&original).unwrap();
+        projection["run_generation"] = json!(2);
+        fs::write(&path, serde_json::to_vec(&projection).unwrap()).unwrap();
+        let (_, envelope, _) = crate::turn::tests::native_worker_completion(
+            &fixture.state_root,
+            source,
+            &fixture.view.workspace_id,
+            &fixture.view.canonical_path.to_path_buf().unwrap(),
+            crate::collaboration::TOOL_NAME,
+            request,
+        )
+        .unwrap();
+        assert_eq!(envelope["success"], false);
+        fs::write(&path, original).unwrap();
+        let (body, envelope, _) = crate::turn::tests::native_worker_completion(
+            &fixture.state_root,
+            source,
+            &fixture.view.workspace_id,
+            &fixture.view.canonical_path.to_path_buf().unwrap(),
+            crate::collaboration::TOOL_NAME,
+            json!({"operation":"release_specialist","run_id":source}),
+        )
+        .unwrap();
+        assert_eq!(envelope["success"], false);
+        assert_eq!(body["operation"], "collaboration_error");
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_exchanges", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn collaboration_root_authority_and_schema_corruption_fail_without_admitting_mail() {
+        let (fixture, _session, _source, _target, context, request) = collaboration_fixture();
+        let mut store =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let mut record: Value = serde_json::from_str(
+            &connection
+                .query_row(
+                    "SELECT record_json FROM collaboration_root_priorities",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        record["priority"] = json!(0);
+        let changed = record.to_string();
+        connection
+            .execute(
+                "UPDATE collaboration_root_priorities SET record_json=?1,record_sha256=?2",
+                rusqlite::params![changed, crate::jcs::sha256_hex(changed.as_bytes())],
+            )
+            .unwrap();
+        assert!(crate::collaboration::admit(&mut store, &context, &request, &mut effects).is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM collaboration_exchanges", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        drop(store);
+        connection
+            .execute(
+                "UPDATE metadata SET value='unsupported' WHERE key='collaboration_schema_version'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let before = fixture.database_bytes();
+        assert!(
+            crate::orchestration::OrchestrationStore::open_observer(&fixture.state_root).is_err()
+        );
+        assert!(crate::orchestration::OrchestrationStore::open(&fixture.state_root).is_err());
+        assert_eq!(fixture.database_bytes(), before);
+    }
+    /// Test-only captured-policy preparation for an accountless pinned-runtime
+    /// component campaign. It never changes the production live-policy gate.
+    #[allow(
+        dead_code,
+        reason = "invoked only by the opted-in native successor component driver"
+    )]
+    pub(crate) fn native_collaboration_component(root: &Path, codex: &Path) -> Value {
+        use std::os::unix::process::CommandExt as _;
+        assert_eq!(
+            std::env::var("DOLGORAE_RUN_NATIVE_INTEGRATED_ACCEPTANCE").as_deref(),
+            Ok("1")
+        );
+        let (fixture, session, source, _target, mut context, request) = collaboration_fixture();
+        fs::write(
+            root.join("collaboration-request.json"),
+            serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(
+            root.join("collaboration-request.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let socket = root.join("collaboration.sock");
+        let log = fs::File::create(root.join("collaboration-server.log")).unwrap();
+        struct Server(std::process::Child);
+        impl Drop for Server {
+            fn drop(&mut self) {
+                let _ =
+                    crate::darwin::DarwinSystem.signal_process_group(self.0.id(), libc::SIGTERM);
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while self.0.try_wait().unwrap().is_none() {
+                    if std::time::Instant::now() >= until {
+                        let _ = crate::darwin::DarwinSystem
+                            .signal_process_group(self.0.id(), libc::SIGKILL);
+                        self.0.wait().unwrap();
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        }
+        let server = Server(
+            std::process::Command::new(codex)
+                .args(["--disable", "shell_snapshot", "app-server", "--listen"])
+                .arg(format!("unix://{}", socket.display()))
+                .current_dir(root)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(log)
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        let owned_identity = crate::darwin::DarwinSystem
+            .bsd_process_identity(server.0.id())
+            .unwrap();
+        assert_eq!(owned_identity.process_group_id, server.0.id());
+        fs::write(
+            root.join("collaboration-owned-server.json"),
+            serde_json::to_vec(&owned_identity).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(
+            root.join("collaboration-owned-server.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !socket.exists() {
+            assert!(
+                std::time::Instant::now() < until,
+                "native collaboration app-server socket timeout"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let result = crate::turn::tests::native_collaboration_connection(
+            &fixture.state_root,
+            source,
+            session,
+            &fixture.view.workspace_id,
+            &fixture.view.canonical_path.to_path_buf().unwrap(),
+            &socket,
+            |accepted, completion| {
+                if let Some(completion) = completion {
+                    context.source_tool_call_id = completion.source_tool_call_id.clone();
+                    let mut store =
+                        crate::orchestration::OrchestrationStore::open(&fixture.state_root)
+                            .unwrap();
+                    let mut effects =
+                        crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+                    assert_eq!(
+                        crate::collaboration::admit(&mut store, &context, &request, &mut effects)
+                            .unwrap(),
+                        completion.result.clone().unwrap()
+                    );
+                    fs::write(
+                        root.join("collaboration-result.json"),
+                        serde_json::to_vec(completion.result.as_ref().unwrap()).unwrap(),
+                    )
+                    .unwrap();
+                } else {
+                    context.source_turn_id = accepted.turn_id.clone();
+                    let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+                    connection
+                        .execute(
+                            "UPDATE brokered_tasks SET target_turn_id=?1 WHERE target_run_id=?2",
+                            rusqlite::params![accepted.turn_id, source.to_string()],
+                        )
+                        .unwrap();
+                    collaboration_core(
+                        &fixture,
+                        source,
+                        crate::domain::RunLifecycle::Running,
+                        Some(&accepted.turn_id),
+                    );
+                    let path = crate::run::run_root(&fixture.state_root, source).join("state.json");
+                    let mut state: crate::projection::RunStateProjection =
+                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    state.thread_id = Some(accepted.thread_id.clone());
+                    fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
+                }
+            },
+        )
+        .unwrap();
+        let pid = server.0.id();
+        drop(server);
+        let retirement_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !crate::darwin::DarwinSystem
+            .process_group_pids(pid)
+            .unwrap()
+            .is_empty()
+            && std::time::Instant::now() < retirement_deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(
+            crate::darwin::DarwinSystem
+                .process_group_pids(pid)
+                .unwrap()
+                .is_empty(),
+            "native owned process group remains after bounded retirement"
+        );
+        json!({"schema":"dolgorae.native-collaboration-component/v1","passed":true,"observations":result,
+            "prepared_policy_fixture":true,"live_policy_enablement_proven":false,
+            "root_priority_after_ordering_removal":true,"store_reopen_replay":true,"owned_process_group_absent":true,"owned_server_identity":owned_identity})
     }
 }

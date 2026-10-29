@@ -47,10 +47,17 @@ fn main() {
         }
         println!(
             "{}",
-            driver::campaign(
-                std::path::Path::new(&args[1]),
-                std::path::Path::new(&args[2])
-            )
+            if std::env::var("DOLGORAE_NATIVE_COLLABORATION_COMPONENT").as_deref() == Ok("1") {
+                delegation_service::tests::native_collaboration_component(
+                    std::path::Path::new(&args[1]),
+                    std::path::Path::new(&args[2]),
+                )
+            } else {
+                driver::campaign(
+                    std::path::Path::new(&args[1]),
+                    std::path::Path::new(&args[2]),
+                )
+            }
         );
     }
 }

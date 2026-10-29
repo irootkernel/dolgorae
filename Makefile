@@ -3,7 +3,8 @@ SHELL := /bin/bash
 CARGO ?= cargo
 GO ?= go
 PYTHON_BIN ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
-DOLGORAE_BIN ?= $(CURDIR)/target/debug/dolgorae
+CARGO_OUTPUT_ROOT := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),$(CURDIR)/target)
+DOLGORAE_BIN ?= $(CARGO_OUTPUT_ROOT)/debug/dolgorae
 TEST_THREADS ?= 4
 BUF_VERSION := 1.69.0
 GO_VERSION := go1.26.6
@@ -120,8 +121,8 @@ test-int:
 
 test-e2e:
 	$(CARGO) build --locked --bin dolgorae --example native_caller_pipeline
-	$(CARGO) test --locked --test accepted_legacy_cli --no-run --message-format=json > target/accepted-fixture-artifacts.json
-	$(CARGO) test --locked --no-run --message-format=json --test gateway_native --test gateway_semantic_native --test gateway_configuration_native --test gateway_interaction_native > target/gateway-native-artifacts.json
+	$(CARGO) test --locked --test accepted_legacy_cli --no-run --message-format=json > "$(CARGO_OUTPUT_ROOT)/accepted-fixture-artifacts.json"
+	$(CARGO) test --locked --no-run --message-format=json --test gateway_native --test gateway_semantic_native --test gateway_configuration_native --test gateway_interaction_native > "$(CARGO_OUTPUT_ROOT)/gateway-native-artifacts.json"
 	@command -v git >/dev/null 2>&1 || { \
 		echo "Missing E2E dependency: Git 2.39 or later is required." >&2; \
 		exit 1; \
@@ -166,7 +167,7 @@ test-e2e:
 		run_case tests/e2e/test_live_workspace_startup.py; \
 		run_case tests/e2e/test_live_workspace_policy.py; \
 		run_case tests/e2e/test_native_workspace_policy_fixture.py; \
-		run_case tests/e2e/test_native_caller_pipeline.py --driver "$(dir $(DOLGORAE_BIN))examples/native_caller_pipeline"; \
+		run_case tests/e2e/test_native_caller_pipeline.py --driver "$(CARGO_OUTPUT_ROOT)/debug/examples/native_caller_pipeline"; \
 		run_case tests/e2e/test_workspace_cli.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_worker_cli.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_external_engagement_cli.py --binary "$(DOLGORAE_BIN)"; \
@@ -274,7 +275,7 @@ test-native-host-invocation-fixture:
 	}
 	$(CARGO) build --locked --example host_invocation_contract
 	$(PYTHON_BIN) tests/e2e/run_native_host_invocation_fixture.py \
-		--prototype "$(CURDIR)/target/debug/examples/host_invocation_contract" \
+		--prototype "$(CARGO_OUTPUT_ROOT)/debug/examples/host_invocation_contract" \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" \
 		--claude "$${DOLGORAE_CLAUDE_BIN:-$(HOME)/.local/bin/claude}" \
 		--scratch-root "$${DOLGORAE_HOST_FIXTURE_SCRATCH_ROOT}"
@@ -286,7 +287,7 @@ test-native-caller-pipeline:
 	}
 	$(CARGO) build --locked --example native_caller_pipeline
 	$(PYTHON_BIN) tests/e2e/run_native_caller_pipeline.py \
-		--driver "$(CURDIR)/target/debug/examples/native_caller_pipeline" \
+		--driver "$(CARGO_OUTPUT_ROOT)/debug/examples/native_caller_pipeline" \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"
 
 test-native-review-reader:
@@ -296,7 +297,7 @@ test-native-review-reader:
 	}
 	$(CARGO) build --locked --example native_review_reader
 	$(PYTHON_BIN) tests/e2e/run_native_review_reader.py \
-		--driver "$(CURDIR)/target/debug/examples/native_review_reader" \
+		--driver "$(CARGO_OUTPUT_ROOT)/debug/examples/native_review_reader" \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"
 
 test-native-integrated-acceptance:
@@ -307,7 +308,7 @@ test-native-integrated-acceptance:
 	$(CARGO) build --locked --bin dolgorae --example native_caller_pipeline
 	$(PYTHON_BIN) tests/e2e/run_native_integrated_acceptance.py \
 		--binary "$(DOLGORAE_BIN)" \
-		--caller-driver "$(CURDIR)/target/debug/examples/native_caller_pipeline" \
+		--caller-driver "$(CARGO_OUTPUT_ROOT)/debug/examples/native_caller_pipeline" \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"
 
 test-live-access-safety:

@@ -5169,6 +5169,7 @@ impl GenerationProbe {
             }
         }
         crate::assignment_queue::validate_schema(&connection)?;
+        crate::collaboration::validate_schema(&connection)?;
         if matches!(schema_generation, AdmittedGeneration::Legacy(_))
             && !connection
                 .query_row(

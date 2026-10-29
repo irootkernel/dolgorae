@@ -13,8 +13,8 @@ REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
 
 def run_case(target: str, case: str) -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--binary", type=pathlib.Path, default=REPOSITORY / "target/debug/dolgorae")
-    parser.add_argument("--artifacts", type=pathlib.Path, default=REPOSITORY / "target/gateway-native-artifacts.json")
+    parser.add_argument("--binary", type=pathlib.Path, default=pathlib.Path(os.environ.get("CARGO_TARGET_DIR", str(REPOSITORY / "target"))) / "debug/dolgorae")
+    parser.add_argument("--artifacts", type=pathlib.Path, default=pathlib.Path(os.environ.get("CARGO_TARGET_DIR", str(REPOSITORY / "target"))) / "gateway-native-artifacts.json")
     args = parser.parse_args()
     records = [json.loads(line) for line in args.artifacts.read_text().splitlines() if line.strip()]
     executables = {record["executable"] for record in records if record.get("reason") == "compiler-artifact" and record.get("target", {}).get("name") == target and record.get("profile", {}).get("test") and record.get("executable")}

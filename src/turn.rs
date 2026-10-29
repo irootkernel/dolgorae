@@ -2303,7 +2303,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.thread_id.as_deref()
     }
     pub(crate) fn primary_session_id(&self) -> Option<Uuid> {
-        self.primary_tool.as_ref().map(|config| config.session_id)
+        self.primary_tool
+            .as_ref()
+            .filter(|config| config.contract.name() == crate::primary_tool::PRIMARY_TOOL_NAME)
+            .map(|config| config.session_id)
     }
     /// The one model this Run may use; a Turn that names another is refused.
     #[must_use]
@@ -3989,8 +3992,12 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
         if self.candidate_tools {
             if method == "thread/start" {
-                params["dynamicTools"] =
-                    Value::Array(vec![crate::direct_review::candidate_tool_spec()]);
+                let mut tools = self
+                    .primary_tool
+                    .as_ref()
+                    .map_or_else(Vec::new, |tool| tool.contract.tool_specs());
+                tools.push(crate::direct_review::candidate_tool_spec());
+                params["dynamicTools"] = Value::Array(tools);
             }
             params["config"] = serde_json::json!({"project_doc_max_bytes":0});
         }
@@ -4543,7 +4550,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             return Ok(());
         }
         if method == "item/tool/call" {
-            if self.candidate_tools {
+            if self.candidate_tools
+                && !self.primary_tool.as_ref().is_some_and(|tool| {
+                    params.get("tool").and_then(Value::as_str) == Some(tool.contract.name())
+                })
+            {
                 return self.open_candidate_tool(request_id, params);
             }
             return self.open_primary_tool(request_id, params);
@@ -6913,6 +6924,89 @@ pub(crate) mod tests {
     use std::collections::VecDeque;
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 
+    /// Pinned runtime component qualification using the same production Worker
+    /// dispatcher as the offline fixture. The caller owns prepared policy data.
+    #[allow(
+        dead_code,
+        reason = "invoked only by the opted-in native successor component driver"
+    )]
+    pub(crate) fn native_collaboration_connection(
+        state_root: &Path,
+        source: Uuid,
+        session: Uuid,
+        workspace_id: &str,
+        workspace: &Path,
+        socket: &Path,
+        mut observe: impl FnMut(&AcceptedTurn, Option<&PrimaryToolCompletion>),
+    ) -> Result<Value, TurnError> {
+        let worker =
+            crate::worker::tests::PrimaryWorkerFixture::new(state_root, source, workspace_id);
+        let wire = crate::app_server::JsonRpcConnection::connect(
+            socket,
+            std::time::Duration::from_secs(30),
+        )?;
+        let mut coordinator = TurnCoordinator::initialize(
+            wire,
+            MemoryJournal::default(),
+            MemoryArtifactStore::default(),
+            CoordinatorConfig {
+                attach: ThreadAttach::Start,
+                foreign_diagnostics: Box::new(RecordingDiagnostics::default()),
+                fixed_model: "gpt-5.6-luna".into(),
+                default_effort: "low".into(),
+                supported_efforts: ["low".into()].into(),
+                cwd: workspace.into(),
+                developer_instructions: String::new(),
+                sandbox: "read-only".into(),
+                approval_policy: "never".into(),
+                safety_policy: SessionSafetyPolicy::Standard,
+                run_generation: 1,
+                server_key: "a".repeat(64),
+                server_epoch: 1,
+                run_id: source,
+                controller_id: Uuid::now_v7(),
+                control_mode: "managed_agent".into(),
+                record_accepted_user_input: false,
+                primary_tool: Some(PrimaryToolConfig {
+                    session_id: session,
+                    contract: PrimaryToolContract::load().unwrap().for_collaboration(),
+                    dispatcher: Arc::clone(&worker.dispatcher),
+                }),
+                candidate_tools: false,
+                candidate_reader: None,
+                file_change_publication_dir: None,
+            },
+            &std::env::var("CODEX_HOME").unwrap(),
+        )?;
+        let mut turn = request("native-collaboration-component", DeliveryMode::Submit);
+        turn.model = "gpt-5.6-luna".into();
+        let accepted = coordinator.start_turn(turn)?;
+        observe(&accepted, None);
+        let mut completions = 0;
+        for _ in 0..256 {
+            if !coordinator.pending_primary_tools.is_empty() {
+                let completion = worker.completion();
+                assert_eq!(completion.run_generation, 1);
+                assert!(!completion.source_tool_call_id.is_empty());
+                assert_eq!(
+                    completion.result.as_ref().unwrap()["operation"],
+                    "submit_consultation_result"
+                );
+                observe(&accepted, Some(&completion));
+                coordinator.complete_primary_tool(completion)?;
+                completions += 1;
+            }
+            if let Some(terminal) = coordinator.next_event()? {
+                assert_eq!(terminal.status, "completed");
+                assert_eq!(completions, 1);
+                return Ok(
+                    serde_json::json!({"native_specialist_tool_registered":true,"native_thread_turn_call_correlated":true,"production_worker_dispatch":true,"native_terminal_completed":true}),
+                );
+            }
+        }
+        Err(TurnError::CorrelationMismatch)
+    }
+
     pub(crate) fn native_worker_completion(
         state_root: &Path,
         root: Uuid,
@@ -6972,8 +7066,24 @@ pub(crate) mod tests {
                 control_mode: "managed_agent".into(),
                 record_accepted_user_input: false,
                 primary_tool: Some(PrimaryToolConfig {
-                    session_id: root,
-                    contract: PrimaryToolContract::load().unwrap().with_specialists(),
+                    session_id: if tool == crate::collaboration::TOOL_NAME {
+                        crate::run::RunStore::new(
+                            crate::workspace::SystemWorkspacePlatform,
+                            state_root,
+                        )
+                        .load_manifest(root)
+                        .unwrap()
+                        .aggregate_binding
+                        .unwrap()
+                        .aggregate_id
+                    } else {
+                        root
+                    },
+                    contract: if tool == crate::collaboration::TOOL_NAME {
+                        PrimaryToolContract::load().unwrap().for_collaboration()
+                    } else {
+                        PrimaryToolContract::load().unwrap().with_specialists()
+                    },
                     dispatcher: Arc::clone(&worker.dispatcher),
                 }),
                 candidate_tools: false,
@@ -7295,6 +7405,49 @@ pub(crate) mod tests {
             "/tmp/codex-home",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn collaboration_and_candidate_tools_preserve_registration_and_name_routing() {
+        let fixture = crate::direct_review_target::tests::Fixture::new(false);
+        std::fs::write(fixture.source.join("file.txt"), b"candidate\n").unwrap();
+        let reader = fixture.reader(fixture.admit("workspace", None));
+        let mut coordinator = direct_coordinator(reader);
+        let dispatcher = Arc::new(RecordingPrimaryDispatcher::default());
+        coordinator.primary_tool = Some(PrimaryToolConfig {
+            session_id: Uuid::now_v7(),
+            contract: PrimaryToolContract::load().unwrap().for_collaboration(),
+            dispatcher: dispatcher.clone(),
+        });
+        assert_eq!(coordinator.primary_session_id(), None);
+        coordinator
+            .start_turn(request("combined-tools", DeliveryMode::Submit))
+            .unwrap();
+        let params = &coordinator
+            .server
+            .calls
+            .iter()
+            .find(|(method, _)| method == "thread/start")
+            .unwrap()
+            .1;
+        let names: Vec<_> = params["dynamicTools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                crate::collaboration::TOOL_NAME,
+                crate::direct_review::CANDIDATE_TOOL_NAME
+            ]
+        );
+        coordinator.ingest(serde_json::json!({"id":51,"method":"item/tool/call","params":{"threadId":"thread-1","turnId":"turn-1","callId":"combined-call","tool":crate::collaboration::TOOL_NAME,"arguments":{"operation":"collect_collaboration_results","limit":1}}})).unwrap();
+        let calls = dispatcher.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool_name, crate::collaboration::TOOL_NAME);
+        assert_eq!(calls[0].context.source_tool_call_id, "combined-call");
     }
 
     #[test]

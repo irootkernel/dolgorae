@@ -28,7 +28,7 @@ TASK-092 are COMPLETE. EPIC-020 and TASK-076 through TASK-079 are COMPLETE.
 EPIC-009 is ACTIVE; EPIC-021 and EPIC-022 remain PLANNED for v0.1.4, in that
 execution order. TASK-067 is COMPLETE;
 TASK-068 through TASK-079 are COMPLETE;
-TASK-080 is COMPLETE; TASK-081 through TASK-089 remain PLANNED.
+TASK-080 and TASK-081 are COMPLETE; TASK-082 through TASK-089 remain PLANNED.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -2728,7 +2728,7 @@ Handoff: Durable queued task state for mailbox and activation scheduling.
 
 ### TASK-081: Bind and Persist Specialist Collaboration Exchanges
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-080.
 
