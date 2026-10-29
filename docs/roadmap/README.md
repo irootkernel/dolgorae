@@ -24,8 +24,7 @@ live-provider boundary `MILESTONE-BH1-P` without claiming actual Gul
 integration. EPIC-018 is COMPLETE after successor requirements, checked contracts
 and qualified H1 validation. EPIC-019 is COMPLETE.
 EPIC-023 is COMPLETE with Master's whole-Epic acceptance; TASK-090, TASK-091 and
-TASK-092 are COMPLETE. With that prerequisite met, Master resumed EPIC-020, which
-is ACTIVE.
+TASK-092 are COMPLETE. EPIC-020 and TASK-076 through TASK-079 are COMPLETE.
 EPIC-009, EPIC-021, and EPIC-022 remain PLANNED for v0.1.4, in that execution
 order. TASK-067 is COMPLETE;
 TASK-068 through TASK-079 are COMPLETE;
@@ -2629,9 +2628,12 @@ production activation or final three-consumer runtime acceptance is inferred.
 
 ## EPIC-020: Delegation Identity, Access, and Approval Integration
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+Canonical Outcomes: [delegation identity, trusted hosts and consumer exports](../specs/dolgorae-v014-delegation-runtime.md),
+[shared member release proof](../specs/dolgorae-v014-release-proof-correction.md),
+[modern control and bounded execution](../specs/README.md#spec-014-control-modes-execution-lanes-and-assurance),
+and [protected interactions and safe activity](../specs/README.md#spec-009-pending-requests-and-approvals).
 
 Goal: Expose accepted delegation evidence and modern public Runs with bounded execution and Controller-owned interactions.
 
