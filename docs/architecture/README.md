@@ -1416,7 +1416,7 @@ policy per Session and consumes its retained admission limits. It provides no
 policy override operation. Assignment queue priority uses 0 for interactive,
 1 for normal and 2 for background; an eventual orchestration-state projection
 maps these ordering values to the checked policy priority classes.
-The central scheduler and result outbox remain TASK-082 and TASK-083 work.
+The result outbox remains TASK-083 work.
 The full checked orchestration-state export remains an integration obligation;
 this storage foundation adds no public exporter.
 
@@ -2528,9 +2528,12 @@ is version 1; it does not replace the generation-6 namespace or its task receipt
 Its first-use transaction replaces `one_active_external_task_per_member` to
 exclude `queued`; the version-1 marker distinguishes this shape, while
 `accepted`, `claimed`, `dispatching` and `running` remain unique per member.
-Ready-only live entrypoints remain gated until the central scheduler can dispatch
-queued work under current owner authority. Queue storage alone cannot authorize
-a Turn, reconstruct an external Controller capability or replay uncertain work.
+The central scheduler dispatches retained queued work under current owner
+authority. Live entrypoints retain their ready-target-only admission policy
+until TASK-083 wait/result semantics and TASK-027 integrated qualification are
+complete. Target readiness is separate from read-only access. Queue storage
+alone cannot authorize a Turn, reconstruct an external Controller capability
+or replay uncertain work.
 The shared `assignment_queue` module owns ordering and reuse records; the
 Engagement and Broker stores compose them with their task transactions and
 owner-specific event chains. Delegation Service owns source capture, scope
@@ -2542,6 +2545,41 @@ activation completion, and state changes. A single notification wakes the
 scheduler, which consults SQLite and the authoritative core Run state. One
 global reconciliation timer, default 30 seconds, repairs missed wake signals and
 expired pre-dispatch claims.
+
+The gateway owns the scheduler's private same-user Unix wake endpoint. Workers
+send bounded workspace/Run hints after commit; hints grant no authority. The
+runtime resolves registered workspace identity again before opening its store.
+One global scan also visits idle resident members for passivation. No actor owns
+a timer or database polling loop.
+
+Post-commit wake hints use a private per-UID short socket under
+`/tmp/dolgorae-<uid>/w/`, independent of the installation-home path length.
+Its domain-separated name binds the canonical home and gateway instance.
+Sender and receiver verify the private root; shutdown removes only its captured
+socket inode and never unlinks an unknown or earlier-instance endpoint.
+
+Scheduler claims, fairness history and activation operations are private SQLite
+extensions. Assignment and consultation queues keep their distinct accepted
+records and event owners. A selected claim binds its immutable owner, task,
+target and deadline before effects. External delayed execution uses an internal
+accepted-work permit rather than a recovered Controller secret. Only the exact
+retained task and its necessary writer transitions are authorized; the Worker
+checks this scope again on its mutation drain. Its external submit requires
+the exact task and claim both at the owning dispatch reservation. A short
+pre-effect lease is never renewed or treated as the deadline of an already
+reserved dispatch. In-progress task and Writer effects use the original
+accepted task or exchange deadline, capped by existing operation timeouts; the
+reservation remains non-reclaimable and unknown work is not replayed. Existing
+release authority survives deadline expiry. Controller credentials and public
+Run authorization keep their existing meanings.
+
+A gateway response loss can leave a durable original Turn without its task link.
+Reconciliation may recover that link from the complete verified Submit history
+and original acceptance, then use existing task settlement and Writer cleanup.
+The request digest, key, namespace, owner, member, generation and recorded
+effort must agree. The owning transaction accepts an identical link and rejects a
+conflict. Absence of acceptance in a current ledger snapshot never authorizes
+requeue of a reserved dispatch; unresolved evidence stays fenced.
 
 For a dispatchable Run, the deterministic selection key is:
 
@@ -2564,7 +2602,7 @@ Actor residency is separate from core Run lifecycle:
 
 | Actor residency | Process meaning | Scheduler action |
 | --- | --- | --- |
-| `unstarted` | member provisioned but first generation is not ready | wait for spawn operation |
+| `unstarted` | accepted member has no settled first residency | initialize on queued work or recognize its exact already-Ready Worker |
 | `resident` | Worker generation is present | dispatch only when core Run is idle |
 | `passivating` | safe shutdown is being committed | retain queue and reevaluate after completion |
 | `passivated` | logical Run and thread persist, Worker is absent | request `on_mail` activation |
@@ -2573,9 +2611,26 @@ Actor residency is separate from core Run lifecycle:
 | `unavailable` | automatic activation or compatibility failed | retain mail and expose blocker |
 | `terminal` | closed, retired, or released | reject new work |
 
-Activation uses a `passivated -> activating` compare-and-swap, a bounded lease,
-and the existing Worker, lane, thread-resume, and compatibility protocols. A
-failed activation never consumes the queued request. Safe passivation requires
+Activation uses a compare-and-swap from `passivated` or `unstarted` to
+`activating`, a bounded lease, and the existing Worker, lane, thread and
+compatibility protocols. Initialization uses the accepted member's captured
+configuration; resumption uses its original recorded thread. A failed
+activation never consumes the queued request. An accepted member whose
+physical Worker is already Ready can satisfy that same captured activation
+operation without starting another generation or acquiring Writer authority;
+the queued task acquires Writer authority at dispatch. A write activation binds
+its acquisition transaction to the captured activation before the effect and
+retains the acquired Writer generation and original execution identity as
+compensation evidence. Failed or expired activation may release only that
+positively attributable quiescent authority through the existing owner and
+generation-retirement protocol. Restart recovery requires the same durable
+attribution. Unknown, changed or foreign ownership remains blocked, and an
+already-Ready operation that acquired nothing cannot release pre-existing
+authority. Dedicated actors retain the original native registration witness.
+Shared-read-only actors instead
+verify their retained Profile lifetime, active membership, durable verified
+read-only policy and exact Worker/Thread identity; they do not create or require
+a Dedicated registration witness. Safe passivation requires
 idle Run state, no writer, no pending interaction, no blocking outbound
 exchange, no dispatchable mail, verified background cleanup, and resumable
 thread state.

@@ -1,20 +1,22 @@
 //! Durable assignment ordering shared by internal and external owners.
 //!
-//! These primitives are not a scheduler. The live ready-only entrypoints retain
-//! their admission gate until the central dispatcher owns queued work.
+//! The central scheduler consumes this ordering under retained owner authority.
+//! Live entrypoints retain ready-target-only admission pending TASK-083
+//! wait/result semantics and TASK-027 integration; target readiness is not an
+//! access mode.
 
 use crate::machine::MachineError;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use uuid::Uuid;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Owner {
     Managed(Uuid),
     External(Uuid),
 }
 
 impl Owner {
-    fn scope(self) -> (&'static str, Uuid) {
+    pub(crate) fn scope(self) -> (&'static str, Uuid) {
         match self {
             Self::Managed(id) => ("orchestrated_session", id),
             Self::External(id) => ("external_engagement", id),
@@ -159,6 +161,8 @@ pub(crate) fn admit(transaction: &Transaction<'_>, entry: &Entry<'_>) -> Result<
          VALUES(?1,?2,?3,?4,?5,?6,?7)",
         params![entry.task.to_string(),kind,scope.to_string(),entry.target.to_string(),entry.source,entry.priority,entry.deadline_ms],
     ).map_err(sql)?;
+    crate::scheduler::install(transaction)?;
+    crate::scheduler::policy(transaction, entry.owner)?;
     event(transaction, entry.owner, "assignment_queued", entry.task)
 }
 

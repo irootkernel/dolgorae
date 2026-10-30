@@ -62,6 +62,7 @@ pub mod review_recovery;
 pub mod review_target;
 pub mod run;
 pub mod runtime;
+pub(crate) mod scheduler;
 pub mod semantic;
 pub mod snapshot;
 pub mod specialist;

@@ -6022,6 +6022,35 @@ pub(crate) fn revalidate_history_server(
     Ok(())
 }
 
+/// Observation only: a pooled actor may detach when its native thread is idle
+/// and the retained shared generation has no background workload. This proof
+/// never permits stopping that generation or any sibling member.
+pub(crate) fn prove_shared_actor_workload_absent(
+    root: &Path,
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    epoch: u64,
+) -> Result<(), MachineError> {
+    let expected = observe_history_server(root, binding)?;
+    if expected.server_epoch != epoch {
+        return Err(transport("shared actor server epoch changed"));
+    }
+    for _ in 0..5 {
+        revalidate_history_server(root, binding, &expected)?;
+        verify_live_process_identity(&expected)?;
+        let members = DarwinSystem
+            .process_group_pids(expected.pgid)
+            .map_err(|_| transport("shared actor workload census failed"))?;
+        if members.as_slice() != [expected.pid] {
+            return Err(profile_server_busy(
+                &binding.selected_name,
+                &binding.server_key,
+                "shared actor background workload is not absent",
+            ));
+        }
+    }
+    revalidate_history_server(root, binding, &expected)
+}
+
 fn read_state(path: &Path) -> Result<Option<ServerState>, MachineError> {
     let Some(mut file) =
         crate::workspace::open_secure_file_if_present(path, DarwinSystem.current_uid())?

@@ -1579,6 +1579,7 @@ fn assign_external_specialist_task_in(
         }
     };
     if queued_priority.is_some() {
+        crate::scheduler::notify(scope.state_root, request.member_ref);
         return accepted_boundary(
             "assign_external_specialist_task",
             Some(operation_ref),
@@ -3264,6 +3265,7 @@ fn assign_specialist_task_in(
         }
     };
     if queued_priority.is_some() {
+        crate::scheduler::notify(scope.state_root, request.member_ref);
         return accepted_boundary(
             "assign_specialist_task",
             Some(operation_ref),
@@ -18306,6 +18308,825 @@ pub(crate) mod tests {
                         .get::<_, u64>(0))
                     .unwrap(),
                 0
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_recovers_original_queues_claims_once_and_retains_immutable_receipts() {
+        for managed in [false, true] {
+            let fixture = Fixture::new();
+            let port = FakePort::new();
+            let (scope, member, owner) = if managed {
+                let session = fixture.managed_session();
+                let member = Uuid::parse_str(
+                    &fixture
+                        .spawn_member(session, "schedule-spawn", &port)
+                        .member
+                        .member_ref,
+                )
+                .unwrap();
+                (
+                    session,
+                    member,
+                    crate::assignment_queue::Owner::Managed(session),
+                )
+            } else {
+                fixture.set_up_namespace();
+                let scope = fixture.open();
+                let candidate = fixture.install();
+                (
+                    scope,
+                    fixture.hire_member(scope, &candidate, "schedule-hire"),
+                    crate::assignment_queue::Owner::External(scope),
+                )
+            };
+            let mut accepted = Vec::new();
+            for (index, priority) in [(0, 2), (1, 0)] {
+                let key = format!("schedule-queued-{index}");
+                let receipt = if managed {
+                    queue_specialist_task(
+                        &fixture.scope(),
+                        &fixture.managed_context(scope, &key),
+                        &caller(16),
+                        &port,
+                        managed_assign(member, "Original accepted bytes.", "read_only", None),
+                        priority,
+                    )
+                    .unwrap()
+                    .1
+                } else {
+                    queue_external_specialist_task(
+                        &fixture.scope(),
+                        &caller(16),
+                        &port,
+                        assign_request(scope, member, &key, "read_only"),
+                        priority,
+                    )
+                    .unwrap()
+                    .1
+                };
+                accepted.push(receipt);
+            }
+            // Model a database written by TASK080/081 before this extension:
+            // only derived scheduler state disappears, original acceptance and
+            // ordering/event authority remain unchanged.
+            let mut store = EngagementStore::open(&fixture.database()).unwrap();
+            store.transact(|tx| {tx.execute_batch("DROP TABLE scheduler_claims; DROP TABLE scheduler_fairness; DROP TABLE scheduler_actors; DROP TABLE scheduler_external_policies; DROP TABLE scheduler_operations; DELETE FROM metadata WHERE key='actor_scheduler_schema_version';").unwrap();Ok(())}).unwrap();
+            drop(store);
+            let expected =
+                Uuid::parse_str(accepted[1].accepted_subjects.task_ref.as_deref().unwrap())
+                    .unwrap();
+            let mut store = EngagementStore::open(&fixture.database()).unwrap();
+            if !managed {
+                // FakePort does not publish a physical external Worker. Keep
+                // the residency refusal, then model its separate Ready receipt
+                // through the same store settlement used by the real adapter.
+                let denied = crate::scheduler::require_live_dispatch_owner(
+                    store.connection(),
+                    owner,
+                    member,
+                )
+                .unwrap_err();
+                assert_eq!(
+                    denied.details["reason"],
+                    "queued_dispatch_member_not_resident"
+                );
+                store.mark_external_member_resident(scope, member).unwrap();
+            }
+            assert_eq!(
+                crate::scheduler::candidates(store.connection(), owner, member)
+                    .unwrap()
+                    .len(),
+                2
+            );
+            let permit = store
+                .transact(|tx| crate::scheduler::claim(tx, owner, member, now_ms()?))
+                .unwrap()
+                .unwrap();
+            assert_eq!(permit.work, expected);
+            assert!(
+                store
+                    .transact(|tx| crate::scheduler::claim(tx, owner, member, now_ms()?))
+                    .unwrap()
+                    .is_none()
+            );
+            let retained = crate::scheduler::retained_task(
+                &store,
+                &permit,
+                &fixture.view.workspace_id,
+                &fixture.state_root,
+            )
+            .unwrap();
+            assert!(
+                retained
+                    .contents
+                    .prompt(
+                        &retained.accepted,
+                        &retained.accepted.execution_intent,
+                        retained.deadline_seconds
+                    )
+                    .unwrap()
+                    .contains(if managed {
+                        "Original accepted bytes."
+                    } else {
+                        "Assess the accepted candidate."
+                    })
+            );
+            store
+                .transact(|tx| crate::scheduler::prepare_dispatch(tx, &permit, now_ms()?))
+                .unwrap();
+            crate::scheduler::require_dispatch_claim(store.connection(), expected, member).unwrap();
+            // Expiry is not a replay grant after the dispatch boundary.
+            store.transact(|tx|{tx.execute("UPDATE scheduler_claims SET lease_until_ms=0,phase='unknown' WHERE claim_id=?1",[permit.claim.to_string()]).unwrap();Ok(())}).unwrap();
+            assert!(
+                crate::scheduler::require_dispatch_claim(store.connection(), expected, member)
+                    .is_err()
+            );
+            assert!(
+                store
+                    .transact(|tx| crate::scheduler::claim(tx, owner, member, now_ms()?))
+                    .unwrap()
+                    .is_none()
+            );
+            for receipt in accepted {
+                match store.intent_lookup(&receipt.namespace).unwrap() {
+                    engagement::IntentLookup::Accepted(observed) => assert_eq!(*observed, receipt),
+                    _ => panic!("acceptance changed during scheduling"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scheduler_persists_source_fairness_across_priorities_and_reopening() {
+        let (fixture, session, source, target, context, request) = collaboration_fixture();
+        let owner = crate::assignment_queue::Owner::Managed(session);
+        let port = FakePort::new();
+        let mut receipts = Vec::new();
+        for priority in [0, 2] {
+            let key = format!("fairness-{priority}");
+            receipts.push(
+                queue_specialist_task(
+                    &fixture.scope(),
+                    &fixture.managed_context(session, &key),
+                    &caller(16),
+                    &port,
+                    managed_assign(target, "Retain source fairness.", "read_only", None),
+                    priority,
+                )
+                .unwrap()
+                .1,
+            );
+        }
+        for (index, priority) in [0, 2].into_iter().enumerate() {
+            let mut store = EngagementStore::open(&fixture.database()).unwrap();
+            let now = now_ms().unwrap();
+            let permit = store
+                .transact(|tx| crate::scheduler::claim(tx, owner, target, now))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                permit.work.to_string(),
+                receipts[index]
+                    .accepted_subjects
+                    .task_ref
+                    .as_deref()
+                    .unwrap()
+            );
+            store
+                .transact(|tx| crate::scheduler::prepare_dispatch(tx, &permit, now))
+                .unwrap();
+            let history: (String, u8, u32) = store
+                .connection()
+                .query_row(
+                    "SELECT source_ref,effective_priority,consecutive FROM scheduler_fairness WHERE target_run_id=?1",
+                    [target.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(history, (session.to_string(), priority, index as u32 + 1));
+            // A proved refusal followed by ordinary pre-dispatch cancellation
+            // leaves no active work, without erasing selection history.
+            store
+                .transact(|tx| {
+                    crate::scheduler::finish_dispatch(
+                        tx,
+                        &permit,
+                        &MemberDispatchOutcome::Refused {
+                            code: "RUN_BUSY".into(),
+                            message: "Fixture proved no Turn acceptance.".into(),
+                        },
+                        now,
+                    )?;
+                    crate::orchestration::cancel_successor_before_dispatch(
+                        tx,
+                        session,
+                        target,
+                        permit.work,
+                        now,
+                    )
+                })
+                .unwrap();
+        }
+        let mut broker =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        let exchange =
+            Uuid::parse_str(
+                crate::collaboration::admit(&mut broker, &context, &request, &mut effects).unwrap()
+                    ["exchange_id"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut assignment =
+            managed_assign(target, "New mail from the same source.", "read_only", None);
+        assignment.deadline_seconds = 30;
+        receipts.push(
+            queue_specialist_task(
+                &fixture.scope(),
+                &fixture.managed_context(session, "fairness-new"),
+                &caller(16),
+                &port,
+                assignment,
+                1,
+            )
+            .unwrap()
+            .1,
+        );
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        let candidates = crate::scheduler::candidates(store.connection(), owner, target).unwrap();
+        let a = candidates.iter().find(|c| c.kind == "assignment").unwrap();
+        let b = candidates.iter().find(|c| c.id == exchange).unwrap();
+        assert_eq!((a.priority, b.priority), (1, 1));
+        assert!(a.deadline_ms < b.deadline_ms);
+        let now = now_ms().unwrap();
+        let permit = store
+            .transact(|tx| crate::scheduler::claim(tx, owner, target, now))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            permit.work, exchange,
+            "durable history must yield to the peer"
+        );
+        store
+            .transact(|tx| crate::scheduler::prepare_dispatch(tx, &permit, now))
+            .unwrap();
+        let history: (String, u8, u32) = store
+            .connection()
+            .query_row(
+                "SELECT source_ref,effective_priority,consecutive FROM scheduler_fairness WHERE target_run_id=?1",
+                [target.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(history, (source.to_string(), 1, 1));
+        for receipt in receipts {
+            match store.intent_lookup(&receipt.namespace).unwrap() {
+                engagement::IntentLookup::Accepted(observed) => assert_eq!(*observed, receipt),
+                _ => panic!("acceptance changed during fairness selection"),
+            }
+        }
+    }
+
+    #[test]
+    fn scheduler_concurrent_activation_is_one_cas_and_failure_keeps_the_queue() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let scope = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(scope, &candidate, "activation-hire");
+        let port = FakePort::new();
+        queue_external_specialist_task(
+            &fixture.scope(),
+            &caller(16),
+            &port,
+            assign_request(scope, member, "activation-mail", "read_only"),
+            1,
+        )
+        .unwrap();
+        let actor = crate::scheduler::Actor {
+            owner: crate::assignment_queue::Owner::External(scope),
+            run: member,
+        };
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        store
+            .transact(|tx| {
+                crate::scheduler::observe_actor(tx, actor, 1, true, 1_000)?;
+                tx.execute(
+                    "UPDATE members SET actor_residency='passivated' WHERE specialist_run_id=?1",
+                    [member.to_string()],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let path = fixture.database();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                let mut store = EngagementStore::open(&path).unwrap();
+                barrier.wait();
+                store.transact(|tx| {
+                    let operation = crate::scheduler::begin_activation(tx, actor, 2_000)?;
+                    crate::scheduler::capture_operation(tx, actor, operation, "{}", 2_000)?;
+                    Ok(operation)
+                })
+            }));
+        }
+        let results = threads
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        let operation = *results.iter().find_map(|r| r.as_ref().ok()).unwrap();
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        store
+            .transact(|tx| crate::scheduler::finish_activation(tx, actor, operation, false, 32_000))
+            .unwrap();
+        assert_eq!(
+            store
+                .external_member_actor_residency(scope, member)
+                .unwrap(),
+            "unavailable"
+        );
+        assert_eq!(
+            crate::scheduler::candidates(store.connection(), actor.owner, member)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT attempts FROM scheduler_actors WHERE target_run_id=?1",
+                    [member.to_string()],
+                    |r| r.get::<_, u32>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert!(
+            store
+                .transact(|tx| crate::scheduler::begin_activation(tx, actor, 40_000))
+                .is_err()
+        );
+        assert_eq!(port.calls(), 0);
+    }
+
+    #[test]
+    fn scheduler_does_not_enroll_unrelated_ready_only_live_members() {
+        let fixture = Fixture::new();
+        fixture.set_up_namespace();
+        let scope = fixture.open();
+        let candidate = fixture.install();
+        let member = fixture.hire_member(scope, &candidate, "unrelated-hire");
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        store.transact(crate::scheduler::install).unwrap();
+        assert!(
+            crate::scheduler::actors(store.connection())
+                .unwrap()
+                .is_empty()
+        );
+        drop(store);
+        queue_external_specialist_task(
+            &fixture.scope(),
+            &caller(16),
+            &FakePort::new(),
+            assign_request(scope, member, "accepted-enrollment", "read_only"),
+            1,
+        )
+        .unwrap();
+        let store = EngagementStore::open(&fixture.database()).unwrap();
+        let actors = crate::scheduler::actors(store.connection()).unwrap();
+        assert_eq!(actors.len(), 1);
+        assert_eq!(actors[0].run, member);
+    }
+
+    #[test]
+    fn scheduler_mail_selection_filters_ineligible_residency_before_role_ranking() {
+        let (fixture, session, _source, target, context, mut request) = collaboration_fixture();
+        let port = FakePort::new();
+        let resident = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "resident-peer", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        collaboration_core(&fixture, resident, crate::domain::RunLifecycle::Idle, None);
+        let db = rusqlite::Connection::open(fixture.database()).unwrap();
+        db.execute(
+            "UPDATE brokered_members SET actor_residency='passivated' WHERE run_id=?1",
+            [target.to_string()],
+        )
+        .unwrap();
+        request["target"] = json!({"role_ref":"reviewer"});
+        let mut broker =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        assert_eq!(
+            crate::collaboration::admit(&mut broker, &context, &request, &mut effects).unwrap()["target_run_id"],
+            resident.to_string()
+        );
+        // On-mail targets remain eligible while the durable activation or stop
+        // owner is working. Additional mail must not create another generation.
+        for residency in ["activating", "passivating"] {
+            let mut policy = managed_policy();
+            policy.roles[0].collaboration_source = true;
+            policy.roles[0].collaboration_target = true;
+            policy.roles[0].activation_policy = "on_mail".into();
+            let (fixture, session, _source, target, context, request) =
+                collaboration_fixture_policy(policy);
+            let db = rusqlite::Connection::open(fixture.database()).unwrap();
+            db.execute(
+                "UPDATE brokered_members SET actor_residency=?2 WHERE run_id=?1",
+                rusqlite::params![target.to_string(), residency],
+            )
+            .unwrap();
+            let mut broker =
+                crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+            let mut effects =
+                crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+            assert_eq!(
+                crate::collaboration::admit(&mut broker, &context, &request, &mut effects).unwrap()
+                    ["target_run_id"],
+                target.to_string(),
+                "{session} {residency}"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_consultation_effect_uses_original_deadline_and_lifecycle_cap() {
+        let (fixture, session, _, target, context, request) = collaboration_fixture();
+        let mut broker =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        let admitted =
+            crate::collaboration::admit(&mut broker, &context, &request, &mut effects).unwrap();
+        let exchange = Uuid::parse_str(admitted["exchange_id"].as_str().unwrap()).unwrap();
+        let owner = crate::assignment_queue::Owner::Managed(session);
+        let actor = crate::scheduler::Actor { owner, run: target };
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        let now = now_ms().unwrap();
+        let permit = store
+            .transact(|tx| {
+                crate::scheduler::observe_actor(tx, actor, 1, true, now)?;
+                crate::scheduler::claim(tx, owner, target, now)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(permit.work, exchange);
+        let original = crate::collaboration::execution_record(store.connection(), exchange)
+            .unwrap()
+            .deadline_ms;
+        store
+            .transact(|tx| {
+                crate::scheduler::prepare_dispatch(tx, &permit, now)?;
+                tx.execute(
+                    "UPDATE scheduler_claims SET lease_until_ms=0 WHERE claim_id=?1",
+                    [permit.claim.to_string()],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        let record = crate::collaboration::execution_record(store.connection(), exchange).unwrap();
+        assert!(
+            crate::collaboration::bind_execution(
+                &fixture.state_root,
+                session,
+                target,
+                &format!("collaboration-exchange:{exchange}"),
+                false,
+                &record.prompt
+            )
+            .unwrap()
+        );
+        let before_budget = now_ms().unwrap();
+        let remaining = crate::scheduler::effect_remaining(&fixture.state_root, target)
+            .unwrap()
+            .unwrap();
+        assert!(remaining > std::time::Duration::from_secs(30));
+        assert!(remaining <= std::time::Duration::from_millis((original - before_budget) as u64));
+        assert_eq!(
+            crate::collaboration::execution_record(store.connection(), exchange)
+                .unwrap()
+                .deadline_ms,
+            original
+        );
+        assert!(
+            store
+                .transact(|tx| crate::scheduler::claim(tx, owner, target, now_ms()?))
+                .unwrap()
+                .is_none()
+        );
+        for kind in ["activation", "passivation"] {
+            store.transact(|tx| {
+                tx.execute("UPDATE scheduler_actors SET operation_id=?2,operation_kind=?3,lease_until_ms=?4 WHERE target_run_id=?1", rusqlite::params![target.to_string(),Uuid::now_v7().to_string(),kind,now_ms()?+1_000]).unwrap();
+                Ok(())
+            }).unwrap();
+            assert!(
+                crate::scheduler::effect_remaining(&fixture.state_root, target)
+                    .unwrap()
+                    .unwrap()
+                    <= std::time::Duration::from_secs(1)
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_expires_original_assignment_deadlines_once_without_dispatch() {
+        for managed in [false, true] {
+            let fixture = Fixture::new();
+            let port = FakePort::new();
+            let (scope, member, owner) = if managed {
+                let scope = fixture.managed_session();
+                let member = Uuid::parse_str(
+                    &fixture
+                        .spawn_member(scope, "expiry-spawn", &port)
+                        .member
+                        .member_ref,
+                )
+                .unwrap();
+                (
+                    scope,
+                    member,
+                    crate::assignment_queue::Owner::Managed(scope),
+                )
+            } else {
+                fixture.set_up_namespace();
+                let scope = fixture.open();
+                let candidate = fixture.install();
+                (
+                    scope,
+                    fixture.hire_member(scope, &candidate, "expiry-hire"),
+                    crate::assignment_queue::Owner::External(scope),
+                )
+            };
+            let mut receipts = Vec::new();
+            for (key, seconds) in [("expiry-first", 1), ("expiry-later", 600)] {
+                let result = if managed {
+                    let mut request =
+                        managed_assign(member, "Retained expiry body.", "read_only", None);
+                    request.deadline_seconds = seconds;
+                    queue_specialist_task(
+                        &fixture.scope(),
+                        &fixture.managed_context(scope, key),
+                        &caller(16),
+                        &port,
+                        request,
+                        1,
+                    )
+                    .unwrap()
+                } else {
+                    let mut request = assign_request(scope, member, key, "read_only");
+                    request.deadline_seconds = seconds;
+                    queue_external_specialist_task(&fixture.scope(), &caller(16), &port, request, 1)
+                        .unwrap()
+                };
+                receipts.push(result.1);
+            }
+            let task = Uuid::parse_str(receipts[0].accepted_subjects.task_ref.as_deref().unwrap())
+                .unwrap();
+            let later = receipts[1].accepted_subjects.task_ref.as_ref().unwrap();
+            let actor = crate::scheduler::Actor { owner, run: member };
+            let mut store = EngagementStore::open(&fixture.database()).unwrap();
+            let deadline: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT deadline_ms FROM assignment_queue_entries WHERE task_id=?1",
+                    [task.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            store
+                .transact(|tx| crate::scheduler::expire_queued(tx, actor, deadline - 1))
+                .unwrap();
+            assert_eq!(
+                crate::scheduler::candidates(store.connection(), owner, member)
+                    .unwrap()
+                    .len(),
+                2
+            );
+            for _ in 0..2 {
+                store
+                    .transact(|tx| crate::scheduler::expire_queued(tx, actor, deadline))
+                    .unwrap();
+            }
+            let query = if managed {
+                "SELECT state,safe_error_code,target_turn_id FROM brokered_tasks WHERE task_id=?1"
+            } else {
+                "SELECT state,safe_error_code,turn_id FROM tasks WHERE task_id=?1"
+            };
+            let state: (String, String, Option<String>) = store
+                .connection()
+                .query_row(query, [task.to_string()], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .unwrap();
+            assert_eq!(
+                state,
+                (
+                    if managed { "failed" } else { "expired" }.into(),
+                    "OPERATION_TIMEOUT".into(),
+                    None
+                )
+            );
+            assert_eq!(store.connection().query_row("SELECT accounting_state FROM caller_scope_assignments WHERE assignment_id=?1",[task.to_string()],|r|r.get::<_,String>(0)).unwrap(),"proved_nondispatch");
+            assert_eq!(
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM assignment_queue_entries WHERE task_id=?1",
+                        [task.to_string()],
+                        |r| r.get::<_, u64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            let remaining =
+                crate::scheduler::candidates(store.connection(), owner, member).unwrap();
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].id.to_string(), *later);
+            let query = if managed {
+                "SELECT COUNT(*) FROM orchestration_events WHERE session_id=?1 AND kind='scheduler_queued_work_expired'"
+            } else {
+                "SELECT COUNT(*) FROM events WHERE engagement_id=?1 AND kind='scheduler_queued_work_expired'"
+            };
+            assert_eq!(
+                store
+                    .connection()
+                    .query_row(query, [scope.to_string()], |r| r.get::<_, u64>(0))
+                    .unwrap(),
+                1
+            );
+            assert!(
+                matches!(store.intent_lookup(&receipts[0].namespace).unwrap(),engagement::IntentLookup::Accepted(ref retained) if retained.as_ref()==&receipts[0])
+            );
+            assert!(port.dispatched_tasks().is_empty());
+        }
+    }
+
+    #[test]
+    fn scheduler_expires_consultation_without_dispatch_or_duplicate_event() {
+        let (fixture, session, _, target, context, request) = collaboration_fixture();
+        let mut broker =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        let admitted =
+            crate::collaboration::admit(&mut broker, &context, &request, &mut effects).unwrap();
+        let id = Uuid::parse_str(admitted["exchange_id"].as_str().unwrap()).unwrap();
+        let actor = crate::scheduler::Actor {
+            owner: crate::assignment_queue::Owner::Managed(session),
+            run: target,
+        };
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        let original = crate::collaboration::execution_record(store.connection(), id)
+            .unwrap()
+            .deadline_ms;
+        let mail: u64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM collaboration_mailbox", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        store
+            .transact(|tx| crate::scheduler::expire_queued(tx, actor, original - 1))
+            .unwrap();
+        assert!(
+            crate::scheduler::candidates(store.connection(), actor.owner, target)
+                .unwrap()
+                .iter()
+                .any(|c| c.id == id)
+        );
+        for _ in 0..2 {
+            store
+                .transact(|tx| crate::scheduler::expire_queued(tx, actor, original))
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT execution_state FROM collaboration_exchanges WHERE exchange_id=?1",
+                    [id.to_string()],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "expired"
+        );
+        assert!(
+            crate::scheduler::candidates(store.connection(), actor.owner, target)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM scheduler_claims WHERE target_run_id=?1",
+                    [target.to_string()],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.connection().query_row("SELECT COUNT(*) FROM orchestration_events WHERE session_id=?1 AND kind='scheduler_queued_work_expired'",[session.to_string()],|r|r.get::<_,u64>(0)).unwrap(),1);
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM collaboration_mailbox", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            mail
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT deadline_ms FROM collaboration_exchanges WHERE exchange_id=?1",
+                    [id.to_string()],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn scheduler_retained_body_and_receipt_tampering_never_claim_new_authority() {
+        for tamper in ["content", "receipt", "owner", "causal_order"] {
+            let fixture = Fixture::new();
+            fixture.set_up_namespace();
+            let scope = fixture.open();
+            let candidate = fixture.install();
+            let member = fixture.hire_member(scope, &candidate, "authority-hire");
+            let (_, receipt) = queue_external_specialist_task(
+                &fixture.scope(),
+                &caller(16),
+                &FakePort::new(),
+                assign_request(scope, member, "authority-queue", "read_only"),
+                1,
+            )
+            .unwrap();
+            let owner = crate::assignment_queue::Owner::External(scope);
+            let mut store = EngagementStore::open(&fixture.database()).unwrap();
+            let permit = store
+                .transact(|tx| crate::scheduler::claim(tx, owner, member, now_ms()?))
+                .unwrap()
+                .unwrap();
+            assert!(
+                crate::scheduler::retained_task(
+                    &store,
+                    &permit,
+                    &fixture.view.workspace_id,
+                    &fixture.state_root
+                )
+                .is_ok()
+            );
+            store.transact(|tx|{
+                match tamper {
+                    "content"=>{tx.execute("UPDATE result_content SET bytes=x'7b7d' WHERE sha256 IN (SELECT sha256 FROM result_content_refs WHERE owner_kind='accepted_task' AND owner_id=?1 AND representation='task_body')",[permit.work.to_string()]).unwrap();},
+                    "receipt"=>{
+                    assert!(tx.execute("UPDATE delegation_operations SET receipt_json='{}' WHERE operation_ref=?1",[receipt.operation_ref.to_string()]).is_err());
+                    // Simulate storage corruption only after proving the normal
+                    // application update is rejected by the immutable guard.
+                    tx.execute_batch("DROP TRIGGER delegation_receipt_frozen").unwrap();
+                    tx.execute("UPDATE delegation_operations SET receipt_json='{}' WHERE operation_ref=?1",[receipt.operation_ref.to_string()]).unwrap();},
+                    "owner"=>{tx.execute("UPDATE engagements SET controller_binding_json='{}' WHERE engagement_id=?1",[scope.to_string()]).unwrap();},
+                    "causal_order"=>{tx.execute("DELETE FROM events WHERE engagement_id=?1 AND kind='assignment_queued'",[scope.to_string()]).unwrap();},
+                    _=>unreachable!(),
+                };Ok(())
+            }).unwrap();
+            let denied = if tamper == "causal_order" {
+                crate::scheduler::candidates(store.connection(), owner, member).is_err()
+            } else {
+                crate::scheduler::retained_task(
+                    &store,
+                    &permit,
+                    &fixture.view.workspace_id,
+                    &fixture.state_root,
+                )
+                .is_err()
+            };
+            assert!(denied, "{tamper}");
+            assert_eq!(
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT state FROM tasks WHERE task_id=?1",
+                        [permit.work.to_string()],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "queued"
             );
         }
     }

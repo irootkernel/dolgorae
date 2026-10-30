@@ -1512,6 +1512,142 @@ def successor_startup_component_campaign(binary: Path, codex: Path) -> dict[str,
             print(json.dumps({"schema":"dolgorae.native-successor-startup-failure/v1",
                               "owned_fixture_retained":str(root)}), file=sys.stderr)
 
+
+class SchedulerResponses(ScriptedResponses):
+    """Four accepted tasks, with actual native writes and retained instructions."""
+    def __init__(self, root: Path):
+        super().__init__(concurrent_requests=True)
+        self.root = root
+        self.issued = set()
+        self.completed = set()
+        self.markers = {"scheduler-managed-write", "scheduler-external-write",
+                        "scheduler-pool-sibling", "scheduler-pool-resume"}
+
+    def respond(self, request):
+        with self.lock:
+            self.posts += 1
+            if self.posts > 6:
+                raise ProbeCheckFailure("scheduler_component_post_bound")
+            users = [item for item in request.get("input", [])
+                     if item.get("type") == "message" and item.get("role") == "user"]
+            text = "".join(block.get("text", "") for block in users[-1].get("content", [])) if users else ""
+            if "\n\nAccepted task:\n" not in text:
+                raise ProbeCheckFailure("scheduler_accepted_task_missing")
+            task, end = json.JSONDecoder().raw_decode(text.split("\n\nAccepted task:\n", 1)[1])
+            marker = task.get("brief")
+            if marker not in self.markers or marker in self.completed:
+                raise ProbeCheckFailure("scheduler_task_identity_changed")
+            captured = json.dumps([request.get("instructions"), request.get("input")])
+            if GENERAL not in captured or "Edited authoring source" in captured:
+                raise ProbeCheckFailure("scheduler_retained_role_not_used")
+            private_file(self.root / f"scheduler-http-{self.posts}.json", json.dumps(request).encode())
+            call = "scheduler-call-" + marker
+            if marker.endswith("-write") and marker not in self.issued:
+                self.issued.add(marker)
+                path = "scheduler-managed.txt" if marker == "scheduler-managed-write" else "scheduler-external.txt"
+                item = code_call(request, call, [(call, "exec_command", {"cmd":f"printf 'written\\n' > {path}; printf 'written\\n'", "yield_time_ms":1000})])
+            else:
+                if marker.endswith("-write"):
+                    if terminal_output(code_results(request, call, [call])[call]) != (0, "written\n"):
+                        raise ProbeCheckFailure("scheduler_native_write_unverified")
+                self.completed.add(marker)
+                item = {"type":"message", "role":"assistant", "id":call,
+                        "content":[{"type":"output_text", "text":"Bounded accepted task completed."}]}
+            identity = "scheduler-response-" + str(self.posts)
+            return [{"type":"response.created", "response":{"id":identity}},
+                    {"type":"response.output_item.done", "item":item},
+                    {"type":"response.completed", "response":{"id":identity,
+                     "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}]
+
+
+def scheduler_component_campaign(binary: Path, codex: Path) -> dict[str, Any]:
+    if os.environ.get(OPT_IN) != "1" or executable_identity(codex)["sha256"] != CODEX_SHA256:
+        raise ValueError("scheduler component requires the opted-in qualified executable")
+    correction = _scheduler_component_phase(binary, codex, correction=True)
+    normal = _scheduler_component_phase(binary, codex, correction=False)
+    combined = dict(normal, correction_subphase=correction, both_subphases_verified=True)
+    private_file(Path(normal["owned_fixture_retained"]) / "combined-result.json", json.dumps(combined).encode())
+    return combined
+
+
+def _scheduler_component_phase(binary: Path, codex: Path, *, correction: bool) -> dict[str, Any]:
+    if os.environ.get(OPT_IN) != "1" or executable_identity(codex)["sha256"] != CODEX_SHA256:
+        raise ValueError("scheduler component requires the opted-in qualified executable")
+    # Native Unix socket paths require a short physical fixture root.
+    root = Path(tempfile.mkdtemp(prefix="dsc-", dir="/private/tmp")).resolve()
+    root.chmod(0o700)
+    fixture = None
+    driver = None
+    environment = None
+    passed = False
+    try:
+        for name in ("home", "tmp", "config", "cache", "profile", "profile-members", "workspace"):
+            (root / name).mkdir(mode=0o700)
+        private_file(root / "fixture-owned", b"native-successor-pipeline/v1\n")
+        if correction:
+            private_file(root / "scheduler-correction-phase", b"dolgorae.scheduler-correction-phase/v1\n")
+        environment = isolated_environment(root)
+        environment.update({OPT_IN:"1", "DOLGORAE_NATIVE_SCHEDULER_COMPONENT":"1",
+                            "GIT_CONFIG_NOSYSTEM":"1", "GIT_CONFIG_GLOBAL":"/dev/null"})
+        checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
+        cargo = shlex.split(os.environ.get("CARGO", "cargo"))
+        for name, command in [("main", cargo + ["build", "--locked", "--bin", "dolgorae"]),
+                              ("driver", cargo + ["rustc", "--locked", "--example", "native_successor_pipeline", "--",
+                                                   "--cfg", "dolgorae_native_acceptance", "--cfg", "test"])]:
+            build = subprocess.run(command, cwd=PROTOCOL.parents[1], capture_output=True, text=True, timeout=600)
+            private_file(root / f"build-{name}.stdout", build.stdout.encode())
+            private_file(root / f"build-{name}.stderr", build.stderr.encode())
+            if build.returncode:
+                raise ProbeCheckFailure("scheduler_component_build_failed", {"target":name})
+        target = Path(os.environ.get("CARGO_TARGET_DIR", str(PROTOCOL.parents[1] / "target"))).resolve()
+        if binary != (target / "debug/dolgorae").resolve():
+            raise ValueError("scheduler census must use the current candidate main binary")
+        driver = root / "fixture-scheduler-driver"
+        shutil.copyfile(target / "debug/examples/native_successor_pipeline", driver)
+        driver.chmod(0o700)
+        fixture = SchedulerResponses(root)
+        private_file(root / "profile/config.toml", b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n'
+                     + fixture_config(fixture.base_url) + b"\n[features]\nplugins = false\nshell_snapshot = false\n")
+        private_file(root / "profile-members/config.toml", (root / "profile/config.toml").read_bytes())
+        result = subprocess.run([str(driver), str(root), str(codex)], env=environment,
+                                capture_output=True, text=True, timeout=300)
+        private_file(root / "driver.stdout", result.stdout.encode())
+        private_file(root / "driver.stderr", result.stderr.encode())
+        if result.returncode or fixture.failure:
+            raise ProbeCheckFailure("scheduler_component_driver_failed", {"exit":result.returncode,"posts":fixture.posts,"fixture_failure":fixture.failure})
+        value = json.loads(result.stdout)
+        if correction:
+            if not value.get("passed") or value.get("phase") != "correction" or not value.get("activation_compensation", {}).get("passed") or fixture.posts != 0:
+                raise ProbeCheckFailure("scheduler_correction_evidence_incomplete")
+        elif not value.get("passed") or value.get("phase") != "normal" or fixture.posts != 6 or fixture.completed != fixture.markers:
+            raise ProbeCheckFailure("scheduler_component_evidence_incomplete")
+        inspected = subprocess.run([str(binary), "runtime", "orphan", "inspect", "--owner-root-under", str(root)], env=environment, capture_output=True, text=True, timeout=30)
+        if inspected.returncode:
+            raise ProbeCheckFailure("scheduler_owned_process_inspection_failed")
+        observation=json.loads(inspected.stdout)
+        require_fixture_process_absence(observation["data"])
+        private_file(root / "owned-process-absence.json", json.dumps(observation).encode())
+        value.update(loopback_posts=fixture.posts, external_provider_requests=0,
+                     real_account_or_credentials_used=False, codex_sha256=CODEX_SHA256,
+                     driver_sha256=hashlib.sha256(driver.read_bytes()).hexdigest(),
+                     census_binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+                     owned_fixture_retained=str(root), owned_process_absence_verified=True)
+        private_file(root / "result.json", json.dumps(value).encode())
+        passed = True
+        return value
+    finally:
+        if not passed and driver is not None and driver.is_file() and environment is not None:
+            cleanup = subprocess.run([str(driver), "--cleanup", str(root)], env=environment,
+                                     capture_output=True, text=True, timeout=120)
+            private_file(root / "cleanup.stdout", cleanup.stdout.encode())
+            private_file(root / "cleanup.stderr", cleanup.stderr.encode())
+            private_file(root / "cleanup-status.json", json.dumps({"exit":cleanup.returncode}).encode())
+        if fixture is not None:
+            fixture.close()
+        if not passed:
+            print(json.dumps({"schema":"dolgorae.native-scheduler-component-failure/v1",
+                              "owned_fixture_retained":str(root)}), file=sys.stderr)
+
 def main() -> int:
     if os.environ.get(OPT_IN) != "1":
         print("integrated native acceptance requires explicit opt-in")
@@ -1527,12 +1663,17 @@ def main() -> int:
     parser.add_argument("--successor-only", action="store_true")
     parser.add_argument("--collaboration-component-only", action="store_true")
     parser.add_argument("--successor-startup-only", action="store_true")
+    parser.add_argument("--scheduler-component-only", action="store_true")
     args = parser.parse_args()
     try:
         if args.successor_startup_only:
-            if args.collaboration_component_only or args.default_feature_startup_only or args.successor_only or args.ordinary_close_only:
+            if args.scheduler_component_only or args.collaboration_component_only or args.default_feature_startup_only or args.successor_only or args.ordinary_close_only:
                 raise ValueError("successor startup is a distinct component mode")
             result = successor_startup_component_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True))
+        elif args.scheduler_component_only:
+            if args.collaboration_component_only or args.default_feature_startup_only or args.successor_only or args.ordinary_close_only:
+                raise ValueError("scheduler component is a distinct mode")
+            result = scheduler_component_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True))
         elif args.collaboration_component_only:
             if args.default_feature_startup_only or args.successor_only or args.ordinary_close_only:
                 raise ValueError("collaboration component is a distinct mode")

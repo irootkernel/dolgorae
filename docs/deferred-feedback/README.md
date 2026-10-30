@@ -250,16 +250,23 @@ from current work. It is not a second roadmap or status authority.
 ## DF-023: Converge an uncertain successor dispatch with no Turn id
 
 - Owner: Delegation runtime maintainers
-- Finding: a dispatch whose transport effect stayed uncertain and whose Turn id
-  was never recorded ends in the typed recovery row today, yet the durable facts
-  to converge it already exist in the Run ledger — `IdempotencyReserved` maps
-  the Submit key to its operation id and `TurnStarted` maps the operation id
-  to a Turn id.
-- Reason for deferral: converging from the ledger needs a complete-journal
-  non-dispatch proof plus a late-admission block; the weaker
-  "no Turn id plus generation absent means proved non-dispatch" rule was
-  rejected by a design check (2026-10-23) because a
-  worker can die after turn/start and before `TurnAccepted` is journaled.
+- Finding: a successor dispatch without a scheduler assignment claim can remain
+  in the typed recovery row when its transport effect is uncertain and no Turn
+  id was recorded. Its Run ledger may already retain `IdempotencyReserved`
+  mapping the Submit key to an operation id and `TurnStarted` mapping that
+  operation to a Turn id.
+- Scope boundary: TASK-082 repairs positively verified original acceptance for
+  managed and external assignments with a retained scheduler claim. This entry
+  retains successor recovery without that claim and genuinely unresolved
+  effects without positive acceptance evidence. Consultation Turn and result
+  recovery remain TASK-083 work.
+- Reason for deferral: positive acceptance recovery is not integrated with the
+  successor path that has no scheduler claim. A complete-journal non-dispatch
+  proof plus a late-admission block would be required before redispatching an
+  unresolved request; missing positive evidence alone is insufficient. The
+  weaker "no Turn id plus generation absent means proved non-dispatch" rule
+  was rejected by a design check (2026-10-23) because a worker can die after
+  turn/start and before `TurnAccepted` is journaled.
 - Revisit condition: a complete-journal proof owner or the next delegation
   recovery revision.
 
@@ -358,8 +365,8 @@ from current work. It is not a second roadmap or status authority.
 ## DF-030: Consolidate native successor component selection
 
 - Owner: Native successor acceptance fixture maintainers
-- Finding: the example entrypoint selects the collaboration component, while
-  its support campaign selects successor startup and supplies mode-specific
+- Finding: the example entrypoint selects collaboration and scheduler components,
+  while its support campaign selects successor startup and supplies mode-specific
   instructions and access settings.
 - Reason for deferral: the bounded startup branch and the default campaign use
   their intended settings. A shared selection boundary would reduce the work
@@ -396,17 +403,60 @@ from current work. It is not a second roadmap or status authority.
 - Revisit condition: changing optional-tool membership filtering, Role target
   resolution, or Caller policy capture handling.
 
-## DF-033: Extend offline guards for successor startup selection
+## DF-034: Extend optional scheduler boundary regressions
 
-- Owner: Native acceptance fixture maintainers
-- Finding: existing offline tests cover opt-in and executable-identity refusal
-  for older campaigns but do not select the successor-startup campaign or its
-  combined-mode refusal.
-- Reason for deferral: the new campaign checks opt-in and the pinned executable
-  digest before allocating its owned root, and the parser rejects combined modes
-  before dispatch. Additional offline cases would pin these existing guards.
-- Revisit condition: changing native startup opt-in, executable qualification,
-  root allocation, or component-mode exclusivity.
+- Owner: Scheduler runtime regression maintainers
+- Finding: additional default-suite central-entry, passivation-refusal,
+  retained activation attempt limits, immutable-policy refusal and durable
+  fairness-history cases can strengthen the existing behavior checks.
+- Reason for deferral: these additional combinations do not identify another
+  current production defect. Mandatory recovery, compensation, expiry and
+  fairness-correction verification is outside this deferred item. Unavailable
+  residency stops automatic retries; an attempt-bound case must preserve that rule.
+- Revisit condition: changing central scheduling, passivation fences,
+  activation attempt policy, policy capture or persistent fairness selection.
+
+## DF-035: Improve safe scheduler diagnostics
+
+- Owner: Scheduler diagnostics maintainers
+- Finding: distinct closed scheduler reasons share a generic top-level message,
+  and invalid workspace registration is skipped without a trusted diagnostic.
+- Reason for deferral: machine reasons remain available for actor failures.
+  Workspace identity failure must prohibit opening or writing that workspace's
+  store; diagnostic placement needs an already trusted boundary.
+- Revisit condition: changing scheduler operator diagnostics or adding a trusted
+  control-plane diagnostic surface.
+
+## DF-036: Share fixed scheduler default constants
+
+- Owner: Collaboration policy and scheduler maintainers
+- Finding: immutable scheduling defaults and matching runtime timer values have
+  equivalent literals in their current owners.
+- Reason for deferral: the fixed values currently agree. Sharing constants is
+  independent of the current recovery and expiry corrections and must preserve
+  admission-time immutable capture.
+- Revisit condition: changing a scheduling default or introducing another
+  consumer of the captured policy.
+
+## DF-037: Centralize accepted-work identity constructors
+
+- Owner: Accepted-work and Submit identity maintainers
+- Finding: accepted-work schema names and task Submit key construction have
+  matching literals across their producers and consumers.
+- Reason for deferral: no current identity mismatch is established. A shared
+  constructor should preserve each owner and validation boundary.
+- Revisit condition: changing an accepted-work schema or Submit key, or adding
+  another producer or consumer.
+
+## DF-038: Revisit scheduler extension bootstrap ownership
+
+- Owner: Scheduler persistence maintainers
+- Finding: admission and runtime recovery both install or validate the private
+  scheduler extension through its current sanctioned dependency boundary.
+- Reason for deferral: admission-time policy capture and recovery from original
+  durable queues must remain available. Simplifying bootstrap ownership is
+  independent of current correctness.
+- Revisit condition: changing extension migration or initialization ownership.
 
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the

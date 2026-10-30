@@ -51,6 +51,7 @@ use crate::workspace::{
     GitBaseline, LosslessPath, SystemWorkspacePlatform, WorkspaceMode, WorkspaceService,
     WorkspaceView, isolated_specialist_root, verify_secure_directory,
 };
+use rusqlite::OptionalExtension as _;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1477,254 +1478,7 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
         &self,
         request: crate::delegation_service::MemberTaskDispatch<'_>,
     ) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
-        use crate::delegation_service::MemberDispatchOutcome;
-        let write = request.execution_intent == "canonical_workspace_write";
-        // A writer release that fails is surfaced, never treated as released:
-        // the caller keeps the accepted effect and the conservative round.
-        let release = |state_root: &Path| -> Result<(), MachineError> {
-            if write {
-                release_external_writer(
-                    request.view,
-                    state_root,
-                    request.member_ref,
-                    request.engagement_id,
-                    self.carrier,
-                )?;
-            }
-            Ok(())
-        };
-        // The next authorized mutation of this member resolves the guard a
-        // terminal left behind; a blocked guard stays for recovery.
-        release_stale_member_writer(
-            request.view,
-            request.state_root,
-            request.member_ref,
-            SettlementOwner::External {
-                engagement_id: request.engagement_id,
-            },
-            self.carrier,
-            write,
-        )?;
-        if write {
-            if let Err(error) = acquire_external_writer(
-                request.view,
-                request.state_root,
-                request.member_ref,
-                request.engagement_id,
-                self.carrier,
-            ) {
-                // The acquire can fail after leaving a pending writer transition,
-                // so the durable record decides whether non-dispatch is proved.
-                let writer = crate::writer::WriterStore::new(
-                    request.state_root,
-                    &request.view.workspace_id,
-                    DarwinSystem.current_uid(),
-                )
-                .load();
-                return Ok(acquire_failure_outcome(
-                    writer.as_ref().ok(),
-                    request.member_ref,
-                    error,
-                ));
-            }
-        } else if let Err(error) =
-            ensure_external_specialist_worker(request.view, request.state_root, request.member_ref)
-        {
-            return Ok(MemberDispatchOutcome::Refused {
-                code: error.code,
-                message: error.message,
-            });
-        }
-        let mut store = crate::engagement::EngagementStore::open(
-            &crate::engagement::EngagementStore::workspace_database_path(request.state_root),
-        )?;
-        if let Err(error) =
-            store.mark_external_member_resident(request.engagement_id, request.member_ref)
-        {
-            return refused_after_release(release(request.state_root), error.code, error.message);
-        }
-        // The Turn is built from the retained acceptance bytes, verified against
-        // the accepted identity, never from current caller input.
-        let stored =
-            crate::engagement::accepted_task_content(store.connection(), request.task_ref)?;
-        let Some((task_body, contexts, target)) = stored else {
-            return refused_after_release(
-                release(request.state_root),
-                "ACCEPTED_TASK_CONTENT_UNAVAILABLE".to_owned(),
-                "the accepted task bytes are no longer retained".to_owned(),
-            );
-        };
-        let contents = crate::successor_capture::AcceptedTaskContents {
-            task_body,
-            contexts,
-            target,
-        };
-        let prompt = match contents.prompt(
-            request.accepted,
-            request.execution_intent,
-            request.deadline_seconds,
-        ) {
-            Ok(prompt) => prompt,
-            Err(error) => {
-                return refused_after_release(
-                    release(request.state_root),
-                    error.code,
-                    error.message,
-                );
-            }
-        };
-        let now = unix_time_ms_semantic()?;
-        if write {
-            // Capture under the held authority, then record and mark dispatching
-            // in one transaction before the Turn exists.
-            let workspace = request.view.canonical_path.to_path_buf()?;
-            let capture = match crate::successor_capture::capture_dispatch_index(
-                &workspace,
-                request.task_ref,
-            ) {
-                Ok(capture) => capture,
-                Err(error) => {
-                    return refused_after_release(
-                        release(request.state_root),
-                        error.code,
-                        error.message,
-                    );
-                }
-            };
-            let recorded = store.transact(|transaction| {
-                crate::engagement::record_dispatch_index_with_content(
-                    transaction,
-                    crate::engagement::DispatchIndexRecord {
-                        task_id: request.task_ref,
-                        workspace_ref: &request.view.workspace_id,
-                        run_ref: request.member_ref,
-                        head_commit: capture.head.as_deref(),
-                        index_sha256: &capture.sha256,
-                        index_byte_length: u64::try_from(capture.canonical.len()).map_err(
-                            |_| {
-                                MachineError::invalid_argument(
-                                    "dispatch_index",
-                                    "the index is unrepresentable",
-                                )
-                            },
-                        )?,
-                        file_count: capture.file_count,
-                        baseline_bytes: capture.baseline_bytes,
-                    },
-                    &capture.canonical,
-                    &capture.baseline,
-                    now,
-                )?;
-                crate::engagement::mark_external_task_dispatching_in(
-                    transaction,
-                    request.engagement_id,
-                    request.task_ref,
-                    now,
-                )
-                .map(|_| ())
-            });
-            if let Err(error) = recorded {
-                return refused_after_release(
-                    release(request.state_root),
-                    error.code,
-                    error.message,
-                );
-            }
-        } else if let Err(error) = store.transact(|transaction| {
-            crate::engagement::mark_external_task_dispatching_in(
-                transaction,
-                request.engagement_id,
-                request.task_ref,
-                now,
-            )
-            .map(|_| ())
-        }) {
-            return Ok(MemberDispatchOutcome::Refused {
-                code: error.code,
-                message: error.message,
-            });
-        }
-        let uid = DarwinSystem.current_uid();
-        let key = request.idempotency_key.to_owned();
-        let response = crate::worker::call_run_worker(
-            request.state_root,
-            request.member_ref,
-            uid,
-            Some(self.carrier.raw_fd()),
-            |expected| crate::worker::ControlRequestV1::ExternalSubmit {
-                expected,
-                caller: None,
-                engagement_id: request.engagement_id,
-                request: crate::worker::TurnControlRequest {
-                    normalized_request_sha256: None,
-                    write: false,
-                    message: prompt,
-                    idempotency_key: key,
-                    effort: None,
-                    images: Vec::new(),
-                },
-            },
-        );
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                let error = error.machine_error(request.member_ref, request.state_root);
-                return Ok(MemberDispatchOutcome::Uncertain {
-                    code: error.code,
-                    message: error.message,
-                });
-            }
-        };
-        // The settlement attempt below covers an immediate Terminal as well as a
-        // terminal that is already durable when the Turn id is recorded.
-        let turn_id = match response {
-            crate::worker::ControlResponseV1::Accepted { accepted } => accepted.turn_id,
-            crate::worker::ControlResponseV1::Terminal { terminal } => terminal.turn_id,
-            crate::worker::ControlResponseV1::Failed { code, message, .. } => {
-                // Case B needs an authoritative fact that the Turn was not
-                // accepted. Only a code that proves non-dispatch qualifies;
-                // everything else stays uncertain and conservative.
-                if !proved_non_dispatch(&code) {
-                    return Ok(MemberDispatchOutcome::Uncertain { code, message });
-                }
-                return refused_after_release(release(request.state_root), code, message);
-            }
-            _ => {
-                return Ok(MemberDispatchOutcome::Uncertain {
-                    code: "DISPATCH_OUTCOME_UNKNOWN".to_owned(),
-                    message: "the worker returned an unexpected dispatch response".to_owned(),
-                });
-            }
-        };
-        let now = unix_time_ms_semantic()?;
-        store.transact(|transaction| {
-            crate::engagement::mark_external_task_running_in(
-                transaction,
-                request.engagement_id,
-                request.task_ref,
-                &turn_id,
-                now,
-            )
-            .map(|_| ())
-        })?;
-        // The executor accepted the task: the round is now counted accepted.
-        store
-            .transact(|transaction| crate::caller_scope::accepted(transaction, request.task_ref))?;
-        // A durable terminal may already exist (fast completion); this settles
-        // it exactly once, otherwise it is a no-op and the worker hook or the
-        // restart sweep converges it.
-        settle_successor_task(
-            request.view,
-            request.state_root,
-            SettlementOwner::External {
-                engagement_id: request.engagement_id,
-            },
-            request.member_ref,
-            request.task_ref,
-            request.execution_intent,
-            Some(self.carrier),
-        )?;
-        Ok(MemberDispatchOutcome::Accepted { turn_ref: turn_id })
+        dispatch_accepted_external_task(request, self.carrier, None)
     }
 
     /// Settle one dispatched member task from the member Run's observed Turn.
@@ -1798,6 +1552,7 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
             request.task_ref,
             request.execution_intent,
             Some(broker_carrier.as_ref().unwrap_or(self.carrier)),
+            None,
         )
     }
 
@@ -1866,6 +1621,7 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
                 request.task_ref,
                 request.execution_intent,
                 None,
+                None,
             )? {
                 crate::delegation_service::MemberSettlement::Terminal => {
                     finish_settled_reconciliation_admission(
@@ -1902,6 +1658,7 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
             request.member_ref,
             request.task_ref,
             request.execution_intent,
+            None,
             None,
         )? {
             crate::delegation_service::MemberSettlement::Terminal => {
@@ -1953,190 +1710,7 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
         &self,
         request: crate::delegation_service::ManagedTaskDispatch<'_>,
     ) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
-        use crate::delegation_service::MemberDispatchOutcome;
-        let prompt = request.contents.prompt(
-            request.accepted,
-            request.execution_intent,
-            request.deadline_seconds,
-        )?;
-        let broker = crate::orchestration::OrchestrationStore::open(request.state_root)?;
-        let credential = broker.member_credential(request.member_ref)?;
-        let carrier = credential.controller_carrier()?;
-        let owner = SettlementOwner::Managed {
-            session_id: request.session_id,
-        };
-        let write = request.execution_intent == "canonical_workspace_write";
-        release_stale_member_writer(
-            request.view,
-            request.state_root,
-            request.member_ref,
-            owner,
-            &carrier,
-            write,
-        )?;
-        let release = || {
-            if write {
-                release_writer_authorized(
-                    request.view,
-                    request.state_root,
-                    request.member_ref,
-                    &carrier,
-                    None,
-                    None,
-                )
-                .map(|_| ())
-            } else {
-                Ok(())
-            }
-        };
-        if write
-            && let Err(error) = acquire_writer_authorized(
-                request.view,
-                request.state_root,
-                request.member_ref,
-                &carrier,
-                true,
-                None,
-                None,
-                None,
-            )
-        {
-            let writer = crate::writer::WriterStore::new(
-                request.state_root,
-                &request.view.workspace_id,
-                DarwinSystem.current_uid(),
-            )
-            .load();
-            return Ok(acquire_failure_outcome(
-                writer.as_ref().ok(),
-                request.member_ref,
-                error,
-            ));
-        }
-        #[cfg(test)]
-        managed_dispatch_preparation();
-        let mut store = crate::engagement::EngagementStore::open(
-            &crate::engagement::EngagementStore::workspace_database_path(request.state_root),
-        )?;
-        let now = unix_time_ms_semantic()?;
-        let capture = if write {
-            match crate::successor_capture::capture_dispatch_index(
-                &request.view.canonical_path.to_path_buf()?,
-                request.task_ref,
-            ) {
-                Ok(capture) => Some(capture),
-                Err(error) => return refused_after_release(release(), error.code, error.message),
-            }
-        } else {
-            None
-        };
-        if let Err(error) = store.transact(|transaction| {
-            if let Some(capture) = &capture {
-                crate::engagement::record_dispatch_index_with_content(
-                    transaction,
-                    crate::engagement::DispatchIndexRecord {
-                        task_id: request.task_ref,
-                        workspace_ref: &request.view.workspace_id,
-                        run_ref: request.member_ref,
-                        head_commit: capture.head.as_deref(),
-                        index_sha256: &capture.sha256,
-                        index_byte_length: capture.canonical.len() as u64,
-                        file_count: capture.file_count,
-                        baseline_bytes: capture.baseline_bytes,
-                    },
-                    &capture.canonical,
-                    &capture.baseline,
-                    now,
-                )?;
-            }
-            crate::orchestration::mark_successor_task_dispatching(
-                transaction,
-                request.session_id,
-                request.task_ref,
-                now,
-            )
-        }) {
-            // The reservation is the dispatch boundary, so a refusal here proves
-            // the Turn never left.
-            return refused_after_release(release(), error.code, error.message);
-        }
-        #[cfg(test)]
-        MANAGED_SUBMIT_CALLS.with(|count| count.set(count.get() + 1));
-        let response = crate::worker::call_run_worker(
-            request.state_root,
-            request.member_ref,
-            DarwinSystem.current_uid(),
-            Some(carrier.raw_fd()),
-            |expected| crate::worker::ControlRequestV1::Submit {
-                expected,
-                caller: None,
-                request: crate::worker::TurnControlRequest {
-                    normalized_request_sha256: None,
-                    write: false,
-                    message: prompt,
-                    idempotency_key: format!("successor-task:{}", request.task_ref),
-                    effort: None,
-                    images: Vec::new(),
-                },
-            },
-        );
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                let error = error.machine_error(request.member_ref, request.state_root);
-                return Ok(MemberDispatchOutcome::Uncertain {
-                    code: error.code,
-                    message: error.message,
-                });
-            }
-        };
-        let turn_id = match response {
-            crate::worker::ControlResponseV1::Accepted { accepted } => accepted.turn_id,
-            // The worker's fenced acknowledgement is an accepted dispatch too: it
-            // carries the Turn the executor took, exactly as the legacy adapter
-            // reads it.
-            crate::worker::ControlResponseV1::AcceptedReceipt { accepted, .. } => accepted.turn_id,
-            crate::worker::ControlResponseV1::Terminal { terminal } => terminal.turn_id,
-            crate::worker::ControlResponseV1::Failed { code, message, .. } => {
-                if !proved_non_dispatch(&code) {
-                    return Ok(MemberDispatchOutcome::Uncertain { code, message });
-                }
-                return refused_after_release(release(), code, message);
-            }
-            _ => {
-                return Ok(MemberDispatchOutcome::Uncertain {
-                    code: "DISPATCH_OUTCOME_UNKNOWN".to_owned(),
-                    message: "the worker returned an unexpected dispatch response".to_owned(),
-                });
-            }
-        };
-        let now = unix_time_ms_semantic()?;
-        store.transact(|transaction| {
-            crate::orchestration::mark_successor_task_running(
-                transaction,
-                request.session_id,
-                request.task_ref,
-                &turn_id,
-                now,
-            )
-        })?;
-        // The executor accepted the task: the round is now counted accepted.
-        store
-            .transact(|transaction| crate::caller_scope::accepted(transaction, request.task_ref))?;
-        // The K path attempts settlement once: a fast completion settles
-        // here, otherwise the worker hook or the restart sweep converges it.
-        settle_successor_task(
-            request.view,
-            request.state_root,
-            SettlementOwner::Managed {
-                session_id: request.session_id,
-            },
-            request.member_ref,
-            request.task_ref,
-            request.execution_intent,
-            Some(&carrier),
-        )?;
-        Ok(MemberDispatchOutcome::Accepted { turn_ref: turn_id })
+        dispatch_accepted_managed_task(request, None)
     }
 }
 
@@ -4574,14 +4148,15 @@ fn call_admitted_caller_policy_proof(
     operation_id: Uuid,
     admission_id: Option<Uuid>,
 ) -> Result<crate::worker::CallerPolicyProof, MachineError> {
-    match crate::worker::call_run_worker(
+    let accepted_engagement = carrier.accepted_work()?.map(|permit| permit.scope_ref);
+    match call_actor_worker(
         state_root,
         run_id,
         DarwinSystem.current_uid(),
         Some(carrier.raw_fd()),
         |expected| {
             let request = ControlRequestV1::VerifyCallerPolicy {
-                engagement_id: None,
+                engagement_id: accepted_engagement,
                 expected,
                 caller: None,
                 operation_id,
@@ -8669,9 +8244,14 @@ fn stop_lifecycle_generation(
     let uid = DarwinSystem.current_uid();
     let record = crate::worker::read_runtime_record(runtime_record, uid)
         .map_err(|error| error.machine_error(run_id, runtime_record))?;
-    let response = crate::worker::call_run_worker(state_root, run_id, uid, None, |expected| {
-        ControlRequestV1::Shutdown { expected }
-    })
+    let response = crate::worker::call_run_worker_bounded(
+        state_root,
+        run_id,
+        uid,
+        None,
+        Duration::from_secs(10),
+        |expected| ControlRequestV1::Shutdown { expected },
+    )
     .map_err(|error| error.machine_error(run_id, runtime_record))?;
     if !matches!(response, ControlResponseV1::Shutdown { .. }) {
         return Err(internal(
@@ -10859,6 +10439,33 @@ fn acquire_writer_authorized_with_lifecycle(
     admission_id: Option<Uuid>,
     lifecycle: Option<&crate::worker::RunLifecycleLease>,
 ) -> Result<(), MachineError> {
+    acquire_writer_authorized_with_capture(
+        view,
+        state_root,
+        run_id,
+        carrier,
+        allow_threadless,
+        external_engagement,
+        expected_state_revision,
+        admission_id,
+        lifecycle,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn acquire_writer_authorized_with_capture(
+    view: &WorkspaceView,
+    state_root: &Path,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+    allow_threadless: bool,
+    external_engagement: Option<Uuid>,
+    expected_state_revision: Option<u64>,
+    admission_id: Option<Uuid>,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
+    acquisition: Option<&ActorWriterAcquire>,
+) -> Result<(), MachineError> {
     let uid = DarwinSystem.current_uid();
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
     let manifest = store.load_manifest(run_id)?;
@@ -10951,7 +10558,7 @@ fn acquire_writer_authorized_with_lifecycle(
         None
     };
     let lifecycle = lifecycle.or(owned_lifecycle.as_ref());
-    let transaction_id = Uuid::now_v7();
+    let transaction_id = acquisition.map_or_else(Uuid::now_v7, |a| a.transaction_id);
     let holder = crate::writer::WriterStore::holder(
         run_id,
         manifest.profile.profile_name.clone(),
@@ -10973,6 +10580,14 @@ fn acquire_writer_authorized_with_lifecycle(
                 "run.acquire_write",
                 expected_state_revision,
             )?;
+        }
+        if let Some(acquisition) = acquisition
+            && (record.state != crate::writer::WriterAuthorityState::None
+                || record.holder.is_some()
+                || record.writer_generation != acquisition.previous_generation
+                || record.authority_revision != acquisition.previous_revision)
+        {
+            return Err(crate::scheduler::error("activation_writer_source_changed"));
         }
         let prepared = record.prepare_acquire(run_id, holder.clone(), transaction_id)?;
         if let Some(registration) = registration.as_ref() {
@@ -11098,7 +10713,7 @@ fn acquire_writer_authorized_with_lifecycle(
             "retry_census",
         ));
     }
-    let response = crate::worker::call_run_worker(
+    let response = call_actor_worker(
         state_root,
         run_id,
         uid,
@@ -11580,7 +11195,7 @@ fn release_writer_authorized_with_lifecycle(
             "retry_census",
         ));
     }
-    let response = crate::worker::call_run_worker(
+    let response = call_actor_worker(
         state_root,
         run_id,
         uid,
@@ -12576,7 +12191,9 @@ fn validate_caller_policy_current_authorized(
     let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
     require_caller_runtime(&manifest)?;
     let controller = load_reconciled_controller_binding(state_root, run_id)?;
-    if let Some(engagement_id) = external_engagement {
+    if let Some(engagement_id) =
+        external_engagement.or(carrier.accepted_work()?.map(|permit| permit.scope_ref))
+    {
         crate::worker::RunControllerAuthority::new(state_root.to_owned(), run_id)
             .authorize_external(engagement_id, "engagement.release_write", carrier)?;
     } else {
@@ -15431,8 +15048,19 @@ fn start_worker(
     let record =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), start.run_id)
             .map_err(|error| error.machine_error(start.run_id, state_root))?;
-    crate::worker::start_run_worker_with_startup_range(state_root, start, startup_range)
-        .map_err(|error| error.machine_error(start.run_id, &record))
+    let remaining = crate::scheduler::activation_remaining(state_root, start.run_id)?;
+    match remaining {
+        Some(budget) => crate::worker::start_run_worker_with_activation_budget(
+            state_root,
+            start,
+            startup_range,
+            budget,
+        ),
+        None => {
+            crate::worker::start_run_worker_with_startup_range(state_root, start, startup_range)
+        }
+    }
+    .map_err(|error| error.machine_error(start.run_id, &record))
 }
 
 #[cfg(target_os = "macos")]
@@ -16432,6 +16060,7 @@ pub(crate) fn reuse_successor_reconciliation_resolution(
         execution.task_ref,
         &execution.intent,
         None,
+        None,
     )?;
     Ok(true)
 }
@@ -16818,6 +16447,7 @@ pub(crate) fn preserve_observed_successor_terminal(
             execution.task_ref,
             &execution.intent,
             None,
+            None,
         )?;
     }
     Ok(())
@@ -17142,6 +16772,7 @@ fn release_stale_member_writer(
     owner: SettlementOwner,
     carrier: &CredentialCarrier,
     write: bool,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
 ) -> Result<(), MachineError> {
     use crate::writer::WriterAuthorityState;
     let link =
@@ -17171,7 +16802,7 @@ fn release_stale_member_writer(
             return Ok(());
         }
     }
-    release_member_writer(view, state_root, member_ref, owner, carrier)
+    release_member_writer(view, state_root, member_ref, owner, carrier, lifecycle)
 }
 
 fn release_member_writer(
@@ -17180,15 +16811,16 @@ fn release_member_writer(
     member_ref: Uuid,
     owner: SettlementOwner,
     carrier: &CredentialCarrier,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
 ) -> Result<(), MachineError> {
-    match owner {
-        SettlementOwner::External { engagement_id } => {
-            release_external_writer(view, state_root, member_ref, engagement_id, carrier)
-        }
-        SettlementOwner::Managed { .. } => {
-            release_writer_authorized(view, state_root, member_ref, carrier, None, None).map(|_| ())
-        }
-    }
+    let external = match owner {
+        SettlementOwner::External { engagement_id } => Some(engagement_id),
+        SettlementOwner::Managed { .. } => None,
+    };
+    release_writer_authorized_with_lifecycle(
+        view, state_root, member_ref, carrier, external, None, lifecycle,
+    )
+    .map(|_| ())
 }
 
 /// Settle one successor task from the durable terminal of its bound Turn.
@@ -17199,6 +16831,7 @@ fn release_member_writer(
 /// only after that publication and only when the caller holds the member's own
 /// authority carrier.
 #[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
 fn settle_successor_task(
     view: &WorkspaceView,
     state_root: &Path,
@@ -17207,6 +16840,7 @@ fn settle_successor_task(
     task_ref: Uuid,
     execution_intent: &str,
     release_carrier: Option<&CredentialCarrier>,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
 ) -> Result<crate::delegation_service::MemberSettlement, MachineError> {
     use crate::delegation_service::MemberSettlement;
     let store = crate::engagement::EngagementStore::open_read_only(
@@ -17246,6 +16880,7 @@ fn settle_successor_task(
         execution_intent,
         &turn_id,
         release_carrier,
+        lifecycle,
     )
 }
 
@@ -17260,6 +16895,7 @@ fn settle_successor_task_from_turn(
     execution_intent: &str,
     turn_id: &str,
     release_carrier: Option<&CredentialCarrier>,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
 ) -> Result<crate::delegation_service::MemberSettlement, MachineError> {
     use crate::delegation_service::MemberSettlement;
     let mut store = crate::engagement::EngagementStore::open(
@@ -17371,7 +17007,7 @@ fn settle_successor_task_from_turn(
     {
         // Terminal publication precedes the release; a failed release is surfaced
         // to the caller, never hidden.
-        release_member_writer(view, state_root, member_ref, owner, carrier)?;
+        release_member_writer(view, state_root, member_ref, owner, carrier, lifecycle)?;
     }
     if let Some(error) = source_error {
         return Err(error);
@@ -17435,6 +17071,7 @@ pub(crate) fn resettle_member_tasks(
             task_ref,
             &execution_intent,
             &turn_id,
+            None,
             None,
         )?;
     }
@@ -17668,8 +17305,9 @@ pub(crate) fn settle_bound_successor_task(
         &execution_intent,
         turn_id,
         None,
+        None,
     )
-    .map(|_| ())
+    .map(|_| crate::scheduler::notify(state_root, member_run_id))
 }
 
 /// Validate source assurance before output semantics, preserving storage failures.
@@ -18932,9 +18570,2028 @@ impl RunMutationLock for RunStartupLock {
     }
 }
 
+pub(crate) fn dispatch_accepted_external_task(
+    request: crate::delegation_service::MemberTaskDispatch<'_>,
+    carrier: &CredentialCarrier,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
+) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
+    use crate::delegation_service::MemberDispatchOutcome;
+    let write = request.execution_intent == "canonical_workspace_write";
+    // A writer release that fails is surfaced, never treated as released:
+    // the caller keeps the accepted effect and the conservative round.
+    let release = |state_root: &Path| -> Result<(), MachineError> {
+        if write {
+            release_writer_authorized_with_lifecycle(
+                request.view,
+                state_root,
+                request.member_ref,
+                carrier,
+                Some(request.engagement_id),
+                None,
+                lifecycle,
+            )?;
+        }
+        Ok(())
+    };
+    // The next authorized mutation of this member resolves the guard a
+    // terminal left behind; a blocked guard stays for recovery.
+    release_stale_member_writer(
+        request.view,
+        request.state_root,
+        request.member_ref,
+        SettlementOwner::External {
+            engagement_id: request.engagement_id,
+        },
+        carrier,
+        write,
+        lifecycle,
+    )?;
+    if write {
+        if let Err(error) = acquire_writer_authorized_with_lifecycle(
+            request.view,
+            request.state_root,
+            request.member_ref,
+            carrier,
+            true,
+            Some(request.engagement_id),
+            None,
+            None,
+            lifecycle,
+        ) {
+            // The acquire can fail after leaving a pending writer transition,
+            // so the durable record decides whether non-dispatch is proved.
+            let writer = crate::writer::WriterStore::new(
+                request.state_root,
+                &request.view.workspace_id,
+                DarwinSystem.current_uid(),
+            )
+            .load();
+            return Ok(acquire_failure_outcome(
+                writer.as_ref().ok(),
+                request.member_ref,
+                error,
+            ));
+        }
+    } else if let Err(error) =
+        ensure_external_specialist_worker(request.view, request.state_root, request.member_ref)
+    {
+        return Ok(MemberDispatchOutcome::Refused {
+            code: error.code,
+            message: error.message,
+        });
+    }
+    let mut store = crate::engagement::EngagementStore::open(
+        &crate::engagement::EngagementStore::workspace_database_path(request.state_root),
+    )?;
+    if let Err(error) =
+        store.mark_external_member_resident(request.engagement_id, request.member_ref)
+    {
+        return refused_after_release(release(request.state_root), error.code, error.message);
+    }
+    // The Turn is built from the retained acceptance bytes, verified against
+    // the accepted identity, never from current caller input.
+    let stored = crate::engagement::accepted_task_content(store.connection(), request.task_ref)?;
+    let Some((task_body, contexts, target)) = stored else {
+        return refused_after_release(
+            release(request.state_root),
+            "ACCEPTED_TASK_CONTENT_UNAVAILABLE".to_owned(),
+            "the accepted task bytes are no longer retained".to_owned(),
+        );
+    };
+    let contents = crate::successor_capture::AcceptedTaskContents {
+        task_body,
+        contexts,
+        target,
+    };
+    let prompt = match contents.prompt(
+        request.accepted,
+        request.execution_intent,
+        request.deadline_seconds,
+    ) {
+        Ok(prompt) => prompt,
+        Err(error) => {
+            return refused_after_release(release(request.state_root), error.code, error.message);
+        }
+    };
+    let now = unix_time_ms_semantic()?;
+    if write {
+        // Capture under the held authority, then record and mark dispatching
+        // in one transaction before the Turn exists.
+        let workspace = request.view.canonical_path.to_path_buf()?;
+        let capture =
+            match crate::successor_capture::capture_dispatch_index(&workspace, request.task_ref) {
+                Ok(capture) => capture,
+                Err(error) => {
+                    return refused_after_release(
+                        release(request.state_root),
+                        error.code,
+                        error.message,
+                    );
+                }
+            };
+        let recorded = store.transact(|transaction| {
+            crate::engagement::record_dispatch_index_with_content(
+                transaction,
+                crate::engagement::DispatchIndexRecord {
+                    task_id: request.task_ref,
+                    workspace_ref: &request.view.workspace_id,
+                    run_ref: request.member_ref,
+                    head_commit: capture.head.as_deref(),
+                    index_sha256: &capture.sha256,
+                    index_byte_length: u64::try_from(capture.canonical.len()).map_err(|_| {
+                        MachineError::invalid_argument(
+                            "dispatch_index",
+                            "the index is unrepresentable",
+                        )
+                    })?,
+                    file_count: capture.file_count,
+                    baseline_bytes: capture.baseline_bytes,
+                },
+                &capture.canonical,
+                &capture.baseline,
+                now,
+            )?;
+            crate::engagement::mark_external_task_dispatching_in(
+                transaction,
+                request.engagement_id,
+                request.task_ref,
+                now,
+            )
+            .map(|_| ())
+        });
+        if let Err(error) = recorded {
+            return refused_after_release(release(request.state_root), error.code, error.message);
+        }
+    } else if let Err(error) = store.transact(|transaction| {
+        crate::engagement::mark_external_task_dispatching_in(
+            transaction,
+            request.engagement_id,
+            request.task_ref,
+            now,
+        )
+        .map(|_| ())
+    }) {
+        return Ok(MemberDispatchOutcome::Refused {
+            code: error.code,
+            message: error.message,
+        });
+    }
+    let uid = DarwinSystem.current_uid();
+    let key = request.idempotency_key.to_owned();
+    let response = call_actor_worker(
+        request.state_root,
+        request.member_ref,
+        uid,
+        Some(carrier.raw_fd()),
+        |expected| crate::worker::ControlRequestV1::ExternalSubmit {
+            expected,
+            caller: None,
+            engagement_id: request.engagement_id,
+            request: crate::worker::TurnControlRequest {
+                normalized_request_sha256: None,
+                write: false,
+                message: prompt,
+                idempotency_key: key,
+                effort: None,
+                images: Vec::new(),
+            },
+        },
+    );
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            let error = error.machine_error(request.member_ref, request.state_root);
+            return Ok(MemberDispatchOutcome::Uncertain {
+                code: error.code,
+                message: error.message,
+            });
+        }
+    };
+    // The settlement attempt below covers an immediate Terminal as well as a
+    // terminal that is already durable when the Turn id is recorded.
+    let turn_id = match response {
+        crate::worker::ControlResponseV1::Accepted { accepted } => accepted.turn_id,
+        crate::worker::ControlResponseV1::Terminal { terminal } => terminal.turn_id,
+        crate::worker::ControlResponseV1::Failed { code, message, .. } => {
+            // Case B needs an authoritative fact that the Turn was not
+            // accepted. Only a code that proves non-dispatch qualifies;
+            // everything else stays uncertain and conservative.
+            if !proved_non_dispatch(&code) {
+                return Ok(MemberDispatchOutcome::Uncertain { code, message });
+            }
+            return refused_after_release(release(request.state_root), code, message);
+        }
+        _ => {
+            return Ok(MemberDispatchOutcome::Uncertain {
+                code: "DISPATCH_OUTCOME_UNKNOWN".to_owned(),
+                message: "the worker returned an unexpected dispatch response".to_owned(),
+            });
+        }
+    };
+    let now = unix_time_ms_semantic()?;
+    store.transact(|transaction| {
+        link_dispatched_task(
+            transaction,
+            SettlementOwner::External {
+                engagement_id: request.engagement_id,
+            },
+            request.member_ref,
+            request.task_ref,
+            &turn_id,
+            now,
+        )
+    })?;
+    // The executor accepted the task: the round is now counted accepted.
+    store.transact(|transaction| crate::caller_scope::accepted(transaction, request.task_ref))?;
+    // A durable terminal may already exist (fast completion); this settles
+    // it exactly once, otherwise it is a no-op and the worker hook or the
+    // restart sweep converges it.
+    settle_successor_task(
+        request.view,
+        request.state_root,
+        SettlementOwner::External {
+            engagement_id: request.engagement_id,
+        },
+        request.member_ref,
+        request.task_ref,
+        request.execution_intent,
+        Some(carrier),
+        lifecycle,
+    )?;
+    Ok(MemberDispatchOutcome::Accepted { turn_ref: turn_id })
+}
+
+pub(crate) fn dispatch_accepted_managed_task(
+    request: crate::delegation_service::ManagedTaskDispatch<'_>,
+    lifecycle: Option<&crate::worker::RunLifecycleLease>,
+) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
+    use crate::delegation_service::MemberDispatchOutcome;
+    let prompt = request.contents.prompt(
+        request.accepted,
+        request.execution_intent,
+        request.deadline_seconds,
+    )?;
+    let broker = crate::orchestration::OrchestrationStore::open(request.state_root)?;
+    let credential = broker.member_credential(request.member_ref)?;
+    let carrier = credential.controller_carrier()?;
+    let owner = SettlementOwner::Managed {
+        session_id: request.session_id,
+    };
+    let write = request.execution_intent == "canonical_workspace_write";
+    release_stale_member_writer(
+        request.view,
+        request.state_root,
+        request.member_ref,
+        owner,
+        &carrier,
+        write,
+        lifecycle,
+    )?;
+    let release = || {
+        if write {
+            release_writer_authorized_with_lifecycle(
+                request.view,
+                request.state_root,
+                request.member_ref,
+                &carrier,
+                None,
+                None,
+                lifecycle,
+            )
+            .map(|_| ())
+        } else {
+            Ok(())
+        }
+    };
+    if write
+        && let Err(error) = acquire_writer_authorized_with_lifecycle(
+            request.view,
+            request.state_root,
+            request.member_ref,
+            &carrier,
+            true,
+            None,
+            None,
+            None,
+            lifecycle,
+        )
+    {
+        let writer = crate::writer::WriterStore::new(
+            request.state_root,
+            &request.view.workspace_id,
+            DarwinSystem.current_uid(),
+        )
+        .load();
+        return Ok(acquire_failure_outcome(
+            writer.as_ref().ok(),
+            request.member_ref,
+            error,
+        ));
+    }
+    #[cfg(test)]
+    managed_dispatch_preparation();
+    let mut store = crate::engagement::EngagementStore::open(
+        &crate::engagement::EngagementStore::workspace_database_path(request.state_root),
+    )?;
+    let now = unix_time_ms_semantic()?;
+    let capture = if write {
+        match crate::successor_capture::capture_dispatch_index(
+            &request.view.canonical_path.to_path_buf()?,
+            request.task_ref,
+        ) {
+            Ok(capture) => Some(capture),
+            Err(error) => return refused_after_release(release(), error.code, error.message),
+        }
+    } else {
+        None
+    };
+    if let Err(error) = store.transact(|transaction| {
+        if let Some(capture) = &capture {
+            crate::engagement::record_dispatch_index_with_content(
+                transaction,
+                crate::engagement::DispatchIndexRecord {
+                    task_id: request.task_ref,
+                    workspace_ref: &request.view.workspace_id,
+                    run_ref: request.member_ref,
+                    head_commit: capture.head.as_deref(),
+                    index_sha256: &capture.sha256,
+                    index_byte_length: capture.canonical.len() as u64,
+                    file_count: capture.file_count,
+                    baseline_bytes: capture.baseline_bytes,
+                },
+                &capture.canonical,
+                &capture.baseline,
+                now,
+            )?;
+        }
+        crate::orchestration::mark_successor_task_dispatching(
+            transaction,
+            request.session_id,
+            request.task_ref,
+            now,
+        )
+    }) {
+        // The reservation is the dispatch boundary, so a refusal here proves
+        // the Turn never left.
+        return refused_after_release(release(), error.code, error.message);
+    }
+    #[cfg(test)]
+    MANAGED_SUBMIT_CALLS.with(|count| count.set(count.get() + 1));
+    let response = call_actor_worker(
+        request.state_root,
+        request.member_ref,
+        DarwinSystem.current_uid(),
+        Some(carrier.raw_fd()),
+        |expected| crate::worker::ControlRequestV1::Submit {
+            expected,
+            caller: None,
+            request: crate::worker::TurnControlRequest {
+                normalized_request_sha256: None,
+                write: false,
+                message: prompt,
+                idempotency_key: format!("successor-task:{}", request.task_ref),
+                effort: None,
+                images: Vec::new(),
+            },
+        },
+    );
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            let error = error.machine_error(request.member_ref, request.state_root);
+            return Ok(MemberDispatchOutcome::Uncertain {
+                code: error.code,
+                message: error.message,
+            });
+        }
+    };
+    let turn_id = match response {
+        crate::worker::ControlResponseV1::Accepted { accepted } => accepted.turn_id,
+        // The worker's fenced acknowledgement is an accepted dispatch too: it
+        // carries the Turn the executor took, exactly as the legacy adapter
+        // reads it.
+        crate::worker::ControlResponseV1::AcceptedReceipt { accepted, .. } => accepted.turn_id,
+        crate::worker::ControlResponseV1::Terminal { terminal } => terminal.turn_id,
+        crate::worker::ControlResponseV1::Failed { code, message, .. } => {
+            if !proved_non_dispatch(&code) {
+                return Ok(MemberDispatchOutcome::Uncertain { code, message });
+            }
+            return refused_after_release(release(), code, message);
+        }
+        _ => {
+            return Ok(MemberDispatchOutcome::Uncertain {
+                code: "DISPATCH_OUTCOME_UNKNOWN".to_owned(),
+                message: "the worker returned an unexpected dispatch response".to_owned(),
+            });
+        }
+    };
+    let now = unix_time_ms_semantic()?;
+    store.transact(|transaction| {
+        link_dispatched_task(
+            transaction,
+            SettlementOwner::Managed {
+                session_id: request.session_id,
+            },
+            request.member_ref,
+            request.task_ref,
+            &turn_id,
+            now,
+        )
+    })?;
+    // The executor accepted the task: the round is now counted accepted.
+    store.transact(|transaction| crate::caller_scope::accepted(transaction, request.task_ref))?;
+    // The K path attempts settlement once: a fast completion settles
+    // here, otherwise the worker hook or the restart sweep converges it.
+    settle_successor_task(
+        request.view,
+        request.state_root,
+        SettlementOwner::Managed {
+            session_id: request.session_id,
+        },
+        request.member_ref,
+        request.task_ref,
+        request.execution_intent,
+        Some(&carrier),
+        lifecycle,
+    )?;
+    Ok(MemberDispatchOutcome::Accepted { turn_ref: turn_id })
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActorWriterAcquire {
+    transaction_id: Uuid,
+    previous_generation: u64,
+    previous_revision: u64,
+    work: crate::scheduler::AcceptedWork,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActorExecutionIdentity {
+    run: Uuid,
+    workspace: String,
+    thread: Option<String>,
+    generation: u64,
+    configuration: String,
+    profile: String,
+    controller: String,
+    runtime: Option<crate::worker::WorkerRuntimeRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    writer_acquire: Option<ActorWriterAcquire>,
+}
+impl ActorExecutionIdentity {
+    fn capture(snapshot: &crate::snapshot::RunSnapshot) -> Result<Self, MachineError> {
+        if snapshot.controller != snapshot.manifest.controller.identity {
+            return Err(crate::scheduler::error("actor_controller_changed"));
+        }
+        Ok(Self {
+            run: snapshot.manifest.run_id,
+            workspace: snapshot.manifest.workspace_id.clone(),
+            thread: snapshot.projection.thread_id.clone(),
+            generation: snapshot.projection.run_generation,
+            configuration: crate::run::agent_configuration_digest(
+                &snapshot.manifest.agent_configuration,
+            )
+            .map_err(|_| crate::scheduler::error("actor_configuration_invalid"))?,
+            profile: snapshot
+                .manifest
+                .global_profile_binding
+                .as_ref()
+                .ok_or_else(|| crate::scheduler::error("actor_profile_missing"))?
+                .digest()?,
+            controller: crate::jcs::sha256_hex(
+                &serde_json::to_vec(&snapshot.manifest.controller)
+                    .map_err(|_| crate::scheduler::error("actor_controller_invalid"))?,
+            ),
+            runtime: snapshot.runtime_record.clone(),
+            writer_acquire: None,
+        })
+    }
+    fn matches(&self, snapshot: &crate::snapshot::RunSnapshot) -> Result<bool, MachineError> {
+        let next = Self::capture(snapshot)?;
+        Ok(self.run == next.run
+            && self.workspace == next.workspace
+            && self.configuration == next.configuration
+            && self.profile == next.profile
+            && self.controller == next.controller
+            && self
+                .thread
+                .as_ref()
+                .is_none_or(|thread| next.thread.as_ref() == Some(thread))
+            && next.generation >= self.generation
+            && next.generation <= self.generation.saturating_add(1))
+    }
+}
+
+/// Execute one reconstructable scheduling visit. This is an operational
+/// dispatch of already accepted work, never a second admission or model loop.
+pub(crate) fn schedule_actor(
+    view: &WorkspaceView,
+    state_root: &Path,
+    actor: crate::scheduler::Actor,
+) -> Result<(), MachineError> {
+    use crate::assignment_queue::Owner;
+    use crate::scheduler;
+    let snapshot = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+    let binding = snapshot
+        .manifest
+        .aggregate_binding
+        .as_ref()
+        .ok_or_else(|| scheduler::error("actor_binding_missing"))?;
+    if snapshot.manifest.schema_version != 4
+        || snapshot.manifest.workspace_id != view.workspace_id
+        || binding.aggregate_id != actor.owner.scope().1
+        || binding.member_kind != crate::run::AggregateMemberKind::Specialist
+        || binding.aggregate_kind
+            != match actor.owner {
+                Owner::Managed(_) => AggregateKind::OrchestratedSession,
+                Owner::External(_) => AggregateKind::ExternalSpecialistEngagement,
+            }
+    {
+        return Err(scheduler::error("actor_binding_changed"));
+    }
+    let lifecycle = crate::worker::RunLifecycleLease::acquire(
+        state_root,
+        &view.workspace_id,
+        actor.run,
+        snapshot.projection.run_generation.max(1),
+    )
+    .map_err(|e| e.machine_error(actor.run, state_root))?;
+    reconcile_scheduler_writer(view, state_root, actor, &lifecycle)?;
+    let snapshot = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+    let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
+    let now = scheduler::now_ms()?;
+    let (idle_since, policy) = store.transact(|tx| {
+        scheduler::install(tx)?;
+        let policy = scheduler::policy(tx, actor.owner)?;
+        let idle_since = scheduler::observe_actor(
+            tx,
+            actor,
+            snapshot.stamp.run_state_revision,
+            snapshot.projection.lifecycle == RunLifecycle::Idle,
+            now,
+        )?;
+        scheduler::reconcile_claim(tx, actor, &snapshot, now, state_root)?;
+        scheduler::expire_queued(tx, actor, now)?;
+        Ok((idle_since, policy))
+    })?;
+    if snapshot.projection.lifecycle != RunLifecycle::Idle
+        || snapshot.projection.active_turn_id.is_some()
+        || !snapshot.projection.pending_requests.is_empty()
+    {
+        return Ok(());
+    }
+    let activation_policy = match actor.owner {
+        Owner::Managed(scope) => {
+            let broker = crate::orchestration::OrchestrationStore::open_observer(state_root)?;
+            let member =
+                crate::orchestration::successor_member(store.connection(), scope, actor.run)?
+                    .ok_or_else(|| scheduler::error("actor_member_missing"))?;
+            let controller:String=store.connection().query_row("SELECT controller_binding_json FROM brokered_members WHERE session_id=?1 AND run_id=?2",rusqlite::params![scope.to_string(),actor.run.to_string()],|r|r.get(0)).map_err(scheduler::sql)?;
+            let controller: crate::run::ControllerBinding = serde_json::from_str(&controller)
+                .map_err(|_| scheduler::error("actor_controller_invalid"))?;
+            if member.membership_state != "active"
+                || member.agent_configuration != snapshot.manifest.agent_configuration
+                || controller != snapshot.manifest.controller
+            {
+                return Err(scheduler::error("actor_capture_changed"));
+            }
+            let session = broker.session(scope)?;
+            session
+                .specialist_policy
+                .role(&member.role_ref)
+                .ok()
+                .filter(|role| role.agent_configuration() == &member.agent_configuration)
+                .map_or("keep_resident".to_owned(), |role| {
+                    role.activation_policy().to_owned()
+                })
+        }
+        Owner::External(scope) => {
+            let (configuration, _, state) =
+                store.external_member_configuration(scope, actor.run)?;
+            let (workspace, owner) = store.accepted_external_owner(scope)?;
+            if state != "active"
+                || configuration != snapshot.manifest.agent_configuration
+                || workspace != view.workspace_id
+                || owner != snapshot.manifest.controller
+            {
+                return Err(scheduler::error("actor_capture_changed"));
+            }
+            // External work has no lateral policy. Only its own accepted queue
+            // can trigger reactivation, under the captured fixed queue policy.
+            "on_mail".into()
+        }
+    };
+    let residency = scheduler::residency(store.connection(), actor)?;
+    let pending = !scheduler::candidates(store.connection(), actor.owner, actor.run)?.is_empty();
+    if residency == "activating" {
+        let (operation, until): (String, i64) = store
+            .connection()
+            .query_row(
+                "SELECT operation_id,lease_until_ms FROM scheduler_actors WHERE target_run_id=?1",
+                [actor.run.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(scheduler::sql)?;
+        let text = scheduler::captured_operation(store.connection(), actor, &operation)?;
+        let identity: ActorExecutionIdentity = serde_json::from_str(&text)
+            .map_err(|_| scheduler::error("activation_capture_invalid"))?;
+        let resident =
+            now < until && actor_ready_verified(state_root, &snapshot, &identity).unwrap_or(false);
+        if resident || now >= until {
+            store.transact(|tx| {
+                if resident {
+                    scheduler::record_ready(
+                        tx,
+                        actor,
+                        Uuid::parse_str(&operation)
+                            .map_err(|_| scheduler::error("activation_identity_invalid"))?,
+                        &serde_json::to_string(&ActorExecutionIdentity::capture(&snapshot)?)
+                            .map_err(|_| scheduler::error("actor_capture_invalid"))?,
+                        now,
+                    )?;
+                }
+                scheduler::finish_activation(
+                    tx,
+                    actor,
+                    Uuid::parse_str(&operation)
+                        .map_err(|_| scheduler::error("activation_identity_invalid"))?,
+                    resident,
+                    now,
+                )
+            })?;
+            scheduler::notify(state_root, actor.run);
+            if scheduler::residency(store.connection(), actor)? == "unavailable" {
+                compensate_activation_writer(
+                    view,
+                    state_root,
+                    &mut store,
+                    actor,
+                    Uuid::parse_str(&operation)
+                        .map_err(|_| scheduler::error("activation_identity_invalid"))?,
+                    &identity,
+                    &lifecycle,
+                )?;
+            }
+        }
+        return Ok(());
+    }
+    if matches!(residency.as_str(), "passivating" | "recovering") {
+        let (operation, kind): (String, String) = store
+            .connection()
+            .query_row(
+                "SELECT operation_id,operation_kind FROM scheduler_actors WHERE target_run_id=?1",
+                [actor.run.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(scheduler::sql)?;
+        if (residency == "passivating" && kind != "passivation")
+            || (residency == "recovering" && kind != "recovery_detach")
+        {
+            return Err(scheduler::error("actor_recovery_scope_changed"));
+        }
+        let text = scheduler::captured_operation(store.connection(), actor, &operation)?;
+        let identity: ActorExecutionIdentity =
+            serde_json::from_str(&text).map_err(|_| scheduler::error("actor_capture_invalid"))?;
+        if !identity.matches(&snapshot)?
+            || identity.generation != snapshot.projection.run_generation
+        {
+            return Err(scheduler::error("actor_recovery_identity_changed"));
+        }
+        let captured = identity
+            .runtime
+            .as_ref()
+            .ok_or_else(|| scheduler::error("actor_recovery_runtime_missing"))?;
+        match snapshot.runtime_record.as_ref() {
+            Some(current) if current == captured => {
+                match crate::worker::classify_worker_identity(current) {
+                    crate::worker::ProcessIdentityVerdict::Absent => {
+                        retire_absent_actor_runtime(state_root, current)?
+                    }
+                    crate::worker::ProcessIdentityVerdict::Match if residency == "passivating" => {
+                        // The durable Worker fence forbids further Turns. Re-check
+                        // the exact captured generation before completing its stop.
+                        crate::worker::prove_worker_workload_absent(current)
+                            .map_err(|e| e.machine_error(actor.run, state_root))?;
+                        if snapshot.manifest.execution_lane == ExecutionLane::SharedReadonly {
+                            crate::profile::prove_shared_actor_workload_absent(
+                                DolgoraeHome::system()?.root(),
+                                snapshot
+                                    .manifest
+                                    .global_profile_binding
+                                    .as_ref()
+                                    .ok_or_else(|| {
+                                        scheduler::error("passivation_profile_missing")
+                                    })?,
+                                current.app_server_epoch.ok_or_else(|| {
+                                    scheduler::error("passivation_server_epoch_missing")
+                                })?,
+                            )?;
+                        }
+                        let path = crate::worker::runtime_record_path(
+                            &crate::worker::runtime_root(state_root),
+                            actor.run,
+                        )
+                        .map_err(|e| e.machine_error(actor.run, state_root))?;
+                        stop_lifecycle_generation(state_root, actor.run, &path)?;
+                    }
+                    _ => return Err(scheduler::error("actor_recovery_absence_unverified")),
+                }
+            }
+            None if actor_absence_matches(state_root, captured)? => {}
+            _ => return Err(scheduler::error("actor_recovery_generation_changed")),
+        }
+        if residency == "passivating" {
+            finish_actor_passivation(state_root, &mut store, actor)?;
+        } else {
+            store.transact(|tx| {
+                scheduler::finish_idle_recovery(tx, actor, &operation, scheduler::now_ms()?)
+            })?;
+        }
+        scheduler::notify(state_root, actor.run);
+        return Ok(());
+    }
+    // A prepared stop has not crossed the Worker drain: that transition would
+    // atomically set passivating. Only its expired, still-resident preparation
+    // may be abandoned; mail accepted in the meantime remains in the queue.
+    if residency == "resident"
+        && store.transact(|tx| scheduler::settle_unfenced_passivation(tx, actor, now))?
+    {
+        return Ok(());
+    }
+    if matches!(residency.as_str(), "passivated" | "unstarted") {
+        if !pending || (residency == "passivated" && activation_policy != "on_mail") {
+            return Ok(());
+        }
+        if residency == "passivated" && snapshot.projection.thread_id.is_none() {
+            return Err(scheduler::error("activation_thread_missing"));
+        }
+        // Starting/resuming a native thread is already an external effect.
+        // Validate the exact accepted authority and bytes before activation,
+        // and retain one pre-dispatch claim while it runs.
+        let Some(activation_work) =
+            store.transact(|tx| scheduler::claim(tx, actor.owner, actor.run, now))?
+        else {
+            return Ok(());
+        };
+        if activation_work.kind == "assignment" {
+            let retained =
+                scheduler::retained_task(&store, &activation_work, &view.workspace_id, state_root)?;
+            if now >= retained.deadline_ms
+                || retained.accepted.agent_configuration_digest
+                    != snapshot
+                        .manifest
+                        .agent_configuration
+                        .admitted_configuration
+                        .as_ref()
+                        .ok_or_else(|| scheduler::error("activation_configuration_missing"))?
+                        .digest()?
+            {
+                return Err(scheduler::error("activation_acceptance_changed"));
+            }
+        } else {
+            let work =
+                crate::collaboration::execution_record(store.connection(), activation_work.work)?;
+            if work.session != actor.owner.scope().1
+                || work.target != actor.run
+                || work.deadline_ms <= now
+            {
+                return Err(scheduler::error("activation_consultation_changed"));
+            }
+        }
+        if matches!(actor.owner, Owner::Managed(_)) {
+            let carrier = crate::orchestration::OrchestrationStore::open_observer(state_root)?
+                .member_credential(actor.run)?
+                .controller_carrier()?;
+            crate::worker::RunControllerAuthority::new(state_root.to_owned(), actor.run)
+                .authorize("run.submit", &carrier)?;
+        }
+        let mut captured = ActorExecutionIdentity::capture(&snapshot)?;
+        let write = if activation_work.kind == "assignment" {
+            scheduler::retained_task(&store, &activation_work, &view.workspace_id, state_root)?
+                .accepted
+                .execution_intent
+                == "canonical_workspace_write"
+        } else {
+            false
+        };
+        let already_ready = actor_ready_verified(state_root, &snapshot, &captured)?;
+        if write
+            && !already_ready
+            && snapshot.writer.state == crate::writer::WriterAuthorityState::None
+            && snapshot.writer.holder.is_none()
+        {
+            captured.writer_acquire = Some(ActorWriterAcquire {
+                transaction_id: Uuid::now_v7(),
+                previous_generation: snapshot.writer.writer_generation,
+                previous_revision: snapshot.writer.authority_revision,
+                work: activation_work.clone(),
+            });
+        }
+        let text = serde_json::to_string(&captured)
+            .map_err(|_| scheduler::error("activation_capture_invalid"))?;
+        let operation = store.transact(|tx| {
+            let operation = scheduler::begin_activation(tx, actor, now)?;
+            scheduler::capture_operation(tx, actor, operation, &text, now)?;
+            Ok(operation)
+        })?;
+        let started = if already_ready {
+            Ok(0)
+        } else if write {
+            let (carrier, external) = match actor.owner {
+                Owner::Managed(_) => (
+                    crate::orchestration::OrchestrationStore::open_observer(state_root)?
+                        .member_credential(actor.run)?
+                        .controller_carrier()?,
+                    None,
+                ),
+                Owner::External(scope) => (
+                    CredentialCarrier::for_accepted_work(state_root, &activation_work)?,
+                    Some(scope),
+                ),
+            };
+            acquire_writer_authorized_with_capture(
+                view,
+                state_root,
+                actor.run,
+                &carrier,
+                true,
+                external,
+                None,
+                None,
+                Some(&lifecycle),
+                captured.writer_acquire.as_ref(),
+            )
+            .map(|_| 0)
+        } else {
+            ensure_run_worker(view, state_root, actor.run)
+        };
+        let after = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0);
+        let resident = started.is_ok()
+            && after.as_ref().is_ok_and(|next| {
+                actor_ready_verified(state_root, next, &captured).unwrap_or(false)
+            });
+        store.transact(|tx| {
+            if resident {
+                scheduler::record_ready(
+                    tx,
+                    actor,
+                    operation,
+                    &serde_json::to_string(&ActorExecutionIdentity::capture(
+                        after
+                            .as_ref()
+                            .map_err(|_| scheduler::error("activation_ready_missing"))?,
+                    )?)
+                    .map_err(|_| scheduler::error("actor_capture_invalid"))?,
+                    scheduler::now_ms()?,
+                )?;
+            }
+            scheduler::finish_activation(tx, actor, operation, resident, scheduler::now_ms()?)
+        })?;
+        scheduler::notify(state_root, actor.run);
+        if scheduler::residency(store.connection(), actor)? == "unavailable" {
+            compensate_activation_writer(
+                view, state_root, &mut store, actor, operation, &captured, &lifecycle,
+            )?;
+        }
+        return Ok(());
+    }
+    if residency != "resident" {
+        return Ok(());
+    }
+    let resident = snapshot.runtime_record.as_ref().is_some_and(|r| {
+        crate::worker::classify_worker_identity(r) == crate::worker::ProcessIdentityVerdict::Match
+    });
+    if !resident {
+        if let Some(runtime) = snapshot.runtime_record.as_ref()
+            && crate::worker::classify_worker_identity(runtime)
+                == crate::worker::ProcessIdentityVerdict::Absent
+            && !scheduler::has_in_flight(store.connection(), actor)?
+            && snapshot
+                .writer
+                .holder
+                .as_ref()
+                .is_none_or(|holder| holder.run_id != actor.run)
+        {
+            let text = serde_json::to_string(&ActorExecutionIdentity::capture(&snapshot)?)
+                .map_err(|_| scheduler::error("actor_capture_invalid"))?;
+            let operation =
+                store.transact(|tx| scheduler::begin_idle_recovery(tx, actor, &text, now))?;
+            retire_absent_actor_runtime(state_root, runtime)?;
+            store.transact(|tx| {
+                scheduler::finish_idle_recovery(
+                    tx,
+                    actor,
+                    &operation.to_string(),
+                    scheduler::now_ms()?,
+                )
+            })?;
+            scheduler::notify(state_root, actor.run);
+            return Ok(());
+        }
+        return Err(scheduler::error("resident_generation_unverified"));
+    }
+    if pending {
+        let Some(permit) =
+            store.transact(|tx| scheduler::resume_or_claim(tx, actor.owner, actor.run, now))?
+        else {
+            return Ok(());
+        };
+        if permit.kind == "assignment" {
+            let retained =
+                scheduler::retained_task(&store, &permit, &view.workspace_id, state_root)?;
+            if now >= retained.deadline_ms {
+                return Err(scheduler::error("accepted_task_expired"));
+            }
+            if retained.accepted.agent_configuration_digest
+                != snapshot
+                    .manifest
+                    .agent_configuration
+                    .admitted_configuration
+                    .as_ref()
+                    .ok_or_else(|| scheduler::error("accepted_configuration_missing"))?
+                    .digest()?
+                || retained.accepted.role_snapshot_digest
+                    != snapshot
+                        .manifest
+                        .instructions
+                        .delegation()
+                        .ok_or_else(|| scheduler::error("accepted_role_missing"))?
+                        .role_snapshot_digest
+            {
+                return Err(scheduler::error("accepted_capture_changed"));
+            }
+            store.transact(|tx| scheduler::prepare_dispatch(tx, &permit, scheduler::now_ms()?))?;
+            let intent = retained.accepted.execution_intent.clone();
+            let outcome = match actor.owner {
+                Owner::Managed(session_id) => dispatch_accepted_managed_task(
+                    crate::delegation_service::ManagedTaskDispatch {
+                        view,
+                        state_root,
+                        session_id,
+                        member_ref: actor.run,
+                        task_ref: permit.work,
+                        execution_intent: &intent,
+                        accepted: &retained.accepted,
+                        contents: &retained.contents,
+                        deadline_seconds: retained.deadline_seconds,
+                    },
+                    Some(&lifecycle),
+                ),
+                Owner::External(engagement_id) => {
+                    let carrier = CredentialCarrier::for_accepted_work(state_root, &permit)?;
+                    dispatch_accepted_external_task(
+                        crate::delegation_service::MemberTaskDispatch {
+                            view,
+                            state_root,
+                            engagement_id,
+                            member_ref: actor.run,
+                            task_ref: permit.work,
+                            idempotency_key: &retained.key,
+                            execution_intent: &intent,
+                            accepted: &retained.accepted,
+                            contents: &retained.contents,
+                            deadline_seconds: retained.deadline_seconds,
+                        },
+                        &carrier,
+                        Some(&lifecycle),
+                    )
+                }
+            };
+            let outcome = outcome.unwrap_or(
+                crate::delegation_service::MemberDispatchOutcome::Uncertain {
+                    code: "RECOVERY_REQUIRED".into(),
+                    message: "accepted dispatch requires reconciliation".into(),
+                },
+            );
+            store.transact(|tx| {
+                scheduler::finish_dispatch(tx, &permit, &outcome, scheduler::now_ms()?)
+            })?;
+        } else {
+            let record = crate::collaboration::execution_record(store.connection(), permit.work)?;
+            if record.session != actor.owner.scope().1 || record.target != actor.run {
+                return Err(scheduler::error("consultation_scope_changed"));
+            }
+            let carrier = crate::orchestration::OrchestrationStore::open_observer(state_root)?
+                .member_credential(actor.run)?
+                .controller_carrier()?;
+            store.transact(|tx| scheduler::prepare_dispatch(tx, &permit, scheduler::now_ms()?))?;
+            let response = call_actor_worker(
+                state_root,
+                actor.run,
+                DarwinSystem.current_uid(),
+                Some(carrier.raw_fd()),
+                |expected| ControlRequestV1::Submit {
+                    expected,
+                    caller: None,
+                    request: crate::worker::TurnControlRequest {
+                        normalized_request_sha256: None,
+                        write: false,
+                        message: record.prompt,
+                        idempotency_key: format!("collaboration-exchange:{}", permit.work),
+                        effort: None,
+                        images: Vec::new(),
+                    },
+                },
+            );
+            let outcome = match response {
+                Ok(ControlResponseV1::Accepted { accepted })
+                | Ok(ControlResponseV1::AcceptedReceipt { accepted, .. }) => {
+                    crate::delegation_service::MemberDispatchOutcome::Accepted {
+                        turn_ref: accepted.turn_id,
+                    }
+                }
+                Ok(ControlResponseV1::Terminal { terminal }) => {
+                    crate::delegation_service::MemberDispatchOutcome::Accepted {
+                        turn_ref: terminal.turn_id,
+                    }
+                }
+                Ok(ControlResponseV1::Failed { code, message, .. })
+                    if proved_non_dispatch(&code) =>
+                {
+                    crate::delegation_service::MemberDispatchOutcome::Refused { code, message }
+                }
+                _ => crate::delegation_service::MemberDispatchOutcome::Uncertain {
+                    code: "RECOVERY_REQUIRED".into(),
+                    message: "consultation dispatch requires reconciliation".into(),
+                },
+            };
+            store.transact(|tx| {
+                scheduler::finish_dispatch(tx, &permit, &outcome, scheduler::now_ms()?)
+            })?;
+        }
+        return Ok(());
+    }
+    if now.saturating_sub(idle_since) < policy.idle_ms
+        || activation_policy != "on_mail"
+        || snapshot.manifest.agent_configuration.native_subagent_policy != "disabled"
+    {
+        return Ok(());
+    }
+    store.transact(|tx| scheduler::idle_mail_guards(tx, actor))?;
+    let runtime = snapshot
+        .runtime_record
+        .as_ref()
+        .ok_or_else(|| scheduler::error("passivation_runtime_missing"))?;
+    if snapshot.projection.thread_id.is_none()
+        || snapshot
+            .writer
+            .holder
+            .as_ref()
+            .is_some_and(|h| h.run_id == actor.run)
+    {
+        return Ok(());
+    }
+    actor_thread_verified(state_root, &snapshot)?;
+    crate::worker::prove_worker_workload_absent(runtime)
+        .map_err(|e| e.machine_error(actor.run, state_root))?;
+    if snapshot.manifest.execution_lane == ExecutionLane::SharedReadonly {
+        crate::profile::prove_shared_actor_workload_absent(
+            DolgoraeHome::system()?.root(),
+            snapshot
+                .manifest
+                .global_profile_binding
+                .as_ref()
+                .ok_or_else(|| scheduler::error("passivation_profile_missing"))?,
+            runtime
+                .app_server_epoch
+                .ok_or_else(|| scheduler::error("passivation_server_epoch_missing"))?,
+        )?;
+    }
+    let operation = Uuid::now_v7();
+    store.transact(|tx|{
+        scheduler::idle_mail_guards(tx,actor)?;
+        let count=tx.execute("UPDATE scheduler_actors SET operation_id=?2,operation_kind='passivation',lease_until_ms=?3,operation_snapshot_json=?4 WHERE target_run_id=?1 AND operation_id IS NULL",rusqlite::params![actor.run.to_string(),operation.to_string(),now+policy.activation_ms,serde_json::to_string(&ActorExecutionIdentity::capture(&snapshot)?).map_err(|_|scheduler::error("actor_capture_invalid"))?]).map_err(scheduler::sql)?;
+        if count!=1{return Err(scheduler::error("actor_operation_busy"));}
+        scheduler::capture_operation(tx,actor,operation,&serde_json::to_string(&ActorExecutionIdentity::capture(&snapshot)?).map_err(|_|scheduler::error("actor_capture_invalid"))?,now)?;
+        scheduler::event(tx,actor.owner,"actor_passivation_prepared",&operation.to_string(),now)
+    })?;
+    let fenced = call_actor_worker(
+        state_root,
+        actor.run,
+        DarwinSystem.current_uid(),
+        None,
+        |expected| ControlRequestV1::ActorPassivate {
+            expected,
+            caller: None,
+            operation_id: operation,
+        },
+    );
+    if !matches!(fenced,Ok(ControlResponseV1::Status{ref lifecycle,active_turn:None,..}) if lifecycle=="idle")
+    {
+        return Err(scheduler::error("passivation_fence_unverified"));
+    }
+    if snapshot.manifest.execution_lane == ExecutionLane::SharedReadonly {
+        crate::profile::prove_shared_actor_workload_absent(
+            DolgoraeHome::system()?.root(),
+            snapshot
+                .manifest
+                .global_profile_binding
+                .as_ref()
+                .ok_or_else(|| scheduler::error("passivation_profile_missing"))?,
+            runtime
+                .app_server_epoch
+                .ok_or_else(|| scheduler::error("passivation_server_epoch_missing"))?,
+        )?;
+    }
+    let runtime_path =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), actor.run)
+            .map_err(|e| e.machine_error(actor.run, state_root))?;
+    stop_lifecycle_generation(state_root, actor.run, &runtime_path)?;
+    finish_actor_passivation(state_root, &mut store, actor)?;
+    scheduler::notify(state_root, actor.run);
+    Ok(())
+}
+
+/// Cleanup reuses the captured acquisition and the ordinary release protocol.
+/// The failed operation's immutable capture survives the unavailable transition.
+fn compensate_activation_writer(
+    view: &WorkspaceView,
+    state_root: &Path,
+    store: &mut EngagementStore,
+    actor: crate::scheduler::Actor,
+    operation: Uuid,
+    captured: &ActorExecutionIdentity,
+    lifecycle: &crate::worker::RunLifecycleLease,
+) -> Result<(), MachineError> {
+    use crate::scheduler;
+    let Some(acquisition) = captured.writer_acquire.as_ref() else {
+        return Ok(());
+    };
+    let text =
+        scheduler::failed_activation_capture(store.connection(), actor, &operation.to_string())?;
+    if text
+        != serde_json::to_string(captured).map_err(|_| scheduler::error("actor_capture_invalid"))?
+    {
+        return Err(scheduler::error("activation_cleanup_capture_changed"));
+    }
+    let permit = &acquisition.work;
+    if permit.target != actor.run
+        || permit.scope_kind != actor.owner.scope().0
+        || permit.scope_ref != actor.owner.scope().1
+        || permit.kind != "assignment"
+    {
+        return Err(scheduler::error("activation_cleanup_work_changed"));
+    }
+    let claim:bool=store.connection().query_row("SELECT EXISTS(SELECT 1 FROM scheduler_claims WHERE claim_id=?1 AND target_run_id=?2 AND work_ref=?3 AND scope_kind=?4 AND scope_ref=?5 AND kind='assignment' AND phase='claimed' AND turn_id IS NULL)",rusqlite::params![permit.claim.to_string(),actor.run.to_string(),permit.work.to_string(),permit.scope_kind,permit.scope_ref.to_string()],|r|r.get(0)).map_err(scheduler::sql)?;
+    if !claim {
+        return Err(scheduler::error("activation_cleanup_claim_changed"));
+    }
+    let retained = scheduler::retained_task(store, permit, &view.workspace_id, state_root)?;
+    if retained.accepted.execution_intent != "canonical_workspace_write" {
+        return Err(scheduler::error("activation_cleanup_intent_changed"));
+    }
+    let snapshot = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+    if !captured.matches(&snapshot)?
+        || snapshot.projection.lifecycle != RunLifecycle::Idle
+        || snapshot.projection.active_turn_id.is_some()
+        || !snapshot.projection.pending_requests.is_empty()
+    {
+        return Err(scheduler::error("activation_cleanup_run_changed"));
+    }
+    let task_state = match actor.owner {
+        crate::assignment_queue::Owner::Managed(session) => {
+            crate::orchestration::successor_task(store.connection(), session, permit.work)?
+                .ok_or_else(|| scheduler::error("claim_task_missing"))?
+                .state
+        }
+        crate::assignment_queue::Owner::External(scope) => {
+            store.external_task(scope, permit.work)?.state
+        }
+    };
+    if !matches!(task_state.as_str(), "queued" | "expired" | "failed") {
+        return Err(scheduler::error("activation_cleanup_task_changed"));
+    }
+    if snapshot.writer.state == crate::writer::WriterAuthorityState::None
+        && snapshot.writer.holder.is_none()
+        && snapshot
+            .writer
+            .generation_release
+            .as_ref()
+            .is_none_or(|r| !r.pending())
+    {
+        return Ok(());
+    }
+    let (_, records) = observe_run_ledger(state_root, actor.run, true)?;
+    prove_activation_writer(captured, &snapshot, records.records())?;
+    let owner = match actor.owner {
+        crate::assignment_queue::Owner::Managed(session_id) => {
+            SettlementOwner::Managed { session_id }
+        }
+        crate::assignment_queue::Owner::External(engagement_id) => {
+            SettlementOwner::External { engagement_id }
+        }
+    };
+    let carrier = match actor.owner {
+        crate::assignment_queue::Owner::Managed(_) => {
+            crate::orchestration::OrchestrationStore::open_observer(state_root)?
+                .member_credential(actor.run)?
+                .controller_carrier()?
+        }
+        crate::assignment_queue::Owner::External(_) => {
+            CredentialCarrier::for_accepted_work(state_root, permit)?
+        }
+    };
+    release_member_writer(
+        view,
+        state_root,
+        actor.run,
+        owner,
+        &carrier,
+        Some(lifecycle),
+    )?;
+    store.transact(|tx| {
+        scheduler::event(
+            tx,
+            actor.owner,
+            "activation_writer_compensated",
+            &format!("{operation}\0{}", acquisition.transaction_id),
+            scheduler::now_ms()?,
+        )
+    })?;
+    Ok(())
+}
+
+/// Bounded preparation in the existing opted-in native scheduler component.
+/// The expired activation clock is fixture data; owning task deadlines and
+/// production acquisition, recovery and release paths remain unchanged.
+#[cfg(test)]
+#[allow(dead_code, reason = "called by the opted-in native scheduler driver")]
+pub(crate) fn native_scheduler_activation_fixture(
+    view: &WorkspaceView,
+    state_root: &Path,
+    actor: crate::scheduler::Actor,
+    owner: &CredentialCarrier,
+) -> Result<Value, MachineError> {
+    use crate::scheduler;
+    let crate::assignment_queue::Owner::External(scope) = actor.owner else {
+        return Err(scheduler::error("fixture_external_owner_required"));
+    };
+    let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
+    if scheduler::residency(store.connection(), actor)? != "unstarted" {
+        return Err(scheduler::error("fixture_original_unstarted_required"));
+    }
+    let snapshot = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+    if snapshot.writer.state != crate::writer::WriterAuthorityState::None
+        || snapshot.writer.holder.is_some()
+    {
+        return Err(scheduler::error("fixture_original_reader_required"));
+    }
+    let now = scheduler::now_ms()?;
+    let permit = store
+        .transact(|tx| {
+            scheduler::observe_actor(tx, actor, snapshot.stamp.run_state_revision, true, now)?;
+            scheduler::claim(tx, actor.owner, actor.run, now)
+        })?
+        .ok_or_else(|| scheduler::error("fixture_accepted_claim_missing"))?;
+    let retained = scheduler::retained_task(&store, &permit, &view.workspace_id, state_root)?;
+    let mut capture = ActorExecutionIdentity::capture(&snapshot)?;
+    capture.writer_acquire = Some(ActorWriterAcquire {
+        transaction_id: Uuid::now_v7(),
+        previous_generation: snapshot.writer.writer_generation,
+        previous_revision: snapshot.writer.authority_revision,
+        work: permit.clone(),
+    });
+    let operation = store.transact(|tx| {
+        let operation = scheduler::begin_activation(tx, actor, now)?;
+        scheduler::capture_operation(
+            tx,
+            actor,
+            operation,
+            &serde_json::to_string(&capture).unwrap(),
+            now,
+        )?;
+        Ok(operation)
+    })?;
+    let carrier = CredentialCarrier::for_accepted_work(state_root, &permit)?;
+    {
+        let lifecycle = crate::worker::RunLifecycleLease::acquire(
+            state_root,
+            &view.workspace_id,
+            actor.run,
+            snapshot.projection.run_generation.max(1),
+        )
+        .map_err(|e| e.machine_error(actor.run, state_root))?;
+        acquire_writer_authorized_with_capture(
+            view,
+            state_root,
+            actor.run,
+            &carrier,
+            true,
+            Some(scope),
+            None,
+            None,
+            Some(&lifecycle),
+            capture.writer_acquire.as_ref(),
+        )?;
+    }
+    let acquired = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+    let (_, ledger) = observe_run_ledger(state_root, actor.run, true)?;
+    prove_activation_writer(&capture, &acquired, ledger.records())?;
+    store.transact(|tx| {
+        // Inject expiry after the actual acquisition, keeping the original
+        // prepared operation and task deadline. No expired effect is started.
+        if tx.execute(
+            "UPDATE scheduler_actors SET lease_until_ms=?3 WHERE target_run_id=?1 AND operation_id=?2 AND operation_kind='activation'",
+            rusqlite::params![actor.run.to_string(), operation.to_string(), scheduler::now_ms()? - 1],
+        ).map_err(scheduler::sql)? != 1 {
+            return Err(scheduler::error("fixture_activation_owner_changed"));
+        }
+        Ok(())
+    })?;
+    // Reconstruct the operation from SQLite in the actual activating branch.
+    schedule_actor(view, state_root, actor)?;
+    let compensated = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+    if scheduler::residency(store.connection(), actor)? != "unavailable"
+        || compensated.writer.state != crate::writer::WriterAuthorityState::None
+        || compensated.writer.holder.is_some()
+        || store.external_task(scope, permit.work)?.state != "queued"
+        || scheduler::candidates(store.connection(), actor.owner, actor.run)?.len() != 1
+    {
+        return Err(scheduler::error("fixture_compensation_incomplete"));
+    }
+    let next_permit = {
+        let _lifecycle = crate::worker::RunLifecycleLease::acquire(
+            state_root,
+            &view.workspace_id,
+            actor.run,
+            compensated.projection.run_generation.max(1),
+        )
+        .map_err(|e| e.machine_error(actor.run, state_root))?;
+        let fresh = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+        let (_, ledger) = observe_run_ledger(state_root, actor.run, true)?;
+        if !crate::turn::submit_audit_history_is_quiescent(ledger.records())
+            .map_err(|_| scheduler::error("fixture_effect_not_quiescent"))?
+        {
+            return Err(scheduler::error("fixture_effect_not_quiescent"));
+        }
+        store.transact(|tx| {
+            let until: i64 = tx.query_row(
+                "SELECT lease_until_ms FROM scheduler_claims WHERE claim_id=?1 AND phase='claimed' AND turn_id IS NULL",
+                [permit.claim.to_string()], |r| r.get(0),
+            ).map_err(scheduler::sql)?;
+            // The original pre-effect claim is proved nondispatched before
+            // a separate claim is admitted. Its lease is never refreshed.
+            scheduler::reconcile_claim(tx, actor, &fresh, until, state_root)?;
+            let remains: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM scheduler_claims WHERE claim_id=?1)",
+                [permit.claim.to_string()], |r| r.get(0),
+            ).map_err(scheduler::sql)?;
+            if remains {
+                return Err(scheduler::error("fixture_original_claim_not_retired"));
+            }
+            scheduler::claim(tx, actor.owner, actor.run, scheduler::now_ms()?)?
+                .ok_or_else(|| scheduler::error("fixture_fresh_claim_missing"))
+        })?
+    };
+    if next_permit.claim == permit.claim || next_permit.work != permit.work {
+        return Err(scheduler::error("fixture_fresh_claim_changed_work"));
+    }
+    // An explicit owner effect creates a later Writer. The expired activation
+    // must not compensate that separate acquisition, even for the same Run.
+    acquire_external_writer(view, state_root, actor.run, scope, owner)?;
+    let later = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+    let later_refusal = {
+        let lifecycle = crate::worker::RunLifecycleLease::acquire(
+            state_root,
+            &view.workspace_id,
+            actor.run,
+            later.projection.run_generation.max(1),
+        )
+        .map_err(|e| e.machine_error(actor.run, state_root))?;
+        match compensate_activation_writer(
+            view, state_root, &mut store, actor, operation, &capture, &lifecycle,
+        ) {
+            Ok(()) => return Err(scheduler::error("fixture_later_writer_was_not_fenced")),
+            Err(error) => error
+                .details
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| scheduler::error("fixture_refusal_reason_missing"))?,
+        }
+    };
+    if crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?.writer != later.writer {
+        return Err(scheduler::error("fixture_later_writer_changed"));
+    }
+    // Exercise the original deadline counterexample using fixture time. No
+    // persisted deadline changes and no activation or dispatch are retried.
+    for _ in 0..2 {
+        store.transact(|tx| scheduler::expire_queued(tx, actor, retained.deadline_ms))?;
+    }
+    schedule_actor(view, state_root, actor)?;
+    let released = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+    let task = store.external_task(scope, permit.work)?;
+    let expiry_events: u64 = store.connection().query_row(
+        "SELECT COUNT(*) FROM events WHERE engagement_id=?1 AND kind='scheduler_queued_work_expired'",
+        [scope.to_string()], |r| r.get(0),
+    ).map_err(scheduler::sql)?;
+    if released.writer.state != crate::writer::WriterAuthorityState::None
+        || released.writer.holder.is_some()
+        || released
+            .writer
+            .generation_release
+            .as_ref()
+            .is_some_and(|r| r.pending())
+        || task.state != "expired"
+        || task.turn_id.is_some()
+        || expiry_events != 1
+        || scheduler::retained_task(&store, &permit, &view.workspace_id, state_root)?.deadline_ms
+            != retained.deadline_ms
+    {
+        return Err(scheduler::error("fixture_terminal_cleanup_incomplete"));
+    }
+    Ok(
+        json!({"schema":"dolgorae.native-activation-compensation/v1",
+        "passed":true,"prepared_expired_activation_clock":true,"prepared_expiry_observation_clock":true,
+        "original_task_deadline_ms":retained.deadline_ms,"task":permit.work,
+        "actual_qualified_acquisition":true,"restart_compensation_released_original_writer":true,
+        "unavailable_and_queued_preserved":true,"later_same_run_writer_refused":true,
+        "later_writer_refusal_reason":later_refusal,"original_claim":permit.claim,"fresh_claim":next_permit.claim,
+        "proved_nondispatch_claim_replaced_without_deadline_change":true,
+        "original_deadline_terminal_writer_cleanup":true,"expiry_events":expiry_events,"no_task_turn":true}),
+    )
+}
+
+fn prove_activation_writer(
+    captured: &ActorExecutionIdentity,
+    snapshot: &crate::snapshot::RunSnapshot,
+    records: &[crate::audit::AuditRecord],
+) -> Result<(), MachineError> {
+    let acquisition = captured
+        .writer_acquire
+        .as_ref()
+        .ok_or_else(|| crate::scheduler::error("activation_acquisition_unattributed"))?;
+    let generation = acquisition
+        .previous_generation
+        .checked_add(1)
+        .ok_or_else(|| crate::scheduler::error("activation_writer_generation_invalid"))?;
+    let runtime = snapshot
+        .runtime_record
+        .as_ref()
+        .ok_or_else(|| crate::scheduler::error("activation_writer_runtime_missing"))?;
+    if snapshot.writer.state != crate::writer::WriterAuthorityState::Active
+        || snapshot.writer.transaction_id.is_some()
+        || snapshot.writer.writer_generation != generation
+        || snapshot
+            .writer
+            .generation_release
+            .as_ref()
+            .is_some_and(|r| r.pending())
+        || snapshot.writer.holder.as_ref().is_none_or(|h| {
+            h.run_id != captured.run
+                || h.run_generation != runtime.identity.run_generation
+                || h.worker_generation != runtime.identity.run_generation
+                || h.thread_id != snapshot.projection.thread_id
+        })
+        || snapshot.captured_effective_policy.access != Access::Write
+        || snapshot.captured_effective_policy.verification
+            != crate::domain::PolicyVerification::Verified
+        || snapshot.captured_effective_policy.writer_generation != Some(generation)
+    {
+        return Err(crate::scheduler::error(
+            "activation_writer_ownership_changed",
+        ));
+    }
+    if !crate::turn::submit_audit_history_is_quiescent(records)
+        .map_err(|_| crate::scheduler::error("activation_writer_effect_unknown"))?
+    {
+        return Err(crate::scheduler::error("activation_writer_effect_unknown"));
+    }
+    let mut evidence = 0;
+    for record in records
+        .iter()
+        .filter(|r| r.kind() == AuditKind::WriterAcquired)
+    {
+        let value = audit_value(record)?;
+        if value["transaction_id"] == acquisition.transaction_id.to_string() {
+            if record.run_id() != captured.run
+                || record.run_generation() != runtime.identity.run_generation
+                || value["writer_generation"] != generation
+            {
+                return Err(crate::scheduler::error(
+                    "activation_writer_evidence_changed",
+                ));
+            }
+            evidence += 1;
+        }
+    }
+    if evidence != 1 {
+        return Err(crate::scheduler::error(
+            "activation_writer_evidence_missing",
+        ));
+    }
+    Ok(())
+}
+
+fn finish_actor_passivation(
+    state_root: &Path,
+    store: &mut EngagementStore,
+    actor: crate::scheduler::Actor,
+) -> Result<(), MachineError> {
+    let snapshot = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+    if snapshot.projection.lifecycle != RunLifecycle::Idle
+        || snapshot.projection.active_turn_id.is_some()
+    {
+        return Err(crate::scheduler::error("passivation_run_changed"));
+    }
+    store.transact(|tx| {
+        crate::scheduler::complete_passivation(tx, actor, crate::scheduler::now_ms()?)
+    })
+}
+
+/// Link only a positively accepted original Turn. This is shared by the reply
+/// path and crash repair, so a late identical reply never overwrites a result.
+pub(crate) fn link_dispatched_task(
+    tx: &rusqlite::Transaction<'_>,
+    owner: SettlementOwner,
+    member: Uuid,
+    task: Uuid,
+    turn: &str,
+    now: i64,
+) -> Result<(), MachineError> {
+    let query = match owner {
+        SettlementOwner::Managed { .. } => {
+            "SELECT state,target_turn_id FROM brokered_tasks WHERE session_id=?1 AND target_run_id=?2 AND task_id=?3"
+        }
+        SettlementOwner::External { .. } => {
+            "SELECT state,turn_id FROM tasks WHERE engagement_id=?1 AND specialist_run_id=?2 AND task_id=?3"
+        }
+    };
+    let (state, existing): (String, Option<String>) = tx
+        .query_row(
+            query,
+            rusqlite::params![
+                owner.scope_ref().to_string(),
+                member.to_string(),
+                task.to_string()
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(crate::scheduler::sql)?;
+    if let Some(existing) = existing {
+        return if existing == turn {
+            Ok(())
+        } else {
+            Err(crate::scheduler::error("accepted_turn_conflict"))
+        };
+    }
+    if !matches!(state.as_str(), "accepted" | "dispatching") {
+        return Err(crate::scheduler::error("accepted_task_state_conflict"));
+    }
+    match owner {
+        SettlementOwner::Managed { session_id } => {
+            crate::orchestration::mark_successor_task_running(tx, session_id, task, turn, now)
+        }
+        SettlementOwner::External { engagement_id } => {
+            crate::engagement::mark_external_task_running_in(tx, engagement_id, task, turn, now)
+                .map(|_| ())
+        }
+    }
+}
+
+/// Recover positive acceptance, never absence, before Turn-based settlement.
+/// No current deadline check belongs here: the original effect already exists.
+pub(crate) fn recover_scheduler_assignment(
+    state_root: &Path,
+    actor: crate::scheduler::Actor,
+) -> Result<(), MachineError> {
+    use crate::scheduler;
+    let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
+    let exists:bool=store.connection().query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_claims')",[],|r|r.get(0)).map_err(scheduler::sql)?;
+    if !exists {
+        return Ok(());
+    }
+    let row:Option<(String,String)>=store.connection().query_row("SELECT claim_id,work_ref FROM scheduler_claims WHERE target_run_id=?1 AND scope_kind=?2 AND scope_ref=?3 AND kind='assignment' AND phase IN ('dispatching','unknown','accepted')",rusqlite::params![actor.run.to_string(),actor.owner.scope().0,actor.owner.scope().1.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(scheduler::sql)?;
+    let Some((claim, work)) = row else {
+        return Ok(());
+    };
+    let permit = scheduler::AcceptedWork {
+        schema: "dolgorae.accepted-work/v1".into(),
+        claim: Uuid::parse_str(&claim).map_err(|_| scheduler::error("claim_identity_invalid"))?,
+        work: Uuid::parse_str(&work).map_err(|_| scheduler::error("claim_work_invalid"))?,
+        target: actor.run,
+        scope_kind: actor.owner.scope().0.into(),
+        scope_ref: actor.owner.scope().1,
+        kind: "assignment".into(),
+    };
+    let snapshot = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+    let manifest = &snapshot.manifest;
+    let expected_kind = match actor.owner {
+        crate::assignment_queue::Owner::Managed(_) => AggregateKind::OrchestratedSession,
+        crate::assignment_queue::Owner::External(_) => AggregateKind::ExternalSpecialistEngagement,
+    };
+    if manifest.schema_version != 4
+        || manifest.aggregate_binding.as_ref().is_none_or(|b| {
+            b.aggregate_kind != expected_kind
+                || b.aggregate_id != permit.scope_ref
+                || b.member_kind != crate::run::AggregateMemberKind::Specialist
+        })
+        || load_reconciled_controller_binding(state_root, actor.run)? != manifest.controller
+    {
+        return Err(scheduler::error("accepted_recovery_owner_changed"));
+    }
+    let (owner, configuration) = match actor.owner {
+        crate::assignment_queue::Owner::Managed(session_id) => {
+            let broker = crate::orchestration::OrchestrationStore::open_observer(state_root)?;
+            let carrier = broker.member_credential(actor.run)?.controller_carrier()?;
+            crate::worker::RunControllerAuthority::new(state_root.to_owned(), actor.run)
+                .authorize("run.submit", &carrier)?;
+            let member =
+                crate::orchestration::successor_member(store.connection(), session_id, actor.run)?
+                    .ok_or_else(|| scheduler::error("accepted_recovery_member_missing"))?;
+            (
+                SettlementOwner::Managed { session_id },
+                member.agent_configuration,
+            )
+        }
+        crate::assignment_queue::Owner::External(engagement_id) => {
+            let (workspace, controller) = store.accepted_external_owner(engagement_id)?;
+            if workspace != manifest.workspace_id || controller != manifest.controller {
+                return Err(scheduler::error("accepted_recovery_owner_changed"));
+            }
+            let (configuration, _, _) =
+                store.external_member_configuration(engagement_id, actor.run)?;
+            (SettlementOwner::External { engagement_id }, configuration)
+        }
+    };
+    let retained = scheduler::retained_task(&store, &permit, &manifest.workspace_id, state_root)?;
+    if configuration != manifest.agent_configuration
+        || retained.accepted.agent_configuration_digest
+            != configuration
+                .admitted_configuration
+                .as_ref()
+                .ok_or_else(|| scheduler::error("accepted_configuration_missing"))?
+                .digest()?
+        || manifest
+            .instructions
+            .delegation()
+            .is_none_or(|r| r.role_snapshot_digest != retained.accepted.role_snapshot_digest)
+    {
+        return Err(scheduler::error("accepted_recovery_configuration_changed"));
+    }
+    let request = crate::turn::TurnRequest {
+        write: false,
+        idempotency_key: retained.key,
+        message: retained.contents.prompt(
+            &retained.accepted,
+            &retained.accepted.execution_intent,
+            retained.deadline_seconds,
+        )?,
+        images: Vec::new(),
+        model: manifest.model.clone(),
+        effort: None,
+        delivery: crate::turn::DeliveryMode::Submit,
+    };
+    let namespace = crate::operation::Namespace::submit(
+        &manifest.controller.identity,
+        &manifest.workspace_id,
+        actor.run,
+        &request.idempotency_key,
+    )
+    .map_err(|_| scheduler::error("accepted_recovery_namespace_invalid"))?;
+    let (_, ledger) = observe_run_ledger(state_root, actor.run, true)?;
+    let Some((accepted, generation)) =
+        crate::turn::verified_submit_acceptance(ledger.records(), &namespace, &request)
+            .map_err(|_| scheduler::error("accepted_recovery_evidence_invalid"))?
+    else {
+        return Ok(());
+    };
+    if generation > snapshot.projection.run_generation
+        || snapshot.projection.thread_id.as_deref() != Some(&accepted.thread_id)
+    {
+        return Err(scheduler::error("accepted_recovery_generation_changed"));
+    }
+    store.transact(|tx|{
+        let current:Option<(String,Option<String>)>=tx.query_row("SELECT phase,turn_id FROM scheduler_claims WHERE claim_id=?1 AND work_ref=?2 AND target_run_id=?3 AND scope_kind=?4 AND scope_ref=?5 AND kind='assignment'",rusqlite::params![claim,work,actor.run.to_string(),permit.scope_kind,permit.scope_ref.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(scheduler::sql)?;
+        let Some((phase,turn))=current else {return Ok(());};
+        if !matches!(phase.as_str(),"dispatching"|"unknown"|"accepted") || turn.as_deref().is_some_and(|t|t!=accepted.turn_id) {return Err(scheduler::error("accepted_recovery_claim_changed"));}
+        let now=scheduler::now_ms()?;
+        link_dispatched_task(tx,owner,actor.run,permit.work,&accepted.turn_id,now)?;
+        crate::caller_scope::accepted(tx,permit.work)?;
+        crate::assignment_queue::remove(tx,actor.owner,permit.work)?;
+        if phase!="accepted" || turn.is_none() {
+            tx.execute("UPDATE scheduler_claims SET phase='accepted',turn_id=?2,safe_blocker=NULL WHERE claim_id=?1",rusqlite::params![claim,accepted.turn_id]).map_err(scheduler::sql)?;
+            scheduler::event(tx,actor.owner,"scheduler_original_acceptance_linked",&format!("{claim}\0{}",accepted.turn_id),now)?;
+        }
+        Ok(())
+    })
+}
+
+fn reconcile_scheduler_writer(
+    view: &WorkspaceView,
+    state_root: &Path,
+    actor: crate::scheduler::Actor,
+    lifecycle: &crate::worker::RunLifecycleLease,
+) -> Result<(), MachineError> {
+    use crate::assignment_queue::Owner;
+    let owner = match actor.owner {
+        Owner::Managed(session_id) => SettlementOwner::Managed { session_id },
+        Owner::External(engagement_id) => SettlementOwner::External { engagement_id },
+    };
+    recover_scheduler_assignment(state_root, actor)?;
+    resettle_member_tasks(state_root, actor.run, owner)?;
+    let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
+    let exists:bool=store.connection().query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_claims')",[],|r|r.get(0)).map_err(crate::scheduler::sql)?;
+    if !exists {
+        return Ok(());
+    }
+    let row:Option<(String,String,String)>=store.connection().query_row("SELECT claim_id,kind,work_ref FROM scheduler_claims WHERE target_run_id=?1 AND scope_kind=?2 AND scope_ref=?3",rusqlite::params![actor.run.to_string(),actor.owner.scope().0,actor.owner.scope().1.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(crate::scheduler::sql)?;
+    let Some((claim, kind, work)) = row else {
+        return Ok(());
+    };
+    if kind != "assignment" {
+        return Ok(());
+    }
+    let permit = crate::scheduler::AcceptedWork {
+        schema: "dolgorae.accepted-work/v1".into(),
+        claim: Uuid::parse_str(&claim)
+            .map_err(|_| crate::scheduler::error("claim_identity_invalid"))?,
+        work: Uuid::parse_str(&work).map_err(|_| crate::scheduler::error("claim_work_invalid"))?,
+        target: actor.run,
+        scope_kind: actor.owner.scope().0.into(),
+        scope_ref: actor.owner.scope().1,
+        kind,
+    };
+    let (state, turn) = match actor.owner {
+        Owner::Managed(scope) => {
+            let task =
+                crate::orchestration::successor_task(store.connection(), scope, permit.work)?
+                    .ok_or_else(|| crate::scheduler::error("claim_task_missing"))?;
+            (task.state, task.target_turn_id)
+        }
+        Owner::External(scope) => {
+            let task = store.external_task(scope, permit.work)?;
+            (task.state, task.turn_id)
+        }
+    };
+    if !matches!(
+        state.as_str(),
+        "completed_not_delivered" | "delivered" | "failed" | "cancelled" | "expired"
+    ) {
+        return Ok(());
+    }
+    let snapshot = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
+    if snapshot.projection.lifecycle != RunLifecycle::Idle
+        || snapshot.projection.active_turn_id.is_some()
+        || !snapshot.projection.pending_requests.is_empty()
+    {
+        return Ok(());
+    }
+    if snapshot
+        .writer
+        .holder
+        .as_ref()
+        .is_none_or(|holder| holder.run_id != actor.run)
+    {
+        return Ok(());
+    }
+    let retained =
+        crate::scheduler::retained_task(&store, &permit, &view.workspace_id, state_root)?;
+    if retained.accepted.execution_intent != "canonical_workspace_write" {
+        return Err(crate::scheduler::error("claim_writer_scope_changed"));
+    }
+    store.transact(|tx| {
+        tx.execute(
+            "UPDATE scheduler_claims SET phase='accepted',turn_id=?2 WHERE claim_id=?1",
+            rusqlite::params![claim, turn],
+        )
+        .map_err(crate::scheduler::sql)?;
+        Ok(())
+    })?;
+    let carrier = match actor.owner {
+        Owner::Managed(_) => crate::orchestration::OrchestrationStore::open_observer(state_root)?
+            .member_credential(actor.run)?
+            .controller_carrier()?,
+        Owner::External(_) => CredentialCarrier::for_accepted_work(state_root, &permit)?,
+    };
+    release_member_writer(
+        view,
+        state_root,
+        actor.run,
+        owner,
+        &carrier,
+        Some(lifecycle),
+    )?;
+    crate::scheduler::notify(state_root, actor.run);
+    Ok(())
+}
+
+fn retire_absent_actor_runtime(
+    state_root: &Path,
+    record: &crate::worker::WorkerRuntimeRecord,
+) -> Result<(), MachineError> {
+    let run = record.identity.run_id;
+    if crate::worker::classify_worker_identity(record)
+        != crate::worker::ProcessIdentityVerdict::Absent
+    {
+        return Err(crate::scheduler::error("actor_generation_not_absent"));
+    }
+    let lock = RunStartupLock::open(state_root, run)?;
+    lock.acquire()?;
+    let result = (|| {
+        lock.lock
+            .require_unowned_worker_range()
+            .map_err(|e| worker_startup_range_error(e, run, lock.lock.path()))?;
+        let path =
+            crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run)
+                .map_err(|e| e.machine_error(run, state_root))?;
+        let current = crate::worker::read_runtime_record(&path, DarwinSystem.current_uid())
+            .map_err(|e| e.machine_error(run, state_root))?;
+        if current != *record {
+            return Err(crate::scheduler::error("actor_generation_changed"));
+        }
+        crate::worker::stop_orphaned_dedicated_server(record)
+            .map_err(|e| e.machine_error(run, state_root))?;
+        crate::worker::prove_worker_generation_absent(record)
+            .map_err(|e| e.machine_error(run, state_root))?;
+        retire_absent_generation_writer(state_root, record)?;
+        crate::worker::remove_verified_absent_runtime(&path, DarwinSystem.current_uid())
+            .map_err(|e| e.machine_error(run, state_root))
+    })();
+    lock.release();
+    result
+}
+
+fn actor_absence_matches(
+    state_root: &Path,
+    record: &crate::worker::WorkerRuntimeRecord,
+) -> Result<bool, MachineError> {
+    let marker = crate::worker::verified_absence_marker(
+        &crate::worker::runtime_root(state_root),
+        record.identity.run_id,
+    )
+    .map_err(|e| e.machine_error(record.identity.run_id, state_root))?;
+    let value = serde_json::to_value(&record.identity)
+        .map_err(|_| crate::scheduler::error("actor_identity_invalid"))?;
+    let bytes = crate::jcs::canonicalize(
+        &crate::jcs::parse(&value.to_string())
+            .map_err(|_| crate::scheduler::error("actor_identity_invalid"))?,
+    )
+    .map_err(|_| crate::scheduler::error("actor_identity_invalid"))?;
+    Ok(marker.is_some_and(|m| {
+        m.run_id == record.identity.run_id
+            && m.run_generation == record.identity.run_generation
+            && m.worker_identity_sha256 == crate::jcs::sha256_hex(&bytes)
+    }))
+}
+
+fn call_actor_worker(
+    state_root: &Path,
+    run: Uuid,
+    uid: u32,
+    credential: Option<std::os::fd::RawFd>,
+    build: impl FnOnce(crate::worker::WorkerIdentity) -> ControlRequestV1,
+) -> Result<ControlResponseV1, crate::worker::WorkerProtocolError> {
+    match crate::scheduler::effect_remaining(state_root, run)
+        .map_err(|_| crate::worker::WorkerProtocolError::Io)?
+    {
+        Some(budget) => {
+            crate::worker::call_run_worker_bounded(state_root, run, uid, credential, budget, build)
+        }
+        None => crate::worker::call_run_worker(state_root, run, uid, credential, build),
+    }
+}
+
+fn actor_ready_verified(
+    state_root: &Path,
+    snapshot: &crate::snapshot::RunSnapshot,
+    captured: &ActorExecutionIdentity,
+) -> Result<bool, MachineError> {
+    if !captured.matches(snapshot)?
+        || snapshot.projection.lifecycle != RunLifecycle::Idle
+        || snapshot.projection.active_turn_id.is_some()
+    {
+        return Ok(false);
+    }
+    let Some(runtime) = snapshot.runtime_record.as_ref() else {
+        return Ok(false);
+    };
+    if runtime.control_recovery_required
+        || crate::worker::classify_worker_identity(runtime)
+            != crate::worker::ProcessIdentityVerdict::Match
+        || runtime
+            .startup_scope
+            .as_ref()
+            .is_some_and(|scope| !scope.complete)
+    {
+        return Ok(false);
+    }
+    if snapshot.projection.thread_id.is_none() {
+        return Ok(false);
+    }
+    actor_thread_verified(state_root, snapshot)?;
+    let status = call_actor_worker(
+        state_root,
+        snapshot.manifest.run_id,
+        DarwinSystem.current_uid(),
+        None,
+        |expected| ControlRequestV1::RunStatus {
+            expected,
+            caller: None,
+        },
+    )
+    .map_err(|e| e.machine_error(snapshot.manifest.run_id, state_root))?;
+    Ok(
+        matches!(status,ControlResponseV1::Status{identity,lifecycle,active_turn:None,..} if identity==runtime.identity && lifecycle=="idle"),
+    )
+}
+
+fn shared_actor_policy_verified(policy: &crate::domain::EffectivePolicy, epoch: u64) -> bool {
+    policy.access == Access::Read
+        && policy.verification == crate::domain::PolicyVerification::Verified
+        && policy.policy_epoch.0 > 0
+        && policy
+            .thread_generation
+            .is_some_and(|generation| generation > 0)
+        && policy.server_epoch == Some(epoch)
+        && policy.writer_generation.is_none()
+}
+
+/// The Dedicated witness belongs to caller-workspace qualification. Shared
+/// actors bind their durable Thread policy to the retained Profile lifetime
+/// and its hash-checked active membership instead.
+fn actor_thread_verified(
+    state_root: &Path,
+    snapshot: &crate::snapshot::RunSnapshot,
+) -> Result<(), MachineError> {
+    let run = snapshot.manifest.run_id;
+    let thread = snapshot
+        .projection
+        .thread_id
+        .as_deref()
+        .ok_or_else(|| crate::scheduler::error("actor_thread_missing"))?;
+    if snapshot.manifest.execution_lane != ExecutionLane::SharedReadonly {
+        return crate::worker::read_thread_registration(state_root, &snapshot.manifest, thread)
+            .map(|_| ())
+            .map_err(|e| e.machine_error(run, state_root));
+    }
+    let binding = snapshot
+        .manifest
+        .global_profile_binding
+        .as_ref()
+        .ok_or_else(|| crate::scheduler::error("actor_profile_missing"))?;
+    let epoch = snapshot
+        .runtime_record
+        .as_ref()
+        .and_then(|runtime| runtime.app_server_epoch)
+        .ok_or_else(|| crate::scheduler::error("actor_server_epoch_missing"))?;
+    if !shared_actor_policy_verified(&snapshot.captured_effective_policy, epoch) {
+        return Err(crate::scheduler::error("actor_reader_policy_unverified"));
+    }
+    let membership = membership_for_run(state_root, &snapshot.manifest)?;
+    let index = membership.load_existing()?;
+    let key = format!("{}:{run}", snapshot.manifest.workspace_id);
+    if !index.members.get(&key).is_some_and(|member| {
+        member.workspace_id == snapshot.manifest.workspace_id
+            && member.run_id == run
+            && member.disposition == MembershipDisposition::Active
+            && member.observed_epoch == Some(epoch)
+    }) {
+        return Err(crate::scheduler::error("actor_profile_membership_changed"));
+    }
+    let home = state_root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| crate::scheduler::error("actor_profile_home_missing"))?;
+    let server = crate::profile::observe_history_server(home, binding)?;
+    if server.server_epoch != epoch {
+        return Err(crate::scheduler::error("actor_server_epoch_changed"));
+    }
+    crate::profile::revalidate_history_server(home, binding, &server)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduler_shared_actor_requires_verified_reader_policy_at_its_retained_epoch() {
+        let policy = crate::domain::EffectivePolicy {
+            access: Access::Read,
+            verification: crate::domain::PolicyVerification::Verified,
+            policy_epoch: crate::domain::PolicyEpoch(1),
+            thread_generation: Some(1),
+            server_epoch: Some(7),
+            writer_generation: None,
+        };
+        assert!(shared_actor_policy_verified(&policy, 7));
+        assert!(!shared_actor_policy_verified(&policy, 8));
+        for case in 0..7 {
+            let mut changed = policy.clone();
+            match case {
+                0 => changed.access = Access::Write,
+                1 => changed.verification = crate::domain::PolicyVerification::Unverified,
+                2 => changed.policy_epoch = crate::domain::PolicyEpoch(0),
+                3 => changed.thread_generation = None,
+                4 => changed.thread_generation = Some(0),
+                5 => changed.server_epoch = None,
+                _ => changed.writer_generation = Some(1),
+            }
+            assert!(!shared_actor_policy_verified(&changed, 7), "case {case}");
+        }
+    }
 
     /// The admitted control path still retires a closed Run's Profile
     /// membership after the close, and its Status half only observes it.
@@ -28037,6 +29694,17 @@ pub(crate) mod successor_fixture {
     }
 
     impl SuccessorMember {
+        pub(crate) fn scheduled() -> Self {
+            Self::with_runtime_lane_and_open(
+                "canonical_workspace_write",
+                "review",
+                true,
+                false,
+                "dedicated",
+                true,
+            )
+        }
+
         pub(crate) fn shared_readonly() -> Self {
             Self::with_runtime_lane("read_only", "review", true, false, "shared_readonly")
         }
@@ -28079,6 +29747,17 @@ pub(crate) mod successor_fixture {
             qualified: bool,
             historical: bool,
             lane: &str,
+        ) -> Self {
+            Self::with_runtime_lane_and_open(access, purpose, qualified, historical, lane, false)
+        }
+
+        fn with_runtime_lane_and_open(
+            access: &str,
+            purpose: &str,
+            qualified: bool,
+            historical: bool,
+            lane: &str,
+            successor_open: bool,
         ) -> Self {
             let root = std::env::temp_dir().join(format!("dolgorae-successor-{}", Uuid::now_v7()));
             for directory in [
@@ -28218,18 +29897,35 @@ pub(crate) mod successor_fixture {
             let mut store =
                 EngagementStore::open(&EngagementStore::workspace_database_path(&state_root))
                     .unwrap();
-            let opened = store
-                .open_external_engagement(
-                    &view.workspace_id,
-                    &owner_binding,
-                    &json!({"namespace": "test", "kind": "host", "id": "successor"}),
-                    None,
+            let engagement_id = if successor_open {
+                let scope = crate::delegation_service::DelegationScope {
+                    trusted_invocation: None,
+                    view: &view,
+                    state_root: &state_root,
+                    controller: &owner_binding,
+                };
+                let (opened, _) = crate::delegation_service::open_external_engagement(
+                    &scope,
                     "fixture-open",
+                    None,
                 )
                 .unwrap();
+                Uuid::parse_str(&opened.engagement_ref).unwrap()
+            } else {
+                store
+                    .open_external_engagement(
+                        &view.workspace_id,
+                        &owner_binding,
+                        &json!({"namespace": "test", "kind": "host", "id": "successor"}),
+                        None,
+                        "fixture-open",
+                    )
+                    .unwrap()
+                    .engagement_id
+            };
             let reservation = store
                 .reserve_external_hire(
-                    opened.engagement_id,
+                    engagement_id,
                     "reviewer",
                     &configuration,
                     "inspect the accepted candidate",
@@ -28248,7 +29944,7 @@ pub(crate) mod successor_fixture {
                 .unwrap();
             let aggregate = crate::run::AggregateBinding {
                 aggregate_kind: crate::domain::AggregateKind::ExternalSpecialistEngagement,
-                aggregate_id: opened.engagement_id,
+                aggregate_id: engagement_id,
                 operation_id: reservation.hire_operation_id,
                 member_kind: crate::run::AggregateMemberKind::Specialist,
                 policy_sha256: None,
@@ -28284,7 +29980,7 @@ pub(crate) mod successor_fixture {
                 parent_ref: Some(ParentReference {
                     namespace: "dolgorae.external-specialist-engagement.v1".to_owned(),
                     kind: "specialist".to_owned(),
-                    id: opened.engagement_id.to_string(),
+                    id: engagement_id.to_string(),
                 }),
                 required_capabilities: configuration.required_capabilities.clone(),
                 idempotency_key: "successor-member-start".to_owned(),
@@ -28355,7 +30051,7 @@ pub(crate) mod successor_fixture {
                 state_root,
                 view,
                 manifest,
-                engagement_id: opened.engagement_id,
+                engagement_id,
                 member_ref: reservation.specialist_run_id,
                 owner_binding,
                 owner,
@@ -31469,12 +33165,27 @@ pub(crate) mod successor_review_tests {
             Self::with_runtime(managed, case, writable, false, false)
         }
 
+        pub(crate) fn scheduled(managed: bool) -> Self {
+            Self::with_runtime_and_open(managed, None, false, false, false, true)
+        }
+
         fn with_runtime(
             managed: bool,
             case: Option<usize>,
             writable: bool,
             historical: bool,
             shared_readonly: bool,
+        ) -> Self {
+            Self::with_runtime_and_open(managed, case, writable, historical, shared_readonly, false)
+        }
+
+        fn with_runtime_and_open(
+            managed: bool,
+            case: Option<usize>,
+            writable: bool,
+            historical: bool,
+            shared_readonly: bool,
+            scheduled: bool,
         ) -> Self {
             let member = if managed {
                 let member = if shared_readonly {
@@ -31509,7 +33220,9 @@ pub(crate) mod successor_review_tests {
 
                 Member::Managed(Box::new((member, controller, carrier)))
             } else {
-                Member::External(Box::new(if shared_readonly {
+                Member::External(Box::new(if scheduled {
+                    SuccessorMember::scheduled()
+                } else if shared_readonly {
                     SuccessorMember::shared_readonly()
                 } else if historical {
                     SuccessorMember::historical()
@@ -31610,6 +33323,119 @@ pub(crate) mod successor_review_tests {
                 Member::Managed(m) => &m.0.manifest,
             }
         }
+        pub(crate) fn reserve_scheduler_task(
+            &self,
+            key: &str,
+            seconds: u64,
+        ) -> (AcceptedSuccessorTask, crate::scheduler::AcceptedWork) {
+            let mut task = service::fixture_task();
+            task.expected_output = "complete_result".into();
+            task.brief = "Original scheduler recovery task.".into();
+            let caller = caller_scope::fixture(32);
+            let observed = match self.owner() {
+                service::SettlementOwner::Managed { .. } => {
+                    service::queue_specialist_task(
+                        &self.scope(),
+                        &self.context(key),
+                        &caller,
+                        &AcceptingPort,
+                        service::AssignSpecialistTask {
+                            member_ref: self.manifest().run_id,
+                            task,
+                            execution_intent: "read_only",
+                            target: None,
+                            deadline_seconds: seconds,
+                            expected_revision: None,
+                        },
+                        1,
+                    )
+                    .unwrap()
+                    .0
+                }
+                service::SettlementOwner::External { engagement_id } => {
+                    service::queue_external_specialist_task(
+                        &self.scope(),
+                        &caller,
+                        &AcceptingPort,
+                        service::AssignExternalSpecialistTask {
+                            engagement_id,
+                            member_ref: self.manifest().run_id,
+                            task,
+                            execution_intent: "read_only",
+                            target: None,
+                            deadline_seconds: seconds,
+                            idempotency_key: key,
+                            expected_revision: None,
+                        },
+                        1,
+                    )
+                    .unwrap()
+                    .0
+                }
+            };
+            let task_ref = Uuid::parse_str(&observed.task_ref).unwrap();
+            let owner = match self.owner() {
+                service::SettlementOwner::Managed { session_id } => {
+                    crate::assignment_queue::Owner::Managed(session_id)
+                }
+                service::SettlementOwner::External { engagement_id } => {
+                    crate::assignment_queue::Owner::External(engagement_id)
+                }
+            };
+            let mut store = self.store();
+            if let service::SettlementOwner::External { engagement_id } = self.owner() {
+                store
+                    .mark_external_member_resident(engagement_id, self.manifest().run_id)
+                    .unwrap();
+            }
+            let permit = store
+                .transact(|tx| {
+                    crate::scheduler::claim(
+                        tx,
+                        owner,
+                        self.manifest().run_id,
+                        unix_time_ms_semantic()?,
+                    )
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(permit.work, task_ref);
+            let retained = crate::scheduler::retained_task(
+                &store,
+                &permit,
+                &self.view().workspace_id,
+                self.state_root(),
+            )
+            .unwrap();
+            let prompt = retained
+                .contents
+                .prompt(&retained.accepted, "read_only", seconds)
+                .unwrap();
+            store
+                .transact(|tx| {
+                    let now = unix_time_ms_semantic()?;
+                    crate::scheduler::prepare_dispatch(tx, &permit, now)?;
+                    match self.owner() {
+                        service::SettlementOwner::Managed { session_id } => {
+                            crate::orchestration::mark_successor_task_dispatching(
+                                tx, session_id, task_ref, now,
+                            )
+                        }
+                        service::SettlementOwner::External { engagement_id } => {
+                            crate::engagement::mark_external_task_dispatching_in(
+                                tx,
+                                engagement_id,
+                                task_ref,
+                                now,
+                            )
+                            .map(|_| ())
+                        }
+                    }
+                })
+                .unwrap();
+            (AcceptedSuccessorTask { task_ref, prompt }, permit)
+        }
+
         pub(crate) fn accept_generic_task(&self, key: &str) -> AcceptedSuccessorTask {
             match &self.member {
                 Member::External(m) => m.accept_and_dispatch_task(key, "read_only", 600),
@@ -33167,6 +34993,16 @@ mod managed_write_tests {
             manifest: &RunManifest,
             failure: u8,
         ) -> Self {
+            Self::start_member_with_witness(view, state_root, manifest, failure, false)
+        }
+
+        fn start_member_with_witness(
+            view: &WorkspaceView,
+            state_root: &Path,
+            manifest: &RunManifest,
+            failure: u8,
+            witnessed: bool,
+        ) -> Self {
             use std::os::unix::fs::MetadataExt as _;
             use std::os::unix::net::UnixListener;
             let (worker, identity) = spawn_identity(view, manifest.run_id);
@@ -33225,7 +35061,7 @@ mod managed_write_tests {
                 app_server_epoch: Some(1),
                 control_recovery_required: false,
                 startup_scope: None,
-                dedicated_server_identity: None,
+                dedicated_server_identity: witnessed.then_some(dedicated.clone()),
                 dolgorae_version: build.version,
                 mutation_protocol_version: build.mutation_protocol_version,
                 binary_sha256: build.binary_sha256,
@@ -34652,6 +36488,577 @@ mod managed_write_tests {
         }
     }
 
+    fn scheduler_idle_crash_scene() -> (
+        Assignment,
+        crate::scheduler::Actor,
+        crate::worker::WorkerRuntimeRecord,
+    ) {
+        let scene = Assignment::new();
+        let worker = ScriptedWorker::start_member_with_witness(
+            &scene.member.view,
+            &scene.member.state_root,
+            &scene.member.manifest,
+            0,
+            true,
+        );
+        let actor = crate::scheduler::Actor {
+            owner: crate::assignment_queue::Owner::Managed(scene.member.session_id),
+            run: scene.member.member_ref,
+        };
+        let snapshot =
+            crate::snapshot::RunSnapshot::load(&scene.member.state_root, actor.run, 0).unwrap();
+        let runtime = snapshot.runtime_record.clone().unwrap();
+        assert_eq!(
+            crate::worker::classify_worker_identity(&runtime),
+            crate::worker::ProcessIdentityVerdict::Match
+        );
+        scene
+            .member
+            .store()
+            .transact(|tx| {
+                crate::scheduler::observe_actor(
+                    tx,
+                    actor,
+                    snapshot.stamp.run_state_revision,
+                    true,
+                    crate::scheduler::now_ms()?,
+                )?;
+                tx.execute(
+                    "UPDATE brokered_members SET actor_residency='resident' WHERE run_id=?1",
+                    [actor.run.to_string()],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert!(worker.calls.lock().unwrap().is_empty());
+        // Drop reaps only this fixture's witnessed process and sockets. Its
+        // retained locator now supplies a real kernel absence observation.
+        drop(worker);
+        assert_eq!(
+            crate::worker::classify_worker_identity(&runtime),
+            crate::worker::ProcessIdentityVerdict::Absent
+        );
+        (scene, actor, runtime)
+    }
+
+    #[test]
+    fn scheduler_idle_crash_and_restored_recovery_converge_once() {
+        for restored in 0..3 {
+            let (scene, actor, runtime) = scheduler_idle_crash_scene();
+            let before =
+                crate::snapshot::RunSnapshot::load(&scene.member.state_root, actor.run, 0).unwrap();
+            let mut store = scene.member.store();
+            let operation = if restored == 0 {
+                None
+            } else {
+                Some(
+                    store
+                        .transact(|tx| {
+                            crate::scheduler::begin_idle_recovery(
+                                tx,
+                                actor,
+                                &serde_json::to_string(&ActorExecutionIdentity::capture(&before)?)
+                                    .unwrap(),
+                                crate::scheduler::now_ms()?,
+                            )
+                        })
+                        .unwrap(),
+                )
+            };
+            if restored == 2 {
+                // Crash after exact physical retirement but before the SQLite
+                // outcome: restart must consume the matching absence proof.
+                retire_absent_actor_runtime(&scene.member.state_root, &runtime).unwrap();
+            }
+            drop(store);
+            schedule_actor(&scene.member.view, &scene.member.state_root, actor).unwrap();
+            let after =
+                crate::snapshot::RunSnapshot::load(&scene.member.state_root, actor.run, 0).unwrap();
+            assert_eq!(
+                serde_json::to_value(&after.manifest).unwrap(),
+                serde_json::to_value(&before.manifest).unwrap()
+            );
+            assert_eq!(after.projection.lifecycle, RunLifecycle::Idle);
+            assert_eq!(
+                after.projection.run_generation,
+                before.projection.run_generation
+            );
+            assert_eq!(after.projection.thread_id, before.projection.thread_id);
+            assert!(after.runtime_record.is_none());
+            assert!(actor_absence_matches(&scene.member.state_root, &runtime).unwrap());
+            let store = scene.member.store();
+            let (recorded, state): (String, String) = store
+                .connection()
+                .query_row(
+                    "SELECT operation_id,state FROM scheduler_operations WHERE target_run_id=?1",
+                    [actor.run.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            if let Some(operation) = operation {
+                assert_eq!(recorded, operation.to_string());
+            }
+            assert_eq!(state, "passivated");
+            assert_eq!(
+                crate::scheduler::residency(store.connection(), actor).unwrap(),
+                "passivated"
+            );
+            drop(store);
+            schedule_actor(&scene.member.view, &scene.member.state_root, actor).unwrap();
+            let store = scene.member.store();
+            let count: u64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM orchestration_events WHERE session_id=?1 AND kind='actor_idle_crash_reconciled'",
+                    [scene.member.session_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+    }
+
+    #[test]
+    fn scheduler_idle_crash_preserves_in_flight_and_changed_recovery_captures() {
+        for blocked in ["in-flight", "configuration", "generation"] {
+            let (scene, actor, runtime) = scheduler_idle_crash_scene();
+            let before =
+                crate::snapshot::RunSnapshot::load(&scene.member.state_root, actor.run, 0).unwrap();
+            let mut store = scene.member.store();
+            if blocked == "in-flight" {
+                let mut task = crate::delegation_service::fixture_task();
+                task.expected_output = "complete_result".into();
+                crate::delegation_service::queue_specialist_task(
+                    &scene.scope(),
+                    &scene.context(),
+                    &crate::caller_scope::fixture(3),
+                    &super::successor_fixture::AcceptingPort,
+                    crate::delegation_service::AssignSpecialistTask {
+                        member_ref: actor.run,
+                        task,
+                        execution_intent: "read_only",
+                        target: None,
+                        deadline_seconds: 600,
+                        expected_revision: None,
+                    },
+                    1,
+                )
+                .unwrap();
+                store
+                    .transact(|tx| {
+                        let now = crate::scheduler::now_ms()?;
+                        let permit =
+                            crate::scheduler::claim(tx, actor.owner, actor.run, now)?.unwrap();
+                        crate::scheduler::prepare_dispatch(tx, &permit, now)?;
+                        crate::scheduler::finish_dispatch(
+                            tx,
+                            &permit,
+                            &crate::delegation_service::MemberDispatchOutcome::Uncertain {
+                                code: "TRANSPORT_FAILURE".into(),
+                                message: "Fixture retains unknown acceptance.".into(),
+                            },
+                            now,
+                        )
+                    })
+                    .unwrap();
+            } else {
+                let mut captured = ActorExecutionIdentity::capture(&before).unwrap();
+                if blocked == "configuration" {
+                    captured.configuration = "0".repeat(64);
+                } else {
+                    captured.generation += 1;
+                }
+                store
+                    .transact(|tx| {
+                        crate::scheduler::begin_idle_recovery(
+                            tx,
+                            actor,
+                            &serde_json::to_string(&captured).unwrap(),
+                            crate::scheduler::now_ms()?,
+                        )
+                    })
+                    .unwrap();
+            }
+            drop(store);
+            let error =
+                schedule_actor(&scene.member.view, &scene.member.state_root, actor).unwrap_err();
+            assert_eq!(
+                error.details["reason"],
+                if blocked == "in-flight" {
+                    "resident_generation_unverified"
+                } else {
+                    "actor_recovery_identity_changed"
+                },
+                "{blocked}"
+            );
+            let after =
+                crate::snapshot::RunSnapshot::load(&scene.member.state_root, actor.run, 0).unwrap();
+            assert_eq!(after.runtime_record.as_ref(), Some(&runtime));
+            assert!(!actor_absence_matches(&scene.member.state_root, &runtime).unwrap());
+            let store = scene.member.store();
+            assert_eq!(
+                crate::scheduler::residency(store.connection(), actor).unwrap(),
+                if blocked == "in-flight" {
+                    "resident"
+                } else {
+                    "recovering"
+                }
+            );
+            assert_eq!(
+                store.connection().query_row(
+                    "SELECT COUNT(*) FROM orchestration_events WHERE session_id=?1 AND kind='actor_idle_crash_reconciled'",
+                    [scene.member.session_id.to_string()], |row| row.get::<_, u64>(0)
+                ).unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_expired_passivation_preparation_is_distinct_from_a_crossed_fence() {
+        for fenced in [false, true] {
+            let (scene, actor, runtime) = scheduler_idle_crash_scene();
+            let before =
+                crate::snapshot::RunSnapshot::load(&scene.member.state_root, actor.run, 0).unwrap();
+            let operation = Uuid::now_v7();
+            scene.member.store().transact(|tx| {
+                tx.execute(
+                    "UPDATE scheduler_actors SET operation_id=?2,operation_kind='passivation',lease_until_ms=1 WHERE target_run_id=?1",
+                    rusqlite::params![actor.run.to_string(), operation.to_string()]
+                ).unwrap();
+                crate::scheduler::capture_operation(
+                    tx, actor, operation,
+                    &serde_json::to_string(&ActorExecutionIdentity::capture(&before)?).unwrap(),
+                    crate::scheduler::now_ms()?
+                )?;
+                if fenced {
+                    // Model the committed Worker fence at the crash boundary.
+                    tx.execute("UPDATE brokered_members SET actor_residency='passivating' WHERE run_id=?1",[actor.run.to_string()]).unwrap();
+                }
+                Ok(())
+            }).unwrap();
+            schedule_actor(&scene.member.view, &scene.member.state_root, actor).unwrap();
+            let store = scene.member.store();
+            let state: String = store
+                .connection()
+                .query_row(
+                    "SELECT state FROM scheduler_operations WHERE operation_id=?1",
+                    [operation.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(state, if fenced { "passivated" } else { "not_fenced" });
+            assert_eq!(
+                crate::scheduler::residency(store.connection(), actor).unwrap(),
+                if fenced { "passivated" } else { "resident" }
+            );
+            let after =
+                crate::snapshot::RunSnapshot::load(&scene.member.state_root, actor.run, 0).unwrap();
+            assert_eq!(after.runtime_record.is_none(), fenced);
+            assert_eq!(
+                actor_absence_matches(&scene.member.state_root, &runtime).unwrap(),
+                fenced
+            );
+        }
+    }
+
+    fn captured_activation(
+        scene: &Assignment,
+        deadline_seconds: u64,
+    ) -> (
+        crate::scheduler::Actor,
+        crate::scheduler::AcceptedWork,
+        Uuid,
+        ActorExecutionIdentity,
+    ) {
+        let mut task = crate::delegation_service::fixture_task();
+        task.expected_output = "complete_result".into();
+        crate::delegation_service::queue_specialist_task(
+            &scene.scope(),
+            &scene.context(),
+            &crate::caller_scope::fixture(3),
+            &super::successor_fixture::AcceptingPort,
+            crate::delegation_service::AssignSpecialistTask {
+                member_ref: scene.member.member_ref,
+                task,
+                execution_intent: "canonical_workspace_write",
+                target: None,
+                deadline_seconds,
+                expected_revision: None,
+            },
+            1,
+        )
+        .unwrap();
+        let actor = crate::scheduler::Actor {
+            owner: crate::assignment_queue::Owner::Managed(scene.member.session_id),
+            run: scene.member.member_ref,
+        };
+        let snapshot =
+            crate::snapshot::RunSnapshot::load(&scene.member.state_root, actor.run, 0).unwrap();
+        let mut store = scene.member.store();
+        let now = crate::scheduler::now_ms().unwrap();
+        let permit = store
+            .transact(|tx| {
+                crate::scheduler::observe_actor(
+                    tx,
+                    actor,
+                    snapshot.stamp.run_state_revision,
+                    true,
+                    now,
+                )?;
+                tx.execute(
+                    "UPDATE brokered_members SET actor_residency='unstarted' WHERE run_id=?1",
+                    [actor.run.to_string()],
+                )
+                .unwrap();
+                crate::scheduler::claim(tx, actor.owner, actor.run, now)
+            })
+            .unwrap()
+            .unwrap();
+        let mut captured = ActorExecutionIdentity::capture(&snapshot).unwrap();
+        captured.writer_acquire = Some(ActorWriterAcquire {
+            transaction_id: Uuid::now_v7(),
+            previous_generation: snapshot.writer.writer_generation,
+            previous_revision: snapshot.writer.authority_revision,
+            work: permit.clone(),
+        });
+        let operation = store
+            .transact(|tx| {
+                let operation = crate::scheduler::begin_activation(tx, actor, now)?;
+                crate::scheduler::capture_operation(
+                    tx,
+                    actor,
+                    operation,
+                    &serde_json::to_string(&captured).unwrap(),
+                    now,
+                )?;
+                Ok(operation)
+            })
+            .unwrap();
+        (actor, permit, operation, captured)
+    }
+
+    #[test]
+    fn scheduler_failed_activation_requires_the_original_acquisition_and_release_guards() {
+        for restart in [false, true] {
+            let scene = Assignment::new();
+            let worker = ScriptedWorker::start_member_with_witness(
+                &scene.member.view,
+                &scene.member.state_root,
+                &scene.member.manifest,
+                0,
+                true,
+            );
+            let (actor, permit, operation, captured) = captured_activation(&scene, 600);
+            let acquisition = captured.writer_acquire.as_ref().unwrap();
+            let holder = crate::writer::WriterStore::holder(
+                actor.run,
+                scene.member.manifest.profile.profile_name.clone(),
+                &scene.member.manifest.controller,
+                1,
+                scene.member.manifest.profile.initial_server_key.clone(),
+                scene
+                    .member
+                    .manifest
+                    .profile_capability_snapshot
+                    .server_epoch,
+                Some("thread-1".into()),
+                RunLifecycle::Idle,
+            );
+            writers(&scene.member)
+                .transact(|record| {
+                    let (_, generation) =
+                        record.prepare_acquire(actor.run, holder, acquisition.transaction_id)?;
+                    record.commit_acquire(acquisition.transaction_id, generation)
+                })
+                .unwrap();
+            let acquired = writers(&scene.member).load().unwrap();
+            append_policy(
+                &scene.member.state_root,
+                actor.run,
+                AuditKind::WriterAcquired,
+                acquisition.transaction_id,
+                true,
+                acquired.writer_generation,
+            );
+            let snapshot =
+                crate::snapshot::RunSnapshot::load(&scene.member.state_root, actor.run, 0).unwrap();
+            let (_, records) =
+                observe_run_ledger(&scene.member.state_root, actor.run, true).unwrap();
+            prove_activation_writer(&captured, &snapshot, records.records()).unwrap();
+            let mut changed = snapshot.clone();
+            changed.writer.writer_generation += 1;
+            assert!(prove_activation_writer(&captured, &changed, records.records()).is_err());
+            let mut changed = snapshot.clone();
+            changed.writer.holder.as_mut().unwrap().run_id = Uuid::now_v7();
+            assert!(prove_activation_writer(&captured, &changed, records.records()).is_err());
+            let mut changed = snapshot.clone();
+            changed.writer.state = crate::writer::WriterAuthorityState::BlockedUnknown;
+            assert!(prove_activation_writer(&captured, &changed, records.records()).is_err());
+            let mut changed = snapshot.clone();
+            changed.runtime_record = None;
+            assert!(prove_activation_writer(&captured, &changed, records.records()).is_err());
+            let mut changed = snapshot.clone();
+            changed.captured_effective_policy.verification =
+                crate::domain::PolicyVerification::Unverified;
+            assert!(prove_activation_writer(&captured, &changed, records.records()).is_err());
+            let mut changed: ActorExecutionIdentity =
+                serde_json::from_str(&serde_json::to_string(&captured).unwrap()).unwrap();
+            changed.writer_acquire.as_mut().unwrap().transaction_id = Uuid::now_v7();
+            assert!(prove_activation_writer(&changed, &snapshot, records.records()).is_err());
+            let mut duplicate = records.records().to_vec();
+            duplicate.push(
+                duplicate
+                    .iter()
+                    .find(|r| r.kind() == AuditKind::WriterAcquired)
+                    .unwrap()
+                    .clone(),
+            );
+            assert!(prove_activation_writer(&captured, &snapshot, &duplicate).is_err());
+            let lifecycle = crate::worker::RunLifecycleLease::acquire(
+                &scene.member.state_root,
+                &scene.member.view.workspace_id,
+                actor.run,
+                1,
+            )
+            .unwrap();
+            let mut store = scene.member.store();
+            let until: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT lease_until_ms FROM scheduler_actors WHERE target_run_id=?1",
+                    [actor.run.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            store
+                .transact(|tx| {
+                    crate::scheduler::finish_activation(
+                        tx,
+                        actor,
+                        operation,
+                        restart,
+                        if restart {
+                            until
+                        } else {
+                            crate::scheduler::now_ms()?
+                        },
+                    )
+                })
+                .unwrap();
+            let recovered = if restart {
+                serde_json::from_str(
+                    &crate::scheduler::failed_activation_capture(
+                        store.connection(),
+                        actor,
+                        &operation.to_string(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+            } else {
+                captured
+            };
+            // Ready recognition acquired nothing: a preexisting Writer must
+            // never enter compensation merely because activation failed.
+            let mut no_acquisition: ActorExecutionIdentity =
+                serde_json::from_str(&serde_json::to_string(&recovered).unwrap()).unwrap();
+            no_acquisition.writer_acquire = None;
+            compensate_activation_writer(
+                &scene.member.view,
+                &scene.member.state_root,
+                &mut store,
+                actor,
+                operation,
+                &no_acquisition,
+                &lifecycle,
+            )
+            .unwrap();
+            assert_eq!(writers(&scene.member).load().unwrap(), acquired);
+            // This fixture has no native Thread registration. The positive
+            // ownership proof cannot bypass ordinary qualified release fences.
+            assert!(
+                compensate_activation_writer(
+                    &scene.member.view,
+                    &scene.member.state_root,
+                    &mut store,
+                    actor,
+                    operation,
+                    &recovered,
+                    &lifecycle,
+                )
+                .is_err()
+            );
+            assert_eq!(writers(&scene.member).load().unwrap(), acquired);
+            assert_eq!(
+                crate::scheduler::residency(store.connection(), actor).unwrap(),
+                "unavailable"
+            );
+            assert_eq!(
+                crate::scheduler::candidates(store.connection(), actor.owner, actor.run)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                crate::orchestration::successor_task(
+                    store.connection(),
+                    scene.member.session_id,
+                    permit.work
+                )
+                .unwrap()
+                .unwrap()
+                .state,
+                "queued"
+            );
+            assert!(worker.calls.lock().unwrap().is_empty());
+            // Even after the acceptance deadline, expiry is non-dispatching;
+            // the following visit attempts existing terminal Writer cleanup.
+            let retained = crate::scheduler::retained_task(
+                &store,
+                &permit,
+                &scene.member.view.workspace_id,
+                &scene.member.state_root,
+            )
+            .unwrap();
+            store
+                .transact(|tx| crate::scheduler::expire_queued(tx, actor, retained.deadline_ms))
+                .unwrap();
+            assert!(
+                reconcile_scheduler_writer(
+                    &scene.member.view,
+                    &scene.member.state_root,
+                    actor,
+                    &lifecycle
+                )
+                .is_err()
+            );
+            let phase: String = store
+                .connection()
+                .query_row(
+                    "SELECT phase FROM scheduler_claims WHERE claim_id=?1",
+                    [permit.claim.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(phase, "accepted");
+            assert_eq!(writers(&scene.member).load().unwrap(), acquired);
+            assert_eq!(
+                crate::orchestration::successor_task(
+                    store.connection(),
+                    scene.member.session_id,
+                    permit.work
+                )
+                .unwrap()
+                .unwrap()
+                .state,
+                "failed"
+            );
+            assert!(worker.calls.lock().unwrap().is_empty());
+        }
+    }
+
     #[test]
     fn initial_writer_reuse_keeps_read_terminal_and_transition_cleanup() {
         let scene = Assignment::new();
@@ -34680,6 +37087,7 @@ mod managed_write_tests {
                 scene.member.owner(),
                 &carrier,
                 write,
+                None,
             )
         };
         cleanup(true).unwrap();
@@ -34738,6 +37146,7 @@ mod managed_write_tests {
                 task,
                 "canonical_workspace_write",
                 Some(&carrier),
+                None,
             )
         };
         let before = writers(&scene.member).load().unwrap();
@@ -36122,6 +38531,7 @@ mod caller_lane_gate_tests {
                 accepted.task_ref,
                 "read_only",
                 Some(&fixture.owner),
+                None
             )
             .unwrap(),
             crate::delegation_service::MemberSettlement::Running
@@ -36192,6 +38602,7 @@ mod caller_lane_gate_tests {
             accepted.task_ref,
             "read_only",
             Some(&fixture.owner),
+            None,
         )
         .unwrap_err();
         assert_eq!(refused.code, "RECOVERY_REQUIRED");
@@ -37592,6 +40003,7 @@ mod caller_lane_gate_tests {
                 accepted.task_ref,
                 "read_only",
                 Some(&fixture.owner),
+                None
             )
             .unwrap(),
             crate::delegation_service::MemberSettlement::Terminal
@@ -37608,6 +40020,7 @@ mod caller_lane_gate_tests {
                 accepted.task_ref,
                 "read_only",
                 Some(&fixture.owner),
+                None
             )
             .unwrap(),
             crate::delegation_service::MemberSettlement::Terminal
@@ -38824,6 +41237,7 @@ mod caller_lane_gate_tests {
                 accepted.task_ref,
                 "read_only",
                 None,
+                None
             )
             .unwrap(),
             crate::delegation_service::MemberSettlement::Terminal
@@ -38881,6 +41295,7 @@ mod caller_lane_gate_tests {
                 fixture.member_ref,
                 accepted.task_ref,
                 "read_only",
+                None,
                 None,
             )
             .unwrap()

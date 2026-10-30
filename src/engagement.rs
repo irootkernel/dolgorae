@@ -2432,6 +2432,82 @@ impl EngagementStore {
         Ok((workspace_id, binding))
     }
 
+    /// Validate the successor open's immutable authority and provenance without
+    /// pretending its public binding contains an external Controller secret.
+    pub(crate) fn accepted_external_owner(
+        &self,
+        engagement_id: Uuid,
+    ) -> Result<(String, ControllerBinding), MachineError> {
+        let (workspace, binding) = self.external_owner_binding(engagement_id)?;
+        let (bootstrap,external,external_hash,binding_hash):(String,Option<String>,Option<String>,String)=self.connection.query_row("SELECT bootstrap_operation_id,external_controller_ref_json,external_controller_ref_sha256,controller_sha256 FROM engagements WHERE engagement_id=?1",[engagement_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(internal)?;
+        if external.is_some() || external_hash.is_some() || Uuid::parse_str(&bootstrap).is_err() {
+            return Err(integrity("successor open provenance differs"));
+        }
+        let payload = sha256_hex(
+            format!("{bootstrap}\0{NO_EXTERNAL_PROVENANCE_SHA256}\0{binding_hash}").as_bytes(),
+        );
+        let mut events=self.connection.prepare("SELECT previous_hash,event_hash FROM events WHERE engagement_id=?1 AND kind='external_engagement_opened' AND payload_sha256=?2").map_err(internal)?;
+        let events = events
+            .query_map(params![engagement_id.to_string(), payload], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        let [(previous, hash)] = events.as_slice() else {
+            return Err(integrity("successor open event is ambiguous"));
+        };
+        if *hash
+            != event_digest(
+                previous,
+                engagement_id,
+                "external_engagement_opened",
+                &payload,
+            )
+        {
+            return Err(integrity("successor open event differs"));
+        }
+        let mut receipts=self.connection.prepare("SELECT receipt_json,controller_principal,controller_generation FROM delegation_operations WHERE workspace_ref=?1 AND operation_kind='open_external_engagement' AND state='accepted' AND json_extract(accepted_subjects_json,'$.engagement_ref')=?2").map_err(internal)?;
+        let receipts = receipts
+            .query_map(params![workspace, engagement_id.to_string()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, u64>(2)?,
+                ))
+            })
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        let [(text, principal, generation)] = receipts.as_slice() else {
+            return Err(integrity("successor open receipt is ambiguous"));
+        };
+        let receipt: OperationReceipt = serde_json::from_str(text)
+            .map_err(|_| integrity("successor open receipt is invalid"))?;
+        let expected = crate::operation::Namespace::delegation(
+            &binding.identity,
+            &workspace,
+            None,
+            "open_external_engagement",
+            &receipt.namespace.idempotency_key,
+        )
+        .map_err(|_| integrity("successor open namespace invalid"))?;
+        if principal != &expected.controller_principal
+            || *generation != binding.identity.generation
+            || receipt.accepted_subjects.engagement_ref.as_deref()
+                != Some(engagement_id.to_string().as_str())
+            || receipt.namespace.workspace_ref != workspace
+            || receipt.namespace.operation_kind != "open_external_engagement"
+        {
+            return Err(integrity("successor open owner differs"));
+        }
+        match self.intent_lookup(&receipt.namespace)? {
+            IntentLookup::Accepted(retained) if *retained == receipt => {}
+            _ => return Err(integrity("successor open authority differs")),
+        }
+        Ok((workspace, binding))
+    }
+
     /// The accepted `install_provisioning` intent that retained one snapshot.
     ///
     /// A published snapshot is installed only when its own keyed install was
@@ -5170,6 +5246,7 @@ impl GenerationProbe {
         }
         crate::assignment_queue::validate_schema(&connection)?;
         crate::collaboration::validate_schema(&connection)?;
+        crate::scheduler::validate_schema(&connection)?;
         if matches!(schema_generation, AdmittedGeneration::Legacy(_))
             && !connection
                 .query_row(

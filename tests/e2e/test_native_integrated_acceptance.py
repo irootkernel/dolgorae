@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import threading
@@ -178,13 +179,38 @@ def main() -> int:
         assert probe.main() == 2
         rejected(lambda: probe.campaign(Path("unused"), Path("unused"), Path("unused")))
         rejected(lambda: probe.successor_campaign(Path("unused"), Path("unused")))
+        rejected(lambda: probe.successor_startup_component_campaign(Path("unused"), Path("unused")))
+        rejected(lambda: probe.scheduler_component_campaign(Path("unused"), Path("unused")))
         identity.assert_not_called()
     with patch.dict(os.environ, {probe.OPT_IN: "1"}), patch.object(
         probe, "executable_identity", return_value={"sha256": "0" * 64}
     ), patch.object(probe.tempfile, "mkdtemp") as allocation:
         rejected(lambda: probe.campaign(Path("unused"), Path("unused"), Path("unused")))
         rejected(lambda: probe.successor_campaign(Path("unused"), Path("unused")))
+        rejected(lambda: probe.successor_startup_component_campaign(Path("unused"), Path("unused")))
+        rejected(lambda: probe.scheduler_component_campaign(Path("unused"), Path("unused")))
         allocation.assert_not_called()
+    modes = ("--successor-startup-only", "--scheduler-component-only")
+    for selected in modes:
+        for other in (*modes, "--collaboration-component-only", "--default-feature-startup-only",
+                      "--successor-only", "--ordinary-close-only"):
+            if selected == other:
+                continue
+            argv = ["probe", "--binary", "unused", "--codex", "unused",
+                    "--caller-driver", "unused", selected, other]
+            with patch.dict(os.environ, {probe.OPT_IN: "1"}), patch.object(
+                probe.sys, "argv", argv
+            ), patch.object(probe, "successor_startup_component_campaign") as startup, patch.object(
+                probe, "scheduler_component_campaign"
+            ) as scheduler, patch.object(probe.tempfile, "mkdtemp") as allocation, patch.object(
+                probe, "executable_identity"
+            ) as identity, patch.object(probe.sys, "stdout", io.StringIO()) as output:
+                assert probe.main() == 1
+                assert json.loads(output.getvalue())["failure_type"] == "ValueError"
+                startup.assert_not_called()
+                scheduler.assert_not_called()
+                allocation.assert_not_called()
+                identity.assert_not_called()
     # A Writer ack wait must allow the concurrent Primary request to set it.
     concurrent = probe.SuccessorResponses()
     entered = threading.Event()

@@ -4386,6 +4386,14 @@ pub enum ControlRequestV1 {
         request: TurnControlRequest,
     },
     /// Rejoin one addressed Turn; a reconnecting caller uses this after a
+    /// Gateway-owned actor fence is serialized before physical passivation.
+    ActorPassivate {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        operation_id: Uuid,
+    },
+    /// Rejoin one addressed Turn; a reconnecting caller uses this after a
     /// Submit.
     ///
     /// The Turn is named, never inferred: SPEC-006 has `wait` require both run
@@ -4556,6 +4564,7 @@ impl ControlRequestV1 {
             | Self::Send { expected, .. }
             | Self::Submit { expected, .. }
             | Self::ExternalSubmit { expected, .. }
+            | Self::ActorPassivate { expected, .. }
             | Self::Wait { expected, .. }
             | Self::Events { expected, .. }
             | Self::Respond { expected, .. }
@@ -4639,6 +4648,7 @@ impl ControlRequestV1 {
             | Self::Send { caller, .. }
             | Self::Submit { caller, .. }
             | Self::ExternalSubmit { caller, .. }
+            | Self::ActorPassivate { caller, .. }
             | Self::Wait { caller, .. }
             | Self::Events { caller, .. }
             | Self::Respond { caller, .. }
@@ -4677,6 +4687,7 @@ impl ControlRequestV1 {
             | Self::Send { caller, .. }
             | Self::Submit { caller, .. }
             | Self::ExternalSubmit { caller, .. }
+            | Self::ActorPassivate { caller, .. }
             | Self::Wait { caller, .. }
             | Self::Events { caller, .. }
             | Self::Respond { caller, .. }
@@ -4780,6 +4791,7 @@ impl ControlRequestV1 {
             Self::Send { .. } => "run.send",
             Self::Submit { .. } => "run.submit",
             Self::ExternalSubmit { .. } => "engagement.assign",
+            Self::ActorPassivate { .. } => "actor.passivate",
             Self::Wait { .. } => "run.wait",
             Self::Events { .. } => "run.events",
             Self::Respond { .. } => "run.respond",
@@ -5010,6 +5022,15 @@ impl RunControllerAuthority {
         operation: &str,
         carrier: &CredentialCarrier,
     ) -> Result<(), MachineError> {
+        if let Some(permit) = carrier.accepted_work()? {
+            return crate::scheduler::authorize_external_work(
+                &self.state_root,
+                self.run_id,
+                engagement_id,
+                operation,
+                &permit,
+            );
+        }
         let runs = RunStore::new(SystemWorkspacePlatform, &self.state_root);
         let manifest = runs.load_manifest(self.run_id)?;
         let binding = manifest.aggregate_binding.as_ref().ok_or_else(|| {
@@ -6143,6 +6164,9 @@ pub const REMEMBERED_TERMINAL_TURNS: usize = 64;
 
 /// One mutation a control caller handed to the Run's drain thread.
 enum SessionCommand {
+    ActorPassivate {
+        operation_id: Uuid,
+    },
     #[cfg(test)]
     Panic {
         ledger: Option<Arc<Mutex<Ledger>>>,
@@ -9336,7 +9360,7 @@ fn drain_run(
     }
     let mut in_flight: Option<Arc<MutationOutcome>> = None;
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        publish_state(&coordinator, progress, control);
+        publish_state(&coordinator, progress, control, &authority.state_root);
         loop {
             match mailbox.next_work() {
                 SessionWork::Stop => break,
@@ -9349,7 +9373,7 @@ fn drain_run(
                     remember_lost(&coordinator, progress);
                     let reported = coordinator.lost_in_flight(error);
                     progress.fail(reported);
-                    publish_state(&coordinator, progress, control);
+                    publish_state(&coordinator, progress, control, &authority.state_root);
                     break;
                 }
                 SessionWork::Message(Ok(message)) => {
@@ -9378,7 +9402,7 @@ fn drain_run(
                             }
                         }
                     }
-                    publish_state(&coordinator, progress, control);
+                    publish_state(&coordinator, progress, control, &authority.state_root);
                 }
                 SessionWork::PrimaryTool(completion) => {
                     if let Err(error) = coordinator.complete_primary_tool(completion)
@@ -9386,7 +9410,7 @@ fn drain_run(
                     {
                         progress.fail(error);
                     }
-                    publish_state(&coordinator, progress, control);
+                    publish_state(&coordinator, progress, control, &authority.state_root);
                 }
                 SessionWork::Mutation(mutation) => {
                     let outcome = Arc::clone(&mutation.outcome);
@@ -9394,7 +9418,7 @@ fn drain_run(
                     outcome.start();
                     let response =
                         perform(&mut coordinator, identity, progress, authority, *mutation);
-                    publish_state(&coordinator, progress, control);
+                    publish_state(&coordinator, progress, control, &authority.state_root);
                     outcome.settle(response);
                     in_flight = None;
                 }
@@ -9432,7 +9456,7 @@ fn drain_run(
     if let Some(outcome) = in_flight {
         outcome.settle(failed(&failure, &progress.facts.bare()));
     }
-    publish_state(&coordinator, progress, control);
+    publish_state(&coordinator, progress, control, &authority.state_root);
     let stopping = progress.facts.bare();
     for refused in mailbox.stop() {
         refused.outcome.settle(failed(
@@ -9584,6 +9608,7 @@ fn bind_successor_dispatch(
     if task.specialist_run_id != run_id || task.state != "dispatching" {
         return Err(refused());
     }
+    crate::scheduler::require_dispatch_claim(store.connection(), task_ref, run_id)?;
     let accepted = store
         .external_task_identity(engagement_id, task.task_id)?
         .ok_or_else(refused)?;
@@ -9667,6 +9692,7 @@ fn bind_managed_successor_dispatch(
     if facts.state != "dispatching" || facts.member_ref != run_id.to_string() {
         return Err(refused());
     }
+    crate::scheduler::require_dispatch_claim(store.connection(), task_ref, run_id)?;
     let accepted = crate::successor_capture::retained_accepted_task(&facts.accepted_request_json)
         .map_err(|_| refused())?;
     let deadline_seconds = managed_dispatch_deadline(&facts.request_json).ok_or_else(refused)?;
@@ -9758,6 +9784,32 @@ fn perform(
     // not a Controller credential — it is the operation that replaces the
     // Controller — so it proves the operator's durable reset prepare instead,
     // in the same position: immediately before its effect, on this thread.
+    if let SessionCommand::ActorPassivate { operation_id } = mutation.command {
+        if *coordinator.state() != CoordinatorState::Idle
+            || coordinator.active_turn_id().is_some()
+            || !coordinator.pending_interactions().is_empty()
+        {
+            return refusal_from(crate::scheduler::error("actor_not_idle"));
+        }
+        if coordinator.verify_actor_passivation().is_err() {
+            return refusal_from(crate::scheduler::error(
+                "actor_native_quiescence_unverified",
+            ));
+        }
+        return match crate::scheduler::fence_passivation(
+            &authority.state_root,
+            identity.run_id,
+            operation_id,
+        ) {
+            Ok(()) => ControlResponseV1::Status {
+                identity: identity.clone(),
+                lifecycle: "idle".into(),
+                active_turn: None,
+                last_terminal: None,
+            },
+            Err(error) => refusal_from(error),
+        };
+    }
     if let SessionCommand::ResetFence { confirmation } = mutation.command {
         let lifecycle = coordinator_control_state(coordinator, progress.is_closed()).lifecycle;
         return match authority.reset_fence(confirmation, &lifecycle) {
@@ -10043,9 +10095,41 @@ fn perform(
     {
         return refusal_from(error);
     }
+    if matches!(mutation.command, SessionCommand::Accept { .. })
+        && owner.is_some()
+        && let Err(error) =
+            crate::scheduler::require_turn_admission(&authority.state_root, identity.run_id)
+    {
+        return refusal_from(error);
+    }
     // A generation-4 member binds every dispatched Turn to its accepted task
     // identity and preserved bytes, never a legacy operations key, and
     // independently of the generation-3 candidate-tool mechanism.
+    let collaboration_bound = match (&mutation.command, owner) {
+        (
+            SessionCommand::Accept { request, .. },
+            Some(crate::delegation_service::SettlementOwner::Managed { session_id }),
+        ) => {
+            match crate::collaboration::bind_execution(
+                &authority.state_root,
+                session_id,
+                identity.run_id,
+                &request.idempotency_key,
+                request.write,
+                &request.message,
+            ) {
+                Ok(bound) => bound,
+                Err(error) => return refusal_from(error),
+            }
+        }
+        _ => false,
+    };
+    if collaboration_bound
+        && coordinator.uses_candidate_tools()
+        && coordinator.bind_generic_successor_task().is_err()
+    {
+        return refusal_from(crate::scheduler::error("consultation_tool_binding_failed"));
+    }
     let successor_bound = match &mutation.command {
         SessionCommand::Accept { request, .. } => {
             if let Some(engagement_id) = mutation.external_engagement {
@@ -10090,17 +10174,21 @@ fn perform(
                 // against its accepted assignment before admitting the Turn.
                 // `member_owner` never names a managed owner for a legacy member,
                 // so this branch is the successor lane alone.
-                match bind_managed_successor_dispatch(
-                    &authority.state_root,
-                    session_id,
-                    identity.run_id,
-                    &request.idempotency_key,
-                    request.write,
-                    &request.message,
-                ) {
-                    Ok(true) => true,
-                    Ok(false) => return refusal_from(accepted_assignment_not_found()),
-                    Err(error) => return refusal_from(error),
+                if collaboration_bound {
+                    false
+                } else {
+                    match bind_managed_successor_dispatch(
+                        &authority.state_root,
+                        session_id,
+                        identity.run_id,
+                        &request.idempotency_key,
+                        request.write,
+                        &request.message,
+                    ) {
+                        Ok(true) => true,
+                        Ok(false) => return refusal_from(accepted_assignment_not_found()),
+                        Err(error) => return refusal_from(error),
+                    }
                 }
             } else {
                 false
@@ -10805,7 +10893,8 @@ fn perform_command(
             }
         }
         // Answered above, before any Controller revalidation.
-        SessionCommand::ResetFence { .. }
+        SessionCommand::ActorPassivate { .. }
+        | SessionCommand::ResetFence { .. }
         | SessionCommand::ShutdownInterrupt
         | SessionCommand::ShutdownAbandon => {
             internal_invariant("unauthenticated work reached the effects")
@@ -11295,7 +11384,9 @@ fn publish_state(
     coordinator: &SessionCoordinator,
     progress: &SessionProgress,
     control: &Mutex<WorkerControlState>,
+    state_root: &Path,
 ) {
+    crate::scheduler::notify(state_root, progress.facts.run_id);
     let state = coordinator_control_state(coordinator, progress.is_closed());
     if let Ok(mut published) = control.lock() {
         published.clone_from(&state);
@@ -11810,12 +11901,23 @@ fn startup_handoff_error(code: &str) -> WorkerProtocolError {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", test))]
 fn spawn_hidden_worker_inner(
     executable: &Path,
     bootstrap_path: &Path,
     held_startup_range: StartupLockFile,
 ) -> Result<StartedWorker, WorkerProtocolError> {
+    spawn_hidden_worker_with_budget(executable, bootstrap_path, held_startup_range, None)
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_hidden_worker_with_budget(
+    executable: &Path,
+    bootstrap_path: &Path,
+    held_startup_range: StartupLockFile,
+    budget: Option<Duration>,
+) -> Result<StartedWorker, WorkerProtocolError> {
+    let deadline = budget.and_then(|budget| Instant::now().checked_add(budget));
     let uid = DarwinSystem.current_uid();
     let mut child = None;
     let mut launch = None;
@@ -11843,7 +11945,25 @@ fn spawn_hidden_worker_inner(
             bootstrap.run_generation,
             bootstrap.ledger_root.clone(),
         ));
-        let (reader, bound) = read_bound_handoff(startup)?;
+        let (reader, bound) = if let Some(deadline) = deadline {
+            startup
+                .set_read_timeout(Some(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .max(Duration::from_millis(1))
+                        .min(STARTUP_BOUND_TIMEOUT),
+                ))
+                .map_err(|_| WorkerProtocolError::Io)?;
+            let mut reader = std::io::BufReader::new(startup);
+            let bound = match read_startup_handoff(&mut reader)? {
+                StartupHandoff::Bound { record } => record,
+                StartupHandoff::Failed { code } => return Err(startup_handoff_error(&code)),
+                _ => return Err(WorkerProtocolError::MalformedFrame),
+            };
+            (reader, bound)
+        } else {
+            read_bound_handoff(startup)?
+        };
         Ok((reader, bound, bootstrap))
     })();
     let release = held_startup_range.release_startup_range();
@@ -11861,6 +11981,16 @@ fn spawn_hidden_worker_inner(
                 expected_protocol: WORKER_PROTOCOL_VERSION,
                 actual_protocol: WORKER_PROTOCOL_VERSION,
             });
+        }
+        if let Some(deadline) = deadline {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|d| !d.is_zero())
+                .ok_or(WorkerProtocolError::WorkerStartFailed)?;
+            reader
+                .get_ref()
+                .set_read_timeout(Some(remaining))
+                .map_err(|_| WorkerProtocolError::Io)?;
         }
         let ready = read_ready_handoff(&mut reader)?;
         if bound.identity != ready.identity
@@ -12303,7 +12433,17 @@ pub fn start_run_worker_with_startup_range(
     start: &RunWorkerStart,
     startup_range: StartupLockFile,
 ) -> Result<StartedRun, WorkerProtocolError> {
-    start_run_worker_inner(state_root, start, startup_range)
+    start_run_worker_inner(state_root, start, startup_range, None)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn start_run_worker_with_activation_budget(
+    state_root: &Path,
+    start: &RunWorkerStart,
+    startup_range: StartupLockFile,
+    budget: Duration,
+) -> Result<StartedRun, WorkerProtocolError> {
+    start_run_worker_inner(state_root, start, startup_range, Some(budget))
 }
 
 #[cfg(target_os = "macos")]
@@ -12311,6 +12451,7 @@ fn start_run_worker_inner(
     state_root: &Path,
     start: &RunWorkerStart,
     startup_range: StartupLockFile,
+    budget: Option<Duration>,
 ) -> Result<StartedRun, WorkerProtocolError> {
     let uid = DarwinSystem.current_uid();
     let runtime = runtime_root(state_root);
@@ -12341,7 +12482,7 @@ fn start_run_worker_inner(
     let path = bootstrap_path(&runtime, start.run_id);
     let _ = fs::remove_file(&path);
     write_worker_bootstrap(&path, &bootstrap, uid)?;
-    let started = spawn_hidden_worker_inner(&executable, &path, startup_range)?;
+    let started = spawn_hidden_worker_with_budget(&executable, &path, startup_range, budget)?;
     let result = StartedRun {
         run_id: start.run_id,
         socket_path: started.record.socket_path.clone(),
@@ -12383,6 +12524,42 @@ pub fn call_run_worker(
         .set_write_timeout(Some(CONTROL_CALL_TIMEOUT))
         .map_err(|_| WorkerProtocolError::Io)?;
     write_control_request(&mut stream, &request, credential)?;
+    read_frame(&mut std::io::BufReader::new(stream))
+}
+
+/// One absolute budget covers a scheduler effect's connect, descriptor handoff
+/// and complete reply. Timeout leaves the accepted operation intact.
+pub(crate) fn call_run_worker_bounded(
+    state_root: &Path,
+    run_id: Uuid,
+    uid: u32,
+    credential: Option<RawFd>,
+    budget: Duration,
+    build: impl FnOnce(WorkerIdentity) -> ControlRequestV1,
+) -> Result<ControlResponseV1, WorkerProtocolError> {
+    let deadline = Instant::now() + budget.min(CONTROL_CALL_TIMEOUT);
+    let (record, request) = prepare_run_worker_call(state_root, run_id, uid, build)?;
+    let mut stream = DeadlineStream::connect(&record.socket_path, deadline)
+        .map_err(|_| WorkerProtocolError::Io)?;
+    if let Some(fd) = credential {
+        let bytes =
+            serde_json::to_vec(&request).map_err(|_| WorkerProtocolError::MalformedFrame)?;
+        if bytes.len() > MAX_CLI_WORKER_FRAME_BYTES {
+            return Err(frame_too_large(bytes.len()));
+        }
+        let (first, rest) = bytes
+            .split_first()
+            .ok_or(WorkerProtocolError::MalformedFrame)?;
+        stream
+            .send_byte_with_fd(*first, fd)
+            .map_err(|_| WorkerProtocolError::Io)?;
+        stream
+            .write_all(rest)
+            .and_then(|()| stream.write_all(b"\n"))
+            .map_err(|_| WorkerProtocolError::Io)?;
+    } else {
+        write_frame(&mut stream, &request)?;
+    }
     read_frame(&mut std::io::BufReader::new(stream))
 }
 
@@ -13116,9 +13293,15 @@ fn decode_sha256(value: &str) -> Option<[u8; 32]> {
     Some(decoded)
 }
 
-fn prepare_socket_root(uid: u32, socket_parent: &Path) -> Result<(), WorkerProtocolError> {
+pub(crate) fn prepare_socket_root(
+    uid: u32,
+    socket_parent: &Path,
+) -> Result<(), WorkerProtocolError> {
     let expected_root = PathBuf::from(format!("/tmp/dolgorae-{uid}"));
-    if socket_parent != expected_root.join("s") && socket_parent != expected_root.join("c") {
+    if !["s", "c", "w"]
+        .iter()
+        .any(|name| socket_parent == expected_root.join(name))
+    {
         return Err(WorkerProtocolError::InvalidIdentity);
     }
     for directory in [&expected_root, socket_parent] {
@@ -13530,6 +13713,14 @@ fn serve_run_operation(
     if let ControlRequestV1::ResetFence { confirmation, .. } = request {
         return Ok(session.reset_fence(operation, confirmation));
     }
+    if let ControlRequestV1::ActorPassivate { operation_id, .. } = request {
+        return Ok(session.dispatch_with(
+            "actor.passivate",
+            None,
+            SessionCommand::ActorPassivate { operation_id },
+            CONTROL_CALL_TIMEOUT,
+        ));
+    }
     let Some(credential) = credential else {
         return Ok(controller_refused(facts.run_id, operation));
     };
@@ -13706,6 +13897,9 @@ fn serve_run_operation(
             request,
             ..
         } => session.external_submit(credential, engagement_id, request),
+        ControlRequestV1::ActorPassivate { .. } => {
+            unreachable!("actor fence handled before Controller carrier")
+        }
         ControlRequestV1::Respond {
             request_id,
             idempotency_key,
@@ -18332,6 +18526,15 @@ pub(crate) mod tests {
             history: serde_json::Value,
             bootstrap: WorkerSessionBootstrap,
         ) -> Self {
+            Self::with_start_identity(scene, history, bootstrap, true)
+        }
+
+        fn with_start_identity(
+            scene: &crate::semantic::successor_review_tests::Scene,
+            history: serde_json::Value,
+            bootstrap: WorkerSessionBootstrap,
+            start_identity: bool,
+        ) -> Self {
             use std::io::Read as _;
             let raw = history.is_string();
             let history = if raw {
@@ -18384,7 +18587,12 @@ pub(crate) mod tests {
                 steps.push(serde_json::json!({"method":"thread/read","occurrence":index+offset,"respond":history}));
             }
             for occurrence in 1..=2 {
-                steps.push(serde_json::json!({"method":"turn/start","occurrence":occurrence,"respond":{"result":{"turn":{"id":format!("turn-{occurrence}")}}}}));
+                let turn = if start_identity {
+                    serde_json::json!({"id":format!("turn-{occurrence}")})
+                } else {
+                    serde_json::json!({})
+                };
+                steps.push(serde_json::json!({"method":"turn/start","occurrence":occurrence,"respond":{"result":{"turn":turn}}}));
             }
             fs::write(&scenario, serde_json::to_vec(&serde_json::json!({
                 "schema_version":1,"name":"review_dispatch","description":"Task-scoped worker dispatch and recovery.",
@@ -18766,6 +18974,419 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
             }]);
         }
         verdict
+    }
+
+    #[test]
+    fn scheduler_recovers_original_worker_acceptance_after_response_loss() {
+        use rusqlite::OptionalExtension as _;
+        for managed in [false, true] {
+            for completed_before in [false, true] {
+                let scene = crate::semantic::successor_review_tests::Scene::scheduled(managed);
+                scene.prepare_worker_ledger();
+                let key = "scheduler-lost-reply";
+                let (task, permit) = scene.reserve_scheduler_task(key, 1);
+                let original_deadline = crate::scheduler::retained_task(
+                    &scene.store(),
+                    &permit,
+                    &scene.view().workspace_id,
+                    scene.state_root(),
+                )
+                .unwrap()
+                .deadline_ms;
+                let mut fixture = ReviewDispatchFixture::new(
+                    &scene,
+                    vec![review_agent_item("Original completed result.")],
+                );
+                let accepted = fixture.dispatch(&scene, &task, key);
+                assert!(
+                    matches!(accepted, ControlResponseV1::Accepted { .. }),
+                    "{accepted:?}"
+                );
+                let actor = crate::scheduler::Actor {
+                    owner: match scene.owner() {
+                        crate::delegation_service::SettlementOwner::Managed { session_id } => {
+                            crate::assignment_queue::Owner::Managed(session_id)
+                        }
+                        crate::delegation_service::SettlementOwner::External { engagement_id } => {
+                            crate::assignment_queue::Owner::External(engagement_id)
+                        }
+                    },
+                    run: scene.manifest().run_id,
+                };
+                // The actual Worker accepted; the gateway lost its reply before
+                // linking the task. Exercise both crash and uncertain variants.
+                if completed_before {
+                    scene
+                        .store()
+                        .transact(|tx| {
+                            crate::scheduler::finish_dispatch(
+                                tx,
+                                &permit,
+                                &crate::delegation_service::MemberDispatchOutcome::Uncertain {
+                                    code: "WORKER_UNREACHABLE".into(),
+                                    message: "test-owned response loss".into(),
+                                },
+                                crate::scheduler::now_ms()?,
+                            )
+                        })
+                        .unwrap();
+                    fixture
+                        .complete(
+                            "turn-1",
+                            vec![review_agent_item("Original completed result.")],
+                        )
+                        .unwrap();
+                }
+                assert_eq!(scene.state(task.task_ref), "dispatching");
+                std::thread::sleep(Duration::from_millis(1_050));
+                // This is post-acceptance recovery after the original deadline,
+                // not a new admission or a deadline extension.
+                crate::semantic::recover_scheduler_assignment(scene.state_root(), actor).unwrap();
+                assert_eq!(scene.state(task.task_ref), "running");
+                if !completed_before {
+                    fixture
+                        .complete(
+                            "turn-1",
+                            vec![review_agent_item("Original completed result.")],
+                        )
+                        .unwrap();
+                }
+                crate::semantic::resettle_member_tasks(
+                    scene.state_root(),
+                    actor.run,
+                    scene.owner(),
+                )
+                .unwrap();
+                assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+                let result = scene.result(task.task_ref);
+                let queue_entry = scene
+                    .store()
+                    .connection()
+                    .query_row(
+                        "SELECT deadline_ms FROM assignment_queue_entries WHERE task_id=?1",
+                        [task.task_ref.to_string()],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .unwrap();
+                assert!(queue_entry.is_none());
+                assert_eq!(
+                    crate::scheduler::retained_task(
+                        &scene.store(),
+                        &permit,
+                        &scene.view().workspace_id,
+                        scene.state_root()
+                    )
+                    .unwrap()
+                    .deadline_ms,
+                    original_deadline
+                );
+                assert!(crate::scheduler::now_ms().unwrap() > original_deadline);
+                let stability = scene.stability_facts();
+                for _ in 0..2 {
+                    crate::semantic::recover_scheduler_assignment(scene.state_root(), actor)
+                        .unwrap();
+                    scene
+                        .store()
+                        .transact(|tx| {
+                            crate::semantic::link_dispatched_task(
+                                tx,
+                                scene.owner(),
+                                actor.run,
+                                task.task_ref,
+                                "turn-1",
+                                crate::scheduler::now_ms()?,
+                            )
+                        })
+                        .unwrap();
+                    crate::semantic::resettle_member_tasks(
+                        scene.state_root(),
+                        actor.run,
+                        scene.owner(),
+                    )
+                    .unwrap();
+                    assert_eq!(scene.result(task.task_ref), result);
+                    assert_eq!(scene.stability_facts(), stability);
+                }
+                assert!(
+                    scene
+                        .store()
+                        .transact(|tx| crate::semantic::link_dispatched_task(
+                            tx,
+                            scene.owner(),
+                            actor.run,
+                            task.task_ref,
+                            "foreign-turn",
+                            crate::scheduler::now_ms()?
+                        ))
+                        .is_err()
+                );
+                assert_eq!(
+                    fixture
+                        .requests()
+                        .iter()
+                        .filter(|r| r["method"] == "turn/start")
+                        .count(),
+                    1
+                );
+                let mut store = scene.store();
+                assert!(
+                    store
+                        .transact(|tx| crate::scheduler::claim(
+                            tx,
+                            actor.owner,
+                            actor.run,
+                            crate::scheduler::now_ms()?
+                        ))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scheduler_original_acceptance_rejects_changed_and_unresolved_evidence() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::scheduled(managed);
+            scene.prepare_worker_ledger();
+            let key = "scheduler-proof";
+            let (task, permit) = scene.reserve_scheduler_task(key, 600);
+            let mut fixture = ReviewDispatchFixture::new(&scene, vec![]);
+            let actor = crate::scheduler::Actor {
+                owner: match scene.owner() {
+                    crate::delegation_service::SettlementOwner::Managed { session_id } => {
+                        crate::assignment_queue::Owner::Managed(session_id)
+                    }
+                    crate::delegation_service::SettlementOwner::External { engagement_id } => {
+                        crate::assignment_queue::Owner::External(engagement_id)
+                    }
+                },
+                run: scene.manifest().run_id,
+            };
+            // No acceptance is not a reclaim proof for a reserved request.
+            crate::semantic::recover_scheduler_assignment(scene.state_root(), actor).unwrap();
+            assert_eq!(scene.state(task.task_ref), "dispatching");
+            assert!(matches!(
+                fixture.dispatch(&scene, &task, key),
+                ControlResponseV1::Accepted { .. }
+            ));
+            let records = fixture
+                .coordinator
+                .as_ref()
+                .unwrap()
+                .journal()
+                .ledger()
+                .lock()
+                .unwrap()
+                .durable_records()
+                .unwrap()
+                .to_vec();
+            let request = crate::turn::TurnRequest {
+                write: false,
+                idempotency_key: if managed {
+                    format!("successor-task:{}", task.task_ref)
+                } else {
+                    key.into()
+                },
+                message: task.prompt.clone(),
+                images: Vec::new(),
+                model: scene.manifest().model.clone(),
+                effort: None,
+                delivery: DeliveryMode::Submit,
+            };
+            let namespace = crate::operation::Namespace::submit(
+                &scene.manifest().controller.identity,
+                &scene.view().workspace_id,
+                actor.run,
+                &request.idempotency_key,
+            )
+            .unwrap();
+            assert!(
+                crate::turn::verified_submit_acceptance(&records, &namespace, &request)
+                    .unwrap()
+                    .is_some()
+            );
+            for case in 0..5 {
+                let mut changed = request.clone();
+                let mut ns = namespace.clone();
+                match case {
+                    0 => changed.message.push_str(" changed"),
+                    1 => changed.model.push_str("-foreign"),
+                    2 => ns.controller_generation += 1,
+                    3 => ns.scope_ref = Some(Uuid::now_v7().to_string()),
+                    _ => ns.idempotency_key.push_str("-foreign"),
+                };
+                assert!(
+                    !matches!(
+                        crate::turn::verified_submit_acceptance(&records, &ns, &changed),
+                        Ok(Some(_))
+                    ),
+                    "{case}"
+                );
+            }
+            let prefix: Vec<_> = records
+                .iter()
+                .filter(|r| r.kind() != crate::audit::AuditKind::TurnStarted)
+                .cloned()
+                .collect();
+            assert!(!matches!(
+                crate::turn::verified_submit_acceptance(&prefix, &namespace, &request),
+                Ok(Some(_))
+            ));
+            let mut altered = Vec::new();
+            for record in &records {
+                let generation = if record.kind() == crate::audit::AuditKind::TurnStarted {
+                    record.run_generation() + 1
+                } else {
+                    record.run_generation()
+                };
+                altered.push(
+                    crate::audit::AuditRecord::new(
+                        record.sequence(),
+                        record.timestamp(),
+                        record.run_id(),
+                        generation,
+                        record.kind(),
+                        record.payload().clone(),
+                        altered.last().map_or_else(
+                            || "0".repeat(64),
+                            |r: &crate::audit::AuditRecord| r.hash().to_owned(),
+                        ),
+                    )
+                    .unwrap(),
+                );
+            }
+            assert!(
+                crate::turn::verified_submit_acceptance(&altered, &namespace, &request).is_err()
+            );
+            // Refusing the missing gateway reply never starts another Turn.
+            scene
+                .store()
+                .transact(|tx| {
+                    crate::scheduler::finish_dispatch(
+                        tx,
+                        &permit,
+                        &crate::delegation_service::MemberDispatchOutcome::Uncertain {
+                            code: "OUTCOME_UNKNOWN".into(),
+                            message: "test-owned loss".into(),
+                        },
+                        crate::scheduler::now_ms()?,
+                    )
+                })
+                .unwrap();
+            crate::semantic::recover_scheduler_assignment(scene.state_root(), actor).unwrap();
+            assert_eq!(
+                fixture
+                    .requests()
+                    .iter()
+                    .filter(|r| r["method"] == "turn/start")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_unresolved_worker_effect_never_reclaims_or_starts_a_second_turn() {
+        for managed in [false, true] {
+            let scene = crate::semantic::successor_review_tests::Scene::scheduled(managed);
+            scene.prepare_worker_ledger();
+            let key = "scheduler-unresolved";
+            let (task, permit) = scene.reserve_scheduler_task(key, 600);
+            let mut fixture = ReviewDispatchFixture::with_start_identity(
+                &scene,
+                recovery_history(vec![], "running", None),
+                reviewer_bootstrap(),
+                false,
+            );
+            let response = fixture.dispatch(&scene, &task, key);
+            assert!(
+                !matches!(response, ControlResponseV1::Accepted { .. }),
+                "{response:?}"
+            );
+            let namespace = crate::operation::Namespace::submit(
+                &scene.manifest().controller.identity,
+                &scene.view().workspace_id,
+                scene.manifest().run_id,
+                if managed {
+                    format!("successor-task:{}", task.task_ref)
+                } else {
+                    key.into()
+                }
+                .as_str(),
+            )
+            .unwrap();
+            let records = fixture
+                .coordinator
+                .as_ref()
+                .unwrap()
+                .journal()
+                .ledger()
+                .lock()
+                .unwrap()
+                .durable_records()
+                .unwrap()
+                .to_vec();
+            assert_eq!(
+                crate::operation::lookup(&records, &namespace).unwrap()["state"],
+                "unresolved"
+            );
+            let actor = crate::scheduler::Actor {
+                owner: if managed {
+                    crate::assignment_queue::Owner::Managed(scene.owner().scope_ref())
+                } else {
+                    crate::assignment_queue::Owner::External(scene.owner().scope_ref())
+                },
+                run: scene.manifest().run_id,
+            };
+            scene
+                .store()
+                .transact(|tx| {
+                    crate::scheduler::finish_dispatch(
+                        tx,
+                        &permit,
+                        &crate::delegation_service::MemberDispatchOutcome::Uncertain {
+                            code: "DISPATCH_OUTCOME_UNKNOWN".into(),
+                            message: "actual Worker omitted acceptance identity".into(),
+                        },
+                        crate::scheduler::now_ms()?,
+                    )?;
+                    tx.execute(
+                        "UPDATE scheduler_claims SET lease_until_ms=0 WHERE claim_id=?1",
+                        [permit.claim.to_string()],
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            crate::semantic::recover_scheduler_assignment(scene.state_root(), actor).unwrap();
+            assert_eq!(scene.state(task.task_ref), "dispatching");
+            assert!(!matches!(
+                fixture.dispatch(&scene, &task, key),
+                ControlResponseV1::Accepted { .. }
+            ));
+            assert_eq!(
+                fixture
+                    .requests()
+                    .iter()
+                    .filter(|r| r["method"] == "turn/start")
+                    .count(),
+                1
+            );
+            assert!(
+                scene
+                    .store()
+                    .transact(|tx| crate::scheduler::claim(
+                        tx,
+                        actor.owner,
+                        actor.run,
+                        crate::scheduler::now_ms()?
+                    ))
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[test]
@@ -23690,6 +24311,325 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
         write_frame(&mut stream, request).unwrap();
         let mut reader = BufReader::new(stream);
         read_frame(&mut reader).unwrap()
+    }
+
+    #[test]
+    fn worker_scheduler_external_submit_requires_the_owning_dispatch_reservation() {
+        use crate::assignment_queue::Owner;
+        use crate::semantic::successor_fixture::{AcceptingPort, SuccessorMember};
+        let fixture = SuccessorMember::scheduled();
+        let mut task = crate::delegation_service::fixture_task();
+        task.expected_output = "complete_result".into();
+        let (queued, _) = crate::delegation_service::queue_external_specialist_task(
+            &fixture.scope(),
+            &crate::caller_scope::fixture(32),
+            &AcceptingPort,
+            crate::delegation_service::AssignExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task,
+                execution_intent: "canonical_workspace_write",
+                target: None,
+                deadline_seconds: 600,
+                idempotency_key: "worker-reserved-queue",
+                expected_revision: None,
+            },
+            1,
+        )
+        .unwrap();
+        let task = Uuid::parse_str(&queued.task_ref).unwrap();
+        let mut store = fixture.store();
+        let owner = Owner::External(fixture.engagement_id);
+        let actor = crate::scheduler::Actor {
+            owner,
+            run: fixture.member_ref,
+        };
+        // Model the separate Ready settlement; this fixture has no physical
+        // Worker. The native component owns that independent proof.
+        store
+            .mark_external_member_resident(fixture.engagement_id, fixture.member_ref)
+            .unwrap();
+        let now = crate::scheduler::now_ms().unwrap();
+        let permit = store
+            .transact(|tx| {
+                crate::scheduler::observe_actor(tx, actor, 1, true, now)?;
+                crate::scheduler::claim(tx, owner, fixture.member_ref, now)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(permit.work, task);
+        let carrier = CredentialCarrier::for_accepted_work(&fixture.state_root, &permit).unwrap();
+        let authority = RunControllerAuthority::new(fixture.state_root.clone(), fixture.member_ref);
+        let assign =
+            || authority.authorize_external(fixture.engagement_id, "engagement.assign", &carrier);
+        assert_eq!(
+            assign().unwrap_err().details["reason"],
+            "accepted_task_not_dispatchable"
+        );
+        store
+            .transact(|tx| crate::scheduler::prepare_dispatch(tx, &permit, now))
+            .unwrap();
+        assert_eq!(
+            assign().unwrap_err().details["reason"],
+            "accepted_task_not_dispatchable"
+        );
+        store
+            .transact(|tx| {
+                crate::engagement::mark_external_task_dispatching_in(
+                    tx,
+                    fixture.engagement_id,
+                    task,
+                    now,
+                )
+            })
+            .unwrap();
+        assign().unwrap();
+        // The reserved owner is not a stealable pre-effect claim. Expiring the
+        // old acquisition lease changes neither its original deadline nor ID.
+        let retained = crate::scheduler::retained_task(
+            &store,
+            &permit,
+            &fixture.view.workspace_id,
+            &fixture.state_root,
+        )
+        .unwrap();
+        let original = retained.deadline_ms;
+        let prompt = retained
+            .contents
+            .prompt(
+                &retained.accepted,
+                &retained.accepted.execution_intent,
+                retained.deadline_seconds,
+            )
+            .unwrap();
+        store
+            .transact(|tx| {
+                tx.execute(
+                    "UPDATE scheduler_claims SET lease_until_ms=0 WHERE claim_id=?1",
+                    [permit.claim.to_string()],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assign().unwrap();
+        assert!(
+            bind_successor_dispatch(
+                &store,
+                fixture.engagement_id,
+                fixture.member_ref,
+                &fixture.view.workspace_id,
+                &retained.key,
+                false,
+                &prompt
+            )
+            .unwrap()
+        );
+        let remaining = crate::scheduler::effect_remaining(&fixture.state_root, fixture.member_ref)
+            .unwrap()
+            .unwrap();
+        assert!(remaining > Duration::from_secs(30) && remaining <= Duration::from_secs(600));
+        assert_eq!(
+            crate::scheduler::retained_task(
+                &store,
+                &permit,
+                &fixture.view.workspace_id,
+                &fixture.state_root
+            )
+            .unwrap()
+            .deadline_ms,
+            original
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT lease_until_ms FROM scheduler_claims WHERE claim_id=?1",
+                    [permit.claim.to_string()],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert!(
+            store
+                .transact(|tx| crate::scheduler::claim(
+                    tx,
+                    owner,
+                    fixture.member_ref,
+                    crate::scheduler::now_ms()?
+                ))
+                .unwrap()
+                .is_none()
+        );
+        store
+            .transact(|tx| {
+                tx.execute(
+                    "UPDATE scheduler_claims SET phase='claimed' WHERE claim_id=?1",
+                    [permit.claim.to_string()],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            assign().unwrap_err().details["reason"],
+            "accepted_claim_expired"
+        );
+        assert!(
+            crate::scheduler::effect_remaining(&fixture.state_root, fixture.member_ref).is_err()
+        );
+        store
+            .transact(|tx| {
+                tx.execute(
+                    "UPDATE scheduler_claims SET phase='dispatching' WHERE claim_id=?1",
+                    [permit.claim.to_string()],
+                )
+                .unwrap();
+                tx.execute(
+                    "UPDATE tasks SET state='failed' WHERE task_id=?1",
+                    [task.to_string()],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            assign().unwrap_err().details["reason"],
+            "accepted_task_not_dispatchable"
+        );
+        assert!(
+            crate::scheduler::effect_remaining(&fixture.state_root, fixture.member_ref)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn worker_scheduler_reserved_dispatch_keeps_original_deadline_and_release_authority() {
+        use crate::assignment_queue::Owner;
+        use crate::semantic::successor_fixture::{AcceptingPort, SuccessorMember};
+        let fixture = SuccessorMember::scheduled();
+        let mut task = crate::delegation_service::fixture_task();
+        task.expected_output = "complete_result".into();
+        crate::delegation_service::queue_external_specialist_task(
+            &fixture.scope(),
+            &crate::caller_scope::fixture(32),
+            &AcceptingPort,
+            crate::delegation_service::AssignExternalSpecialistTask {
+                engagement_id: fixture.engagement_id,
+                member_ref: fixture.member_ref,
+                task,
+                execution_intent: "canonical_workspace_write",
+                target: None,
+                deadline_seconds: 1,
+                idempotency_key: "worker-original-deadline",
+                expected_revision: None,
+            },
+            1,
+        )
+        .unwrap();
+        let mut store = fixture.store();
+        let owner = Owner::External(fixture.engagement_id);
+        let now = crate::scheduler::now_ms().unwrap();
+        let permit = store
+            .transact(|tx| {
+                crate::scheduler::observe_actor(
+                    tx,
+                    crate::scheduler::Actor {
+                        owner,
+                        run: fixture.member_ref,
+                    },
+                    1,
+                    true,
+                    now,
+                )?;
+                crate::scheduler::claim(tx, owner, fixture.member_ref, now)
+            })
+            .unwrap()
+            .unwrap();
+        store
+            .transact(|tx| {
+                crate::scheduler::prepare_dispatch(tx, &permit, now)?;
+                crate::engagement::mark_external_task_dispatching_in(
+                    tx,
+                    fixture.engagement_id,
+                    permit.work,
+                    now,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let deadline = crate::scheduler::retained_task(
+            &store,
+            &permit,
+            &fixture.view.workspace_id,
+            &fixture.state_root,
+        )
+        .unwrap()
+        .deadline_ms;
+        let carrier = CredentialCarrier::for_accepted_work(&fixture.state_root, &permit).unwrap();
+        let authority = RunControllerAuthority::new(fixture.state_root.clone(), fixture.member_ref);
+        let delay = deadline
+            .saturating_sub(crate::scheduler::now_ms().unwrap())
+            .max(0) as u64;
+        std::thread::sleep(Duration::from_millis(delay + 2));
+        assert_eq!(
+            authority
+                .authorize_external(fixture.engagement_id, "engagement.assign", &carrier)
+                .unwrap_err()
+                .details["reason"],
+            "accepted_claim_expired"
+        );
+        assert!(
+            crate::scheduler::effect_remaining(&fixture.state_root, fixture.member_ref).is_err()
+        );
+        authority
+            .authorize_external(fixture.engagement_id, "engagement.release_write", &carrier)
+            .unwrap();
+        store
+            .transact(|tx| {
+                crate::engagement::mark_external_task_running_in(
+                    tx,
+                    fixture.engagement_id,
+                    permit.work,
+                    "observed-turn",
+                    crate::scheduler::now_ms()?,
+                )?;
+                crate::scheduler::finish_dispatch(
+                    tx,
+                    &permit,
+                    &crate::delegation_service::MemberDispatchOutcome::Accepted {
+                        turn_ref: "observed-turn".into(),
+                    },
+                    crate::scheduler::now_ms()?,
+                )
+            })
+            .unwrap();
+        authority
+            .authorize_external(fixture.engagement_id, "engagement.release_write", &carrier)
+            .unwrap();
+        assert!(
+            crate::scheduler::effect_remaining(&fixture.state_root, fixture.member_ref)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            authority
+                .authorize_external(fixture.engagement_id, "engagement.assign", &carrier)
+                .is_err()
+        );
+        assert!(
+            store
+                .transact(|tx| crate::scheduler::claim(
+                    tx,
+                    owner,
+                    fixture.member_ref,
+                    crate::scheduler::now_ms()?
+                ))
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// MD1: only a manifest-4 successor member publishes file-change payloads.

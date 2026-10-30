@@ -9,8 +9,8 @@ development commits.
 
 ### Added
 
-- Add gated authenticated Specialist consultation admission with durable mail and captured policy limits;
-  live enablement, scheduling and result delivery remain pending.
+- Add gated authenticated Specialist consultation with durable admission, scheduling, activation and passivation;
+  live collaboration enablement and result delivery remain pending.
 
 - Route current permission and protected MCP forms through public-v2 Controller decisions, preserving each request's allowed decisions
   and immediate policy declines for private ownerless or fixed read-only work.

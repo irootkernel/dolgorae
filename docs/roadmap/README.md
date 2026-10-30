@@ -2740,7 +2740,7 @@ Handoff: Exchange storage with verified source authority and source/target ident
 
 ### TASK-082: Schedule and Activate Mailbox Actors
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-081.
 

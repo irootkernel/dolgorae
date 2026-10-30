@@ -1387,14 +1387,28 @@ pub fn serve(
             return Err(error);
         }
     };
+    let control = match runtime.block_on(async {
+        crate::scheduler::ControlPlaneRuntime::start(home, socket.record().server_instance_id)
+    }) {
+        Ok(control) => control,
+        Err(error) => {
+            write_readiness(&mut output, &FailureEnvelope::new("serve", error.clone()))?;
+            return Err(error);
+        }
+    };
     write_readiness(
         &mut output,
         &SuccessEnvelope::new("serve", socket.readiness_data()),
     )?;
     drop(output);
-    let result = runtime.block_on(run_server(&mut socket, backend, async move {
-        signal.recv().await;
-    }));
+    let result = runtime.block_on(async {
+        let result = run_server(&mut socket, backend, async move {
+            signal.recv().await;
+        })
+        .await;
+        control.shutdown().await;
+        result
+    });
     // Blocking semantic calls are bounded in count but are not cancellation-safe;
     // do not wait beyond the foreground drain budget for their worker threads.
     runtime.shutdown_timeout(Duration::ZERO);

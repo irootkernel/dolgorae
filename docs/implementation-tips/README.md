@@ -35,6 +35,18 @@ Codex executable apply. All state is isolated, and the existing release and
 cleanup paths must prove owned-process absence. The parser-required
 `--caller-driver` is unused in this mode.
 
+The `--scheduler-component-only` mode checks queued managed and external work,
+canonical writes, and pooled Reader passivation and reactivation through the
+same runner. It prepares accepted service calls without a Primary model tool
+invocation. Its passivation target has no prior result; read-only collection
+does not acknowledge a required result. The fixture settles that target's
+resident marker after verifying its actual idle Worker and Reader policy,
+then checks scheduler passivation and queued reactivation. Both component modes
+build the current main binary and native
+driver, require the matching census binary, and retain their executable hashes.
+Startup and scheduler modes are mutually exclusive. These bounded fixtures do
+not enable the live collaboration policy or qualify TASK-083 result delivery.
+
 Cargo build output and the accepted-legacy/gateway executable manifests follow
 `CARGO_TARGET_DIR` when it is set. The E2E helpers read those manifests from the
 same directory, and Make defaults `DOLGORAE_BIN` to its `debug/dolgorae` binary.
@@ -512,11 +524,26 @@ activities in their own right.
 Select Codex CLI `0.164.0`
 (`d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf`) explicitly
 for the native integrated acceptance, workspace-policy fixture and review-reader
-campaigns. Their isolated homes and loopback Responses require no account
-credentials. The integrated campaign includes caller-pipeline coverage; run the
-standalone caller only to isolate missing coverage or a failure. Keep the
-existing `shell_snapshot=false` regression and the process-quiescence checks.
-The default-feature campaign is separate.
+campaigns. These campaigns use private Codex state and a scripted loopback
+Responses provider that requires no account credentials. In product-launched
+Profiles, `HOME`, `USER`, `LOGNAME`, `SHELL` and `TMPDIR` come from the OS account
+and platform. A temporary driver `HOME` does not change that captured
+environment. Check the child environment against the authorized test scope;
+private `CODEX_HOME` alone does not prove absence of user-home access.
+
+The integrated campaign includes caller-pipeline coverage; run the standalone
+caller only to isolate missing coverage or a failure. Keep the existing
+`shell_snapshot=false` regression and the process-quiescence checks. The
+default-feature campaign is separate.
+
+The existing `--scheduler-component-only` command runs correction proof and
+ordinary queued-work qualification in independent subphases. Each uses its own
+private state, the existing driver bounds and a separate process census. The
+correction subphase starts no model Turn; the ordinary subphase retains the
+managed/external writes and pooled passivation/reactivation checks. The command
+succeeds after both subphases complete. Activation, pre-effect claim and task
+expiry observations use controlled fixture clocks; they do not extend an
+accepted deadline or promise automatic retry.
 
 MCP host qualification additionally selects Claude Code `2.1.310`
 (`ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd`). The

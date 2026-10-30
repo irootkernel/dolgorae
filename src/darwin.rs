@@ -318,6 +318,19 @@ pub(crate) struct DeadlineStream {
 }
 
 impl DeadlineStream {
+    pub(crate) fn send_byte_with_fd(&self, byte: u8, fd: RawFd) -> std::io::Result<()> {
+        loop {
+            self.wait(libc::POLLOUT)?;
+            match DarwinSystem.send_byte_with_optional_fd(&self.stream, byte, Some(fd)) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                result => return result,
+            }
+        }
+    }
     pub(crate) fn set_deadline(&mut self, deadline: std::time::Instant) {
         self.deadline = deadline;
     }

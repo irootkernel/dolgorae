@@ -3878,9 +3878,10 @@ priority from trusted runtime and retained state. A missing trusted priority
 rejects admission. Request retries are scoped by Session, source Run, Turn and
 call; changed input under that identity conflicts. Admission stores immutable
 request and context bytes, the exchange, target mailbox, causal event and durable
-activation marker together. Scheduling, actual activation, blocking waits and
-result delivery retain their later Task owners. Live collaboration policy
-remains gated until those owners and TASK-027 integration are complete.
+activation marker together. TASK-082 supplies centralized scheduling and actor
+activation and passivation. Blocking waits and result delivery remain TASK-083
+work. Live collaboration policy remains gated until those semantics and
+TASK-027 integrated qualification are complete.
 
 ### Durable Mailbox and Virtual Actor Activation
 
@@ -3897,7 +3898,10 @@ remain queued and MUST NOT preempt the active Turn. When safely passivated under
 `on_mail` policy, the Activation Manager MUST use a compare-and-swap transition
 and one bounded activation lease to start a new Worker generation, start or
 reuse the physical lane, resume the recorded thread, verify effective
-configuration, and wake the scheduler. Concurrent mail MUST produce one
+configuration, and wake the scheduler. An accepted `unstarted` member with
+queued work uses the same captured activation boundary for its first residency.
+A physical Worker already proved Ready may satisfy that operation without
+another startup or Writer acquisition. Concurrent mail MUST produce one
 activation and multiple queued items, not duplicate Worker generations.
 
 `passivated` is distinct from core Run `paused` and `closed`. A passivated Run is
@@ -3905,7 +3909,12 @@ logically active and resumable. A paused Run requires explicit authorized
 resume. A closed, retired, or released Run is terminal and MUST reject new mail.
 Activation failure retains queued mail, records a safe blocker, and marks the
 member unavailable; it MUST NOT discard the request or silently replace the
-Specialist.
+Specialist. After failed or expired activation, compensation MUST release only
+Writer authority positively attributable to that activation's captured
+acquisition. Existing owner, lifecycle, registration, process and policy proofs
+remain required. Pre-existing, changed or foreign ownership and active or
+unproved effects remain fenced. Unavailable residency or lease expiry alone
+cannot authorize release.
 
 Passivation is allowed only while the core Run is idle, owns no writer, has no
 pending interaction, has no blocking outbound collaboration, has no required
@@ -3914,14 +3923,26 @@ process cleanup, and has authoritative resumable thread state. Passivation
 preserves Run ID, logical lane, thread ID, Agent Configuration, aggregate
 membership, mailbox, and audit history.
 
+Queued execution consumes the original durable acceptance. For external work,
+the scheduler uses an internal permit restricted to that accepted task and its
+current claim. The permit contains no Controller capability and cannot authorize
+ordinary Run operations, another task, cancellation, or member lifecycle changes.
+The Worker revalidates the acceptance, owner/member/Run binding, retained bytes,
+configuration, deadline and claim at its serialized effect boundary. A missing
+or changed authority retains the queue with a safe blocker. A crossed dispatch
+boundary is reconciled from Run evidence and is never made replayable by lease
+expiry.
+
 ### Scheduling, Priority, and Backpressure
 
 Assignment queue admission and compatible reuse have a staged service boundary
 for both managed Sessions and External Engagements. It commits retained tasks,
-ordering and caller accounting together. The live tools continue to reject busy
-targets and unsupported reuse policies until the central dispatcher can execute
-those accepted queues under current owner authority. This staged boundary
-does not advertise lateral consultation or automatic activation.
+ordering and caller accounting together. The central dispatcher executes those
+retained queues under their original owner authority. Live tools retain
+ready-target-only admission and existing reuse-policy gates pending TASK-083
+wait/result semantics and TASK-027 integrated qualification. Queue storage alone
+grants no lateral consultation or activation authority. Those effects retain
+their separate admission and captured lifecycle checks.
 
 A target Run executes at most one Turn at a time. Collaboration queueing is
 owned by the Orchestration and Collaboration layer; low-level public `run send`
@@ -3936,6 +3957,18 @@ order:
 4. dependency-unblock boost when the source Turn is actively waiting;
 5. earliest deadline; and
 6. oldest mailbox sequence.
+
+The private wake endpoint MUST fit the platform socket-path bound independently
+of the accepted installation-home path and remain isolated by gateway instance.
+Wake loss never changes committed queue or execution authority.
+
+Readiness verification MUST follow the actor's captured execution lane. A
+shared-read-only actor requires its retained live Profile epoch, active owned
+membership, verified read-only policy and matching Worker/Thread identity; a
+Dedicated-only registration witness is not evidence for that lane. An already
+Ready accepted member can complete activation without a second physical start.
+Canonical Writer authority is acquired for dispatch, not merely to recognize
+that existing Ready generation.
 
 A Specialist cannot raise its own priority. A collaboration exchange inherits
 its root Specialist task priority. The scheduler MUST enforce source fairness,
@@ -3968,7 +4001,22 @@ A busy target queues the request. The active Turn is never interrupted for a
 higher-priority mailbox item. A short claim lease covers only the boundary before
 authoritative target Turn acceptance. It MUST NOT permit another executor to
 steal or replay a running LLM Turn. Unknown Turn acceptance or outcome becomes
-`interrupted_unknown` and is not automatically replayed.
+`interrupted_unknown` and is not automatically replayed. A committed dispatch
+reservation remains non-reclaimable: its in-progress task or Writer effects use
+the original accepted task or exchange deadline and existing operation timeouts.
+Neither that deadline nor the pre-effect claim lease is reset. The external
+Worker accepts only the exact task and claim at their owning `dispatching`
+reservation; queued, merely accepted, terminal or unknown work cannot use it to
+start a Turn. Deadline expiry does not remove otherwise valid owner release
+authority. Recovery MUST relink an original accepted Turn only from complete,
+verified durable Submit evidence bound to its original request digest, key,
+Controller namespace, owner, member, generation and acceptance-time effort. An
+identical existing link is idempotent; a conflicting link is refused. Recovery
+then uses the existing owning settlement path. Missing, unresolved, ambiguous
+or foreign evidence remains fenced. Relinking MUST NOT start another Turn or
+renew a deadline. Deadline expiry alone does not invalidate positive original
+acceptance evidence; a conflicting terminal task state still requires owning
+reconciliation.
 
 Result notification is at least once and consumption is idempotent by exchange
 ID and immutable result artifact. A transport await ending does not cancel the

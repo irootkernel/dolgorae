@@ -53,6 +53,8 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "collaboration",
             &[
+                "assignment_queue",
+                "scheduler",
                 "delegation_identity",
                 "domain",
                 "engagement",
@@ -130,8 +132,35 @@ fn source_module_dependencies_match_the_approved_graph() {
             ][..],
         ),
         (
+            "scheduler",
+            &[
+                "assignment_queue",
+                "caller_scope",
+                "collaboration",
+                "controller",
+                "darwin",
+                "delegation_identity",
+                "delegation_service",
+                "domain",
+                "engagement",
+                "gateway_socket",
+                "jcs",
+                "machine",
+                "operation",
+                "orchestration",
+                "paths",
+                "run",
+                "semantic",
+                "snapshot",
+                "successor_capture",
+                "task_request",
+                "worker", // Reuse the private per-UID socket-root validation.
+                "workspace",
+            ][..],
+        ),
+        (
             "assignment_queue",
-            &["engagement", "jcs", "machine", "orchestration"][..],
+            &["scheduler", "engagement", "jcs", "machine", "orchestration"][..],
         ),
         ("app_server", &["darwin", "jcs", "turn"][..]),
         (
@@ -325,6 +354,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "controller",
             &[
+                "scheduler",
                 "darwin",
                 "domain",
                 "jcs",
@@ -379,6 +409,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "engagement",
             &[
+                "scheduler",
                 "collaboration",
                 "assignment_queue",
                 "controller",
@@ -639,6 +670,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "delegation_service",
             &[
+                "scheduler",
                 "worker", // Test-only production contract selection and dispatcher qualification.
                 // Native component qualification owns its test-only server group census.
                 "darwin",
@@ -820,6 +852,8 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "semantic",
             &[
+                "collaboration",
+                "scheduler",
                 "public_resolution",
                 "app_server",
                 "assignment_queue",
@@ -990,6 +1024,10 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "worker",
             &[
+                "scheduler",
+                // Reservation regression uses owning queue and caller fixtures.
+                "assignment_queue",
+                "caller_scope",
                 "collaboration",
                 "operation",
                 "public_resolution",
@@ -1043,6 +1081,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "gateway",
             &[
+                "scheduler",
                 "darwin",
                 "gateway_socket",
                 "machine",

@@ -45,10 +45,20 @@ fn main() {
             assert!(driver::cleanup(std::path::Path::new(&args[2])));
             return;
         }
+        assert!(
+            !(std::env::var("DOLGORAE_NATIVE_SUCCESSOR_STARTUP_COMPONENT").as_deref() == Ok("1")
+                && std::env::var("DOLGORAE_NATIVE_SCHEDULER_COMPONENT").as_deref() == Ok("1")),
+            "successor startup and scheduler components are mutually exclusive"
+        );
         println!(
             "{}",
             if std::env::var("DOLGORAE_NATIVE_COLLABORATION_COMPONENT").as_deref() == Ok("1") {
                 delegation_service::tests::native_collaboration_component(
+                    std::path::Path::new(&args[1]),
+                    std::path::Path::new(&args[2]),
+                )
+            } else if std::env::var("DOLGORAE_NATIVE_SCHEDULER_COMPONENT").as_deref() == Ok("1") {
+                driver::scheduler_component(
                     std::path::Path::new(&args[1]),
                     std::path::Path::new(&args[2]),
                 )

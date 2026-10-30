@@ -937,6 +937,58 @@ fn positional(
 }
 
 impl CredentialCarrier {
+    /// Private accepted-work reference, deliberately not ControllerWire. The
+    /// ordinary Controller parser rejects it. Only the scheduler execution
+    /// boundary interprets it, after rereading the durable claim and acceptance.
+    pub(crate) fn accepted_work(
+        &self,
+    ) -> Result<Option<crate::scheduler::AcceptedWork>, MachineError> {
+        let bytes = self.reread()?;
+        #[derive(Deserialize)]
+        struct Header<'a> {
+            #[serde(borrow)]
+            schema: Option<&'a str>,
+        }
+        let header: Header<'_> = serde_json::from_slice(&bytes)
+            .map_err(|_| credential_invalid("accepted_work", "invalid carrier"))?;
+        if header.schema != Some("dolgorae.accepted-work/v1") {
+            return Ok(None);
+        }
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| credential_invalid("accepted_work", "invalid accepted-work reference"))
+    }
+
+    pub(crate) fn for_accepted_work(
+        state_root: &Path,
+        permit: &crate::scheduler::AcceptedWork,
+    ) -> Result<Self, MachineError> {
+        let path = state_root
+            .join("runtime")
+            .join(format!("accepted-work-{}", Uuid::now_v7()));
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+            .map_err(|_| credential_invalid("accepted_work", "carrier unavailable"))?;
+        let result = (|| {
+            serde_json::to_writer(&mut file, permit)
+                .map_err(|_| credential_invalid("accepted_work", "carrier encoding failed"))?;
+            // Unlink before capturing the descriptor identity. No authority or
+            // secret carrier is persisted for the external Controller.
+            fs::remove_file(&path)
+                .map_err(|_| credential_invalid("accepted_work", "carrier unlink failed"))?;
+            Self::from_file(file)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(path);
+        }
+        result
+    }
+
     pub fn open_path(path: &Path) -> Result<Self, MachineError> {
         let file = OpenOptions::new()
             .read(true)

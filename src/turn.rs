@@ -2777,6 +2777,35 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.check_caller_loaded_root(thread_id)
     }
 
+    /// Verify this actor's native thread while its mutation drain is fenced.
+    /// Pooled siblings may have other loaded roots; their presence grants no
+    /// shutdown authority and is not mistaken for work in this thread.
+    pub(crate) fn verify_actor_passivation(&mut self) -> Result<(), TurnError> {
+        if self.state != CoordinatorState::Idle
+            || self.active_turn_id().is_some()
+            || !self.pending_interactions().is_empty()
+        {
+            return Err(TurnError::TurnBusy);
+        }
+        let thread = self
+            .thread_id()
+            .ok_or(TurnError::CorrelationMismatch)?
+            .to_owned();
+        let read = self.server.request(
+            "thread/read",
+            serde_json::json!({"threadId":thread,"includeTurns":false}),
+        )?;
+        if nested_identity(&read, "thread", "id").as_deref() != Some(thread.as_str())
+            || read.pointer("/thread/parentThreadId") != Some(&Value::Null)
+        {
+            return Err(TurnError::CorrelationMismatch);
+        }
+        if read.pointer("/thread/status/type").and_then(Value::as_str) != Some("idle") {
+            return Err(TurnError::TurnBusy);
+        }
+        self.check_caller_process_quiescence()
+    }
+
     fn check_caller_loaded_root(&mut self, thread_id: &str) -> Result<(), TurnError> {
         let loaded = self.server.request(
             "thread/loaded/list",
@@ -6446,6 +6475,80 @@ pub(crate) fn replay_durable_submit(
     let mut accepted = record.accepted.clone();
     accepted.replayed = true;
     Ok(Some(accepted))
+}
+
+/// Positive original acceptance only. A missing or unresolved receipt is never
+/// proof that a reserved request cannot still reach the Worker.
+pub(crate) fn verified_submit_acceptance(
+    records: &[crate::audit::AuditRecord],
+    namespace: &crate::operation::Namespace,
+    request: &TurnRequest,
+) -> Result<Option<(AcceptedTurn, u64)>, TurnError> {
+    let invalid = || TurnError::Journal("original Submit acceptance is inconsistent".into());
+    let lookup = crate::operation::lookup(records, namespace)?;
+    if lookup["state"] != "accepted" {
+        return Ok(None);
+    }
+    let operation = lookup["operation_ref"].as_str().ok_or_else(invalid)?;
+    let sequence = lookup["receipt"]["accepted_revision"]
+        .as_u64()
+        .ok_or_else(invalid)?;
+    let record = records
+        .iter()
+        .find(|r| r.sequence() == sequence)
+        .ok_or_else(invalid)?;
+    let value: Value =
+        serde_json::from_slice(&canonicalize(record.payload()).map_err(|_| invalid())?)
+            .map_err(|_| invalid())?;
+    if record.kind() != AuditKind::TurnStarted || value["operation_id"] != operation {
+        return Err(invalid());
+    }
+    let effort = value["effort"].as_str().ok_or_else(invalid)?;
+    let expected = crate::operation::SubmitIdentity::prepare(
+        Uuid::parse_str(operation).map_err(|_| invalid())?,
+        namespace.clone(),
+        request,
+        effort,
+    )?;
+    if lookup["accepted_input_digest"] != expected.mutation_envelope_digest {
+        return Err(invalid());
+    }
+    let mut history = Vec::with_capacity(records.len());
+    let mut intent = None;
+    for item in records {
+        let payload: Value =
+            serde_json::from_slice(&canonicalize(item.payload()).map_err(|_| invalid())?)
+                .map_err(|_| invalid())?;
+        if item.kind() == AuditKind::IdempotencyReserved && payload["operation_id"] == operation {
+            if intent.is_some() {
+                return Err(invalid());
+            }
+            let original: OperationIntent =
+                serde_json::from_value(payload.clone()).map_err(|_| invalid())?;
+            if original.run_generation == 0
+                || original.run_generation != record.run_generation()
+                || item.run_generation() != original.run_generation
+                || item.run_id() != record.run_id()
+                || original.server_epoch == 0
+                || original.server_key.is_empty()
+            {
+                return Err(invalid());
+            }
+            intent = Some(original);
+        }
+        history.push((item.kind(), payload));
+    }
+    let original = intent.ok_or_else(invalid)?;
+    let mut request = request.clone();
+    request.effort = Some(effort.to_owned());
+    let accepted = replay_durable_submit(history, &request, effort)?.ok_or_else(invalid)?;
+    if lookup["accepted_subjects"]["turn_ref"] != accepted.turn_id
+        || value["thread_id"] != accepted.thread_id
+        || original.idempotency_key != namespace.idempotency_key
+    {
+        return Err(invalid());
+    }
+    Ok(Some((accepted, original.run_generation)))
 }
 
 pub(crate) fn normalized_request_digest(
