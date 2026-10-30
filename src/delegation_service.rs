@@ -18230,4 +18230,83 @@ pub(crate) mod tests {
             "prepared_policy_fixture":true,"live_policy_enablement_proven":false,
             "root_priority_after_ordering_removal":true,"store_reopen_replay":true,"owned_process_group_absent":true,"owned_server_identity":owned_identity})
     }
+
+    #[test]
+    fn collaboration_unlisted_successor_role_keeps_optional_worker_tool_disabled() {
+        let fixture = Fixture::new();
+        let mut policy = managed_policy();
+        policy.roles[0].role_ref = "unrelated-role".into();
+        policy.roles[0].agent_configuration.role_reference = Some("unrelated-role".into());
+        let session = fixture.managed_session_with_policy(policy);
+        let port = FakePort::new();
+        // This is the owning service's normal installed-provisioning spawn,
+        // with its accepted receipt, rather than an inserted member row.
+        let admitted = fixture.spawn_member(session, "unlisted-role-spawn", &port);
+        let member = Uuid::parse_str(&admitted.member.member_ref).unwrap();
+        assert_eq!(admitted.member.role_ref, "reviewer");
+        let store = EngagementStore::open_read_only(&fixture.database()).unwrap();
+        assert!(matches!(
+            store.intent_lookup(&admitted.receipt.namespace).unwrap(),
+            engagement::IntentLookup::Accepted(receipt) if *receipt == admitted.receipt
+        ));
+        drop(store);
+        fixture.publish_member_manifest(session, member);
+        let manifest = crate::run::RunStore::new(
+            crate::workspace::SystemWorkspacePlatform,
+            &fixture.state_root,
+        )
+        .load_manifest(member)
+        .unwrap();
+        assert!(!crate::collaboration::enabled(&fixture.state_root, session, member).unwrap());
+        assert!(
+            crate::worker::session_tool_contract(&fixture.state_root, &manifest)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn collaboration_registered_role_integrity_failure_is_not_optional_absence() {
+        let (fixture, session, source, _, _, _) = collaboration_fixture();
+        let manifest = crate::run::RunStore::new(
+            crate::workspace::SystemWorkspacePlatform,
+            &fixture.state_root,
+        )
+        .load_manifest(source)
+        .unwrap();
+        assert!(
+            crate::worker::session_tool_contract(&fixture.state_root, &manifest)
+                .unwrap()
+                .is_some()
+        );
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let text: String = connection
+            .query_row(
+                "SELECT policy_json FROM orchestrated_sessions WHERE session_id=?1",
+                [session.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut policy: Value = serde_json::from_str(&text).unwrap();
+        policy["roles"][0]["role_source_sha256"] = json!("0".repeat(64));
+        connection
+            .execute(
+                "UPDATE orchestrated_sessions SET policy_json=?2 WHERE session_id=?1",
+                rusqlite::params![session.to_string(), policy.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            crate::worker::session_tool_contract(&fixture.state_root, &manifest),
+            Err(crate::worker::WorkerProtocolError::LedgerReplay)
+        ));
+        for table in ["collaboration_exchanges", "collaboration_mailbox"] {
+            assert_eq!(
+                connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, u64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
 }

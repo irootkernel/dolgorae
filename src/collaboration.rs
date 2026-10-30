@@ -170,6 +170,23 @@ fn members(
             .ok_or_else(denied)?;
         // Successor membership owns its configuration, while the immutable
         // Session policy supplies lateral-role permission and activation policy.
+        // Independently admitted successors may have no lateral Role in this
+        // Session. Missing permission disables only the optional peer tool.
+        // Keep ordinary validation failures for a registered Role fail-closed.
+        let registered = match &session.specialist_policy {
+            crate::session_policy::SessionPolicySnapshot::Legacy(policy) => policy
+                .roles
+                .iter()
+                .any(|role| role.role_ref == member.role_ref),
+            crate::session_policy::SessionPolicySnapshot::Caller(captures) => captures
+                .policy()
+                .roles
+                .iter()
+                .any(|role| role.role_ref == member.role_ref),
+        };
+        if !registered {
+            continue;
+        }
         let role = session.specialist_policy.role(&member.role_ref)?;
         let configuration_digest =
             crate::run::agent_configuration_digest(&member.agent_configuration)

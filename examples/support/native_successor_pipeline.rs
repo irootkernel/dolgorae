@@ -482,6 +482,146 @@ fn consumer_finish(root: &Path) {
     );
 }
 
+/// Qualify the ordinary physical birth that optional peer-tool discovery must
+/// not invalidate. The source context is prepared service data, not model proof.
+fn successor_startup_component(
+    root: &Path,
+    scope: &delegation::DelegationScope<'_>,
+    primary: Uuid,
+    candidate: &crate::provisioning::ProvisioningCandidate,
+    owner: &CredentialCarrier,
+    home: &DolgoraeHome,
+) -> Value {
+    let state = scope.state_root;
+    let session = crate::orchestration::OrchestrationStore::open_observer(state)
+        .unwrap()
+        .session(primary)
+        .unwrap();
+    assert!(session.specialist_policy.role("reviewer").is_ok());
+    assert!(session.specialist_policy.role("general").is_err());
+    let primary_runtime = RunSnapshot::load(state, primary, 0)
+        .unwrap()
+        .runtime_record
+        .unwrap();
+    let port = SemanticRunSettlementPort { carrier: owner };
+    let admitted = checked(
+        root,
+        "successor startup",
+        delegation::spawn_specialist(
+            scope,
+            &context(primary, "native-startup-component"),
+            &port,
+            delegation::SpawnSpecialist {
+                provisioning_ref: &candidate.provisioning_ref,
+                role_ref: "general",
+                agent_configuration_digest: &candidate.agent_configuration_digest,
+                expected_revision: None,
+            },
+        ),
+    );
+    let run = Uuid::parse_str(&admitted.member.member_ref).unwrap();
+    assert_eq!(admitted.member.role_ref, "general");
+    let (snapshot, observed) = RunSnapshot::observe(state, run, 0).unwrap();
+    assert_eq!(snapshot.manifest.schema_version, 4);
+    assert_eq!(snapshot.projection.lifecycle, RunLifecycle::Idle);
+    assert!(snapshot.projection.active_turn_id.is_none());
+    assert_eq!(observed.effective_policy.access, Access::Read);
+    assert_eq!(
+        observed.effective_policy.verification,
+        PolicyVerification::Verified
+    );
+    let retained =
+        crate::provisioning::retained_snapshot(state, &candidate.provisioning_ref).unwrap();
+    assert_eq!(
+        snapshot.manifest.agent_configuration,
+        retained.admitted_configuration().unwrap().1
+    );
+    assert_eq!(
+        snapshot.manifest.agent_configuration.native_subagent_policy,
+        "enabled"
+    );
+    let binding = snapshot.manifest.aggregate_binding.as_ref().unwrap();
+    assert_eq!(binding.aggregate_id, primary);
+    assert_eq!(
+        binding.member_kind,
+        crate::run::AggregateMemberKind::Specialist
+    );
+    assert!(
+        crate::worker::session_tool_contract(state, &snapshot.manifest)
+            .unwrap()
+            .is_none()
+    );
+    let runtime = snapshot.runtime_record.clone().unwrap();
+    assert_eq!(
+        crate::worker::classify_worker_identity(&runtime),
+        crate::worker::ProcessIdentityVerdict::Match
+    );
+    let response =
+        crate::worker::call_run_worker(state, run, DarwinSystem.current_uid(), None, |expected| {
+            crate::worker::ControlRequestV1::RunStatus {
+                expected,
+                caller: None,
+            }
+        })
+        .unwrap();
+    assert!(
+        matches!(response,crate::worker::ControlResponseV1::Status{identity,lifecycle,active_turn:None,..} if identity==runtime.identity && lifecycle=="idle")
+    );
+    let thread = snapshot.projection.thread_id.as_deref().unwrap();
+    crate::worker::read_thread_registration(state, &snapshot.manifest, thread).unwrap();
+    let store =
+        EngagementStore::open_read_only(&EngagementStore::workspace_database_path(state)).unwrap();
+    assert!(
+        matches!(store.intent_lookup(&admitted.receipt.namespace).unwrap(),crate::engagement::IntentLookup::Accepted(ref receipt) if receipt.as_ref()==&admitted.receipt)
+    );
+    let member = crate::orchestration::successor_member(store.connection(), primary, run)
+        .unwrap()
+        .unwrap();
+    assert_eq!(member.membership_state, "active");
+    assert_eq!(member.actor_residency, "resident");
+    drop(store);
+    let records = snapshot.observed_ledger(state).unwrap();
+    assert!(
+        !records
+            .records()
+            .iter()
+            .any(|record| matches!(record.kind(), crate::audit::AuditKind::TurnStarted))
+    );
+    drop(records);
+    private(
+        &root.join("startup-owned-runtime.json"),
+        &serde_json::to_vec(&json!({"primary":primary_runtime,"successor":runtime})).unwrap(),
+    );
+    private(
+        &root.join("startup-receipt.json"),
+        &serde_json::to_vec(&admitted.receipt).unwrap(),
+    );
+    assert!(
+        cleanup(root),
+        "owning service release and exact Profile retirement failed"
+    );
+    crate::worker::prove_worker_generation_absent(&runtime).unwrap();
+    crate::worker::prove_worker_generation_absent(&primary_runtime).unwrap();
+    let absence = crate::worker::verified_absence_marker(&crate::worker::runtime_root(state), run)
+        .unwrap()
+        .unwrap();
+    assert_eq!(absence.run_id, run);
+    assert_eq!(absence.run_generation, runtime.identity.run_generation);
+    assert_eq!(
+        RunSnapshot::load(state, run, 0)
+            .unwrap()
+            .projection
+            .lifecycle,
+        RunLifecycle::Closed
+    );
+    assert!(home.root().starts_with(root));
+    json!({"schema":"dolgorae.native-successor-startup-component/v1","passed":true,"actual_worker_ready":true,
+        "actual_thread_bound":true,"effective_read_only_verified":true,"optional_collaboration_tool_absent":true,
+        "prepared_service_context":true,"actual_primary_model_tool_call":false,"model_turns":0,
+        "accepted_configuration_retained":true,"accepted_receipt_verified":true,"member_run":run,"thread_id":thread,
+        "worker_generation":runtime.identity.run_generation,"owned_generation_absence_verified":true})
+}
+
 pub fn campaign(root: &Path, codex: &Path) -> Value {
     assert_eq!(
         fs::read(root.join("fixture-owned")).unwrap(),
@@ -515,6 +655,8 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         b"/.podway/\n/.dolgorae/\n",
     );
     let home = DolgoraeHome::system().unwrap();
+    let startup_only =
+        std::env::var("DOLGORAE_NATIVE_SUCCESSOR_STARTUP_COMPONENT").as_deref() == Ok("1");
     private(
         &home.root().join("home/AGENTS.md"),
         b"integrated-common-017\n",
@@ -523,7 +665,11 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         &home.root().join("roles/general/AGENTS.md"),
         &[
             b"integrated-general-017\n".as_slice(),
-            &fs::read(root.join("aquarium-source/references/executor-guidance.md")).unwrap(),
+            &if startup_only {
+                b"Bounded native successor startup fixture.\n".to_vec()
+            } else {
+                fs::read(root.join("aquarium-source/references/executor-guidance.md")).unwrap()
+            },
         ]
         .concat(),
     );
@@ -638,12 +784,14 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         role: SelectedInstructionSource::File(vec!["roles".to_owned(), "general".to_owned()]),
         dependencies: vec![SelectedNamedSource {
             name: "formal-agent-orchestration-v1".into(),
-            source: SelectedInstructionSource::Inline(
+            source: SelectedInstructionSource::Inline(if startup_only {
+                "Bounded accepted successor startup; no model Turn.".into()
+            } else {
                 fs::read_to_string(
                     root.join("aquarium-source/references/formal-agent-orchestration-v1.md"),
                 )
-                .unwrap(),
-            ),
+                .unwrap()
+            }),
         }],
         selected_guidance: Vec::new(),
         profile_binding: binding,
@@ -654,9 +802,14 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
             purpose_label: None,
             required_capabilities: Vec::new(),
             execution_lane: "dedicated".to_owned(),
-            requested_access: "canonical_workspace_write".to_owned(),
+            requested_access: if startup_only {
+                "read_only"
+            } else {
+                "canonical_workspace_write"
+            }
+            .to_owned(),
             required_assurance: "best_effort_personal_alpha".to_owned(),
-            native_subagent_policy: "disabled".to_owned(),
+            native_subagent_policy: if startup_only { "enabled" } else { "disabled" }.to_owned(),
         },
     };
     let (candidate, _) = checked(
@@ -664,6 +817,9 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         "provisioning",
         delegation::install_provisioning(&scope, &sources, "native-install", None),
     );
+    if startup_only {
+        return successor_startup_component(root, &scope, primary, &candidate, &owner, &home);
+    }
     let consumer_owner =
         managed_consumer_setup(root, &view, primary, &primary_binding, &candidate, codex);
     let port = SemanticRunSettlementPort { carrier: &owner };

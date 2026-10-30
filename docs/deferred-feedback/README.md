@@ -355,6 +355,59 @@ from current work. It is not a second roadmap or status authority.
 - Revisit condition: the next Controller reset or persistence change, or an
   observed Ledger reopen failure naming `controller-reset.jsonl`.
 
+## DF-030: Consolidate native successor component selection
+
+- Owner: Native successor acceptance fixture maintainers
+- Finding: the example entrypoint selects the collaboration component, while
+  its support campaign selects successor startup and supplies mode-specific
+  instructions and access settings.
+- Reason for deferral: the bounded startup branch and the default campaign use
+  their intended settings. A shared selection boundary would reduce the work
+  needed to add or rename modes, independently of current startup correctness.
+- Revisit condition: adding a native successor component or changing campaign
+  mode selection, including scheduler acceptance.
+
+## DF-031: Keep Session Role catalog predicates with their policy owner
+
+- Owner: Session policy and collaboration maintainers
+- Finding: collaboration checks catalog membership by matching the Legacy and
+  Caller variants directly before calling the policy owner's fallible Role
+  resolver. Both catalog predicates currently match their owning lookups.
+- Reason for deferral: the exhaustive match preserves current absence and
+  registered-Role failure semantics. Moving the presence predicate to the policy
+  owner would reduce future maintenance across consumers.
+- Revisit condition: adding a policy variant, changing catalog membership, or
+  introducing another consumer that needs to distinguish absence from invalid
+  registered captures.
+
+## DF-032: Extend optional collaboration membership regressions
+
+- Owner: Collaboration regression maintainers
+- Finding: owning-service unit tests cover Legacy catalog absence and registered
+  Role corruption. Caller absence is covered by the opt-in native successor
+  startup campaign, without an equivalent cargo-level case. The suite also lacks
+  a mixed registered/unlisted successor case that checks registered-peer tool
+  retention and denial of the unlisted Role as a consultation target.
+- Reason for deferral: current catalog filtering preserves registered members
+  and restricts targets to the filtered set. The Caller startup campaign has
+  exercised actual Worker readiness with no optional tool. These additional
+  cases would strengthen regression coverage without correcting a demonstrated
+  current failure.
+- Revisit condition: changing optional-tool membership filtering, Role target
+  resolution, or Caller policy capture handling.
+
+## DF-033: Extend offline guards for successor startup selection
+
+- Owner: Native acceptance fixture maintainers
+- Finding: existing offline tests cover opt-in and executable-identity refusal
+  for older campaigns but do not select the successor-startup campaign or its
+  combined-mode refusal.
+- Reason for deferral: the new campaign checks opt-in and the pinned executable
+  digest before allocating its owned root, and the parser rejects combined modes
+  before dispatch. Additional offline cases would pin these existing guards.
+- Revisit condition: changing native startup opt-in, executable qualification,
+  root allocation, or component-mode exclusivity.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical

@@ -61,6 +61,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "orchestration",
                 "run",
                 "semantic",
+                "session_policy",
                 "storage_observation",
                 "successor_capture",
                 "task_request",

@@ -3855,6 +3855,11 @@ close a peer Run, resolve a peer interaction, or transfer writer authority.
 External Specialist Engagements do not support Specialist-to-Specialist
 collaboration in v1.
 
+A separately provisioned Specialist whose Role is absent from the immutable
+Session collaboration catalog MUST receive no collaboration tool. Catalog
+absence MUST NOT invalidate its otherwise valid accepted startup. Registered
+Role captures and source permissions retain all existing validation.
+
 A collaboration-capable Specialist uses a private run-bound tool bridge. Source
 Run, source Turn, and tool-call identity MUST be bound outside model-controlled
 arguments. The model MUST NOT receive or choose an idempotency key. The bridge

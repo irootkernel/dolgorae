@@ -1436,6 +1436,82 @@ def collaboration_component_campaign(codex: Path) -> dict[str, Any]:
                               "owned_fixture_retained":str(root)}), file=sys.stderr)
 
 
+
+def successor_startup_component_campaign(binary: Path, codex: Path) -> dict[str, Any]:
+    """Actual supported successor birth, with no model Turn or consumer run."""
+    if os.environ.get(OPT_IN) != "1" or executable_identity(codex)["sha256"] != CODEX_SHA256:
+        raise ValueError("successor startup requires the opted-in qualified executable")
+    # Physical short root is required by native Unix socket pathname limits.
+    root = Path(tempfile.mkdtemp(prefix="dsu-", dir="/private/tmp")).resolve()
+    root.chmod(0o700)
+    fixture = None
+    driver = None
+    environment = None
+    passed = False
+    try:
+        for name in ("home", "tmp", "config", "cache", "profile", "workspace"):
+            (root / name).mkdir(mode=0o700)
+        private_file(root / "fixture-owned", b"native-successor-pipeline/v1\n")
+        environment = isolated_environment(root)
+        environment.update({OPT_IN:"1", "DOLGORAE_NATIVE_SUCCESSOR_STARTUP_COMPONENT":"1",
+                            "GIT_CONFIG_NOSYSTEM":"1", "GIT_CONFIG_GLOBAL":"/dev/null"})
+        checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
+        cargo = shlex.split(os.environ.get("CARGO", "cargo"))
+        for name, command in [("main", cargo + ["build", "--locked", "--bin", "dolgorae"]),
+                              ("driver", cargo + ["rustc", "--locked", "--example", "native_successor_pipeline", "--",
+                                                   "--cfg", "dolgorae_native_acceptance", "--cfg", "test"])]:
+            build = subprocess.run(command, cwd=PROTOCOL.parents[1], capture_output=True, text=True, timeout=600)
+            private_file(root / f"build-{name}.stdout", build.stdout.encode())
+            private_file(root / f"build-{name}.stderr", build.stderr.encode())
+            if build.returncode:
+                raise ProbeCheckFailure("successor_startup_build_failed", {"target":name})
+        target = Path(os.environ.get("CARGO_TARGET_DIR", str(PROTOCOL.parents[1] / "target"))).resolve()
+        if binary != (target / "debug/dolgorae").resolve():
+            raise ValueError("startup census must use the current candidate main binary")
+        driver = root / "fixture-startup-driver"
+        shutil.copyfile(target / "debug/examples/native_successor_pipeline", driver)
+        driver.chmod(0o700)
+        fixture = ScriptedResponses()
+        private_file(root / "profile/config.toml", b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n'
+                     + fixture_config(fixture.base_url) + b"\n[features]\nplugins = false\nshell_snapshot = false\n")
+        result = subprocess.run([str(driver), str(root), str(codex)], env=environment,
+                                capture_output=True, text=True, timeout=180)
+        private_file(root / "driver.stdout", result.stdout.encode())
+        private_file(root / "driver.stderr", result.stderr.encode())
+        if result.returncode or fixture.failure:
+            raise ProbeCheckFailure("successor_startup_driver_failed", {"exit":result.returncode,"posts":fixture.posts,"fixture_failure":fixture.failure})
+        value = json.loads(result.stdout)
+        if not value.get("passed") or fixture.posts != 0:
+            raise ProbeCheckFailure("successor_startup_evidence_incomplete")
+        inspected = subprocess.run([str(binary), "runtime", "orphan", "inspect", "--owner-root-under", str(root)],
+                                   env=environment, capture_output=True, text=True, timeout=30)
+        private_file(root / "owned-process-absence.stdout", inspected.stdout.encode())
+        private_file(root / "owned-process-absence.stderr", inspected.stderr.encode())
+        if inspected.returncode:
+            raise ProbeCheckFailure("successor_startup_census_failed")
+        observation = json.loads(inspected.stdout)
+        require_fixture_process_absence(observation["data"])
+        value.update(loopback_posts=fixture.posts, external_provider_requests=0,
+                     real_account_or_credentials_used=False, codex_sha256=CODEX_SHA256,
+                     driver_sha256=hashlib.sha256(driver.read_bytes()).hexdigest(),
+                     census_binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+                     owned_fixture_retained=str(root), owned_process_absence_verified=True)
+        private_file(root / "result.json", json.dumps(value).encode())
+        passed = True
+        return value
+    finally:
+        if not passed and driver is not None and environment is not None:
+            cleanup = subprocess.run([str(driver), "--cleanup", str(root)], env=environment,
+                                     capture_output=True, text=True, timeout=120)
+            private_file(root / "cleanup.stdout", cleanup.stdout.encode())
+            private_file(root / "cleanup.stderr", cleanup.stderr.encode())
+            private_file(root / "cleanup-status.json", json.dumps({"exit":cleanup.returncode}).encode())
+        if fixture is not None:
+            fixture.close()
+        if not passed:
+            print(json.dumps({"schema":"dolgorae.native-successor-startup-failure/v1",
+                              "owned_fixture_retained":str(root)}), file=sys.stderr)
+
 def main() -> int:
     if os.environ.get(OPT_IN) != "1":
         print("integrated native acceptance requires explicit opt-in")
@@ -1450,9 +1526,14 @@ def main() -> int:
     parser.add_argument("--ordinary-close-only", action="store_true")
     parser.add_argument("--successor-only", action="store_true")
     parser.add_argument("--collaboration-component-only", action="store_true")
+    parser.add_argument("--successor-startup-only", action="store_true")
     args = parser.parse_args()
     try:
-        if args.collaboration_component_only:
+        if args.successor_startup_only:
+            if args.collaboration_component_only or args.default_feature_startup_only or args.successor_only or args.ordinary_close_only:
+                raise ValueError("successor startup is a distinct component mode")
+            result = successor_startup_component_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True))
+        elif args.collaboration_component_only:
             if args.default_feature_startup_only or args.successor_only or args.ordinary_close_only:
                 raise ValueError("collaboration component is a distinct mode")
             result = collaboration_component_campaign(args.codex.resolve(strict=True))

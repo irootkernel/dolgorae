@@ -25,6 +25,16 @@ dispatcher, durable admission, store-reopen replay and owned process retirement.
 It does not enable the live collaboration policy or qualify the later scheduler
 and result-delivery integration.
 
+The same runner's `--successor-startup-only` mode checks actual native Worker
+and Thread startup for an independently provisioned `general` successor under a
+`reviewer`-only Session. It uses an enabled capture matching its qualified
+Profile, checks that no collaboration tool is selected, and requires zero model
+HTTP requests. It prepares the owning-service call context as fixture data;
+it does not claim a Primary model tool invocation. The normal opt-in and pinned
+Codex executable apply. All state is isolated, and the existing release and
+cleanup paths must prove owned-process absence. The parser-required
+`--caller-driver` is unused in this mode.
+
 Cargo build output and the accepted-legacy/gateway executable manifests follow
 `CARGO_TARGET_DIR` when it is set. The E2E helpers read those manifests from the
 same directory, and Make defaults `DOLGORAE_BIN` to its `debug/dolgorae` binary.

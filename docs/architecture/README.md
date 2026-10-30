@@ -1396,6 +1396,11 @@ writer, lifecycle, role, or credentials. The Primary Agent receives operational
 visibility and final Specialist results but is not required to relay each
 consultation body.
 
+Optional collaboration-tool selection checks whether a successor Role belongs
+to the accepted Session catalog before resolving its permission snapshot. An
+unlisted Role has no peer tool; validation failures for listed Roles still fail
+closed.
+
 The TASK-081 admission module reuses the native tool dispatcher with a
 Specialist-only contract. Worker generation and native Thread/Turn correlation
 precede semantic admission. The Orchestration Store composes the collaboration
