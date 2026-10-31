@@ -7027,89 +7027,6 @@ pub(crate) mod tests {
     use std::collections::VecDeque;
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 
-    /// Pinned runtime component qualification using the same production Worker
-    /// dispatcher as the offline fixture. The caller owns prepared policy data.
-    #[allow(
-        dead_code,
-        reason = "invoked only by the opted-in native successor component driver"
-    )]
-    pub(crate) fn native_collaboration_connection(
-        state_root: &Path,
-        source: Uuid,
-        session: Uuid,
-        workspace_id: &str,
-        workspace: &Path,
-        socket: &Path,
-        mut observe: impl FnMut(&AcceptedTurn, Option<&PrimaryToolCompletion>),
-    ) -> Result<Value, TurnError> {
-        let worker =
-            crate::worker::tests::PrimaryWorkerFixture::new(state_root, source, workspace_id);
-        let wire = crate::app_server::JsonRpcConnection::connect(
-            socket,
-            std::time::Duration::from_secs(30),
-        )?;
-        let mut coordinator = TurnCoordinator::initialize(
-            wire,
-            MemoryJournal::default(),
-            MemoryArtifactStore::default(),
-            CoordinatorConfig {
-                attach: ThreadAttach::Start,
-                foreign_diagnostics: Box::new(RecordingDiagnostics::default()),
-                fixed_model: "gpt-5.6-luna".into(),
-                default_effort: "low".into(),
-                supported_efforts: ["low".into()].into(),
-                cwd: workspace.into(),
-                developer_instructions: String::new(),
-                sandbox: "read-only".into(),
-                approval_policy: "never".into(),
-                safety_policy: SessionSafetyPolicy::Standard,
-                run_generation: 1,
-                server_key: "a".repeat(64),
-                server_epoch: 1,
-                run_id: source,
-                controller_id: Uuid::now_v7(),
-                control_mode: "managed_agent".into(),
-                record_accepted_user_input: false,
-                primary_tool: Some(PrimaryToolConfig {
-                    session_id: session,
-                    contract: PrimaryToolContract::load().unwrap().for_collaboration(),
-                    dispatcher: Arc::clone(&worker.dispatcher),
-                }),
-                candidate_tools: false,
-                candidate_reader: None,
-                file_change_publication_dir: None,
-            },
-            &std::env::var("CODEX_HOME").unwrap(),
-        )?;
-        let mut turn = request("native-collaboration-component", DeliveryMode::Submit);
-        turn.model = "gpt-5.6-luna".into();
-        let accepted = coordinator.start_turn(turn)?;
-        observe(&accepted, None);
-        let mut completions = 0;
-        for _ in 0..256 {
-            if !coordinator.pending_primary_tools.is_empty() {
-                let completion = worker.completion();
-                assert_eq!(completion.run_generation, 1);
-                assert!(!completion.source_tool_call_id.is_empty());
-                assert_eq!(
-                    completion.result.as_ref().unwrap()["operation"],
-                    "submit_consultation_result"
-                );
-                observe(&accepted, Some(&completion));
-                coordinator.complete_primary_tool(completion)?;
-                completions += 1;
-            }
-            if let Some(terminal) = coordinator.next_event()? {
-                assert_eq!(terminal.status, "completed");
-                assert_eq!(completions, 1);
-                return Ok(
-                    serde_json::json!({"native_specialist_tool_registered":true,"native_thread_turn_call_correlated":true,"production_worker_dispatch":true,"native_terminal_completed":true}),
-                );
-            }
-        }
-        Err(TurnError::CorrelationMismatch)
-    }
-
     pub(crate) fn native_worker_completion(
         state_root: &Path,
         root: Uuid,
@@ -7437,6 +7354,71 @@ pub(crate) mod tests {
             "/tmp/codex-home",
         )
         .unwrap()
+    }
+
+    /// Generate original Submit/terminal evidence through the production
+    /// coordinator with the existing scripted server, without a native process.
+    pub(crate) fn collaboration_submit_history(
+        run: Uuid,
+        controller: crate::domain::ControllerIdentity,
+        workspace: &str,
+        request: TurnRequest,
+    ) -> (AcceptedTurn, Vec<crate::audit::AuditRecord>) {
+        struct ScopedJournal {
+            inner: MemoryJournal,
+            workspace: String,
+        }
+        impl DurableTurnJournal for ScopedJournal {
+            fn append_and_sync(&mut self, entry: JournalEntry) -> Result<(), TurnError> {
+                self.inner.append_and_sync(entry)
+            }
+            fn workspace_ref(&self) -> Option<&str> {
+                Some(&self.workspace)
+            }
+        }
+        let mut server = FakeServer::default();
+        server
+            .replies
+            .push_back(Ok(serde_json::json!({"thread":{"id":"native-thread"}})));
+        server.replies.push_back(Ok(
+            serde_json::json!({"turn":{"id":"recovered-consultation-turn"}}),
+        ));
+        let mut c = coordinator_with_journal(
+            server,
+            ThreadAttach::Start,
+            Box::new(RecordingDiagnostics::default()),
+            SessionSafetyPolicy::Standard,
+            None,
+            ScopedJournal {
+                inner: MemoryJournal::default(),
+                workspace: workspace.into(),
+            },
+        );
+        c.run_id = run;
+        c.controller_id = controller.controller_id;
+        c.fixed_model = request.model.clone();
+        c.record_accepted_user_input = false;
+        c.set_acceptance_controller(controller);
+        let accepted = c.start_turn(request).unwrap();
+        c.ingest(serde_json::json!({"method":"turn/completed","params":{"threadId":accepted.thread_id,"turn":{"id":accepted.turn_id,"status":"completed","items":[{"type":"agentMessage","phase":"final_answer","text":"Recovered original consultation answer."}]}}})).unwrap();
+        let mut records = Vec::new();
+        let mut previous = crate::audit::GENESIS_PREVIOUS_HASH.to_owned();
+        for entry in c.journal().inner.entries.iter().cloned() {
+            let (kind, payload) = journal_record(entry).unwrap();
+            let record = crate::audit::AuditRecord::new(
+                records.len() as u64 + 1,
+                SystemLedgerClock::default().timestamp(),
+                run,
+                1,
+                kind,
+                crate::jcs::parse(&payload.to_string()).unwrap(),
+                &previous,
+            )
+            .unwrap();
+            previous = record.hash().into();
+            records.push(record);
+        }
+        (accepted, records)
     }
 
     fn request(key: &str, delivery: DeliveryMode) -> TurnRequest {

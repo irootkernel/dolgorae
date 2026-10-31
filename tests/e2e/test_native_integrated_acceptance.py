@@ -50,7 +50,66 @@ def returned(value: probe.IntegratedResponses, *, content: bytes = b"candidate\n
     return custom_result(call_id or value.call_id, {value.call_id: json.dumps(output)})
 
 
+def collaboration_component_offline() -> None:
+    exchange = "018f0000-0000-7000-8000-000000000001"
+    target = "018f0000-0000-7000-8000-000000000002"
+    artifact = "018f0000-0000-7000-8000-000000000003"
+
+    def request(marker, call=None, name=None, body=None):
+        advertisement = code_advertisement()
+        advertisement["tools"][0]["tools"][0]["description"] += "\n### `dolgorae_collaboration`"
+        result = {"input":[{"type":"message", "role":"user", "content":[{
+            "type":"input_text", "text":"\n\nAccepted task:\n" + json.dumps({"brief":marker})}]}, advertisement]}
+        if call:
+            result["input"].extend(custom_result(call, {name:json.dumps(body)})["input"])
+        return result
+
+    with tempfile.TemporaryDirectory(prefix="dolgorae-collaboration-offline-") as temporary:
+        root = Path(temporary)
+        (root / "collaboration-request.json").write_text(json.dumps({"operation":"submit_consultation", "target":{"run_id":target}, "objective":"Bounded question", "context_refs":[], "expected_output":["Bounded answer"], "blocking":False, "deadline_seconds":60}))
+        value = probe.CollaborationResponses(root)
+        try:
+            initial = "collaboration-source-initial"
+            emitted = value.respond(request(initial))[1]["item"]
+            assert "tools.dolgorae_collaboration(" in emitted["input"]
+            accepted = {"operation":"submit_consultation_result", "exchange_id":exchange, "target_run_id":target, "state":"queued"}
+            emitted = value.respond(request(initial, "collaboration-submit", "submitted", accepted))[1]["item"]
+            assert "await_consultations" in emitted["input"]
+            (root / "source-await-registered.json").write_text("{}")
+            target_request = {"input":[{"type":"message", "role":"user", "content":[{"type":"input_text", "text":"Complete this bounded read-only consultation. TASK083_NATIVE_TARGET"}]}]}
+            answer = value.respond(target_request)[1]["item"]
+            assert answer["content"][0]["text"] == "Bounded target result: 한글."
+            row = {"exchange_id":exchange, "execution_state":"succeeded", "delivery_state":"pending", "result_artifact_ref":artifact, "safe_error_code":None}
+            awaited = {"operation":"await_consultations_result", "completed":[row], "pending":[]}
+            emitted = value.respond(request(initial, "collaboration-await", "awaited", awaited))[1]["item"]
+            assert "collect_collaboration_results" in emitted["input"]
+            collected = {"operation":"collect_collaboration_results_result", "results":[dict(row, delivery_state="acknowledged")]}
+            value.respond(request(initial, "collaboration-collect", "collected", collected))
+            recovery = "collaboration-source-recovery"
+            value.respond(request(recovery))
+            value.respond(request(recovery, "collaboration-recover", "recovered", collected))
+            assert value.posts == 7 and value.target_posts == 1
+            assert value.source_stage == 4 and value.recovery_stage == 2
+            assert value.initial_collection == value.recovery_collection
+            rejected(lambda: value.respond(request(recovery)))
+        finally:
+            value.close()
+        # The fixture refuses a terminal observation with a foreign identity,
+        # missing bytes, changed artifact or pre-existing acknowledgment.
+        for field, replacement in (("exchange_id",target), ("execution_state","failed"),
+                                   ("result_artifact_ref",None), ("delivery_state","acknowledged")):
+            value = probe.CollaborationResponses(root)
+            try:
+                value.respond(request(initial))
+                value.respond(request(initial, "collaboration-submit", "submitted", accepted))
+                changed = dict(row, **{field:replacement})
+                rejected(lambda: value.respond(request(initial, "collaboration-await", "awaited", dict(awaited, completed=[changed]))))
+            finally:
+                value.close()
+
+
 def main() -> int:
+    collaboration_component_offline()
     root = Path("/owned-integrated-fixture")
     effects = []
     retirement = subprocess.CompletedProcess([], 0, '{"retained_profiles_retired":true}', "")
@@ -181,6 +240,7 @@ def main() -> int:
         rejected(lambda: probe.successor_campaign(Path("unused"), Path("unused")))
         rejected(lambda: probe.successor_startup_component_campaign(Path("unused"), Path("unused")))
         rejected(lambda: probe.scheduler_component_campaign(Path("unused"), Path("unused")))
+        rejected(lambda: probe.collaboration_component_campaign(Path("unused"), Path("unused")))
         identity.assert_not_called()
     with patch.dict(os.environ, {probe.OPT_IN: "1"}), patch.object(
         probe, "executable_identity", return_value={"sha256": "0" * 64}
@@ -189,6 +249,7 @@ def main() -> int:
         rejected(lambda: probe.successor_campaign(Path("unused"), Path("unused")))
         rejected(lambda: probe.successor_startup_component_campaign(Path("unused"), Path("unused")))
         rejected(lambda: probe.scheduler_component_campaign(Path("unused"), Path("unused")))
+        rejected(lambda: probe.collaboration_component_campaign(Path("unused"), Path("unused")))
         allocation.assert_not_called()
     modes = ("--successor-startup-only", "--scheduler-component-only")
     for selected in modes:

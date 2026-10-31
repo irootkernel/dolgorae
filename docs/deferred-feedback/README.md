@@ -258,8 +258,7 @@ from current work. It is not a second roadmap or status authority.
 - Scope boundary: TASK-082 repairs positively verified original acceptance for
   managed and external assignments with a retained scheduler claim. This entry
   retains successor recovery without that claim and genuinely unresolved
-  effects without positive acceptance evidence. Consultation Turn and result
-  recovery remain TASK-083 work.
+  effects without positive acceptance evidence.
 - Reason for deferral: positive acceptance recovery is not integrated with the
   successor path that has no scheduler claim. A complete-journal non-dispatch
   proof plus a late-admission block would be required before redispatching an
@@ -416,6 +415,12 @@ from current work. It is not a second roadmap or status authority.
 - Revisit condition: changing central scheduling, passivation fences,
   activation attempt policy, policy capture or persistent fairness selection.
 
+Additional offline scheduler-entry assertions can cover forwarding a waiter
+hint and notifying a source after queued expiry. Existing physical notification
+proof and required reserved-dispatch uncertainty tests remain outside this
+optional coverage item. Revisit this residual coverage when central hint or
+expiry notification wiring changes.
+
 ## DF-035: Improve safe scheduler diagnostics
 
 - Owner: Scheduler diagnostics maintainers
@@ -431,12 +436,15 @@ from current work. It is not a second roadmap or status authority.
 
 - Owner: Collaboration policy and scheduler maintainers
 - Finding: immutable scheduling defaults and matching runtime timer values have
-  equivalent literals in their current owners.
+  equivalent literals in their current owners. Retained policy snapshots are
+  checked against those fixed values.
 - Reason for deferral: the fixed values currently agree. Sharing constants is
   independent of the current recovery and expiry corrections and must preserve
   admission-time immutable capture.
 - Revisit condition: changing a scheduling default or introducing another
-  consumer of the captured policy.
+  consumer of the captured policy. A default or version change needs an explicit
+  retained-snapshot compatibility and migration decision that preserves original
+  acceptance values.
 
 ## DF-037: Centralize accepted-work identity constructors
 
@@ -457,6 +465,51 @@ from current work. It is not a second roadmap or status authority.
   durable queues must remain available. Simplifying bootstrap ownership is
   independent of current correctness.
 - Revisit condition: changing extension migration or initialization ownership.
+
+## DF-039: Distinguish collaboration expiry in safe errors
+
+- Owner: Collaboration tool contract maintainers
+- Finding: expired root admission uses the authority-refusal code, while queued
+  expiry has an honest `expired` state with a generic transport safe code.
+- Reason for deferral: refusal and execution state are correct. The closed
+  collaboration vocabulary has no timeout code; improving actionability needs
+  a deliberate contract revision.
+- Revisit condition: revising the collaboration safe-error vocabulary or its
+  model-facing recovery guidance.
+
+## DF-040: Keep collaboration state-root derivation with its storage owner
+
+- Owner: Collaboration storage maintainers
+- Finding: dependency boost, source-wait and call-thread helpers derive the
+  state root from the same fixed SQLite path layout.
+- Reason for deferral: the current derivations agree. Consolidating them is
+  independent of reserved-dispatch uncertainty and result-delivery correctness.
+- Revisit condition: changing the orchestration database layout or the
+  connection-to-state-root boundary.
+
+## DF-041: Consolidate collaboration transition vocabulary when it changes
+
+- Owner: Collaboration and scheduler state maintainers
+- Finding: collaboration owns the exchange vocabulary while scheduler SQL also
+  names dispatch, recovery and terminal states.
+- Reason for deferral: the current state sets agree. Guarded unknown
+  classification and its regressions preserve execution authority; shared
+  transition helpers would serve future vocabulary changes.
+- Revisit condition: adding or removing an exchange state, or changing which
+  component owns an existing transition.
+
+## DF-042: Revisit collaboration result privacy backstops when read scope changes
+
+- Owner: Collaboration result privacy maintainers
+- Finding: the result validator rejects a bounded set of private-output markers;
+  this backstop does not classify every possible credential or private payload.
+  No concrete exposure chain is established by that limitation alone.
+- Reason for deferral: broader classification requires a defined output scope
+  and evidence of which additional payloads it must recognize. Existing required
+  privacy checks and the prohibition on exposing protected output still apply.
+- Revisit condition: changing model-visible result reads, result formats or
+  credential handling. Qualify each changed output path for privacy before
+  relying on any new backstop.
 
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the

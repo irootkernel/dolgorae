@@ -1353,62 +1353,153 @@ def successor_campaign(binary: Path, codex: Path, podway: Path | None = None,
 
 
 class CollaborationResponses(ScriptedResponses):
-    """One Specialist tool call and its checked return from the pinned runtime."""
+    """Two physical members and source restart, all using loopback responses."""
     def __init__(self, root: Path):
-        super().__init__()
+        super().__init__(concurrent_requests=True)
         self.root = root
-        self.collaboration_result = None
+        self.source_stage = 0
+        self.recovery_stage = 0
+        self.target_posts = 0
+        self.exchange_id = None
+        self.initial_collection = None
+        self.recovery_collection = None
+        self.await_started = None
+        self.await_seconds = None
+        self.await_artifact_ref = None
+
+    @staticmethod
+    def checked_output(request, call, name, operation):
+        output = code_results(request, call, [name])[name]
+        if not isinstance(output, str) or not output.isascii() or len(output.encode()) > 16384:
+            raise ProbeCheckFailure("native_collaboration_return_shape_changed")
+        try:
+            value = json.loads(output)
+            assert_valid(value, validator(PROTOCOL, "dolgorae-collaboration-tool-v1.schema.json"), "native collaboration result")
+        except (ValueError, AssertionError):
+            raise ProbeCheckFailure("native_collaboration_return_schema_changed") from None
+        if value.get("operation") != operation:
+            raise ProbeCheckFailure("native_collaboration_operation_refused", {"operation": value.get("operation"), "code": value.get("code")})
+        return value
 
     def respond(self, request):
+        users = [item for item in request.get("input", [])
+                 if item.get("type") == "message" and item.get("role") == "user"]
+        text = "".join(block.get("text", "") for block in users[-1].get("content", [])) if users else ""
+        marker = None
+        if "\n\nAccepted task:\n" in text:
+            task, _ = json.JSONDecoder().raw_decode(text.split("\n\nAccepted task:\n", 1)[1])
+            marker = task.get("brief")
+        target = marker is None and "TASK083_NATIVE_TARGET" in text
         with self.lock:
             self.posts += 1
-            if self.posts == 1:
-                arguments = json.loads((self.root / "collaboration-request.json").read_text())
-                item = code_call(request, "collaboration-component-call",
-                                 [("consult", "dolgorae_collaboration", arguments)])
-            elif self.posts == 2:
-                output = code_results(request, "collaboration-component-call", ["consult"])["consult"]
-                if not isinstance(output, str) or not output.isascii() or len(output.encode()) > 4096:
-                    raise ProbeCheckFailure("native_collaboration_return_shape_changed")
-                self.collaboration_result = json.loads(output)
-                if self.collaboration_result.get("operation") != "submit_consultation_result":
-                    raise ProbeCheckFailure("native_collaboration_return_unverified")
-                item = {"type":"message", "role":"assistant", "id":"collaboration-completed",
-                        "content":[{"type":"output_text", "text":"Done."}]}
-            else:
+            ordinal = self.posts
+            if ordinal > 7:
                 raise ProbeCheckFailure("native_collaboration_post_bound")
-            identity = "collaboration-response-" + str(self.posts)
-            return [{"type":"response.created", "response":{"id":identity}},
-                    {"type":"response.output_item.done", "item":item},
-                    {"type":"response.completed", "response":{"id":identity,
-                     "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}]
+            if target:
+                self.target_posts += 1
+                if self.target_posts != 1:
+                    raise ProbeCheckFailure("native_collaboration_target_replayed")
+        # The target barrier must not hold the shared response lock: the
+        # source's actual native await has to reach its Worker concurrently.
+        if target:
+            deadline = time.monotonic() + 10
+            while not (self.root / "source-await-registered.json").exists():
+                if time.monotonic() >= deadline:
+                    raise ProbeCheckFailure("native_collaboration_wait_barrier_timeout")
+                time.sleep(.01)
+            item = {"type":"message", "role":"assistant", "id":"collaboration-target-final",
+                    "content":[{"type":"output_text", "text":"Bounded target result: 한글."}]}
+        else:
+            with self.lock:
+                if marker == "collaboration-source-initial":
+                    if self.source_stage == 0:
+                        arguments = json.loads((self.root / "collaboration-request.json").read_text())
+                        item = code_call(request, "collaboration-submit", [("submitted", "dolgorae_collaboration", arguments)])
+                    elif self.source_stage == 1:
+                        accepted = self.checked_output(request, "collaboration-submit", "submitted", "submit_consultation_result")
+                        self.exchange_id = accepted["exchange_id"]
+                        self.await_started = time.monotonic()
+                        item = code_call(request, "collaboration-await", [("awaited", "dolgorae_collaboration", {
+                            "operation":"await_consultations", "exchange_ids":[self.exchange_id],
+                            "return_when":"all", "transport_wait_seconds":10})])
+                    elif self.source_stage == 2:
+                        awaited = self.checked_output(request, "collaboration-await", "awaited", "await_consultations_result")
+                        self.await_seconds = time.monotonic() - self.await_started
+                        if (awaited["pending"] or len(awaited["completed"]) != 1
+                                or awaited["completed"][0]["exchange_id"] != self.exchange_id
+                                or awaited["completed"][0]["execution_state"] != "succeeded"
+                                or awaited["completed"][0]["delivery_state"] != "pending"
+                                or not awaited["completed"][0]["result_artifact_ref"]
+                                or awaited["completed"][0]["safe_error_code"] is not None
+                                or self.await_seconds >= 9.5):
+                            raise ProbeCheckFailure("native_collaboration_pending_wait_not_notified")
+                        self.await_artifact_ref = awaited["completed"][0]["result_artifact_ref"]
+                        private_file(self.root / "native-await-response.json", json.dumps(awaited).encode())
+                        item = code_call(request, "collaboration-collect", [("collected", "dolgorae_collaboration", {"operation":"collect_collaboration_results", "limit":1})])
+                    elif self.source_stage == 3:
+                        self.initial_collection = self.checked_output(request, "collaboration-collect", "collected", "collect_collaboration_results_result")
+                        rows = self.initial_collection["results"]
+                        if (len(rows) != 1 or rows[0]["exchange_id"] != self.exchange_id
+                                or rows[0]["delivery_state"] != "acknowledged"
+                                or rows[0]["execution_state"] != "succeeded"
+                                or rows[0]["safe_error_code"] is not None
+                                or rows[0]["result_artifact_ref"] != self.await_artifact_ref):
+                            raise ProbeCheckFailure("native_collaboration_collection_unverified")
+                        item = {"type":"message", "role":"assistant", "id":"collaboration-source-final",
+                                "content":[{"type":"output_text", "text":"Initial bounded task completed."}]}
+                    else:
+                        raise ProbeCheckFailure("native_collaboration_unsolicited_source_turn")
+                    self.source_stage += 1
+                elif marker == "collaboration-source-recovery":
+                    if self.recovery_stage == 0:
+                        item = code_call(request, "collaboration-recover", [("recovered", "dolgorae_collaboration", {"operation":"collect_collaboration_results", "limit":1})])
+                    elif self.recovery_stage == 1:
+                        self.recovery_collection = self.checked_output(request, "collaboration-recover", "recovered", "collect_collaboration_results_result")
+                        if self.recovery_collection != self.initial_collection:
+                            raise ProbeCheckFailure("native_collaboration_restart_collection_changed")
+                        item = {"type":"message", "role":"assistant", "id":"collaboration-source-recovered",
+                                "content":[{"type":"output_text", "text":"Recovered original bounded result."}]}
+                    else:
+                        raise ProbeCheckFailure("native_collaboration_recovery_post_bound")
+                    self.recovery_stage += 1
+                else:
+                    raise ProbeCheckFailure("native_collaboration_accepted_task_missing")
+        identity = "collaboration-response-" + str(ordinal)
+        return [{"type":"response.created", "response":{"id":identity}},
+                {"type":"response.output_item.done", "item":item},
+                {"type":"response.completed", "response":{"id":identity,
+                 "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}]
 
 
-def collaboration_component_campaign(codex: Path) -> dict[str, Any]:
+def collaboration_component_campaign(binary: Path, codex: Path) -> dict[str, Any]:
     if os.environ.get(OPT_IN) != "1" or executable_identity(codex)["sha256"] != CODEX_SHA256:
         raise ValueError("collaboration component requires the opted-in qualified executable")
     root = Path(tempfile.mkdtemp(prefix="dcc-", dir=os.environ["TMPDIR"])).resolve()
     root.chmod(0o700)
-    fixture = None
+    fixture = driver = environment = None
     passed = False
     try:
-        for name in ("home", "tmp", "config", "cache", "profile"):
+        for name in ("home", "tmp", "config", "cache", "profile", "workspace"):
             (root / name).mkdir(mode=0o700)
+        private_file(root / "fixture-owned", b"native-successor-pipeline/v1\n")
         environment = isolated_environment(root)
-        environment[OPT_IN] = "1"
-        environment["DOLGORAE_NATIVE_COLLABORATION_COMPONENT"] = "1"
-        environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+        environment.update({OPT_IN:"1", "DOLGORAE_NATIVE_COLLABORATION_COMPONENT":"1",
+                            "GIT_CONFIG_NOSYSTEM":"1", "GIT_CONFIG_GLOBAL":"/dev/null"})
         checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
-        command = shlex.split(os.environ.get("CARGO", "cargo")) + [
-            "rustc", "--locked", "--example", "native_successor_pipeline", "--",
-            "--cfg", "dolgorae_native_acceptance", "--cfg", "test"]
-        build = subprocess.run(command, cwd=PROTOCOL.parents[1], capture_output=True, text=True, timeout=600)
-        private_file(root / "build.stdout", build.stdout.encode())
-        private_file(root / "build.stderr", build.stderr.encode())
-        if build.returncode:
-            raise ProbeCheckFailure("collaboration_component_build_failed")
+        cargo = shlex.split(os.environ.get("CARGO", "cargo"))
+        for name, command in [("main", cargo + ["build", "--locked", "--bin", "dolgorae"]),
+                              ("driver", cargo + ["rustc", "--locked", "--example", "native_successor_pipeline", "--",
+                                                  "--cfg", "dolgorae_native_acceptance", "--cfg", "test"])]:
+            build = subprocess.run(command, cwd=PROTOCOL.parents[1], capture_output=True, text=True, timeout=600)
+            private_file(root / f"build-{name}.stdout", build.stdout.encode())
+            private_file(root / f"build-{name}.stderr", build.stderr.encode())
+            if build.returncode:
+                raise ProbeCheckFailure("collaboration_component_build_failed", {"target":name})
+        target = Path(os.environ.get("CARGO_TARGET_DIR", str(PROTOCOL.parents[1] / "target"))).resolve()
+        if binary != (target / "debug/dolgorae").resolve():
+            raise ValueError("collaboration census must use the current candidate main binary")
         driver = root / "fixture-collaboration-driver"
-        shutil.copyfile(Path(os.environ.get("CARGO_TARGET_DIR", str(PROTOCOL.parents[1] / "target"))) / "debug/examples/native_successor_pipeline", driver)
+        shutil.copyfile(target / "debug/examples/native_successor_pipeline", driver)
         driver.chmod(0o700)
         fixture = CollaborationResponses(root)
         private_file(root / "profile/config.toml", b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n'
@@ -1420,21 +1511,34 @@ def collaboration_component_campaign(codex: Path) -> dict[str, Any]:
         if result.returncode or fixture.failure:
             raise ProbeCheckFailure("collaboration_component_driver_failed", {"exit":result.returncode,"posts":fixture.posts,"fixture_failure":fixture.failure})
         value = json.loads(result.stdout)
-        if not value.get("passed") or fixture.posts != 2 or fixture.collaboration_result != json.loads((root / "collaboration-result.json").read_text()):
+        if not value.get("passed") or fixture.posts != 7 or fixture.target_posts != 1 or fixture.source_stage != 4 or fixture.recovery_stage != 2 or fixture.recovery_collection != fixture.initial_collection:
             raise ProbeCheckFailure("collaboration_component_evidence_incomplete")
+        inspected = subprocess.run([str(binary), "runtime", "orphan", "inspect", "--owner-root-under", str(root)], env=environment, capture_output=True, text=True, timeout=30)
+        if inspected.returncode:
+            raise ProbeCheckFailure("collaboration_owned_process_inspection_failed")
+        observation = json.loads(inspected.stdout)
+        require_fixture_process_absence(observation["data"])
+        private_file(root / "owned-process-absence.json", json.dumps(observation).encode())
         value.update(loopback_posts=fixture.posts, external_provider_requests=0,
-                     real_account_or_credentials_used=False, codex_sha256=CODEX_SHA256)
+                     real_account_or_credentials_used=False, codex_sha256=CODEX_SHA256,
+                     driver_sha256=hashlib.sha256(driver.read_bytes()).hexdigest(),
+                     census_binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+                     owned_fixture_retained=str(root), owned_process_absence_verified=True,
+                     notified_await_seconds=fixture.await_seconds)
+        private_file(root / "result.json", json.dumps(value).encode())
         passed = True
         return value
     finally:
+        if not passed and driver is not None and environment is not None:
+            cleanup = subprocess.run([str(driver), "--cleanup", str(root)], env=environment,
+                                     capture_output=True, text=True, timeout=120)
+            private_file(root / "failure-cleanup.stdout", cleanup.stdout.encode())
+            private_file(root / "failure-cleanup.stderr", cleanup.stderr.encode())
         if fixture is not None:
             fixture.close()
-        if passed:
-            shutil.rmtree(root)
-        else:
-            print(json.dumps({"schema":"dolgorae.native-collaboration-component-failure/v1",
+        if not passed:
+            print(json.dumps({"schema":"dolgorae.native-collaboration-component-failure/v2",
                               "owned_fixture_retained":str(root)}), file=sys.stderr)
-
 
 
 def successor_startup_component_campaign(binary: Path, codex: Path) -> dict[str, Any]:
@@ -1677,7 +1781,7 @@ def main() -> int:
         elif args.collaboration_component_only:
             if args.default_feature_startup_only or args.successor_only or args.ordinary_close_only:
                 raise ValueError("collaboration component is a distinct mode")
-            result = collaboration_component_campaign(args.codex.resolve(strict=True))
+            result = collaboration_component_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True))
         elif args.default_feature_startup_only:
             if args.successor_only or args.ordinary_close_only:
                 raise ValueError("default-feature startup is a distinct mode")

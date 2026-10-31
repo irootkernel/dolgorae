@@ -4352,6 +4352,13 @@ pub enum ControlRequestV1 {
         #[serde(default)]
         caller: Option<ExecutingBuild>,
     },
+    /// Same-user, same-build hint only; durable state is re-read by an already
+    /// authenticated waiter. No Turn, credential or delivery decision is carried.
+    CollaborationWake {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+    },
     /// Start a Turn and wait for it to reach a terminal or interaction state.
     ///
     /// `timeout_ms` is the caller's own budget: SPEC-006 has a
@@ -4561,6 +4568,7 @@ impl ControlRequestV1 {
             | Self::Status { expected }
             | Self::Shutdown { expected }
             | Self::RunStatus { expected, .. }
+            | Self::CollaborationWake { expected, .. }
             | Self::Send { expected, .. }
             | Self::Submit { expected, .. }
             | Self::ExternalSubmit { expected, .. }
@@ -4645,6 +4653,7 @@ impl ControlRequestV1 {
             | Self::PublicResolution { request, .. } => request.caller(),
             Self::Hello { .. } | Self::Status { .. } | Self::Shutdown { .. } => None,
             Self::RunStatus { caller, .. }
+            | Self::CollaborationWake { caller, .. }
             | Self::Send { caller, .. }
             | Self::Submit { caller, .. }
             | Self::ExternalSubmit { caller, .. }
@@ -4684,6 +4693,7 @@ impl ControlRequestV1 {
             | Self::PublicResolution { request, .. } => request.declare_caller(build),
             Self::Hello { .. } | Self::Status { .. } | Self::Shutdown { .. } => {}
             Self::RunStatus { caller, .. }
+            | Self::CollaborationWake { caller, .. }
             | Self::Send { caller, .. }
             | Self::Submit { caller, .. }
             | Self::ExternalSubmit { caller, .. }
@@ -4714,7 +4724,11 @@ impl ControlRequestV1 {
     pub const fn observes_only(&self) -> bool {
         matches!(
             self,
-            Self::Hello { .. } | Self::Status { .. } | Self::RunStatus { .. } | Self::Events { .. }
+            Self::Hello { .. }
+                | Self::Status { .. }
+                | Self::RunStatus { .. }
+                | Self::CollaborationWake { .. }
+                | Self::Events { .. }
         )
     }
 
@@ -4788,6 +4802,7 @@ impl ControlRequestV1 {
             Self::Status { .. } => "run.status",
             Self::Shutdown { .. } => "run.shutdown",
             Self::RunStatus { .. } => "run.status",
+            Self::CollaborationWake { .. } => "collaboration.notify",
             Self::Send { .. } => "run.send",
             Self::Submit { .. } => "run.submit",
             Self::ExternalSubmit { .. } => "engagement.assign",
@@ -6707,6 +6722,14 @@ impl SessionMailbox {
     }
 
     /// Stop the drain and refuse every mutation still queued.
+    fn primary_tool_alive(&self) -> bool {
+        !self.failure.load(Ordering::Acquire)
+            && self
+                .state
+                .lock()
+                .is_ok_and(|state| !state.stopping && !state.thread_failed)
+    }
+
     fn stop(&self) -> Vec<SessionMutation> {
         let refused = match self.state.lock() {
             Ok(mut state) => {
@@ -6716,6 +6739,7 @@ impl SessionMailbox {
             Err(_) => Vec::new(),
         };
         self.changed.notify_all();
+        crate::collaboration::notify_waiters(self.facts.run_id);
         refused
     }
 
@@ -6738,6 +6762,7 @@ impl SessionMailbox {
             Err(_) => Vec::new(),
         };
         self.changed.notify_all();
+        crate::collaboration::notify_waiters(self.facts.run_id);
         refused
     }
 }
@@ -6808,6 +6833,7 @@ impl PrimaryToolDispatcher for WorkerPrimaryToolDispatcher {
                                 mailbox.facts.run_id,
                                 run_generation,
                                 &workspace,
+                                &|| mailbox.primary_tool_alive(),
                             )
                         } else if crate::native_consumer::managed_tool(&call.tool_name) {
                             Ok(crate::managed_specialist::dispatch(
@@ -11389,7 +11415,12 @@ fn publish_state(
     crate::scheduler::notify(state_root, progress.facts.run_id);
     let state = coordinator_control_state(coordinator, progress.is_closed());
     if let Ok(mut published) = control.lock() {
+        let changed =
+            published.lifecycle != state.lifecycle || published.active_turn != state.active_turn;
         published.clone_from(&state);
+        if changed {
+            crate::collaboration::notify_waiters(progress.facts.run_id);
+        }
     }
     progress.publish(
         state,
@@ -13454,6 +13485,16 @@ fn serve_control_caller(
                 last_terminal: run.session().and_then(|session| session.last_terminal()),
             }
         }
+        ControlRequestV1::CollaborationWake { .. } => {
+            crate::collaboration::notify_waiters(facts.run_id);
+            let snapshot = state.lock().map_err(|_| WorkerProtocolError::Io)?.clone();
+            ControlResponseV1::Status {
+                identity: hello.identity.clone(),
+                lifecycle: snapshot.lifecycle,
+                active_turn: snapshot.active_turn,
+                last_terminal: None,
+            }
+        }
         ControlRequestV1::Shutdown { .. } => {
             // ADR-011: shutdown interrupts an active Turn and waits for its
             // terminal history rather than declaring the Run idle.  What is
@@ -14003,6 +14044,7 @@ fn serve_run_operation(
         ControlRequestV1::Hello { .. }
         | ControlRequestV1::Status { .. }
         | ControlRequestV1::RunStatus { .. }
+        | ControlRequestV1::CollaborationWake { .. }
         | ControlRequestV1::Shutdown { .. }
         | ControlRequestV1::Wait { .. }
         | ControlRequestV1::ResetFence { .. }
@@ -14372,6 +14414,10 @@ pub(crate) mod tests {
                 mailbox,
             }
         }
+        pub(crate) fn stop(&self) {
+            let refused = self.mailbox.stop();
+            assert!(refused.is_empty());
+        }
         pub(crate) fn completion(&self) -> PrimaryToolCompletion {
             let deadline = Instant::now() + Duration::from_secs(30);
             let mut state = self.mailbox.state.lock().unwrap();
@@ -14391,6 +14437,66 @@ pub(crate) mod tests {
                     .0;
             }
         }
+    }
+
+    /// Existing private-control frame path, without a Codex or Worker process.
+    pub(crate) fn collaboration_control_hint(
+        run_id: Uuid,
+        wrong_generation: bool,
+        wrong_build: bool,
+    ) -> ControlResponseV1 {
+        let mut expected = identity();
+        expected.run_id = run_id;
+        let hello = WorkerHello {
+            schema_version: 1,
+            identity: expected.clone(),
+            control_socket_epoch: 1,
+            dolgorae_version: "fixture".into(),
+            mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+            binary_sha256: "a".repeat(64),
+        };
+        let mut caller = ExecutingBuild {
+            version: hello.dolgorae_version.clone(),
+            mutation_protocol_version: hello.mutation_protocol_version,
+            binary_sha256: hello.binary_sha256.clone(),
+        };
+        if wrong_generation {
+            expected.run_generation += 1;
+        }
+        if wrong_build {
+            caller.binary_sha256 = "b".repeat(64);
+        }
+        let request = ControlRequestV1::CollaborationWake {
+            expected,
+            caller: Some(caller),
+        };
+        assert!(request.observes_only());
+        assert!(!request.requires_controller());
+        assert!(!request.frozen_control_v1());
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let served = thread::spawn(move || {
+            let facts = RunFacts {
+                run_id,
+                profile: "fixture".into(),
+            };
+            serve_control_caller(
+                server,
+                &hello,
+                &facts,
+                &Arc::new(Mutex::new(WorkerControlState {
+                    lifecycle: "running".into(),
+                    active_turn: Some("native-turn".into()),
+                })),
+                &AtomicBool::new(false),
+                &RunHandles::default(),
+                &unreachable_authority(),
+            )
+            .unwrap();
+        });
+        write_frame(&mut client, &request).unwrap();
+        let response = read_frame(&mut std::io::BufReader::new(client)).unwrap();
+        served.join().unwrap();
+        response
     }
 
     struct PanicFixture {

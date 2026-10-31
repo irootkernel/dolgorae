@@ -19,6 +19,7 @@ use crate::snapshot::RunSnapshot;
 use crate::workspace::{
     NativeSubagents, RuntimeProfile, SystemWorkspacePlatform, WorkspaceMode, WorkspaceView,
 };
+use rusqlite::OptionalExtension as _;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -707,6 +708,573 @@ impl delegation::RunSettlementPort for ObservedStart<'_> {
         }
         result
     }
+}
+
+/// Prepared policy is test data; only the two Specialists are physical native
+/// actors here. The production live-policy admission gate remains untouched.
+pub fn collaboration_component(root: &Path, codex: &Path) -> Value {
+    assert_eq!(
+        fs::read(root.join("fixture-owned")).unwrap(),
+        b"native-successor-pipeline/v1\n"
+    );
+    assert_eq!(
+        fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap(),
+        root.join("home")
+    );
+    git(&root.join("workspace"), &["init", "-q"]);
+    let SemanticResult::Workspace(view) = CoreSemanticService
+        .execute(&SemanticCommand::Initialize {
+            path: Some(root.join("workspace")),
+            mode: WorkspaceMode::Git,
+        })
+        .unwrap()
+    else {
+        panic!("workspace")
+    };
+    let workspace = view.canonical_path.to_path_buf().unwrap();
+    private(
+        &workspace.join("file.txt"),
+        b"read-only consultation evidence\n",
+    );
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-q", "-m", "fixture baseline"]);
+    let home = DolgoraeHome::system().unwrap();
+    private(
+        &home.root().join("home/AGENTS.md"),
+        b"Bounded accountless component qualification.\n",
+    );
+    private(
+        &home.root().join("roles/general/AGENTS.md"),
+        b"Execute only the accepted read-only task. Never run a shell for a consultation.\n",
+    );
+    GlobalProfileStore::new(&home)
+        .add(
+            PROFILE.into(),
+            RuntimeProfile {
+                argv: vec![codex.to_str().unwrap().into()],
+                codex_home: root.join("profile").to_str().unwrap().into(),
+                environment: BTreeMap::from([
+                    ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+                    ("LANG".into(), "C".into()),
+                    ("LC_ALL".into(), "C".into()),
+                ]),
+                native_subagents: NativeSubagents::Enabled,
+            },
+        )
+        .unwrap();
+    let binding = ResolvedGlobalProfile::resolve(&home, PROFILE)
+        .unwrap()
+        .prepare_qualified(&home)
+        .unwrap();
+    binding.record_qualified(&home).unwrap();
+    private(
+        &root.join("qualified-binding.json"),
+        &serde_json::to_vec(&binding).unwrap(),
+    );
+    crate::profile::ensure_qualified_global_server(&binding).unwrap();
+    OperatorStore::new(home.operator_root())
+        .initialize(&root.join("operator"))
+        .unwrap();
+    let mut policy: Value = serde_json::from_str(include_str!(
+        "../../docs/protocol/examples/workspace-policy-input-v3.valid.json"
+    ))
+    .unwrap();
+    policy["policy_name"] = json!("native-collaboration");
+    policy["approval_policy"] = json!("fully_delegated");
+    policy["max_active_specialists"] = json!(2);
+    let role = &mut policy["roles"][0];
+    role["role_ref"] = json!("general");
+    role["role_source"] = json!({"name":"general"});
+    role["max_active_instances"] = json!(2);
+    role["reuse_policy"] = json!("never");
+    role["collaboration_source"] = json!(true);
+    role["collaboration_target"] = json!(true);
+    role["agent_configuration"]["selected_profile"] = json!(PROFILE);
+    role["agent_configuration"]["model"] = json!("gpt-5.6-luna");
+    role["agent_configuration"]["default_effort"] = json!("low");
+    role["agent_configuration"]["purpose"] = json!("implementation");
+    role["agent_configuration"]["native_subagent_policy"] = json!("enabled");
+    role["agent_configuration"]
+        .as_object_mut()
+        .unwrap()
+        .remove("global_profile_binding_sha256");
+    private(
+        &root.join("policy.json"),
+        &serde_json::to_vec(&policy).unwrap(),
+    );
+    let registry =
+        crate::markdown_policy::MarkdownPolicyRegistry::discover(Some(&workspace)).unwrap();
+    registry
+        .add_file(&root.join("policy.json"), "native-collaboration")
+        .unwrap();
+    let captures = registry.prepare_session("native-collaboration").unwrap();
+    let state_root = home.workspace_root(&view.workspace_id);
+    assert_eq!(
+        crate::session_policy::SessionPolicySnapshot::Caller(captures.clone())
+            .validate_live(&state_root)
+            .unwrap_err()
+            .code,
+        "POLICY_REJECTED"
+    );
+    create_controller_credential(
+        &root.join("controller"),
+        ControllerKind::Automation,
+        "native-collaboration".into(),
+        None,
+        None,
+    )
+    .unwrap();
+    let owner = CredentialCarrier::open_path(&root.join("controller")).unwrap();
+    let controller = crate::controller::binding_from_carrier(&owner, 1).unwrap();
+    let primary = Uuid::now_v7();
+    let manifest = delegation::tests::root_manifest(&view, &controller, primary);
+    RunStore::new(SystemWorkspacePlatform, &state_root)
+        .publish(&manifest)
+        .unwrap();
+    let mut primary_state = crate::projection::RunStateProjection::starting(primary);
+    primary_state.lifecycle = RunLifecycle::Idle;
+    private(
+        &crate::run::run_root(&state_root, primary).join("state.json"),
+        &serde_json::to_vec(&primary_state).unwrap(),
+    );
+    let mut store = crate::orchestration::OrchestrationStore::open(&state_root).unwrap();
+    let accepted = store
+        .accept_policy_session(
+            primary,
+            "component-bootstrap",
+            &"b".repeat(64),
+            captures.clone(),
+        )
+        .unwrap();
+    store.prepare_caller_session(&accepted).unwrap();
+    store.mark_primary_intent(primary).unwrap();
+    store.finish_primary_publication(primary, Ok(())).unwrap();
+    drop(store);
+    let scope = delegation::DelegationScope {
+        view: &view,
+        state_root: &state_root,
+        controller: &controller,
+        trusted_invocation: None,
+    };
+    let instructions = InstructionSourceStore::new(&home);
+    let sources = ProvisioningSources {
+        instruct: &instructions,
+        role_name: "general",
+        role: SelectedInstructionSource::File(vec!["roles".into(), "general".into()]),
+        dependencies: Vec::new(),
+        selected_guidance: Vec::new(),
+        profile_binding: captures.profile_binding("general").unwrap().clone(),
+        admission: ProvisioningAdmission {
+            model: "gpt-5.6-luna".into(),
+            effort: "low".into(),
+            purpose_kind: "implementation".into(),
+            purpose_label: None,
+            required_capabilities: Vec::new(),
+            execution_lane: "dedicated".into(),
+            requested_access: "read_only".into(),
+            required_assurance: "best_effort_personal_alpha".into(),
+            native_subagent_policy: "enabled".into(),
+        },
+    };
+    let (candidate, _) = checked(
+        root,
+        "collaboration provisioning",
+        delegation::install_provisioning(&scope, &sources, "collaboration-install", None),
+    );
+    let port = SemanticRunSettlementPort { carrier: &owner };
+    let observed = ObservedStart { inner: &port, root };
+    let spawn = |label: &str| {
+        let member = checked(
+            root,
+            label,
+            delegation::spawn_specialist(
+                &scope,
+                &context(primary, label),
+                &observed,
+                delegation::SpawnSpecialist {
+                    provisioning_ref: &candidate.provisioning_ref,
+                    role_ref: "general",
+                    agent_configuration_digest: &candidate.agent_configuration_digest,
+                    expected_revision: None,
+                },
+            ),
+        );
+        Uuid::parse_str(&member.member.member_ref).unwrap()
+    };
+    let source = spawn("collaboration source spawn");
+    let target = spawn("collaboration target spawn");
+    let before = RunSnapshot::load(&state_root, source, 0).unwrap();
+    let target_before = RunSnapshot::load(&state_root, target, 0).unwrap();
+    let source_runtime = before.runtime_record.clone().unwrap();
+    let target_runtime = target_before.runtime_record.clone().unwrap();
+    assert_ne!(source_runtime.identity.pid, target_runtime.identity.pid);
+    assert_eq!(before.projection.lifecycle, RunLifecycle::Idle);
+    assert_eq!(target_before.projection.lifecycle, RunLifecycle::Idle);
+    assert!(crate::collaboration::enabled(&state_root, primary, source).unwrap());
+    let request = json!({"operation":"submit_consultation","target":{"run_id":target},"objective":"TASK083_NATIVE_TARGET: return the bounded retained evidence answer.","context_refs":[],"expected_output":["Bounded target result: 한글."],"blocking":false,"deadline_seconds":60});
+    private(
+        &root.join("collaboration-request.json"),
+        &serde_json::to_vec(&request).unwrap(),
+    );
+    let (first, _) = checked(
+        root,
+        "collaboration source root queue",
+        delegation::queue_specialist_task(
+            &scope,
+            &context(primary, "source-root-initial"),
+            &caller_scope::fixture(32),
+            &port,
+            delegation::AssignSpecialistTask {
+                member_ref: source,
+                task: task("collaboration-source-initial"),
+                execution_intent: "read_only",
+                target: None,
+                deadline_seconds: 60,
+                expected_revision: None,
+            },
+            1,
+        ),
+    );
+    let first = Uuid::parse_str(&first.task_ref).unwrap();
+    let async_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let gateway =
+        crate::gateway_socket::GatewaySocket::bind(&home, &root.join("gateway.sock")).unwrap();
+    let gateway_started = crate::scheduler::now_ms().unwrap();
+    let runtime = {
+        let _entered = async_runtime.enter();
+        crate::scheduler::ControlPlaneRuntime::start(&home, gateway.record().server_instance_id)
+            .unwrap()
+    };
+    let until = Instant::now() + Duration::from_secs(10);
+    let wait_witness = loop {
+        let store =
+            EngagementStore::open(&EngagementStore::workspace_database_path(&state_root)).unwrap();
+        let exists: bool = store
+            .connection()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='collaboration_waits')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let witness = if exists {
+            store.connection().query_row("SELECT w.source_thread_id,w.source_turn_id,w.call_id,w.source_generation,e.exchange_id,l.turn_id,w.expires_at_ms FROM collaboration_waits w JOIN collaboration_wait_edges d USING(wait_id) JOIN collaboration_exchanges e USING(exchange_id) JOIN collaboration_execution_links l USING(exchange_id) WHERE w.source_run_id=?1 AND e.target_run_id=?2 AND w.active=1",rusqlite::params![source.to_string(),target.to_string()],|r|Ok(json!({"source_thread":r.get::<_,String>(0)?,"source_turn":r.get::<_,String>(1)?,"source_call":r.get::<_,String>(2)?,"source_generation":r.get::<_,u64>(3)?,"exchange_id":r.get::<_,String>(4)?,"target_turn":r.get::<_,String>(5)?,"original_wait_until_ms":r.get::<_,i64>(6)?}))).optional().unwrap()
+        } else {
+            None
+        };
+        if let Some(witness) = witness {
+            // The actual private observer stays responsive while the source's
+            // model is blocked. This transaction must also remain available.
+            store
+                .connection()
+                .execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+                .unwrap();
+            assert!(matches!(
+                crate::worker::call_run_worker(
+                    &state_root,
+                    source,
+                    DarwinSystem.current_uid(),
+                    None,
+                    |expected| crate::worker::ControlRequestV1::RunStatus {
+                        expected,
+                        caller: None
+                    }
+                )
+                .unwrap(),
+                crate::worker::ControlResponseV1::Status {
+                    active_turn: Some(_),
+                    ..
+                }
+            ));
+            // The target's loopback response is still held by this barrier.
+            std::thread::sleep(Duration::from_millis(250));
+            private(
+                &root.join("source-await-registered.json"),
+                &serde_json::to_vec(&witness).unwrap(),
+            );
+            break witness;
+        }
+        assert!(
+            Instant::now() < until,
+            "source wait was not registered before the unchanged transport bound"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let wait_for_root = |task_id: Uuid| {
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            let broker =
+                crate::orchestration::OrchestrationStore::open_observer(&state_root).unwrap();
+            let state = crate::orchestration::successor_task(
+                broker.collaboration_connection().unwrap(),
+                primary,
+                task_id,
+            )
+            .unwrap()
+            .unwrap()
+            .state;
+            if state == "completed_not_delivered" {
+                break;
+            }
+            assert!(
+                !matches!(state.as_str(), "failed" | "expired" | "interrupted_unknown"),
+                "source root task failed: {state}"
+            );
+            assert!(Instant::now() < until, "source task completion timeout");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let collected = checked(
+            root,
+            "collect source root",
+            delegation::collect_specialist_task(
+                &scope,
+                &context(primary, &format!("collect-{task_id}")),
+                &observed,
+                delegation::CollectSpecialistTask {
+                    member_ref: source,
+                    task_ref: task_id,
+                    adapter_id: "collaboration-component",
+                    adapter_version: "1",
+                },
+            ),
+        );
+        assert_eq!(collected.task.state, "completed");
+    };
+    wait_for_root(first);
+    assert!(
+        crate::scheduler::now_ms().unwrap() - gateway_started < 25_000,
+        "result relied on global repair instead of the direct hint"
+    );
+    let exchange = Uuid::parse_str(wait_witness["exchange_id"].as_str().unwrap()).unwrap();
+    let store = crate::orchestration::OrchestrationStore::open_observer(&state_root).unwrap();
+    let c = store.collaboration_connection().unwrap();
+    let artifact: String = c
+        .query_row(
+            "SELECT artifact_id FROM collaboration_results WHERE exchange_id=?1",
+            [exchange.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let source_owner = store
+        .member_credential(source)
+        .unwrap()
+        .controller_carrier()
+        .unwrap();
+    let source_snapshot = RunSnapshot::load(&state_root, source, 0).unwrap();
+    let chunk = crate::artifact::chunk(
+        &state_root,
+        &source_snapshot,
+        &artifact,
+        (0, 1024),
+        Some(&source_owner),
+    )
+    .unwrap();
+    assert_eq!(chunk.data, "Bounded target result: 한글.".as_bytes());
+    let target_snapshot = RunSnapshot::load(&state_root, target, 0).unwrap();
+    assert!(
+        crate::artifact::chunk(
+            &state_root,
+            &target_snapshot,
+            &artifact,
+            (0, 1024),
+            Some(&source_owner)
+        )
+        .is_err()
+    );
+    assert!(
+        crate::artifact::chunk(&state_root, &source_snapshot, &artifact, (0, 1024), None).is_err()
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT execution_state FROM collaboration_exchanges WHERE exchange_id=?1",
+            [exchange.to_string()],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "succeeded"
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT delivery_state FROM collaboration_exchanges WHERE exchange_id=?1",
+            [exchange.to_string()],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "acknowledged"
+    );
+    drop(store);
+    // Ordinary Pause stops its Worker generation. Capture the identity first;
+    // locator retirement still requires an independent Kernel absence proof.
+    let old = RunSnapshot::load(&state_root, source, 0)
+        .unwrap()
+        .runtime_record
+        .unwrap();
+    let paused = checked(
+        root,
+        "collaboration source owner pause",
+        CoreSemanticService.mutate_modern_run(RunMutationInput {
+            workspace: view.canonical_path.to_path_buf().unwrap(),
+            expected_workspace_id: view.workspace_id.clone(),
+            run_id: source,
+            expected_state_revision: None,
+            carrier: CredentialCarrier::duplicate_fd(source_owner.raw_fd()).unwrap(),
+            operation: RunMutationOperation::Pause { interrupt: false },
+        }),
+    );
+    assert_eq!(paused.snapshot.projection.lifecycle, RunLifecycle::Paused);
+    assert_eq!(
+        paused.snapshot.projection.run_generation,
+        old.identity.run_generation
+    );
+    assert!(paused.snapshot.runtime_record.is_none());
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        if crate::worker::prove_worker_generation_absent(&old).is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "original source Worker absence unproved"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    mutate(&view, &source_owner, source, RunMutationOperation::Resume);
+    let resumed = RunSnapshot::load(&state_root, source, 0).unwrap();
+    assert!(resumed.projection.run_generation > before.projection.run_generation);
+    assert_eq!(resumed.projection.thread_id, before.projection.thread_id);
+    let (second, _) = checked(
+        root,
+        "source recovery root queue",
+        delegation::queue_specialist_task(
+            &scope,
+            &context(primary, "source-root-recovery"),
+            &caller_scope::fixture(32),
+            &port,
+            delegation::AssignSpecialistTask {
+                member_ref: source,
+                task: task("collaboration-source-recovery"),
+                execution_intent: "read_only",
+                target: None,
+                deadline_seconds: 60,
+                expected_revision: None,
+            },
+            1,
+        ),
+    );
+    let second = Uuid::parse_str(&second.task_ref).unwrap();
+    wait_for_root(second);
+    let broker = crate::orchestration::OrchestrationStore::open_observer(&state_root).unwrap();
+    let c = broker.collaboration_connection().unwrap();
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM collaboration_exchanges", [], |r| r
+            .get::<_, u64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM collaboration_execution_links",
+            [],
+            |r| r.get::<_, u64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM collaboration_results WHERE artifact_id=?1",
+            [&artifact],
+            |r| r.get::<_, u64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    let mut receipts=c.prepare("SELECT source_thread_id,source_turn_id,call_id,response_json FROM collaboration_tool_receipts WHERE source_run_id=?1 ORDER BY rowid").unwrap();
+    let receipt_rows=receipts.query_map([source.to_string()],|r|Ok(json!({"source_thread":r.get::<_,String>(0)?,"source_turn":r.get::<_,String>(1)?,"call_id":r.get::<_,String>(2)?,"response":serde_json::from_str::<Value>(&r.get::<_,String>(3)?).unwrap()}))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+    let collections = receipt_rows
+        .iter()
+        .filter(|r| r["response"]["operation"] == "collect_collaboration_results_result")
+        .collect::<Vec<_>>();
+    assert_eq!(collections.len(), 2);
+    assert_ne!(collections[0]["source_turn"], collections[1]["source_turn"]);
+    assert_eq!(collections[0]["response"], collections[1]["response"]);
+    private(
+        &root.join("native-collaboration-receipts.json"),
+        &serde_json::to_vec(&receipt_rows).unwrap(),
+    );
+    drop(receipts);
+    drop(broker);
+    let after = RunSnapshot::load(&state_root, source, 0).unwrap();
+    let target_after = RunSnapshot::load(&state_root, target, 0).unwrap();
+    assert_eq!(
+        target_after.projection.run_generation,
+        target_before.projection.run_generation
+    );
+    let source_turns = after
+        .observed_ledger(&state_root)
+        .unwrap()
+        .payloads_of_kind(crate::audit::AuditKind::TurnStarted)
+        .unwrap();
+    assert_eq!(source_turns.len(), 2, "unsolicited source continuation");
+    let target_turns = target_after
+        .observed_ledger(&state_root)
+        .unwrap()
+        .payloads_of_kind(crate::audit::AuditKind::TurnStarted)
+        .unwrap();
+    assert_eq!(target_turns.len(), 1, "target replay");
+    async_runtime.block_on(runtime.shutdown());
+    drop(gateway);
+    async_runtime.shutdown_timeout(Duration::from_secs(1));
+    let mut cleanup_rows = Vec::new();
+    for member in [source, target] {
+        let store =
+            EngagementStore::open(&EngagementStore::workspace_database_path(&state_root)).unwrap();
+        let revision = crate::engagement::scope_membership_revision(
+            store.connection(),
+            &view.workspace_id,
+            "orchestrated_session",
+            &primary.to_string(),
+        )
+        .unwrap();
+        drop(store);
+        let released = checked(
+            root,
+            "collaboration owned release",
+            delegation::release_specialist(
+                &scope,
+                &context(primary, "collaboration-release"),
+                &observed,
+                delegation::ReleaseSpecialist {
+                    member_ref: member,
+                    expected_revision: revision,
+                    allow_interrupt: false,
+                },
+            ),
+        );
+        assert_eq!(released.state, "released");
+        let snapshot = RunSnapshot::load(&state_root, member, 0).unwrap();
+        assert_eq!(snapshot.projection.lifecycle, RunLifecycle::Closed);
+        assert_eq!(
+            membership(&home, &snapshot.manifest),
+            MembershipDisposition::Released
+        );
+        cleanup_rows.push(json!({"run_id":member,"stage":"member_release","ok":true,"operation_ref":released.operation.operation_ref}));
+    }
+    let operator = CredentialCarrier::open_path(&root.join("operator")).unwrap();
+    checked(
+        root,
+        "collaboration Profile retire",
+        crate::profile::retire_qualified_global_server(&binding, &operator),
+    );
+    cleanup_rows.push(json!({"stage":"profile_retire","ok":true}));
+    private(
+        &root.join("cleanup-observations.json"),
+        &serde_json::to_vec(&cleanup_rows).unwrap(),
+    );
+    json!({"schema":"dolgorae.native-collaboration-component/v2","passed":true,"prepared_policy_fixture":true,"prepared_primary_no_native_thread":true,"live_policy_enablement_proven":false,"gateway_started_at_ms":gateway_started,"active_wait":wait_witness,"source_before":source_runtime,"source_after":after.runtime_record,"target":target_runtime,"artifact_id":artifact,"artifact_length":chunk.total_byte_length,"artifact_sha256":chunk.sha256,"source_owned_artifact_read":true,"foreign_artifact_read_refused":true,"credentialless_artifact_read_refused":true,"source_native_turns":source_turns.len(),"target_native_turns":target_turns.len(),"source_restart_new_call_recovered":true,"old_source_worker_absence_verified":true,"owned_cleanup_verified":true,"model_consumption_proven":false})
 }
 
 pub fn scheduler_component(root: &Path, codex: &Path) -> Value {

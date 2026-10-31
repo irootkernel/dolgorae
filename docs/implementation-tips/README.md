@@ -545,6 +545,21 @@ succeeds after both subphases complete. Activation, pre-effect claim and task
 expiry observations use controlled fixture clocks; they do not extend an
 accepted deadline or promise automatic retry.
 
+The existing `--collaboration-component-only` scenario prepares an enabled
+captured-policy Session before starting two physical Dedicated members. Its
+Primary identity is fixture data with no native Thread; this does not qualify
+live policy admission or Primary model provenance. Seven bounded loopback POSTs
+cover nonblocking source submit, blocking await, collect, the target answer,
+and new-call collection after an explicit owner-controlled Worker restart.
+Blocking submit has direct unit coverage through the shared wait-lifetime path;
+this physical scenario does not exercise blocking submit or interruption during
+its admission. The source artifact reader
+uses its own Controller authority. Local collection receipts and the fixture's
+artifact read do not establish model consumption. The original 180-second
+driver bound remains unchanged. Ordinary member release, Profile retirement and
+a current-main process census must complete before success; failed roots and
+unverified absence remain explicit. TASK-027 owns complete live integration.
+
 MCP host qualification additionally selects Claude Code `2.1.310`
 (`ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd`). The
 [runtime qualification

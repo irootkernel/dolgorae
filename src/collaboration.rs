@@ -1,5 +1,5 @@
-//! Authenticated Specialist admission. Scheduling and result delivery have
-//! separate owners; this boundary commits durable mail without dispatching it.
+//! Authenticated Specialist mail, immutable results, and bounded waits.
+//! The scheduler owns dispatch; SQLite owns publication and replayable delivery.
 
 use crate::machine::MachineError;
 use crate::orchestration::{OrchestrationStore, PrimaryCallContext};
@@ -302,6 +302,14 @@ pub(crate) fn error_result(error: &MachineError) -> Value {
             false,
             "The consultation input does not match the checked request contract.",
         ),
+        "COLLABORATION_WAIT_CYCLE"
+        | "COLLABORATION_DEPTH_EXCEEDED"
+        | "COLLABORATION_WRITER_HELD"
+        | "INTERRUPTED_UNKNOWN" => (
+            error.code.as_str(),
+            false,
+            "The blocking consultation cannot proceed safely.",
+        ),
         "COLLABORATION_NOT_ALLOWED" => (
             "COLLABORATION_NOT_ALLOWED",
             false,
@@ -325,6 +333,7 @@ pub(crate) fn dispatch(
     worker_run: Uuid,
     generation: u64,
     workspace: &str,
+    alive: &dyn Fn() -> bool,
 ) -> Result<Value, MachineError> {
     let runs = crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, state_root);
     let manifest = runs.load_manifest(worker_run)?;
@@ -346,16 +355,72 @@ pub(crate) fn dispatch(
     }
     let mut store = OrchestrationStore::open(state_root)?;
     let mut effects = crate::semantic::ProductionOrchestrationEffects::new(state_root);
-    admit(&mut store, &call.context, &call.payload, &mut effects)
+    admit_with_lifetime(
+        &mut store,
+        &call.context,
+        &call.payload,
+        &mut effects,
+        alive,
+    )
 }
 
-/// Semantic boundary used by the native dispatcher and storage tests. This is
-/// crate-private and cannot expose a CLI/model-selected source identity.
+/// Storage tests use the same authenticated boundary as the Worker dispatcher.
+#[cfg(test)]
 pub(crate) fn admit(
     store: &mut OrchestrationStore,
     context: &PrimaryCallContext,
     payload: &Value,
     adapter: &mut impl crate::orchestration::OrchestrationAdapter,
+) -> Result<Value, MachineError> {
+    admit_with_lifetime(store, context, payload, adapter, &|| true)
+}
+
+fn admit_with_lifetime(
+    store: &mut OrchestrationStore,
+    context: &PrimaryCallContext,
+    payload: &Value,
+    adapter: &mut impl crate::orchestration::OrchestrationAdapter,
+    alive: &dyn Fn() -> bool,
+) -> Result<Value, MachineError> {
+    let mut pending = None;
+    let blocking = payload["operation"] == "await_consultations" || payload["blocking"] == true;
+    let response = if blocking {
+        let root = store.collaboration_state_root().to_path_buf();
+        let manifest = crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &root)
+            .load_manifest(context.source_run_id)?;
+        crate::writer::WriterStore::new(
+            &root,
+            &manifest.workspace_id,
+            crate::darwin::DarwinSystem.current_uid(),
+        )
+        .observe_locked(|writer| {
+            let held = writer
+                .holder
+                .as_ref()
+                .is_some_and(|h| h.run_id == context.source_run_id)
+                || writer.handoff.as_ref().is_some_and(|h| {
+                    h.source_run_id == context.source_run_id
+                        || h.destination_run_id == context.source_run_id
+                });
+            admit_inner(store, context, payload, adapter, &mut pending, held)
+        })??
+    } else {
+        admit_inner(store, context, payload, adapter, &mut pending, false)?
+    };
+    if let Some(wait) = pending {
+        await_registered(store, context, payload, wait, alive)
+    } else {
+        Ok(response)
+    }
+}
+
+fn admit_inner(
+    store: &mut OrchestrationStore,
+    context: &PrimaryCallContext,
+    payload: &Value,
+    adapter: &mut impl crate::orchestration::OrchestrationAdapter,
+    pending_wait: &mut Option<PendingWait>,
+    writer_held: bool,
 ) -> Result<Value, MachineError> {
     if payload.to_string().len() > 1_048_576 {
         return Err(denied());
@@ -400,6 +465,18 @@ pub(crate) fn admit(
             return Err(denied());
         }
     }
+    if let Some(response) = replay(
+        store.collaboration_connection()?,
+        context,
+        &request_digest(payload)?,
+    )? {
+        materialize_results(
+            &state_root,
+            store.collaboration_connection()?,
+            context.source_run_id,
+        )?;
+        return Ok(response);
+    }
     match request {
         Request::Await {
             exchange_ids,
@@ -408,6 +485,7 @@ pub(crate) fn admit(
         } => {
             if exchange_ids.is_empty()
                 || exchange_ids.len() > 16
+                || exchange_ids.iter().any(|id| id.get_version_num() != 7)
                 || exchange_ids
                     .iter()
                     .collect::<std::collections::BTreeSet<_>>()
@@ -418,15 +496,38 @@ pub(crate) fn admit(
             {
                 return Err(denied());
             }
-            // TASK-083 owns wait-edge and outbox semantics. Do not manufacture
-            // an empty success or perform a blocking wait before that boundary.
-            Err(failure("COLLABORATION_TRANSPORT_UNAVAILABLE"))
+            if writer_held {
+                return Err(failure("COLLABORATION_WRITER_HELD"));
+            }
+            let digest = request_digest(payload)?;
+            let tx = store.collaboration_transaction()?;
+            install(&tx)?;
+            if let Some(response) = replay(&tx, context, &digest)? {
+                return Ok(response);
+            }
+            let until = crate::scheduler::now_ms()?
+                .checked_add(transport_wait_seconds as i64 * 1000)
+                .ok_or_else(denied)?;
+            *pending_wait = Some(begin_wait(
+                &tx,
+                &state_root,
+                context,
+                WaitRequest {
+                    ids: exchange_ids,
+                    all: return_when == "all",
+                    until,
+                    receipt: None,
+                },
+                &digest,
+            )?);
+            crate::storage_observation::commit(tx).map_err(sql)?;
+            Ok(Value::Null)
         }
         Request::Collect { limit } => {
             if !(1..=64).contains(&limit) {
                 return Err(denied());
             }
-            Err(failure("COLLABORATION_TRANSPORT_UNAVAILABLE"))
+            collect(store, context, payload, limit as usize)
         }
         Request::Submit {
             target,
@@ -455,10 +556,6 @@ pub(crate) fn admit(
             {
                 return Err(denied());
             }
-            // Blocking admission requires TASK-083's writer/wait-graph checks.
-            if blocking {
-                return Err(failure("COLLABORATION_TRANSPORT_UNAVAILABLE"));
-            }
             let tx = store.collaboration_transaction()?;
             let current_session: (String, String) = tx
                 .query_row(
@@ -486,6 +583,7 @@ pub(crate) fn admit(
             )
             .map_err(|_| denied())?;
             let body_digest = crate::jcs::sha256_hex(&body);
+            let _ = replay(&tx, context, &body_digest)?;
             let key = crate::jcs::sha256_hex(
                 format!(
                     "dolgorae-collaboration-v1\0{}\0{}\0{}\0{}",
@@ -496,73 +594,10 @@ pub(crate) fn admit(
                 )
                 .as_bytes(),
             );
-            let (task, accepted) = crate::orchestration::successor_task_for_turn(
-                &tx,
-                context.session_id,
-                context.source_run_id,
-                &context.source_turn_id,
-            )?
-            .ok_or_else(denied)?;
-            let accepted_sha = crate::jcs::sha256_hex(accepted.as_bytes());
-            let accepted: crate::delegation_identity::AcceptedTask =
-                serde_json::from_str(&accepted).map_err(|_| denied())?;
-            accepted.digest()?;
-            let accepted_json_digest: String = tx.query_row("SELECT accepted_request_sha256 FROM brokered_task_acceptances WHERE task_id=?1",[task.to_string()],|row|row.get(0)).map_err(sql)?;
-            if accepted_sha != accepted_json_digest {
-                return Err(denied());
-            }
-            let (task_body, contexts, retained_target) =
-                crate::engagement::accepted_task_content(&tx, task)?.ok_or_else(denied)?;
-            let original: crate::task_request::SpecialistTaskRequest =
-                serde_json::from_slice(&task_body).map_err(|_| denied())?;
-            let facts = crate::orchestration::successor_task(&tx, context.session_id, task)?
-                .ok_or_else(denied)?;
-            let marker: Value = serde_json::from_str(&facts.request_json).map_err(|_| denied())?;
-            let root_deadline = marker["deadline_seconds"].as_u64().ok_or_else(denied)?;
-            if !crate::successor_capture::verify_accepted_assignment(
-                source.run_id,
-                &original,
-                &accepted,
-                root_deadline,
-                &format!("sha256:{}", facts.source_request_sha256),
-            )? {
-                return Err(denied());
-            }
-            crate::successor_capture::AcceptedTaskContents {
-                task_body,
-                contexts,
-                target: retained_target,
-            }
-            .prompt(&accepted, &accepted.execution_intent, 1)?;
-            let expected_role = source
-                .agent_configuration
-                .instructions
-                .delegation()
-                .map_or_else(
-                    || format!("sha256:{}", source.role_snapshot_sha256),
-                    |instructions| instructions.role_snapshot_digest.clone(),
-                );
-            let expected_configuration = source
-                .agent_configuration
-                .admitted_configuration
-                .as_ref()
-                .map_or_else(
-                    || Ok(format!("sha256:{}", source.agent_configuration_sha256)),
-                    |configuration| configuration.digest(),
-                )?;
-            if accepted.role_snapshot_digest != expected_role
-                || accepted.agent_configuration_digest != expected_configuration
-                || expected_role != format!("sha256:{}", source.role_snapshot_sha256)
-            {
-                return Err(denied());
-            }
-            let priority = root_priority(
-                &tx,
-                context,
-                task,
-                &accepted_sha,
-                &facts.source_request_sha256,
-            )?;
+            install(&tx)?;
+            let provenance = source_provenance(&tx, context, source)?;
+            let task = provenance.task;
+            let priority = provenance.priority;
             let table_exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='collaboration_exchanges')", [], |row| row.get(0)).map_err(sql)?;
             if table_exists {
                 let _ = policy(&tx, context.session_id)?;
@@ -575,6 +610,9 @@ pub(crate) fn admit(
                         json!({"operation":"submit_consultation_result","exchange_id":exchange,"target_run_id":target,"state":"queued"}),
                     );
                 }
+            }
+            if blocking && writer_held {
+                return Err(failure("COLLABORATION_WRITER_HELD"));
             }
             let policy = policy(&tx, context.session_id)?;
             if payload.to_string().len() as u64
@@ -686,9 +724,13 @@ pub(crate) fn admit(
                 .map_err(|_| denied())?
                 .as_millis();
             let now = i64::try_from(now).map_err(|_| denied())?;
+            if now >= provenance.deadline {
+                return Err(denied());
+            }
             let deadline = now
                 .checked_add(i64::try_from(deadline_seconds).map_err(|_| denied())? * 1000)
-                .ok_or_else(denied)?;
+                .ok_or_else(denied)?
+                .min(provenance.deadline);
             let admission_digest = crate::jcs::sha256_hex(json!({
                 "exchange_id":exchange,"session_id":context.session_id,
                 "source_run_id":source.run_id,"source_turn_id":context.source_turn_id,
@@ -698,6 +740,26 @@ pub(crate) fn admit(
                 "root_priority":priority,"deadline_ms":deadline
             }).to_string().as_bytes());
             tx.execute("INSERT INTO collaboration_exchanges(exchange_id,session_id,source_run_id,source_turn_id,source_call_id,idempotency_key,source_task_id,root_task_id,target_run_id,request_json,request_sha256,context_json,root_priority,deadline_ms,execution_state,delivery_state,created_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?7,?8,?9,?10,?11,?12,?13,'queued','none',?14)",params![exchange.to_string(),context.session_id.to_string(),source.run_id.to_string(),context.source_turn_id,context.source_tool_call_id,key,task.to_string(),target.run_id.to_string(),String::from_utf8(body).map_err(|_| denied())?,body_digest,context_json,priority,deadline,now]).map_err(sql)?;
+            let lineage_digest = crate::jcs::sha256_hex(
+                json!([
+                    exchange,
+                    provenance.parent,
+                    provenance.depth,
+                    task,
+                    priority,
+                    deadline
+                ])
+                .to_string()
+                .as_bytes(),
+            );
+            tx.execute("INSERT INTO collaboration_lineage(exchange_id,parent_exchange_id,hop_depth,provenance_sha256) VALUES(?1,?2,?3,?4)",params![exchange.to_string(),provenance.parent.map(|id|id.to_string()),provenance.depth,lineage_digest]).map_err(sql)?;
+            crate::orchestration::append_event(
+                &tx,
+                context.session_id,
+                "collaboration_lineage_captured",
+                &lineage_digest,
+                now,
+            )?;
             tx.execute(
                 "INSERT INTO collaboration_mailbox(exchange_id,target_run_id) VALUES(?1,?2)",
                 params![exchange.to_string(), target.run_id.to_string()],
@@ -712,6 +774,23 @@ pub(crate) fn admit(
                 &admission_digest,
                 now,
             )?;
+            let accepted_receipt = json!({"operation":"submit_consultation_result","exchange_id":exchange,"target_run_id":target.run_id,"state":"queued"});
+            retain_response(&tx, context, &body_digest, &accepted_receipt)?;
+            if blocking {
+                let receipt = json!({"operation":"submit_consultation_result","exchange_id":exchange,"target_run_id":target.run_id,"state":"queued"});
+                *pending_wait = Some(begin_wait(
+                    &tx,
+                    &state_root,
+                    context,
+                    WaitRequest {
+                        ids: vec![exchange],
+                        all: false,
+                        until: deadline.min(now + 60_000),
+                        receipt: Some(receipt),
+                    },
+                    &body_digest,
+                )?);
+            }
             crate::storage_observation::commit(tx).map_err(sql)?;
             crate::scheduler::notify(&state_root, target.run_id);
             Ok(
@@ -767,6 +846,21 @@ pub(crate) fn validate_schema(connection: &rusqlite::Connection) -> Result<(), M
     if !matches!((version.as_deref(), objects), (None, 0) | (Some("1"), 6)) {
         return Err(failure("ORCHESTRATION_SCHEMA_UNSUPPORTED"));
     }
+    let delivery: Option<String> = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='collaboration_delivery_version'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)?;
+    let delivery_objects:u64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('collaboration_execution_links','collaboration_lineage','collaboration_results','collaboration_result_outbox','collaboration_tool_receipts','collaboration_collection_positions','collaboration_waits','collaboration_wait_edges')",[],|r|r.get(0)).map_err(sql)?;
+    if !matches!(
+        (delivery.as_deref(), delivery_objects),
+        (None, 0) | (Some("1"), 8)
+    ) {
+        return Err(failure("ORCHESTRATION_SCHEMA_UNSUPPORTED"));
+    }
     if objects != 0 {
         for query in [
             "SELECT root_task_id,session_id,member_run_id,record_json,record_sha256 FROM collaboration_root_priorities LIMIT 0",
@@ -791,7 +885,7 @@ pub(crate) fn install(tx: &Transaction<'_>) -> Result<(), MachineError> {
         .optional()
         .map_err(sql)?;
     match version.as_deref() {
-        Some("1") => return Ok(()),
+        Some("1") => return install_runtime(tx),
         Some(_) => return Err(denied()),
         None => {}
     }
@@ -808,7 +902,8 @@ pub(crate) fn install(tx: &Transaction<'_>) -> Result<(), MachineError> {
         CREATE TABLE collaboration_mailbox(sequence INTEGER PRIMARY KEY AUTOINCREMENT,exchange_id TEXT NOT NULL UNIQUE REFERENCES collaboration_exchanges(exchange_id),target_run_id TEXT NOT NULL REFERENCES brokered_members(run_id)) STRICT;
         CREATE INDEX collaboration_mailbox_target ON collaboration_mailbox(target_run_id,sequence);
         CREATE TABLE collaboration_activation_requests(target_run_id TEXT PRIMARY KEY REFERENCES brokered_members(run_id),session_id TEXT NOT NULL REFERENCES orchestrated_sessions(session_id),requested_at_ms INTEGER NOT NULL) STRICT;
-        INSERT INTO metadata(key,value) VALUES('collaboration_schema_version','1');").map_err(sql)
+        INSERT INTO metadata(key,value) VALUES('collaboration_schema_version','1');").map_err(sql)?;
+    install_runtime(tx)
 }
 
 pub(crate) struct ExecutionRecord {
@@ -843,11 +938,45 @@ pub(crate) fn execution_record(
     if count != 1 || stored.as_deref() != Some(&event_digest) {
         return Err(denied());
     }
+    if has_runtime(c)? {
+        let lineage:Option<(Option<String>,u8,String)>=c.query_row("SELECT parent_exchange_id,hop_depth,provenance_sha256 FROM collaboration_lineage WHERE exchange_id=?1",[exchange.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql)?;
+        if let Some((parent, depth, digest)) = lineage {
+            let parent_id = parent
+                .as_deref()
+                .map(Uuid::parse_str)
+                .transpose()
+                .map_err(|_| denied())?;
+            let expected = crate::jcs::sha256_hex(
+                json!([exchange, parent_id, depth, task_id, priority, deadline])
+                    .to_string()
+                    .as_bytes(),
+            );
+            let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_events WHERE session_id=?1 AND kind='collaboration_lineage_captured' AND payload_sha256=?2)",params![session,expected],|r|r.get(0)).map_err(sql)?;
+            if digest != expected || !valid || !(1..=8).contains(&depth) {
+                return Err(denied());
+            }
+            if let Some(parent) = parent {
+                let parent_row:Option<(String,String,String,String,u8,i64,u8)>=c.query_row("SELECT e.session_id,e.root_task_id,x.target_run_id,x.turn_id,e.root_priority,e.deadline_ms,coalesce(l.hop_depth,1) FROM collaboration_exchanges e JOIN collaboration_execution_links x USING(exchange_id) LEFT JOIN collaboration_lineage l USING(exchange_id) WHERE e.exchange_id=?1",[parent],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql)?;
+                if parent_row.is_none_or(|(s, r, t, v, p, d, h)| {
+                    s != session
+                        || r != root
+                        || t != source
+                        || v != turn
+                        || p != priority
+                        || deadline > d
+                        || h + 1 != depth
+                }) {
+                    return Err(denied());
+                }
+            } else if depth != 1 {
+                return Err(denied());
+            }
+        }
+    }
     let request: Request = serde_json::from_str(&request).map_err(|_| denied())?;
     let Request::Submit {
         objective,
         expected_output,
-        blocking: false,
         ..
     } = request
     else {
@@ -903,4 +1032,1382 @@ pub(crate) fn bind_execution(
         return Err(denied());
     }
     Ok(true)
+}
+
+fn has_runtime(c: &rusqlite::Connection) -> Result<bool, MachineError> {
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='collaboration_results')",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(sql)
+}
+
+fn install_runtime(tx: &Transaction<'_>) -> Result<(), MachineError> {
+    let version: Option<String> = tx
+        .query_row(
+            "SELECT value FROM metadata WHERE key='collaboration_delivery_version'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)?;
+    match version.as_deref() {
+        Some("1") => return Ok(()),
+        Some(_) => return Err(denied()),
+        None => {}
+    }
+    tx.execute_batch("CREATE TABLE collaboration_execution_links(exchange_id TEXT PRIMARY KEY REFERENCES collaboration_exchanges(exchange_id),target_run_id TEXT NOT NULL,thread_id TEXT NOT NULL,turn_id TEXT NOT NULL,generation INTEGER NOT NULL,UNIQUE(target_run_id,turn_id)) STRICT;
+    CREATE TABLE collaboration_lineage(exchange_id TEXT PRIMARY KEY REFERENCES collaboration_exchanges(exchange_id),parent_exchange_id TEXT REFERENCES collaboration_exchanges(exchange_id),hop_depth INTEGER NOT NULL CHECK(hop_depth BETWEEN 1 AND 8),provenance_sha256 TEXT NOT NULL) STRICT;
+    CREATE TABLE collaboration_results(exchange_id TEXT PRIMARY KEY REFERENCES collaboration_exchanges(exchange_id),artifact_id TEXT UNIQUE,byte_length INTEGER,sha256 TEXT,safe_error_code TEXT,created_at TEXT NOT NULL) STRICT;
+    CREATE TABLE collaboration_result_outbox(sequence INTEGER PRIMARY KEY AUTOINCREMENT,exchange_id TEXT NOT NULL UNIQUE REFERENCES collaboration_exchanges(exchange_id),source_run_id TEXT NOT NULL,acknowledged_at_ms INTEGER) STRICT;
+    CREATE TABLE collaboration_tool_receipts(session_id TEXT NOT NULL,source_run_id TEXT NOT NULL,source_thread_id TEXT NOT NULL,source_turn_id TEXT NOT NULL,call_id TEXT NOT NULL,request_sha256 TEXT NOT NULL,response_sha256 TEXT NOT NULL,response_json TEXT NOT NULL,PRIMARY KEY(session_id,source_run_id,source_turn_id,call_id)) STRICT;
+    CREATE TABLE collaboration_collection_positions(source_run_id TEXT PRIMARY KEY,recovery_sequence INTEGER NOT NULL DEFAULT 0,recovery_next INTEGER NOT NULL DEFAULT 0) STRICT;
+    CREATE TABLE collaboration_waits(wait_id TEXT PRIMARY KEY,session_id TEXT NOT NULL,source_run_id TEXT NOT NULL,source_thread_id TEXT NOT NULL,source_turn_id TEXT NOT NULL,source_generation INTEGER NOT NULL,call_id TEXT NOT NULL,request_sha256 TEXT NOT NULL,expires_at_ms INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,UNIQUE(session_id,source_run_id,source_turn_id,call_id)) STRICT;
+    CREATE TABLE collaboration_wait_edges(wait_id TEXT NOT NULL REFERENCES collaboration_waits(wait_id) ON DELETE CASCADE,exchange_id TEXT NOT NULL REFERENCES collaboration_exchanges(exchange_id),target_run_id TEXT NOT NULL,PRIMARY KEY(wait_id,exchange_id)) STRICT;
+    INSERT INTO metadata(key,value) VALUES('collaboration_delivery_version','1');").map_err(sql)
+}
+
+fn request_digest(payload: &Value) -> Result<String, MachineError> {
+    let body =
+        crate::jcs::canonicalize(&crate::jcs::parse(&payload.to_string()).map_err(|_| denied())?)
+            .map_err(|_| denied())?;
+    Ok(crate::jcs::sha256_hex(&body))
+}
+
+fn replay(
+    c: &rusqlite::Connection,
+    ctx: &PrimaryCallContext,
+    digest: &str,
+) -> Result<Option<Value>, MachineError> {
+    if !has_runtime(c)? {
+        return Ok(None);
+    }
+    let row: Option<(String,String,String,String)> = c.query_row("SELECT request_sha256,response_json,source_thread_id,response_sha256 FROM collaboration_tool_receipts WHERE session_id=?1 AND source_run_id=?2 AND source_turn_id=?3 AND call_id=?4", params![ctx.session_id.to_string(),ctx.source_run_id.to_string(),ctx.source_turn_id,ctx.source_tool_call_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(sql)?;
+    if row.is_none() {
+        let submitted:Option<String>=c.query_row("SELECT request_sha256 FROM collaboration_exchanges WHERE session_id=?1 AND source_run_id=?2 AND source_turn_id=?3 AND source_call_id=?4",params![ctx.session_id.to_string(),ctx.source_run_id.to_string(),ctx.source_turn_id,ctx.source_tool_call_id],|r|r.get(0)).optional().map_err(sql)?;
+        let waiting:Option<String>=c.query_row("SELECT request_sha256 FROM collaboration_waits WHERE session_id=?1 AND source_run_id=?2 AND source_turn_id=?3 AND call_id=?4",params![ctx.session_id.to_string(),ctx.source_run_id.to_string(),ctx.source_turn_id,ctx.source_tool_call_id],|r|r.get(0)).optional().map_err(sql)?;
+        if submitted.or(waiting).is_some_and(|old| old != digest) {
+            return Err(failure("COLLABORATION_IDEMPOTENCY_CONFLICT"));
+        }
+    }
+    row.map(|(old, response, thread, response_digest)| {
+        if thread != call_thread(c, ctx.source_run_id)? {
+            return Err(denied());
+        }
+        if old != digest {
+            return Err(failure("COLLABORATION_IDEMPOTENCY_CONFLICT"));
+        }
+        if crate::jcs::sha256_hex(response.as_bytes()) != response_digest {
+            return Err(denied());
+        }
+        require_event(
+            c,
+            ctx.session_id,
+            "collaboration_tool_response_retained",
+            &response_binding(ctx, &thread, digest, &response_digest),
+        )?;
+        serde_json::from_str(&response).map_err(|_| denied())
+    })
+    .transpose()
+}
+
+fn retain_response(
+    tx: &Transaction<'_>,
+    ctx: &PrimaryCallContext,
+    digest: &str,
+    response: &Value,
+) -> Result<(), MachineError> {
+    let thread = call_thread(tx, ctx.source_run_id)?;
+    let response = response.to_string();
+    let response_digest = crate::jcs::sha256_hex(response.as_bytes());
+    tx.execute("INSERT INTO collaboration_tool_receipts(session_id,source_run_id,source_thread_id,source_turn_id,call_id,request_sha256,response_sha256,response_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![ctx.session_id.to_string(),ctx.source_run_id.to_string(),thread,ctx.source_turn_id,ctx.source_tool_call_id,digest,response_digest,response]).map_err(sql)?;
+    crate::orchestration::append_event(
+        tx,
+        ctx.session_id,
+        "collaboration_tool_response_retained",
+        &response_binding(ctx, &thread, digest, &response_digest),
+        crate::scheduler::now_ms()?,
+    )
+}
+
+fn response_binding(
+    ctx: &PrimaryCallContext,
+    thread: &str,
+    request: &str,
+    response: &str,
+) -> String {
+    crate::jcs::sha256_hex(
+        json!([
+            ctx.session_id,
+            ctx.source_run_id,
+            thread,
+            ctx.source_turn_id,
+            ctx.source_tool_call_id,
+            request,
+            response
+        ])
+        .to_string()
+        .as_bytes(),
+    )
+}
+
+fn require_event(
+    c: &rusqlite::Connection,
+    session: Uuid,
+    kind: &str,
+    digest: &str,
+) -> Result<(), MachineError> {
+    let retained: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_events WHERE session_id=?1 AND kind=?2 AND payload_sha256=?3)", params![session.to_string(),kind,digest], |r| r.get(0)).map_err(sql)?;
+    if retained { Ok(()) } else { Err(denied()) }
+}
+
+pub(crate) fn link_turn(
+    tx: &Transaction<'_>,
+    exchange: Uuid,
+    target: Uuid,
+    thread: &str,
+    turn: &str,
+    generation: u64,
+) -> Result<(), MachineError> {
+    install_runtime(tx)?;
+    let record = execution_record(tx, exchange)?;
+    if record.target != target || generation == 0 || thread.is_empty() || turn.is_empty() {
+        return Err(denied());
+    }
+    let old:Option<(String,String,String,u64)>=tx.query_row("SELECT target_run_id,thread_id,turn_id,generation FROM collaboration_execution_links WHERE exchange_id=?1",[exchange.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(sql)?;
+    let expected = (
+        target.to_string(),
+        thread.to_owned(),
+        turn.to_owned(),
+        generation,
+    );
+    if let Some(old) = old {
+        return if old == expected {
+            Ok(())
+        } else {
+            Err(denied())
+        };
+    }
+    let state: String = tx
+        .query_row(
+            "SELECT execution_state FROM collaboration_exchanges WHERE exchange_id=?1",
+            [exchange.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(sql)?;
+    if !matches!(
+        state.as_str(),
+        "dispatching" | "running" | "interrupted_unknown"
+    ) {
+        return Err(denied());
+    }
+    tx.execute("INSERT INTO collaboration_execution_links(exchange_id,target_run_id,thread_id,turn_id,generation) VALUES(?1,?2,?3,?4,?5)",params![exchange.to_string(),target.to_string(),thread,turn,generation]).map_err(sql)?;
+    tx.execute(
+        "UPDATE collaboration_exchanges SET execution_state='running' WHERE exchange_id=?1",
+        [exchange.to_string()],
+    )
+    .map_err(sql)?;
+    crate::orchestration::append_event(
+        tx,
+        record.session,
+        "collaboration_target_linked",
+        &crate::jcs::sha256_hex(
+            json!([exchange, target, thread, turn, generation])
+                .to_string()
+                .as_bytes(),
+        ),
+        crate::scheduler::now_ms()?,
+    )
+}
+
+fn terminal(state: &str) -> bool {
+    matches!(
+        state,
+        "succeeded" | "failed" | "cancelled" | "expired" | "interrupted_unknown"
+    )
+}
+
+fn exchange_result(
+    c: &rusqlite::Connection,
+    ctx: &PrimaryCallContext,
+    id: Uuid,
+) -> Result<Value, MachineError> {
+    let row:Option<(String,String,Option<String>,Option<String>)>=c.query_row("SELECT e.execution_state,e.delivery_state,r.artifact_id,coalesce(r.safe_error_code,CASE WHEN e.execution_state='interrupted_unknown' THEN 'INTERRUPTED_UNKNOWN' END) FROM collaboration_exchanges e LEFT JOIN collaboration_results r USING(exchange_id) WHERE e.exchange_id=?1 AND e.session_id=?2 AND e.source_run_id=?3",params![id.to_string(),ctx.session_id.to_string(),ctx.source_run_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(sql)?;
+    let (execution, delivery, artifact, error) = row.ok_or_else(denied)?;
+    if error.as_deref().is_some_and(|code| {
+        !matches!(
+            code,
+            "COLLABORATION_TRANSPORT_UNAVAILABLE" | "INTERRUPTED_UNKNOWN"
+        )
+    }) {
+        return Err(denied());
+    }
+    if execution == "succeeded" && artifact.is_none() {
+        return Err(denied());
+    }
+    Ok(
+        json!({"exchange_id":id,"execution_state":execution,"delivery_state":delivery,"result_artifact_ref":artifact,"safe_error_code":error}),
+    )
+}
+
+pub(crate) fn artifact_metadata(
+    c: &rusqlite::Connection,
+    source: Uuid,
+    artifact: Uuid,
+) -> Result<Option<(String, u64, String)>, MachineError> {
+    if !has_runtime(c)? {
+        return Ok(None);
+    }
+    let metadata = c.query_row("SELECT r.created_at,r.byte_length,r.sha256 FROM collaboration_results r JOIN collaboration_exchanges e USING(exchange_id) WHERE e.source_run_id=?1 AND r.artifact_id=?2 AND e.execution_state='succeeded'",params![source.to_string(),artifact.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get::<_,String>(2)?))).optional().map_err(sql)?;
+    if let Some((_, length, digest)) = &metadata {
+        let (session, exchange, target, thread, turn):(String,String,String,String,String) = c.query_row("SELECT e.session_id,e.exchange_id,l.target_run_id,l.thread_id,l.turn_id FROM collaboration_results r JOIN collaboration_exchanges e USING(exchange_id) JOIN collaboration_execution_links l USING(exchange_id) WHERE e.source_run_id=?1 AND r.artifact_id=?2 AND r.safe_error_code IS NULL", params![source.to_string(),artifact.to_string()],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(sql)?;
+        let binding = crate::jcs::sha256_hex(
+            json!([
+                exchange,
+                target,
+                thread,
+                turn,
+                "succeeded",
+                artifact,
+                digest,
+                Value::Null
+            ])
+            .to_string()
+            .as_bytes(),
+        );
+        require_event(
+            c,
+            Uuid::parse_str(&session).map_err(|_| denied())?,
+            "collaboration_result_published",
+            &binding,
+        )?;
+        let reference = crate::storage_observation::content_reference(
+            c,
+            "collaboration_result",
+            &exchange,
+            "raw",
+        )?
+        .ok_or_else(denied)?;
+        if reference.sha256 != *digest
+            || reference.byte_length != *length
+            || reference.retired_operation.is_some()
+        {
+            return Err(denied());
+        }
+    }
+    Ok(metadata)
+}
+
+pub(crate) fn artifact_content(
+    c: &rusqlite::Connection,
+    source: Uuid,
+    artifact: Uuid,
+) -> Result<Option<Vec<u8>>, MachineError> {
+    if artifact_metadata(c, source, artifact)?.is_none() {
+        return Ok(None);
+    }
+    let exchange:String=c.query_row("SELECT e.exchange_id FROM collaboration_results r JOIN collaboration_exchanges e USING(exchange_id) WHERE e.source_run_id=?1 AND r.artifact_id=?2",params![source.to_string(),artifact.to_string()],|r|r.get(0)).map_err(sql)?;
+    crate::storage_observation::read_content(c, "collaboration_result", &exchange, "raw")
+}
+
+pub(crate) fn logical_artifacts(
+    c: &rusqlite::Connection,
+    source: Uuid,
+) -> Result<
+    std::collections::BTreeMap<Uuid, crate::orchestration::LogicalResultArtifact>,
+    MachineError,
+> {
+    let mut results = std::collections::BTreeMap::new();
+    if !has_runtime(c)? {
+        return Ok(results);
+    }
+    let mut s=c.prepare("SELECT r.artifact_id,r.byte_length,r.sha256,e.exchange_id FROM collaboration_results r JOIN collaboration_exchanges e USING(exchange_id) WHERE e.source_run_id=?1 AND r.artifact_id IS NOT NULL").map_err(sql)?;
+    let rows = s
+        .query_map([source.to_string()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, u64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(sql)?;
+    for row in rows {
+        let (id, length, digest, exchange) = row.map_err(sql)?;
+        let artifact = Uuid::parse_str(&id).map_err(|_| denied())?;
+        if artifact_metadata(c, source, artifact)?.is_none() {
+            return Err(denied());
+        }
+        let reference = crate::storage_observation::content_reference(
+            c,
+            "collaboration_result",
+            &exchange,
+            "raw",
+        )?
+        .ok_or_else(denied)?;
+        if reference.sha256 != digest
+            || reference.byte_length != length
+            || reference.retired_operation.is_some()
+        {
+            return Err(denied());
+        }
+        results.insert(
+            artifact,
+            crate::orchestration::LogicalResultArtifact {
+                byte_length: length,
+                sha256: digest,
+                retired: false,
+                published: true,
+                normalized: true,
+            },
+        );
+    }
+    Ok(results)
+}
+
+fn materialize_results(
+    root: &Path,
+    c: &rusqlite::Connection,
+    source: Uuid,
+) -> Result<(), MachineError> {
+    for (id, metadata) in logical_artifacts(c, source)? {
+        let bytes = artifact_content(c, source, id)?.ok_or_else(denied)?;
+        crate::storage_observation::write_shared_artifact(
+            root,
+            source,
+            id,
+            &metadata.sha256,
+            &bytes,
+        )?;
+    }
+    Ok(())
+}
+
+fn collect(
+    store: &mut OrchestrationStore,
+    ctx: &PrimaryCallContext,
+    payload: &Value,
+    limit: usize,
+) -> Result<Value, MachineError> {
+    let digest = request_digest(payload)?;
+    let root = store.collaboration_state_root().to_path_buf();
+    let tx = store.collaboration_transaction()?;
+    install(&tx)?;
+    materialize_results(&root, &tx, ctx.source_run_id)?;
+    if let Some(response) = replay(&tx, ctx, &digest)? {
+        return Ok(response);
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO collaboration_collection_positions(source_run_id) VALUES(?1)",
+        [ctx.source_run_id.to_string()],
+    )
+    .map_err(sql)?;
+    let (mut cursor,mut recovery):(i64,bool)=tx.query_row("SELECT recovery_sequence,recovery_next FROM collaboration_collection_positions WHERE source_run_id=?1",[ctx.source_run_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).map_err(sql)?;
+    let mut s=tx.prepare("SELECT o.sequence,o.exchange_id,o.acknowledged_at_ms IS NOT NULL FROM collaboration_result_outbox o JOIN collaboration_exchanges e USING(exchange_id) WHERE e.session_id=?1 AND o.source_run_id=?2 AND e.execution_state IN ('succeeded','failed','cancelled','expired','interrupted_unknown') ORDER BY o.sequence").map_err(sql)?;
+    let rows = s
+        .query_map(
+            params![ctx.session_id.to_string(), ctx.source_run_id.to_string()],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
+            },
+        )
+        .map_err(sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql)?;
+    drop(s);
+    let mut selected = std::collections::BTreeSet::new();
+    let mut results = Vec::new();
+    while results.len() < limit {
+        let fresh = rows
+            .iter()
+            .find(|(_, id, ack)| !ack && !selected.contains(id));
+        let old = rows
+            .iter()
+            .filter(|(_, id, ack)| *ack && !selected.contains(id))
+            .min_by_key(|(seq, _, _)| (*seq <= cursor, *seq));
+        let next = if recovery {
+            old.or(fresh)
+        } else {
+            fresh.or(old)
+        };
+        let Some((sequence, id, ack)) = next else {
+            break;
+        };
+        selected.insert(id.clone());
+        if *ack {
+            cursor = *sequence;
+        } else {
+            tx.execute("UPDATE collaboration_result_outbox SET acknowledged_at_ms=?2 WHERE exchange_id=?1 AND acknowledged_at_ms IS NULL",params![id,crate::scheduler::now_ms()?]).map_err(sql)?;
+            tx.execute("UPDATE collaboration_exchanges SET delivery_state='acknowledged' WHERE exchange_id=?1",[id]).map_err(sql)?;
+        }
+        recovery = !*ack;
+        results.push(exchange_result(
+            &tx,
+            ctx,
+            Uuid::parse_str(id).map_err(|_| denied())?,
+        )?);
+    }
+    tx.execute("UPDATE collaboration_collection_positions SET recovery_sequence=?2,recovery_next=?3 WHERE source_run_id=?1",params![ctx.source_run_id.to_string(),cursor,recovery]).map_err(sql)?;
+    let response = json!({"operation":"collect_collaboration_results_result","results":results});
+    retain_response(&tx, ctx, &digest, &response)?;
+    crate::orchestration::append_event(
+        &tx,
+        ctx.session_id,
+        "collaboration_collected",
+        &crate::jcs::sha256_hex(response.to_string().as_bytes()),
+        crate::scheduler::now_ms()?,
+    )?;
+    crate::storage_observation::commit(tx).map_err(sql)?;
+    crate::scheduler::notify(&root, ctx.source_run_id);
+    Ok(response)
+}
+
+/// Publish only the exact recorded execution; notification and projection can
+/// be repeated after the authoritative transaction without starting a Turn.
+pub(crate) fn settle_target(
+    state_root: &Path,
+    target: Uuid,
+    terminal: &crate::turn::TerminalTurn,
+) -> Result<(), MachineError> {
+    let mut store = OrchestrationStore::open(state_root)?;
+    if !has_runtime(store.collaboration_connection()?)? {
+        return Ok(());
+    }
+    let row:Option<(String,String,String)>=store.collaboration_connection()?.query_row("SELECT e.exchange_id,e.session_id,e.source_run_id FROM collaboration_execution_links l JOIN collaboration_exchanges e USING(exchange_id) WHERE l.target_run_id=?1 AND l.thread_id=?2 AND l.turn_id=?3",params![target.to_string(),terminal.thread_id,terminal.turn_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql)?;
+    let Some((exchange, session, source)) = row else {
+        return Ok(());
+    };
+    let source = Uuid::parse_str(&source).map_err(|_| denied())?;
+    let session = Uuid::parse_str(&session).map_err(|_| denied())?;
+    let bytes = match &terminal.final_response {
+        Some(crate::turn::FinalResponse::Inline { text }) => Some(text.as_bytes().to_vec()),
+        Some(crate::turn::FinalResponse::Artifact {
+            artifact_id,
+            byte_length,
+            sha256,
+            ..
+        }) => crate::semantic::read_final_response_artifact(
+            state_root,
+            target,
+            *artifact_id,
+            *byte_length,
+            sha256,
+        )?,
+        _ => None,
+    };
+    let valid = bytes.as_ref().is_some_and(|b| {
+        b.len() <= crate::turn::MAX_FINAL_RESPONSE_ARTIFACT_BYTES
+            && std::str::from_utf8(b).is_ok_and(|s| {
+                !s.contains(&state_root.to_string_lossy().to_string())
+                    && !s.contains(".dolgorae/")
+                    && !s.contains("controller-capability")
+                    && !s.contains("\"jsonrpc\":")
+            })
+    });
+    let (state, error) = match terminal.status.as_str() {
+        "completed" if valid => ("succeeded", None),
+        "completed" => ("failed", Some("COLLABORATION_TRANSPORT_UNAVAILABLE")),
+        "failed" => ("failed", Some("COLLABORATION_TRANSPORT_UNAVAILABLE")),
+        "interrupted" => ("cancelled", Some("INTERRUPTED_UNKNOWN")),
+        _ => ("interrupted_unknown", Some("INTERRUPTED_UNKNOWN")),
+    };
+    let dir = crate::run::run_root(state_root, source).join("artifacts");
+    if !dir.exists() {
+        crate::workspace::create_directory(&dir, 0o700).map_err(|_| denied())?;
+    }
+    let _quota = crate::artifact::ArtifactQuotaLease::acquire_for_run(&dir, source)?;
+    let old: bool = store
+        .collaboration_connection()?
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM collaboration_results WHERE exchange_id=?1)",
+            [&exchange],
+            |r| r.get(0),
+        )
+        .map_err(sql)?;
+    if !old
+        && state == "succeeded"
+        && crate::artifact::logical_artifact_bytes(&dir)?
+            .checked_add(bytes.as_ref().expect("valid bytes").len() as u64)
+            .is_none_or(|n| n > crate::artifact::MAX_RUN_ARTIFACT_BYTES)
+    {
+        return Err(failure("COLLABORATION_MAILBOX_FULL"));
+    }
+    let tx = store.collaboration_transaction()?;
+    let existing:Option<(Option<String>,String,Option<String>)>=tx.query_row("SELECT r.sha256,e.execution_state,r.safe_error_code FROM collaboration_results r JOIN collaboration_exchanges e USING(exchange_id) WHERE r.exchange_id=?1",[&exchange],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql)?;
+    let digest = if state == "succeeded" {
+        Some(crate::jcs::sha256_hex(bytes.as_ref().expect("valid bytes")))
+    } else {
+        None
+    };
+    if let Some((old_digest, old_state, old_error)) = existing {
+        if old_digest != digest || old_state != state || old_error.as_deref() != error {
+            return Err(denied());
+        }
+        drop(tx);
+        materialize_results(state_root, store.collaboration_connection()?, source)?;
+        return Ok(());
+    }
+    let artifact = if state == "succeeded" {
+        Some(Uuid::now_v7())
+    } else {
+        None
+    };
+    let now = crate::scheduler::now_ms()?;
+    if let Some(bytes) = bytes.as_ref().filter(|_| state == "succeeded") {
+        crate::storage_observation::put_content(
+            &tx,
+            "collaboration_result",
+            &exchange,
+            "raw",
+            bytes,
+        )?;
+    }
+    tx.execute("INSERT INTO collaboration_results(exchange_id,artifact_id,byte_length,sha256,safe_error_code,created_at) VALUES(?1,?2,?3,?4,?5,?6)",params![exchange,artifact.map(|id|id.to_string()),bytes.as_ref().filter(|_|state=="succeeded").map(|b|b.len() as u64),digest,error,crate::ledger::LedgerClock::timestamp(&crate::ledger::SystemLedgerClock::default())]).map_err(sql)?;
+    let changed=tx.execute("UPDATE collaboration_exchanges SET execution_state=?2,delivery_state='pending' WHERE exchange_id=?1 AND execution_state IN ('running','dispatching','interrupted_unknown')",params![exchange,state]).map_err(sql)?;
+    if changed != 1 {
+        return Err(denied());
+    }
+    tx.execute("INSERT INTO collaboration_result_outbox(exchange_id,source_run_id) VALUES(?1,?2) ON CONFLICT(exchange_id) DO UPDATE SET acknowledged_at_ms=NULL",params![exchange,source.to_string()]).map_err(sql)?;
+    crate::orchestration::append_event(
+        &tx,
+        session,
+        "collaboration_result_published",
+        &crate::jcs::sha256_hex(
+            json!([
+                exchange,
+                target,
+                terminal.thread_id,
+                terminal.turn_id,
+                state,
+                artifact,
+                digest,
+                error
+            ])
+            .to_string()
+            .as_bytes(),
+        ),
+        now,
+    )?;
+    crate::storage_observation::commit(tx).map_err(sql)?;
+    materialize_results(state_root, store.collaboration_connection()?, source)?;
+    notify_waiters(source);
+    crate::scheduler::notify(state_root, source);
+    crate::scheduler::notify(state_root, target);
+    Ok(())
+}
+
+/// Recover positive original acceptance and terminal evidence, never absence.
+pub(crate) fn reconcile_target(state_root: &Path, target: Uuid) -> Result<(), MachineError> {
+    let mut store = OrchestrationStore::open(state_root)?;
+    if !has_runtime(store.collaboration_connection()?)? {
+        return Ok(());
+    }
+    let mut statement=store.collaboration_connection()?.prepare("SELECT e.exchange_id,e.session_id FROM collaboration_exchanges e JOIN scheduler_claims s ON s.work_ref=e.exchange_id AND s.kind='consultation' WHERE e.target_run_id=?1 AND e.execution_state IN ('dispatching','running','interrupted_unknown') AND s.phase IN ('dispatching','unknown','accepted')").map_err(sql)?;
+    let rows = statement
+        .query_map([target.to_string()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql)?;
+    drop(statement);
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let snapshot = crate::snapshot::RunSnapshot::load(state_root, target, 0)?;
+    let manifest = &snapshot.manifest;
+    let (_, ledger) = crate::semantic::observe_run_ledger(state_root, target, true)?;
+    for (id, session) in rows {
+        let id = Uuid::parse_str(&id).map_err(|_| denied())?;
+        let session = Uuid::parse_str(&session).map_err(|_| denied())?;
+        if manifest.aggregate_binding.as_ref().is_none_or(|b| {
+            b.aggregate_id != session
+                || b.aggregate_kind != crate::domain::AggregateKind::OrchestratedSession
+                || b.member_kind != crate::run::AggregateMemberKind::Specialist
+        }) {
+            return Err(denied());
+        }
+        let captured = store.session(session)?;
+        let member = members(store.collaboration_connection()?, &captured)?
+            .into_iter()
+            .find(|m| m.run_id == target)
+            .ok_or_else(denied)?;
+        if member.agent_configuration != manifest.agent_configuration
+            || member.controller_binding != manifest.controller
+            || snapshot.controller != manifest.controller.identity
+        {
+            return Err(denied());
+        }
+        let record = execution_record(store.collaboration_connection()?, id)?;
+        let request = crate::turn::TurnRequest {
+            write: false,
+            idempotency_key: format!("collaboration-exchange:{id}"),
+            message: record.prompt,
+            images: Vec::new(),
+            model: manifest.model.clone(),
+            effort: None,
+            delivery: crate::turn::DeliveryMode::Submit,
+        };
+        let namespace = crate::operation::Namespace::submit(
+            &manifest.controller.identity,
+            &manifest.workspace_id,
+            target,
+            &request.idempotency_key,
+        )
+        .map_err(|_| denied())?;
+        let Some((accepted, generation)) =
+            crate::turn::verified_submit_acceptance(ledger.records(), &namespace, &request)
+                .map_err(|_| denied())?
+        else {
+            continue;
+        };
+        if generation > snapshot.projection.run_generation
+            || snapshot.projection.thread_id.as_deref() != Some(&accepted.thread_id)
+        {
+            return Err(denied());
+        }
+        let tx = store.collaboration_transaction()?;
+        link_turn(
+            &tx,
+            id,
+            target,
+            &accepted.thread_id,
+            &accepted.turn_id,
+            generation,
+        )?;
+        tx.execute("UPDATE scheduler_claims SET phase='accepted',turn_id=?2,safe_blocker=NULL WHERE kind='consultation' AND work_ref=?1 AND target_run_id=?3",params![id.to_string(),accepted.turn_id,target.to_string()]).map_err(sql)?;
+        crate::storage_observation::commit(tx).map_err(sql)?;
+        for payload in ledger
+            .payloads_of_kind(crate::audit::AuditKind::TurnTerminal)
+            .map_err(|_| denied())?
+        {
+            let mut terminal: crate::turn::TerminalTurn =
+                serde_json::from_value(payload).map_err(|_| denied())?;
+            if terminal.thread_id == accepted.thread_id && terminal.turn_id == accepted.turn_id {
+                if let Some(resolved) =
+                    crate::semantic::resolved_terminal(state_root, target, &accepted.turn_id)?
+                {
+                    if resolved.thread_id != terminal.thread_id
+                        || resolved.turn_id != terminal.turn_id
+                        || resolved.status != terminal.status
+                        || resolved.effort != terminal.effort
+                        || (terminal.final_response.is_some()
+                            && terminal.final_response != resolved.final_response)
+                    {
+                        return Err(denied());
+                    }
+                    terminal = resolved;
+                }
+                settle_target(state_root, target, &terminal)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+struct WaitRequest {
+    ids: Vec<Uuid>,
+    all: bool,
+    until: i64,
+    receipt: Option<Value>,
+}
+
+struct PendingWait {
+    id: Uuid,
+    ids: Vec<Uuid>,
+    all: bool,
+    until: i64,
+    generation: u64,
+    thread: String,
+    receipt: Option<Value>,
+}
+
+fn wait_source_current(
+    root: &Path,
+    run: Uuid,
+    thread: &str,
+    turn: &str,
+    generation: u64,
+) -> Result<bool, MachineError> {
+    let state = crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, root)
+        .load_state_projection(run)?;
+    Ok(state.run_generation == generation
+        && state.thread_id.as_deref() == Some(thread)
+        && state.active_turn_id.as_deref() == Some(turn)
+        && matches!(
+            state.lifecycle,
+            crate::domain::RunLifecycle::Running | crate::domain::RunLifecycle::WaitingInteraction
+        ))
+}
+
+fn active_wait_rows(
+    c: &rusqlite::Connection,
+    root: &Path,
+    now: i64,
+) -> Result<Vec<(String, String, String)>, MachineError> {
+    let mut result = Vec::new();
+    if !has_runtime(c)? {
+        return Ok(result);
+    }
+    let mut s=c.prepare("SELECT w.wait_id,w.source_run_id,w.source_thread_id,w.source_turn_id,w.source_generation,w.expires_at_ms,e.target_run_id FROM collaboration_waits w JOIN collaboration_wait_edges e USING(wait_id) JOIN collaboration_exchanges x USING(exchange_id) JOIN brokered_members b ON b.run_id=w.source_run_id AND b.session_id=w.session_id JOIN orchestrated_sessions s ON s.session_id=w.session_id WHERE w.active=1 AND b.membership_state='active' AND b.actor_residency='resident' AND s.status='active' AND x.execution_state IN ('queued','claimed','dispatching','running')").map_err(sql)?;
+    for row in s
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, u64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(sql)?
+    {
+        let (id, source, thread, turn, generation, until, target) = row.map_err(sql)?;
+        if until > now
+            && wait_source_current(
+                root,
+                Uuid::parse_str(&source).map_err(|_| denied())?,
+                &thread,
+                &turn,
+                generation,
+            )?
+        {
+            result.push((id, source, target));
+        }
+    }
+    Ok(result)
+}
+
+fn prune_waits(tx: &Transaction<'_>, root: &Path, now: i64) -> Result<(), MachineError> {
+    if !has_runtime(tx)? {
+        return Ok(());
+    }
+    let mut s=tx.prepare("SELECT wait_id,source_run_id,source_thread_id,source_turn_id,source_generation,expires_at_ms FROM collaboration_waits WHERE active=1").map_err(sql)?;
+    let rows = s
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, u64>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql)?;
+    drop(s);
+    for (id, source, thread, turn, generation, until) in rows {
+        if until <= now
+            || !wait_source_current(
+                root,
+                Uuid::parse_str(&source).map_err(|_| denied())?,
+                &thread,
+                &turn,
+                generation,
+            )?
+        {
+            tx.execute(
+                "DELETE FROM collaboration_wait_edges WHERE wait_id=?1",
+                [&id],
+            )
+            .map_err(sql)?;
+            tx.execute(
+                "UPDATE collaboration_waits SET active=0 WHERE wait_id=?1",
+                [id],
+            )
+            .map_err(sql)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn reconcile_waits(root: &Path) -> Result<(), MachineError> {
+    let mut store = OrchestrationStore::open(root)?;
+    if !has_runtime(store.collaboration_connection()?)? {
+        return Ok(());
+    }
+    let tx = store.collaboration_transaction()?;
+    prune_waits(&tx, root, crate::scheduler::now_ms()?)?;
+    crate::storage_observation::commit(tx).map_err(sql)
+}
+
+fn graph_visit(
+    node: &str,
+    edges: &[(String, String)],
+    path: &mut Vec<String>,
+) -> Result<usize, MachineError> {
+    if path.iter().any(|id| id == node) {
+        return Err(failure("COLLABORATION_WAIT_CYCLE"));
+    }
+    path.push(node.to_owned());
+    let mut depth = 0;
+    for (_, target) in edges.iter().filter(|(source, _)| source == node) {
+        depth = depth.max(1 + graph_visit(target, edges, path)?);
+    }
+    path.pop();
+    Ok(depth)
+}
+
+fn begin_wait(
+    tx: &Transaction<'_>,
+    root: &Path,
+    ctx: &PrimaryCallContext,
+    request: WaitRequest,
+    digest: &str,
+) -> Result<PendingWait, MachineError> {
+    let WaitRequest {
+        ids,
+        all,
+        until,
+        receipt,
+    } = request;
+    install_runtime(tx)?;
+    let now = crate::scheduler::now_ms()?;
+    prune_waits(tx, root, now)?;
+    let policy = policy(tx, ctx.session_id)?;
+    let source = crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, root)
+        .load_state_projection(ctx.source_run_id)?;
+    let thread = source.thread_id.clone().ok_or_else(denied)?;
+    if source.active_turn_id.as_deref() != Some(&ctx.source_turn_id) {
+        return Err(denied());
+    }
+    let existing:Option<(String,String,i64,bool)>=tx.query_row("SELECT wait_id,request_sha256,expires_at_ms,active FROM collaboration_waits WHERE session_id=?1 AND source_run_id=?2 AND source_turn_id=?3 AND call_id=?4",params![ctx.session_id.to_string(),ctx.source_run_id.to_string(),ctx.source_turn_id,ctx.source_tool_call_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(sql)?;
+    let (wait_id, until) = if let Some((id, retained, until, active)) = existing {
+        if retained != digest {
+            return Err(failure("COLLABORATION_IDEMPOTENCY_CONFLICT"));
+        }
+        let id = Uuid::parse_str(&id).map_err(|_| denied())?;
+        if active {
+            return Ok(PendingWait {
+                id,
+                ids,
+                all,
+                until,
+                generation: source.run_generation,
+                thread,
+                receipt,
+            });
+        }
+        (id, until)
+    } else {
+        (Uuid::now_v7(), until)
+    };
+    let count: u64 = tx
+        .query_row(
+            "SELECT count(*) FROM collaboration_waits WHERE source_run_id=?1 AND active=1",
+            [ctx.source_run_id.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(sql)?;
+    if count
+        >= policy["max_blocking_waits_per_run"]
+            .as_u64()
+            .ok_or_else(denied)?
+    {
+        return Err(failure("COLLABORATION_NOT_ALLOWED"));
+    }
+    let mut edges = active_wait_rows(tx, root, now)?
+        .into_iter()
+        .map(|(_, s, t)| (s, t))
+        .collect::<Vec<_>>();
+    let mut targets = Vec::new();
+    for id in &ids {
+        let result = exchange_result(tx, ctx, *id)?;
+        if !terminal(result["execution_state"].as_str().ok_or_else(denied)?) {
+            let target: String = tx
+                .query_row(
+                    "SELECT target_run_id FROM collaboration_exchanges WHERE exchange_id=?1",
+                    [id.to_string()],
+                    |r| r.get(0),
+                )
+                .map_err(sql)?;
+            edges.push((ctx.source_run_id.to_string(), target.clone()));
+            targets.push((*id, target));
+        }
+    }
+    for (source, _) in &edges {
+        if graph_visit(source, &edges, &mut Vec::new())?
+            > policy["max_blocking_depth"].as_u64().ok_or_else(denied)? as usize
+        {
+            return Err(failure("COLLABORATION_DEPTH_EXCEEDED"));
+        }
+    }
+    let id = wait_id;
+    tx.execute("INSERT INTO collaboration_waits(wait_id,session_id,source_run_id,source_thread_id,source_turn_id,source_generation,call_id,request_sha256,expires_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(wait_id) DO UPDATE SET source_generation=excluded.source_generation,source_thread_id=excluded.source_thread_id,active=1",params![id.to_string(),ctx.session_id.to_string(),ctx.source_run_id.to_string(),thread,ctx.source_turn_id,source.run_generation,ctx.source_tool_call_id,digest,until]).map_err(sql)?;
+    for (exchange, target) in targets {
+        tx.execute("INSERT INTO collaboration_wait_edges(wait_id,exchange_id,target_run_id) VALUES(?1,?2,?3)",params![id.to_string(),exchange.to_string(),target]).map_err(sql)?;
+    }
+    crate::orchestration::append_event(
+        tx,
+        ctx.session_id,
+        "collaboration_wait_started",
+        &crate::jcs::sha256_hex(
+            json!([id, ctx.source_run_id, ctx.source_turn_id, ids, until])
+                .to_string()
+                .as_bytes(),
+        ),
+        now,
+    )?;
+    Ok(PendingWait {
+        id,
+        ids,
+        all,
+        until,
+        generation: source.run_generation,
+        thread,
+        receipt,
+    })
+}
+
+fn await_registered(
+    store: &mut OrchestrationStore,
+    ctx: &PrimaryCallContext,
+    payload: &Value,
+    wait: PendingWait,
+    alive: &dyn Fn() -> bool,
+) -> Result<Value, MachineError> {
+    let root = store.collaboration_state_root().to_path_buf();
+    let digest = request_digest(payload)?;
+    for id in &wait.ids {
+        let target: String = store
+            .collaboration_connection()?
+            .query_row(
+                "SELECT target_run_id FROM collaboration_exchanges WHERE exchange_id=?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        crate::scheduler::notify(&root, Uuid::parse_str(&target).map_err(|_| denied())?);
+    }
+    crate::scheduler::notify(&root, ctx.source_run_id);
+    let signal = local_wait_signal(ctx.source_run_id);
+    let outcome = (|| loop {
+        if !alive() {
+            return Err(failure("INTERRUPTED_UNKNOWN"));
+        }
+        let epoch = *signal.epoch.lock().map_err(|_| denied())?;
+        #[cfg(test)]
+        signal
+            .observations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let authorized:bool=store.collaboration_connection()?.query_row("SELECT EXISTS(SELECT 1 FROM brokered_members m JOIN orchestrated_sessions s USING(session_id) WHERE m.session_id=?1 AND m.run_id=?2 AND m.membership_state='active' AND m.actor_residency='resident' AND s.status='active')",params![ctx.session_id.to_string(),ctx.source_run_id.to_string()],|r|r.get(0)).map_err(sql)?;
+        if !authorized
+            || !wait_source_current(
+                &root,
+                ctx.source_run_id,
+                &wait.thread,
+                &ctx.source_turn_id,
+                wait.generation,
+            )?
+        {
+            return Err(failure("INTERRUPTED_UNKNOWN"));
+        }
+        let mut completed = Vec::new();
+        let mut pending = Vec::new();
+        for id in &wait.ids {
+            let row = exchange_result(store.collaboration_connection()?, ctx, *id)?;
+            if terminal(row["execution_state"].as_str().ok_or_else(denied)?) {
+                completed.push(row);
+            } else {
+                pending.push(*id);
+            }
+        }
+        let now = crate::scheduler::now_ms()?;
+        if pending.is_empty() || (!wait.all && !completed.is_empty()) || now >= wait.until {
+            materialize_results(&root, store.collaboration_connection()?, ctx.source_run_id)?;
+            return Ok(wait.receipt.clone().unwrap_or_else(||json!({"operation":"await_consultations_result","completed":completed,"pending":pending})));
+        }
+        if !alive() {
+            return Err(failure("INTERRUPTED_UNKNOWN"));
+        }
+        let guard = signal.epoch.lock().map_err(|_| denied())?;
+        drop(
+            signal
+                .changed
+                .wait_timeout_while(
+                    guard,
+                    std::time::Duration::from_millis(
+                        u64::try_from(wait.until - now).map_err(|_| denied())?,
+                    ),
+                    |current| *current == epoch,
+                )
+                .map_err(|_| denied())?,
+        );
+    })();
+    let tx = store.collaboration_transaction()?;
+    tx.execute(
+        "DELETE FROM collaboration_wait_edges WHERE wait_id=?1",
+        [wait.id.to_string()],
+    )
+    .map_err(sql)?;
+    tx.execute(
+        "UPDATE collaboration_waits SET active=0 WHERE wait_id=?1",
+        [wait.id.to_string()],
+    )
+    .map_err(sql)?;
+    let response = match outcome {
+        Ok(response) => {
+            if wait.receipt.is_none() {
+                if let Some(original) = replay(&tx, ctx, &digest)? {
+                    crate::storage_observation::commit(tx).map_err(sql)?;
+                    return Ok(original);
+                }
+                retain_response(&tx, ctx, &digest, &response)?;
+            }
+            Ok(response)
+        }
+        Err(error) => Err(error),
+    };
+    crate::orchestration::append_event(
+        &tx,
+        ctx.session_id,
+        "collaboration_wait_ended",
+        &crate::jcs::sha256_hex(wait.id.as_bytes()),
+        crate::scheduler::now_ms()?,
+    )?;
+    crate::storage_observation::commit(tx).map_err(sql)?;
+    for id in &wait.ids {
+        let target: String = store
+            .collaboration_connection()?
+            .query_row(
+                "SELECT target_run_id FROM collaboration_exchanges WHERE exchange_id=?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        crate::scheduler::notify(&root, Uuid::parse_str(&target).map_err(|_| denied())?);
+    }
+    crate::scheduler::notify(&root, ctx.source_run_id);
+    response
+}
+
+/// Read-only consumers validate the original active source identity again;
+/// stale edges never boost work or retain an otherwise safe idle actor.
+pub(crate) fn dependency_unblock(
+    c: &rusqlite::Connection,
+    exchange: Uuid,
+) -> Result<bool, MachineError> {
+    if !has_runtime(c)? {
+        return Ok(false);
+    }
+    let root = c
+        .path()
+        .and_then(|p| Path::new(p).parent()?.parent())
+        .ok_or_else(denied)?;
+    let rows = active_wait_rows(c, root, crate::scheduler::now_ms()?)?;
+    let wait_ids = rows
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut s = c
+        .prepare("SELECT wait_id FROM collaboration_wait_edges WHERE exchange_id=?1")
+        .map_err(sql)?;
+    for id in s
+        .query_map([exchange.to_string()], |r| r.get::<_, String>(0))
+        .map_err(sql)?
+    {
+        if wait_ids.contains(&id.map_err(sql)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn source_waiting(c: &rusqlite::Connection, source: Uuid) -> Result<bool, MachineError> {
+    if !has_runtime(c)? {
+        return Ok(false);
+    }
+    let root = c
+        .path()
+        .and_then(|p| Path::new(p).parent()?.parent())
+        .ok_or_else(denied)?;
+    Ok(active_wait_rows(c, root, crate::scheduler::now_ms()?)?
+        .iter()
+        .any(|(_, run, _)| run == &source.to_string()))
+}
+
+struct SourceProvenance {
+    task: Uuid,
+    priority: u8,
+    deadline: i64,
+    parent: Option<Uuid>,
+    depth: u8,
+}
+
+fn source_provenance(
+    tx: &Transaction<'_>,
+    context: &PrimaryCallContext,
+    source: &crate::orchestration::BrokeredMemberSnapshot,
+) -> Result<SourceProvenance, MachineError> {
+    if let Some((task, accepted)) = crate::orchestration::successor_task_for_turn(
+        tx,
+        context.session_id,
+        context.source_run_id,
+        &context.source_turn_id,
+    )? {
+        let accepted_sha = crate::jcs::sha256_hex(accepted.as_bytes());
+        let accepted: crate::delegation_identity::AcceptedTask =
+            serde_json::from_str(&accepted).map_err(|_| denied())?;
+        accepted.digest()?;
+        let accepted_json_digest: String = tx
+            .query_row(
+                "SELECT accepted_request_sha256 FROM brokered_task_acceptances WHERE task_id=?1",
+                [task.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(sql)?;
+        if accepted_sha != accepted_json_digest {
+            return Err(denied());
+        }
+        let (task_body, contexts, retained_target) =
+            crate::engagement::accepted_task_content(tx, task)?.ok_or_else(denied)?;
+        let original: crate::task_request::SpecialistTaskRequest =
+            serde_json::from_slice(&task_body).map_err(|_| denied())?;
+        let facts = crate::orchestration::successor_task(tx, context.session_id, task)?
+            .ok_or_else(denied)?;
+        let marker: Value = serde_json::from_str(&facts.request_json).map_err(|_| denied())?;
+        let root_deadline = marker["deadline_seconds"].as_u64().ok_or_else(denied)?;
+        if !crate::successor_capture::verify_accepted_assignment(
+            source.run_id,
+            &original,
+            &accepted,
+            root_deadline,
+            &format!("sha256:{}", facts.source_request_sha256),
+        )? {
+            return Err(denied());
+        }
+        crate::successor_capture::AcceptedTaskContents {
+            task_body,
+            contexts,
+            target: retained_target,
+        }
+        .prompt(&accepted, &accepted.execution_intent, 1)?;
+        let expected_role = source
+            .agent_configuration
+            .instructions
+            .delegation()
+            .map_or_else(
+                || format!("sha256:{}", source.role_snapshot_sha256),
+                |instructions| instructions.role_snapshot_digest.clone(),
+            );
+        let expected_configuration = source
+            .agent_configuration
+            .admitted_configuration
+            .as_ref()
+            .map_or_else(
+                || Ok(format!("sha256:{}", source.agent_configuration_sha256)),
+                |configuration| configuration.digest(),
+            )?;
+        if accepted.role_snapshot_digest != expected_role
+            || accepted.agent_configuration_digest != expected_configuration
+            || expected_role != format!("sha256:{}", source.role_snapshot_sha256)
+        {
+            return Err(denied());
+        }
+        let priority = root_priority(
+            tx,
+            context,
+            task,
+            &accepted_sha,
+            &facts.source_request_sha256,
+        )?;
+
+        let origin: i64 = tx
+            .query_row(
+                "SELECT created_at_ms FROM brokered_tasks WHERE task_id=?1",
+                [task.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        let deadline = origin
+            .checked_add(
+                i64::try_from(root_deadline)
+                    .map_err(|_| denied())?
+                    .checked_mul(1000)
+                    .ok_or_else(denied)?,
+            )
+            .ok_or_else(denied)?;
+        return Ok(SourceProvenance {
+            task,
+            priority,
+            deadline,
+            parent: None,
+            depth: 1,
+        });
+    }
+    let row:Option<(String,String,u8,i64,u8)>=tx.query_row("SELECT e.exchange_id,e.root_task_id,e.root_priority,e.deadline_ms,coalesce(l.hop_depth,1) FROM collaboration_execution_links x JOIN collaboration_exchanges e USING(exchange_id) LEFT JOIN collaboration_lineage l USING(exchange_id) WHERE e.session_id=?1 AND x.target_run_id=?2 AND x.turn_id=?3 AND e.execution_state='running'",params![context.session_id.to_string(),context.source_run_id.to_string(),context.source_turn_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(sql)?;
+    let (parent, task, priority, deadline, depth) = row.ok_or_else(denied)?;
+    let parent = Uuid::parse_str(&parent).map_err(|_| denied())?;
+    execution_record(tx, parent)?;
+    if depth >= 8 {
+        return Err(failure("COLLABORATION_DEPTH_EXCEEDED"));
+    }
+    Ok(SourceProvenance {
+        task: Uuid::parse_str(&task).map_err(|_| denied())?,
+        priority,
+        deadline,
+        parent: Some(parent),
+        depth: depth + 1,
+    })
+}
+
+pub(crate) fn expire_exchange(
+    tx: &Transaction<'_>,
+    exchange: Uuid,
+    now: i64,
+) -> Result<(), MachineError> {
+    install(tx)?;
+    let row:Option<(String,String)>=tx.query_row("SELECT session_id,source_run_id FROM collaboration_exchanges WHERE exchange_id=?1 AND execution_state='queued' AND deadline_ms<=?2",params![exchange.to_string(),now],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(sql)?;
+    let Some((session, source)) = row else {
+        return Err(denied());
+    };
+    tx.execute("UPDATE collaboration_exchanges SET execution_state='expired',delivery_state='pending' WHERE exchange_id=?1",[exchange.to_string()]).map_err(sql)?;
+    tx.execute("INSERT INTO collaboration_results(exchange_id,safe_error_code,created_at) VALUES(?1,'COLLABORATION_TRANSPORT_UNAVAILABLE',?2)",params![exchange.to_string(),crate::ledger::LedgerClock::timestamp(&crate::ledger::SystemLedgerClock::default())]).map_err(sql)?;
+    tx.execute(
+        "INSERT INTO collaboration_result_outbox(exchange_id,source_run_id) VALUES(?1,?2)",
+        params![exchange.to_string(), source],
+    )
+    .map_err(sql)?;
+    crate::orchestration::append_event(
+        tx,
+        Uuid::parse_str(&session).map_err(|_| denied())?,
+        "collaboration_expired",
+        &crate::jcs::sha256_hex(exchange.as_bytes()),
+        now,
+    )
+}
+
+pub(crate) fn unknown_exchange(tx: &Transaction<'_>, exchange: Uuid) -> Result<(), MachineError> {
+    install(tx)?;
+    tx.execute("UPDATE collaboration_exchanges SET execution_state='interrupted_unknown',delivery_state='pending' WHERE exchange_id=?1 AND execution_state='dispatching'",[exchange.to_string()]).map_err(sql)?;
+    tx.execute("INSERT OR IGNORE INTO collaboration_result_outbox(exchange_id,source_run_id) SELECT exchange_id,source_run_id FROM collaboration_exchanges WHERE exchange_id=?1 AND execution_state='interrupted_unknown'",[exchange.to_string()]).map_err(sql)?;
+    Ok(())
+}
+
+fn call_thread(c: &rusqlite::Connection, source: Uuid) -> Result<String, MachineError> {
+    let root = c
+        .path()
+        .and_then(|p| Path::new(p).parent()?.parent())
+        .ok_or_else(denied)?;
+    crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, root)
+        .load_state_projection(source)?
+        .thread_id
+        .ok_or_else(denied)
+}
+
+/// Post-commit central-runtime hint. Neither a missing Worker nor a lost hint
+/// changes a delivery decision; the global scan and transport bound repair it.
+pub(crate) fn wake_waiter(root: &Path, source: Uuid) {
+    let Ok(store) = OrchestrationStore::open_observer(root) else {
+        return;
+    };
+    let Ok(c) = store.collaboration_connection() else {
+        return;
+    };
+    if !has_runtime(c).unwrap_or(false) {
+        return;
+    }
+    let pending: bool = c
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM collaboration_waits WHERE source_run_id=?1 AND active=1)",
+            [source.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    drop(store);
+    if pending {
+        let _ = crate::worker::call_run_worker_bounded(
+            root,
+            source,
+            crate::darwin::DarwinSystem.current_uid(),
+            None,
+            std::time::Duration::from_secs(1),
+            |expected| crate::worker::ControlRequestV1::CollaborationWake {
+                expected,
+                caller: None,
+            },
+        );
+    }
+}
+
+struct WaitSignal {
+    epoch: std::sync::Mutex<u64>,
+    changed: std::sync::Condvar,
+    #[cfg(test)]
+    observations: std::sync::atomic::AtomicU64,
+}
+// Weak entries are hints only. The actual authorized wait call owns its signal;
+// neither restart nor a lost entry changes durable exchange or wait authority.
+type LocalWaitSignals =
+    std::sync::Mutex<std::collections::BTreeMap<Uuid, std::sync::Weak<WaitSignal>>>;
+fn local_wait_signals() -> &'static LocalWaitSignals {
+    static SIGNALS: std::sync::OnceLock<LocalWaitSignals> = std::sync::OnceLock::new();
+    SIGNALS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+fn local_wait_signal(run: Uuid) -> std::sync::Arc<WaitSignal> {
+    let mut signals = local_wait_signals()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    signals.retain(|_, signal| signal.strong_count() > 0);
+    if let Some(signal) = signals.get(&run).and_then(std::sync::Weak::upgrade) {
+        return signal;
+    }
+    let signal = std::sync::Arc::new(WaitSignal {
+        epoch: std::sync::Mutex::new(0),
+        changed: std::sync::Condvar::new(),
+        #[cfg(test)]
+        observations: std::sync::atomic::AtomicU64::new(0),
+    });
+    signals.insert(run, std::sync::Arc::downgrade(&signal));
+    signal
+}
+pub(crate) fn notify_waiters(run: Uuid) {
+    let signal = local_wait_signals()
+        .lock()
+        .ok()
+        .and_then(|signals| signals.get(&run).and_then(std::sync::Weak::upgrade));
+    if let Some(signal) = signal
+        && let Ok(mut epoch) = signal.epoch.lock()
+    {
+        *epoch = epoch.wrapping_add(1);
+        signal.changed.notify_all();
+    }
+}
+#[cfg(test)]
+pub(crate) fn wait_observations(run: Uuid) -> u64 {
+    local_wait_signals()
+        .lock()
+        .unwrap()
+        .get(&run)
+        .and_then(std::sync::Weak::upgrade)
+        .map_or(0, |signal| {
+            signal
+                .observations
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
+}
+
+pub(crate) fn notify_exchange(root: &Path, exchange: Uuid) -> Result<(), MachineError> {
+    let store = OrchestrationStore::open_observer(root)?;
+    let source: String = store
+        .collaboration_connection()?
+        .query_row(
+            "SELECT source_run_id FROM collaboration_exchanges WHERE exchange_id=?1",
+            [exchange.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(sql)?;
+    let source = Uuid::parse_str(&source).map_err(|_| denied())?;
+    notify_waiters(source);
+    crate::scheduler::notify(root, source);
+    Ok(())
 }

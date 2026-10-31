@@ -12290,7 +12290,7 @@ fn observe_caller_ledger(
     observe_run_ledger(state_root, run_id, false)
 }
 
-fn observe_run_ledger(
+pub(crate) fn observe_run_ledger(
     state_root: &Path,
     run_id: Uuid,
     require_complete: bool,
@@ -17026,6 +17026,9 @@ pub(crate) fn resettle_member_tasks(
     member_run_id: Uuid,
     owner: SettlementOwner,
 ) -> Result<(), MachineError> {
+    if matches!(owner, SettlementOwner::Managed { .. }) {
+        crate::collaboration::reconcile_target(state_root, member_run_id)?;
+    }
     let store = crate::engagement::EngagementStore::open_read_only(
         &crate::engagement::EngagementStore::workspace_database_path(state_root),
     )?;
@@ -17260,6 +17263,9 @@ pub(crate) fn settle_bound_successor_task(
     let turn_id = terminal.turn_id.as_str();
     // The resolved response is durable before any settlement observes it.
     record_resolved_terminal(state_root, member_run_id, terminal)?;
+    if matches!(owner, SettlementOwner::Managed { .. }) {
+        crate::collaboration::settle_target(state_root, member_run_id, terminal)?;
+    }
     let store = crate::engagement::EngagementStore::open_read_only(
         &crate::engagement::EngagementStore::workspace_database_path(state_root),
     )?;
@@ -17648,7 +17654,7 @@ fn writer_unobservable(error: MachineError) -> MachineError {
 /// The worker's artifact store writes `<run_dir>/artifacts/<id>.bin`; the reference
 /// names the exact length and digest, so an unreadable, oversized or mismatched
 /// artifact is a typed-unavailable result rather than fabricated bytes.
-fn read_final_response_artifact(
+pub(crate) fn read_final_response_artifact(
     state_root: &Path,
     run_id: Uuid,
     artifact_id: Uuid,
@@ -17662,15 +17668,26 @@ fn read_final_response_artifact(
     let path = run_root(state_root, run_id)
         .join("artifacts")
         .join(format!("{artifact_id}.bin"));
-    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+    else {
         return Ok(None);
     };
+    let metadata = file
+        .metadata()
+        .map_err(|_| internal("result artifact metadata is unavailable"))?;
     if !metadata.is_file() || metadata.len() != byte_length {
         return Ok(None);
     }
-    let Ok(bytes) = std::fs::read(&path) else {
+    let mut bytes = Vec::new();
+    if std::io::Read::read_to_end(&mut std::io::Read::take(file, byte_length + 1), &mut bytes)
+        .is_err()
+    {
         return Ok(None);
-    };
+    }
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != byte_length
         || crate::jcs::sha256_hex(&bytes) != sha256.trim_start_matches("sha256:")
     {
@@ -19118,11 +19135,14 @@ pub(crate) fn schedule_actor(
         snapshot.projection.run_generation.max(1),
     )
     .map_err(|e| e.machine_error(actor.run, state_root))?;
+    if matches!(actor.owner, Owner::Managed(_)) {
+        crate::collaboration::reconcile_waits(state_root)?;
+    }
     reconcile_scheduler_writer(view, state_root, actor, &lifecycle)?;
     let snapshot = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
     let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
     let now = scheduler::now_ms()?;
-    let (idle_since, policy) = store.transact(|tx| {
+    let (idle_since, policy, expired_sources) = store.transact(|tx| {
         scheduler::install(tx)?;
         let policy = scheduler::policy(tx, actor.owner)?;
         let idle_since = scheduler::observe_actor(
@@ -19133,9 +19153,16 @@ pub(crate) fn schedule_actor(
             now,
         )?;
         scheduler::reconcile_claim(tx, actor, &snapshot, now, state_root)?;
-        scheduler::expire_queued(tx, actor, now)?;
-        Ok((idle_since, policy))
+        let mut expired_sources = scheduler::expire_queued(tx, actor, now)?;
+        if let Some(source) = scheduler::reconcile_consultation_dispatch(tx, actor, now)? {
+            expired_sources.push(source);
+        }
+        Ok((idle_since, policy, expired_sources))
     })?;
+    for source in expired_sources {
+        crate::collaboration::notify_waiters(source);
+        scheduler::notify(state_root, source);
+    }
     if snapshot.projection.lifecycle != RunLifecycle::Idle
         || snapshot.projection.active_turn_id.is_some()
         || !snapshot.projection.pending_requests.is_empty()
@@ -19617,9 +19644,28 @@ pub(crate) fn schedule_actor(
                     message: "consultation dispatch requires reconciliation".into(),
                 },
             };
+            let execution = crate::run::RunStore::new(SystemWorkspacePlatform, state_root)
+                .load_state_projection(actor.run)?;
             store.transact(|tx| {
+                if let crate::delegation_service::MemberDispatchOutcome::Accepted { turn_ref } =
+                    &outcome
+                {
+                    crate::collaboration::link_turn(
+                        tx,
+                        permit.work,
+                        actor.run,
+                        execution
+                            .thread_id
+                            .as_deref()
+                            .ok_or_else(|| scheduler::error("consultation_thread_missing"))?,
+                        turn_ref,
+                        execution.run_generation,
+                    )?;
+                }
                 scheduler::finish_dispatch(tx, &permit, &outcome, scheduler::now_ms()?)
             })?;
+            crate::collaboration::notify_exchange(state_root, permit.work)?;
+            crate::collaboration::reconcile_target(state_root, actor.run)?;
         }
         return Ok(());
     }
@@ -20291,6 +20337,9 @@ fn reconcile_scheduler_writer(
         Owner::External(engagement_id) => SettlementOwner::External { engagement_id },
     };
     recover_scheduler_assignment(state_root, actor)?;
+    if matches!(actor.owner, Owner::Managed(_)) {
+        crate::collaboration::reconcile_target(state_root, actor.run)?;
+    }
     resettle_member_tasks(state_root, actor.run, owner)?;
     let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
     let exists:bool=store.connection().query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_claims')",[],|r|r.get(0)).map_err(crate::scheduler::sql)?;

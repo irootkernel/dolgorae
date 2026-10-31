@@ -8128,6 +8128,7 @@ pub(crate) mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     /// What one member Run start was handed.
     struct StartRecord {
@@ -17432,26 +17433,66 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn collaboration_unavailable_operations_and_oversized_input_have_no_effects() {
-        let (fixture, _, _, _, context, request) = collaboration_fixture();
+    fn collaboration_invalid_wait_bounds_and_oversized_input_have_no_effects() {
+        let (fixture, session, source, target, mut context, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        let (owned, terminal) = collaboration_accept(
+            &fixture,
+            session,
+            source,
+            target,
+            &mut context,
+            &request,
+            "bounds-owned",
+        );
+        crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
         let mut store =
             crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
         let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let counts = || {
+            [
+                "collaboration_exchanges",
+                "collaboration_mailbox",
+                "collaboration_tool_receipts",
+                "collaboration_waits",
+                "orchestration_events",
+            ]
+            .map(|table| {
+                connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
+                        r.get::<_, u64>(0)
+                    })
+                    .unwrap()
+            })
+        };
+        let unchanged = counts();
         let mut blocking = request.clone();
         blocking["blocking"] = json!(true);
-        for payload in [
+        blocking["deadline_seconds"] = json!(0);
+        let repeated = owned;
+        for (index, payload) in [
             blocking,
-            json!({"operation":"collect_collaboration_results","limit":64}),
-        ] {
-            let error = crate::collaboration::admit(&mut store, &context, &payload, &mut effects)
-                .unwrap_err();
-            assert_eq!(error.code, "COLLABORATION_TRANSPORT_UNAVAILABLE");
+            json!({"operation":"collect_collaboration_results","limit":0}),
+            json!({"operation":"await_consultations","exchange_ids":[],"return_when":"all","transport_wait_seconds":1}),
+            json!({"operation":"await_consultations","exchange_ids":[Uuid::nil()],"return_when":"all","transport_wait_seconds":1}),
+            json!({"operation":"await_consultations","exchange_ids":[repeated,repeated],"return_when":"all","transport_wait_seconds":1}),
+            json!({"operation":"await_consultations","exchange_ids":(0..17).map(|_|Uuid::now_v7()).collect::<Vec<_>>(),"return_when":"all","transport_wait_seconds":1}),
+            json!({"operation":"await_consultations","exchange_ids":[repeated],"return_when":"none","transport_wait_seconds":1}),
+            json!({"operation":"await_consultations","exchange_ids":[repeated],"return_when":"all","transport_wait_seconds":0}),
+            json!({"operation":"await_consultations","exchange_ids":[repeated],"return_when":"all","transport_wait_seconds":61}),
+        ].into_iter().enumerate() {
+            context.source_tool_call_id = format!("invalid-bounds-{index}");
             assert_eq!(
-                crate::collaboration::error_result(&error)["retryable"],
-                false
+                crate::collaboration::admit(&mut store, &context, &payload, &mut effects)
+                    .unwrap_err()
+                    .code,
+                "COLLABORATION_NOT_ALLOWED"
             );
+            assert_eq!(counts(), unchanged);
         }
-        let mut oversized = request;
+        context.source_tool_call_id = "bounded-input".into();
+        let mut oversized = request.clone();
         oversized["objective"] = json!("x".repeat(65_500));
         oversized["context_refs"] = json!([Uuid::now_v7()]);
         assert!(oversized.to_string().len() > 65_536);
@@ -17459,13 +17500,42 @@ pub(crate) mod tests {
             crate::collaboration::admit(&mut store, &context, &oversized, &mut effects).is_err()
         );
         assert_eq!(effects.context_resolutions, 0);
-        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let before = counts();
+        // Model an old accepted root; its request and priority capture stay exact.
+        let root: String = connection
+            .query_row(
+                "SELECT root_task_id FROM collaboration_root_priorities",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let original: i64 = connection
+            .query_row(
+                "SELECT created_at_ms FROM brokered_tasks WHERE task_id=?1",
+                [&root],
+                |r| r.get(0),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE brokered_tasks SET created_at_ms=?1 WHERE task_id=?2",
+                rusqlite::params![original - 3_600_000, root],
+            )
+            .unwrap();
+        context.source_tool_call_id = "expired-root".into();
+        assert_eq!(
+            crate::collaboration::admit(&mut store, &context, &request, &mut effects)
+                .unwrap_err()
+                .code,
+            "COLLABORATION_NOT_ALLOWED"
+        );
+        assert_eq!(counts(), before);
         assert_eq!(
             connection
                 .query_row("SELECT count(*) FROM collaboration_exchanges", [], |r| r
                     .get::<_, u64>(0))
                 .unwrap(),
-            0
+            1
         );
     }
 
@@ -17887,6 +17957,7 @@ pub(crate) mod tests {
     #[test]
     fn collaboration_transactions_preserve_mail_on_failure_and_enforce_pair_capacity() {
         let (fixture, _session, source, _target, mut context, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
         let mut store =
             crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
         let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
@@ -17982,7 +18053,7 @@ pub(crate) mod tests {
             crate::collaboration::admit(&mut store, &context, &wait, &mut effects)
                 .unwrap_err()
                 .code,
-            "COLLABORATION_TRANSPORT_UNAVAILABLE"
+            "COLLABORATION_NOT_ALLOWED"
         );
         assert_eq!(
             connection
@@ -18085,154 +18156,6 @@ pub(crate) mod tests {
         assert!(crate::orchestration::OrchestrationStore::open(&fixture.state_root).is_err());
         assert_eq!(fixture.database_bytes(), before);
     }
-    /// Test-only captured-policy preparation for an accountless pinned-runtime
-    /// component campaign. It never changes the production live-policy gate.
-    #[allow(
-        dead_code,
-        reason = "invoked only by the opted-in native successor component driver"
-    )]
-    pub(crate) fn native_collaboration_component(root: &Path, codex: &Path) -> Value {
-        use std::os::unix::process::CommandExt as _;
-        assert_eq!(
-            std::env::var("DOLGORAE_RUN_NATIVE_INTEGRATED_ACCEPTANCE").as_deref(),
-            Ok("1")
-        );
-        let (fixture, session, source, _target, mut context, request) = collaboration_fixture();
-        fs::write(
-            root.join("collaboration-request.json"),
-            serde_json::to_vec(&request).unwrap(),
-        )
-        .unwrap();
-        fs::set_permissions(
-            root.join("collaboration-request.json"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        let socket = root.join("collaboration.sock");
-        let log = fs::File::create(root.join("collaboration-server.log")).unwrap();
-        struct Server(std::process::Child);
-        impl Drop for Server {
-            fn drop(&mut self) {
-                let _ =
-                    crate::darwin::DarwinSystem.signal_process_group(self.0.id(), libc::SIGTERM);
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                while self.0.try_wait().unwrap().is_none() {
-                    if std::time::Instant::now() >= until {
-                        let _ = crate::darwin::DarwinSystem
-                            .signal_process_group(self.0.id(), libc::SIGKILL);
-                        self.0.wait().unwrap();
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
-            }
-        }
-        let server = Server(
-            std::process::Command::new(codex)
-                .args(["--disable", "shell_snapshot", "app-server", "--listen"])
-                .arg(format!("unix://{}", socket.display()))
-                .current_dir(root)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(log)
-                .process_group(0)
-                .spawn()
-                .unwrap(),
-        );
-        let owned_identity = crate::darwin::DarwinSystem
-            .bsd_process_identity(server.0.id())
-            .unwrap();
-        assert_eq!(owned_identity.process_group_id, server.0.id());
-        fs::write(
-            root.join("collaboration-owned-server.json"),
-            serde_json::to_vec(&owned_identity).unwrap(),
-        )
-        .unwrap();
-        fs::set_permissions(
-            root.join("collaboration-owned-server.json"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while !socket.exists() {
-            assert!(
-                std::time::Instant::now() < until,
-                "native collaboration app-server socket timeout"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-        let result = crate::turn::tests::native_collaboration_connection(
-            &fixture.state_root,
-            source,
-            session,
-            &fixture.view.workspace_id,
-            &fixture.view.canonical_path.to_path_buf().unwrap(),
-            &socket,
-            |accepted, completion| {
-                if let Some(completion) = completion {
-                    context.source_tool_call_id = completion.source_tool_call_id.clone();
-                    let mut store =
-                        crate::orchestration::OrchestrationStore::open(&fixture.state_root)
-                            .unwrap();
-                    let mut effects =
-                        crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
-                    assert_eq!(
-                        crate::collaboration::admit(&mut store, &context, &request, &mut effects)
-                            .unwrap(),
-                        completion.result.clone().unwrap()
-                    );
-                    fs::write(
-                        root.join("collaboration-result.json"),
-                        serde_json::to_vec(completion.result.as_ref().unwrap()).unwrap(),
-                    )
-                    .unwrap();
-                } else {
-                    context.source_turn_id = accepted.turn_id.clone();
-                    let connection = rusqlite::Connection::open(fixture.database()).unwrap();
-                    connection
-                        .execute(
-                            "UPDATE brokered_tasks SET target_turn_id=?1 WHERE target_run_id=?2",
-                            rusqlite::params![accepted.turn_id, source.to_string()],
-                        )
-                        .unwrap();
-                    collaboration_core(
-                        &fixture,
-                        source,
-                        crate::domain::RunLifecycle::Running,
-                        Some(&accepted.turn_id),
-                    );
-                    let path = crate::run::run_root(&fixture.state_root, source).join("state.json");
-                    let mut state: crate::projection::RunStateProjection =
-                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                    state.thread_id = Some(accepted.thread_id.clone());
-                    fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
-                }
-            },
-        )
-        .unwrap();
-        let pid = server.0.id();
-        drop(server);
-        let retirement_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !crate::darwin::DarwinSystem
-            .process_group_pids(pid)
-            .unwrap()
-            .is_empty()
-            && std::time::Instant::now() < retirement_deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-        assert!(
-            crate::darwin::DarwinSystem
-                .process_group_pids(pid)
-                .unwrap()
-                .is_empty(),
-            "native owned process group remains after bounded retirement"
-        );
-        json!({"schema":"dolgorae.native-collaboration-component/v1","passed":true,"observations":result,
-            "prepared_policy_fixture":true,"live_policy_enablement_proven":false,
-            "root_priority_after_ordering_removal":true,"store_reopen_replay":true,"owned_process_group_absent":true,"owned_server_identity":owned_identity})
-    }
-
     #[test]
     fn collaboration_unlisted_successor_role_keeps_optional_worker_tool_disabled() {
         let fixture = Fixture::new();
@@ -18975,8 +18898,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn scheduler_expires_consultation_without_dispatch_or_duplicate_event() {
-        let (fixture, session, _, target, context, request) = collaboration_fixture();
+    fn scheduler_expires_collaboration_consultation_without_dispatch_or_duplicate_event() {
+        let (fixture, session, source, target, mut context, request) = collaboration_fixture();
         let mut broker =
             crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
         let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
@@ -19058,6 +18981,48 @@ pub(crate) mod tests {
                 .unwrap(),
             original
         );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM collaboration_result_outbox WHERE source_run_id=?1",
+                    [source.to_string()],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM collaboration_execution_links",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM orchestration_events WHERE kind='collaboration_expired'",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        context.source_tool_call_id = "collect-expired".into();
+        let expired = collaboration_call(
+            &fixture,
+            &context,
+            &json!({"operation":"collect_collaboration_results","limit":1}),
+        )
+        .unwrap();
+        assert_eq!(expired["results"][0]["execution_state"], "expired");
+        assert!(expired["results"][0]["result_artifact_ref"].is_null());
     }
 
     #[test]
@@ -19129,5 +19094,2279 @@ pub(crate) mod tests {
                 "queued"
             );
         }
+    }
+    fn collaboration_captured_controller(fixture: &Fixture, member: Uuid) {
+        let database = rusqlite::Connection::open(fixture.database()).unwrap();
+        let captured: String = database
+            .query_row(
+                "SELECT controller_binding_json FROM brokered_members WHERE run_id=?1",
+                [member.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let captured: ControllerBinding = serde_json::from_str(&captured).unwrap();
+        let path = crate::run::run_root(&fixture.state_root, member).join("manifest.json");
+        let mut manifest: crate::run::RunManifest =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let controller_path =
+            crate::run::run_root(&fixture.state_root, member).join("controller.json");
+        let controller: ControllerBinding =
+            serde_json::from_slice(&fs::read(&controller_path).unwrap()).unwrap();
+        if manifest.controller == captured && controller == captured {
+            return;
+        }
+        assert_eq!(database.query_row("SELECT count(*) FROM collaboration_exchanges WHERE source_run_id=?1 OR target_run_id=?1",[member.to_string()],|r|r.get::<_,u64>(0)).unwrap(),0,"Controller setup must precede exchange admission");
+        manifest.controller = captured.clone();
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        fs::write(controller_path, serde_json::to_vec(&captured).unwrap()).unwrap();
+    }
+
+    fn collaboration_observable_core(fixture: &Fixture, run: Uuid) {
+        let directory = crate::run::run_root(&fixture.state_root, run);
+        let path = directory.join("state.json");
+        let mut state: crate::projection::RunStateProjection =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if state.ledger_head.sequence != 0 {
+            return;
+        }
+        let payload = json!({"thread_id":"native-thread","thread_generation":1,"effective_policy":{"access":"read","verification":"unverified","policy_epoch":1,"thread_generation":1,"server_epoch":null,"writer_generation":null}});
+        let record = crate::audit::AuditRecord::new(
+            1,
+            "2026-10-30T00:00:00.000000Z",
+            run,
+            1,
+            crate::audit::AuditKind::ThreadBound,
+            crate::jcs::parse(&payload.to_string()).unwrap(),
+            crate::audit::GENESIS_PREVIOUS_HASH,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("audit.jsonl"),
+            record.canonical_line().unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(
+            directory.join("audit.jsonl"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        state.ledger_head.sequence = 1;
+        state.ledger_head.hash = record.hash().into();
+        state.access = crate::domain::Access::Read;
+        fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
+    }
+
+    fn collaboration_call(
+        fixture: &Fixture,
+        ctx: &crate::orchestration::PrimaryCallContext,
+        request: &Value,
+    ) -> Result<Value, MachineError> {
+        let mut store = crate::orchestration::OrchestrationStore::open(&fixture.state_root)?;
+        let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&fixture.state_root);
+        crate::collaboration::admit(&mut store, ctx, request, &mut effects)
+    }
+
+    fn collaboration_accept(
+        fixture: &Fixture,
+        session: Uuid,
+        source: Uuid,
+        target: Uuid,
+        ctx: &mut crate::orchestration::PrimaryCallContext,
+        request: &Value,
+        label: &str,
+    ) -> (Uuid, crate::turn::TerminalTurn) {
+        collaboration_captured_controller(fixture, source);
+        collaboration_captured_controller(fixture, target);
+        ctx.source_tool_call_id = label.into();
+        let receipt = collaboration_call(fixture, ctx, request).unwrap();
+        let id = Uuid::parse_str(receipt["exchange_id"].as_str().unwrap()).unwrap();
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        collaboration_observable_core(fixture, target);
+        collaboration_observable_core(fixture, source);
+        let snapshot = crate::snapshot::RunSnapshot::load(&fixture.state_root, target, 0).unwrap();
+        let actor = crate::scheduler::Actor {
+            owner: crate::assignment_queue::Owner::Managed(session),
+            run: target,
+        };
+        store
+            .transact(|tx| {
+                crate::scheduler::reconcile_claim(
+                    tx,
+                    actor,
+                    &snapshot,
+                    now_ms()?,
+                    &fixture.state_root,
+                )?;
+                let permit = crate::scheduler::claim(tx, actor.owner, target, now_ms()?)?.unwrap();
+                assert_eq!(permit.work, id);
+                crate::scheduler::prepare_dispatch(tx, &permit, now_ms()?)?;
+                crate::collaboration::link_turn(tx, id, target, "native-thread", label, 1)?;
+                crate::scheduler::finish_dispatch(
+                    tx,
+                    &permit,
+                    &MemberDispatchOutcome::Accepted {
+                        turn_ref: label.into(),
+                    },
+                    now_ms()?,
+                )
+            })
+            .unwrap();
+        assert_ne!(source, target);
+        (
+            id,
+            crate::turn::TerminalTurn {
+                thread_id: "native-thread".into(),
+                turn_id: label.into(),
+                status: "completed".into(),
+                effort: "low".into(),
+                final_response: Some(crate::turn::FinalResponse::Inline {
+                    text: format!("Safe answer {label}: 한글."),
+                }),
+                usage: None,
+            },
+        )
+    }
+
+    #[test]
+    fn collaboration_result_atomicity_replay_source_artifact_and_collection_progress() {
+        let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        let (first, terminal) = collaboration_accept(
+            &fixture,
+            session,
+            source,
+            target,
+            &mut ctx,
+            &request,
+            "result-one",
+        );
+        let c = rusqlite::Connection::open(fixture.database()).unwrap();
+        c.execute_batch("CREATE TRIGGER fail_result_outbox BEFORE INSERT ON collaboration_result_outbox BEGIN SELECT RAISE(ABORT,'result outbox fault'); END;").unwrap();
+        assert!(
+            crate::collaboration::settle_target(&fixture.state_root, target, &terminal).is_err()
+        );
+        for table in ["collaboration_results", "collaboration_result_outbox"] {
+            assert_eq!(
+                c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                    .get::<_, u64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM result_content_refs WHERE owner_kind='collaboration_result'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT execution_state FROM collaboration_exchanges",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "running"
+        );
+        c.execute_batch("DROP TRIGGER fail_result_outbox").unwrap();
+        crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+        let artifact: String = c
+            .query_row(
+                "SELECT artifact_id FROM collaboration_results WHERE exchange_id=?1",
+                [first.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+        let mut artifact_terminal = terminal.clone();
+        let crate::turn::FinalResponse::Inline { text } = terminal.final_response.as_ref().unwrap()
+        else {
+            unreachable!()
+        };
+        let target_artifact = Uuid::now_v7();
+        let target_directory = crate::run::run_root(&fixture.state_root, target).join("artifacts");
+        fs::create_dir_all(&target_directory).unwrap();
+        fs::set_permissions(&target_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(
+            target_directory.join(format!("{target_artifact}.bin")),
+            text.as_bytes(),
+        )
+        .unwrap();
+        artifact_terminal.final_response = Some(crate::turn::FinalResponse::Artifact {
+            artifact_id: target_artifact,
+            byte_length: text.len() as u64,
+            sha256: crate::jcs::sha256_hex(text.as_bytes()),
+            created_at: "2026-10-30T00:00:00Z".into(),
+        });
+        crate::collaboration::settle_target(&fixture.state_root, target, &artifact_terminal)
+            .unwrap();
+        let mut changed = terminal.clone();
+        changed.final_response = Some(crate::turn::FinalResponse::Inline {
+            text: "Changed bytes".into(),
+        });
+        assert!(
+            crate::collaboration::settle_target(&fixture.state_root, target, &changed).is_err()
+        );
+        assert_eq!(c.query_row("SELECT count(*) FROM orchestration_events WHERE kind='collaboration_result_published'",[],|r|r.get::<_,u64>(0)).unwrap(),1);
+        // A missing projection is rebuilt from SQLite under the original ID.
+        fs::remove_file(
+            crate::run::run_root(&fixture.state_root, source)
+                .join("artifacts")
+                .join(format!("{artifact}.bin")),
+        )
+        .unwrap();
+        let broker =
+            crate::orchestration::OrchestrationStore::open_observer(&fixture.state_root).unwrap();
+        let carrier = broker
+            .member_credential(source)
+            .unwrap()
+            .controller_carrier()
+            .unwrap();
+        let snapshot = crate::snapshot::RunSnapshot::load(&fixture.state_root, source, 0).unwrap();
+        let chunk = crate::artifact::chunk(
+            &fixture.state_root,
+            &snapshot,
+            &artifact,
+            (0, 1024),
+            Some(&carrier),
+        )
+        .unwrap();
+        assert_eq!(chunk.data, "Safe answer result-one: 한글.".as_bytes());
+        let foreign = crate::snapshot::RunSnapshot::load(&fixture.state_root, target, 0).unwrap();
+        assert!(
+            crate::artifact::chunk(
+                &fixture.state_root,
+                &foreign,
+                &artifact,
+                (0, 1024),
+                Some(&carrier)
+            )
+            .is_err()
+        );
+        assert!(
+            crate::artifact::chunk(&fixture.state_root, &snapshot, &artifact, (0, 1024), None)
+                .is_err()
+        );
+        drop(broker);
+        let (second, terminal) = collaboration_accept(
+            &fixture,
+            session,
+            source,
+            target,
+            &mut ctx,
+            &request,
+            "result-two",
+        );
+        crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+        let collect = json!({"operation":"collect_collaboration_results","limit":1});
+        ctx.source_tool_call_id = "lost-collect".into();
+        let lost = collaboration_call(&fixture, &ctx, &collect).unwrap();
+        assert_eq!(lost["results"][0]["exchange_id"], first.to_string());
+        assert_eq!(lost["results"][0]["delivery_state"], "acknowledged");
+        // The first result is deliberately treated as a lost response. A new
+        // identity recovers it, then later calls progress to the next result.
+        ctx.source_tool_call_id = "recover-lost".into();
+        assert_eq!(collaboration_call(&fixture, &ctx, &collect).unwrap(), lost);
+        ctx.source_tool_call_id = "next-pending".into();
+        let next = collaboration_call(&fixture, &ctx, &collect).unwrap();
+        assert_eq!(next["results"][0]["exchange_id"], second.to_string());
+        ctx.source_tool_call_id = "lost-collect".into();
+        assert_eq!(collaboration_call(&fixture, &ctx, &collect).unwrap(), lost);
+        assert_eq!(
+            collaboration_call(
+                &fixture,
+                &ctx,
+                &json!({"operation":"collect_collaboration_results","limit":2})
+            )
+            .unwrap_err()
+            .code,
+            "COLLABORATION_IDEMPOTENCY_CONFLICT"
+        );
+        let (third, terminal) = collaboration_accept(
+            &fixture,
+            session,
+            source,
+            target,
+            &mut ctx,
+            &request,
+            "result-three",
+        );
+        crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+        ctx.source_tool_call_id = "recover-two".into();
+        assert_eq!(
+            collaboration_call(&fixture, &ctx, &collect).unwrap()["results"][0]["exchange_id"],
+            second.to_string()
+        );
+        ctx.source_tool_call_id = "deliver-three".into();
+        assert_eq!(
+            collaboration_call(&fixture, &ctx, &collect).unwrap()["results"][0]["exchange_id"],
+            third.to_string()
+        );
+        // Source Turn/generation loss cannot erase these source-owned results.
+        collaboration_core(
+            &fixture,
+            source,
+            crate::domain::RunLifecycle::Running,
+            Some("later-turn"),
+        );
+        let state_path = crate::run::run_root(&fixture.state_root, source).join("state.json");
+        let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        state["run_generation"] = json!(2);
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        ctx.source_turn_id = "later-turn".into();
+        ctx.source_tool_call_id = "after-restart".into();
+        let recovered = collaboration_call(
+            &fixture,
+            &ctx,
+            &json!({"operation":"collect_collaboration_results","limit":64}),
+        )
+        .unwrap();
+        assert_eq!(recovered["results"].as_array().unwrap().len(), 3);
+        assert!(
+            recovered["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["result_artifact_ref"] == artifact)
+        );
+        let mut foreign_ctx = ctx.clone();
+        foreign_ctx.source_run_id = target;
+        collaboration_core(
+            &fixture,
+            target,
+            crate::domain::RunLifecycle::Running,
+            Some("later-turn"),
+        );
+        let forbidden = json!({"operation":"await_consultations","exchange_ids":[first],"return_when":"any","transport_wait_seconds":1});
+        assert_eq!(
+            collaboration_call(&fixture, &foreign_ctx, &forbidden)
+                .unwrap_err()
+                .code,
+            "COLLABORATION_NOT_ALLOWED"
+        );
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM collaboration_results", [], |r| r
+                .get::<_, u64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM collaboration_execution_links",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            3
+        );
+    }
+
+    fn collaboration_spawn_call(
+        root: PathBuf,
+        ctx: crate::orchestration::PrimaryCallContext,
+        request: Value,
+    ) -> std::thread::JoinHandle<Result<Value, MachineError>> {
+        std::thread::spawn(move || {
+            let mut store = crate::orchestration::OrchestrationStore::open(&root)?;
+            let mut effects = crate::semantic::ProductionOrchestrationEffects::new(&root);
+            crate::collaboration::admit(&mut store, &ctx, &request, &mut effects)
+        })
+    }
+    fn collaboration_wait_count(fixture: &Fixture, expected: u64) {
+        let c = rusqlite::Connection::open(fixture.database()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let count: u64 = c
+                .query_row(
+                    "SELECT count(*) FROM collaboration_waits WHERE active=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if count == expected {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "wait admission did not settle: {count} != {expected}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn collaboration_abandon_wait(
+        fixture: &Fixture,
+        context: &crate::orchestration::PrimaryCallContext,
+        payload: Value,
+    ) -> Result<(), MachineError> {
+        let state = crate::run::RunStore::new(
+            crate::workspace::SystemWorkspacePlatform,
+            &fixture.state_root,
+        )
+        .load_state_projection(context.source_run_id)?;
+        let call = crate::turn::PrimaryToolCall {
+            tool_name: crate::collaboration::TOOL_NAME.into(),
+            source_thread_id: state.thread_id.unwrap(),
+            request_id: 93,
+            run_generation: state.run_generation,
+            context: context.clone(),
+            payload,
+        };
+        // The lifetime callback runs after registration commits. Unwinding
+        // there models a lost Worker without running ordinary waiter cleanup.
+        let lost = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::collaboration::dispatch(
+                &fixture.state_root,
+                &call,
+                context.source_run_id,
+                state.run_generation,
+                &fixture.view.workspace_id,
+                &|| panic!("fixture lost waiter after committed registration"),
+            )
+        }));
+        match lost {
+            Err(panic) => {
+                assert_eq!(
+                    panic.downcast_ref::<&str>(),
+                    Some(&"fixture lost waiter after committed registration")
+                );
+                Ok(())
+            }
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(_)) => panic!("pending wait did not reach its lifetime callback"),
+        }
+    }
+
+    #[test]
+    fn collaboration_abandoned_waits_reconcile_currency_loss_and_reclaim_both_slots() {
+        for loss in ["generation", "turn", "lifecycle"] {
+            let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
+            fixture.initialize_writer_authority();
+            let queued = collaboration_call(&fixture, &ctx, &request).unwrap();
+            let exchange = Uuid::parse_str(queued["exchange_id"].as_str().unwrap()).unwrap();
+            let db = rusqlite::Connection::open(fixture.database()).unwrap();
+            let accepted = crate::collaboration::execution_record(&db, exchange).unwrap();
+            // Mark the fixture's original Source task delivered so only its
+            // outbound consultation and wait affect this idle-mail guard.
+            db.execute(
+                "UPDATE brokered_tasks SET state='delivered' WHERE target_run_id=?1",
+                [source.to_string()],
+            )
+            .unwrap();
+            let actor = crate::scheduler::Actor {
+                owner: crate::assignment_queue::Owner::Managed(session),
+                run: source,
+            };
+            assert!(
+                crate::scheduler::candidates(&db, actor.owner, source)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM scheduler_claims WHERE target_run_id=?1",
+                    [source.to_string()],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM collaboration_result_outbox WHERE source_run_id=?1",
+                    [source.to_string()],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            crate::scheduler::idle_mail_guards(&db, actor).unwrap();
+            let mailbox = db
+                .query_row(
+                    "SELECT sequence,target_run_id FROM collaboration_mailbox WHERE exchange_id=?1",
+                    [exchange.to_string()],
+                    |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?)),
+                )
+                .unwrap();
+            let wait = json!({"operation":"await_consultations","exchange_ids":[exchange],"return_when":"all","transport_wait_seconds":60});
+            for call in ["lost-first", "lost-second"] {
+                ctx.source_tool_call_id = call.into();
+                collaboration_abandon_wait(&fixture, &ctx, wait.clone()).unwrap();
+            }
+            let retained = {
+                let mut s = db.prepare("SELECT wait_id,request_sha256,expires_at_ms FROM collaboration_waits ORDER BY wait_id").unwrap();
+                s.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+            };
+            assert_eq!(retained.len(), 2);
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM collaboration_waits WHERE active=1",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+                2
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM collaboration_wait_edges", [], |r| r
+                    .get::<_, u64>(
+                    0
+                ))
+                .unwrap(),
+                2
+            );
+            assert_eq!(db.query_row("SELECT count(*) FROM orchestration_events WHERE kind='collaboration_wait_ended'", [], |r| r.get::<_,u64>(0)).unwrap(), 0);
+            assert_eq!(
+                crate::scheduler::idle_mail_guards(&db, actor)
+                    .unwrap_err()
+                    .details["reason"],
+                "actor_has_blocking_wait"
+            );
+
+            let path = crate::run::run_root(&fixture.state_root, source).join("state.json");
+            let mut state: crate::projection::RunStateProjection =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            match loss {
+                "generation" => state.run_generation += 1,
+                "turn" => state.active_turn_id = Some("different-turn".into()),
+                "lifecycle" => state.lifecycle = crate::domain::RunLifecycle::Idle,
+                _ => unreachable!(),
+            }
+            fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+            drop(db);
+            crate::collaboration::reconcile_waits(&fixture.state_root).unwrap();
+            crate::collaboration::reconcile_waits(&fixture.state_root).unwrap();
+            let db = rusqlite::Connection::open(fixture.database()).unwrap();
+            for (id, digest, until) in &retained {
+                assert_eq!(db.query_row("SELECT request_sha256,expires_at_ms,active FROM collaboration_waits WHERE wait_id=?1", [id], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,bool>(2)?))).unwrap(), (digest.clone(), *until, false));
+            }
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM collaboration_wait_edges", [], |r| r
+                    .get::<_, u64>(
+                    0
+                ))
+                .unwrap(),
+                0
+            );
+            crate::scheduler::idle_mail_guards(&db, actor).unwrap();
+            state.lifecycle = crate::domain::RunLifecycle::Running;
+            state.active_turn_id = Some("fresh-source-turn".into());
+            state.latest_turn_id = state.active_turn_id.clone();
+            fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+            ctx.source_turn_id = "fresh-source-turn".into();
+            for call in ["fresh-first", "fresh-second"] {
+                ctx.source_tool_call_id = call.into();
+                collaboration_abandon_wait(&fixture, &ctx, wait.clone()).unwrap();
+            }
+            ctx.source_tool_call_id = "fresh-third".into();
+            assert_eq!(
+                collaboration_abandon_wait(&fixture, &ctx, wait)
+                    .unwrap_err()
+                    .code,
+                "COLLABORATION_NOT_ALLOWED"
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM collaboration_waits WHERE active=1",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+                2
+            );
+            state.lifecycle = crate::domain::RunLifecycle::Idle;
+            fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+            crate::collaboration::reconcile_waits(&fixture.state_root).unwrap();
+            crate::scheduler::idle_mail_guards(&db, actor).unwrap();
+            let after = crate::collaboration::execution_record(&db, exchange).unwrap();
+            assert_eq!(
+                (
+                    after.session,
+                    after.target,
+                    after.event_digest,
+                    after.deadline_ms,
+                    after.prompt
+                ),
+                (
+                    session,
+                    target,
+                    accepted.event_digest,
+                    accepted.deadline_ms,
+                    accepted.prompt
+                )
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT sequence,target_run_id FROM collaboration_mailbox WHERE exchange_id=?1",
+                    [exchange.to_string()],
+                    |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?))
+                )
+                .unwrap(),
+                mailbox
+            );
+            assert_eq!(db.query_row("SELECT execution_state,delivery_state FROM collaboration_exchanges WHERE exchange_id=?1", [exchange.to_string()], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).unwrap(), ("queued".into(), "none".into()));
+        }
+    }
+
+    #[test]
+    fn collaboration_abandoned_wait_edge_cannot_form_a_cycle_after_restart() {
+        let (fixture, session, a, b, mut ca, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        let mut cb = collaboration_prepare_source(
+            &fixture,
+            session,
+            b,
+            &FakePort::new(),
+            "reverse-root",
+            "reverse-turn",
+        );
+        let ab = Uuid::parse_str(
+            collaboration_call(&fixture, &ca, &request).unwrap()["exchange_id"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut reverse = request;
+        reverse["target"] = json!({"run_id":a});
+        let ba = Uuid::parse_str(
+            collaboration_call(&fixture, &cb, &reverse).unwrap()["exchange_id"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let wait = |id| json!({"operation":"await_consultations","exchange_ids":[id],"return_when":"all","transport_wait_seconds":60});
+        ca.source_tool_call_id = "abandoned-a-edge".into();
+        collaboration_abandon_wait(&fixture, &ca, wait(ab)).unwrap();
+        collaboration_wait_count(&fixture, 1);
+        cb.source_tool_call_id = "real-cycle".into();
+        assert_eq!(
+            collaboration_abandon_wait(&fixture, &cb, wait(ba))
+                .unwrap_err()
+                .code,
+            "COLLABORATION_WAIT_CYCLE"
+        );
+        collaboration_core(
+            &fixture,
+            a,
+            crate::domain::RunLifecycle::Running,
+            Some("replacement-turn"),
+        );
+        crate::collaboration::reconcile_waits(&fixture.state_root).unwrap();
+        collaboration_wait_count(&fixture, 0);
+        let db = rusqlite::Connection::open(fixture.database()).unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM collaboration_wait_edges", [], |r| r
+                .get::<_, u64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+        cb.source_tool_call_id = "no-stale-cycle".into();
+        collaboration_abandon_wait(&fixture, &cb, wait(ba)).unwrap();
+        collaboration_wait_count(&fixture, 1);
+        collaboration_core(&fixture, b, crate::domain::RunLifecycle::Idle, None);
+        crate::collaboration::reconcile_waits(&fixture.state_root).unwrap();
+        collaboration_wait_count(&fixture, 0);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM collaboration_exchanges WHERE execution_state='queued'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert!(crate::collaboration::execution_record(&db, ab).is_ok());
+        assert!(crate::collaboration::execution_record(&db, ba).is_ok());
+    }
+
+    #[test]
+    fn collaboration_any_all_waits_release_mutation_owner_and_preserve_original_expiry() {
+        let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        let (first, terminal) = collaboration_accept(
+            &fixture,
+            session,
+            source,
+            target,
+            &mut ctx,
+            &request,
+            "any-result",
+        );
+        crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+        ctx.source_tool_call_id = "pending-request".into();
+        let queued = collaboration_call(&fixture, &ctx, &request).unwrap();
+        let second = Uuid::parse_str(queued["exchange_id"].as_str().unwrap()).unwrap();
+        let any = json!({"operation":"await_consultations","exchange_ids":[second,first],"return_when":"any","transport_wait_seconds":1});
+        ctx.source_tool_call_id = "any-call".into();
+        let response = collaboration_call(&fixture, &ctx, &any).unwrap();
+        assert_eq!(response["completed"][0]["exchange_id"], first.to_string());
+        assert_eq!(response["pending"], json!([second]));
+        let all = json!({"operation":"await_consultations","exchange_ids":[second,first],"return_when":"all","transport_wait_seconds":1});
+        ctx.source_tool_call_id = "all-call".into();
+        let waiting =
+            collaboration_spawn_call(fixture.state_root.clone(), ctx.clone(), all.clone());
+        collaboration_wait_count(&fixture, 1);
+        let mut concurrent = EngagementStore::open(&fixture.database()).unwrap();
+        concurrent
+            .transact(|tx| {
+                crate::orchestration::append_event(
+                    tx,
+                    session,
+                    "test_concurrent_wait_observation",
+                    &crate::jcs::sha256_hex(b"not blocked"),
+                    now_ms()?,
+                )
+            })
+            .unwrap();
+        assert!(crate::collaboration::dependency_unblock(concurrent.connection(), second).unwrap());
+        let rows = crate::scheduler::candidates(
+            concurrent.connection(),
+            crate::assignment_queue::Owner::Managed(session),
+            target,
+        )
+        .unwrap();
+        assert!(
+            rows.iter()
+                .find(|r| r.id == second)
+                .unwrap()
+                .dependency_unblock
+        );
+        let snapshot = waiting.join().unwrap().unwrap();
+        assert_eq!(snapshot["pending"], json!([second]));
+        collaboration_wait_count(&fixture, 0);
+        let c = rusqlite::Connection::open(fixture.database()).unwrap();
+        let until: i64 = c
+            .query_row(
+                "SELECT expires_at_ms FROM collaboration_waits WHERE call_id='all-call'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(collaboration_call(&fixture, &ctx, &all).unwrap(), snapshot);
+        assert_eq!(
+            c.query_row(
+                "SELECT expires_at_ms FROM collaboration_waits WHERE call_id='all-call'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            until
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT execution_state FROM collaboration_exchanges WHERE exchange_id=?1",
+                [second.to_string()],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "queued"
+        );
+        assert!(
+            !crate::collaboration::dependency_unblock(concurrent.connection(), second).unwrap()
+        );
+        // Simulate loss before response persistence, retaining the admitted
+        // transport origin: a restarted same-call wait gets no fresh second.
+        c.execute(
+            "DELETE FROM collaboration_tool_receipts WHERE call_id='all-call'",
+            [],
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        let _ = collaboration_call(&fixture, &ctx, &all).unwrap();
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert_eq!(
+            c.query_row(
+                "SELECT expires_at_ms FROM collaboration_waits WHERE call_id='all-call'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            until
+        );
+        // Actual Worker dispatcher and closed native await response path.
+        let (native, envelope, _) = crate::turn::tests::native_worker_completion(
+            &fixture.state_root,
+            source,
+            &fixture.view.workspace_id,
+            &fixture.view.canonical_path.to_path_buf().unwrap(),
+            crate::collaboration::TOOL_NAME,
+            any,
+        )
+        .unwrap();
+        assert_eq!(envelope["success"], true);
+        assert_eq!(native["completed"][0]["exchange_id"], first.to_string());
+    }
+
+    #[test]
+    fn collaboration_wait_graph_cycles_depth_count_writer_and_atomic_blocking_submit() {
+        let mut policy = managed_policy();
+        policy.roles[0].collaboration_source = true;
+        policy.roles[0].collaboration_target = true;
+        policy.roles[0].max_active_instances = 4;
+        let (fixture, session, a, b, mut ca, mut request) = collaboration_fixture_policy(policy);
+        fixture.initialize_writer_authority();
+        let port = FakePort::new();
+        let c = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "graph-c", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let d = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "graph-d", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let mut cb =
+            collaboration_prepare_source(&fixture, session, b, &port, "graph-root-b", "turn-b");
+        let mut cc =
+            collaboration_prepare_source(&fixture, session, c, &port, "graph-root-c", "turn-c");
+        let mut cd =
+            collaboration_prepare_source(&fixture, session, d, &port, "graph-root-d", "turn-d");
+        let submit =
+            |ctx: &mut crate::orchestration::PrimaryCallContext, target: Uuid, label: &str| {
+                ctx.source_tool_call_id = label.into();
+                let mut payload = request.clone();
+                payload["target"] = json!({"run_id":target});
+                Uuid::parse_str(
+                    collaboration_call(&fixture, ctx, &payload).unwrap()["exchange_id"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap()
+            };
+        let ab = submit(&mut ca, b, "a-to-b");
+        let ba = submit(&mut cb, a, "b-to-a");
+        let bc = submit(&mut cb, c, "b-to-c");
+        let c_to_a = submit(&mut cc, a, "c-to-a");
+        let da = submit(&mut cd, a, "d-to-a");
+        let wait = |ids: Vec<Uuid>| json!({"operation":"await_consultations","exchange_ids":ids,"return_when":"all","transport_wait_seconds":5});
+        let refusal = |error: MachineError, code: &str| {
+            assert_eq!(error.code, code);
+            let projected = crate::collaboration::error_result(&error);
+            assert_eq!(projected["operation"], "collaboration_error");
+            assert_eq!(projected["code"], code);
+            assert_eq!(projected["retryable"], false);
+            assert!(
+                !projected
+                    .to_string()
+                    .contains(fixture.state_root.to_str().unwrap())
+            );
+        };
+        ca.source_tool_call_id = "wait-a".into();
+        let wa = collaboration_spawn_call(fixture.state_root.clone(), ca.clone(), wait(vec![ab]));
+        collaboration_wait_count(&fixture, 1);
+        cb.source_tool_call_id = "direct-cycle".into();
+        refusal(
+            collaboration_call(&fixture, &cb, &wait(vec![ba])).unwrap_err(),
+            "COLLABORATION_WAIT_CYCLE",
+        );
+        cb.source_tool_call_id = "atomic-set-cycle".into();
+        assert_eq!(
+            collaboration_call(&fixture, &cb, &wait(vec![bc, ba]))
+                .unwrap_err()
+                .code,
+            "COLLABORATION_WAIT_CYCLE"
+        );
+        collaboration_wait_count(&fixture, 1);
+        cb.source_tool_call_id = "wait-b".into();
+        let wb = collaboration_spawn_call(fixture.state_root.clone(), cb.clone(), wait(vec![bc]));
+        collaboration_wait_count(&fixture, 2);
+        cc.source_tool_call_id = "transitive-cycle".into();
+        refusal(
+            collaboration_call(&fixture, &cc, &wait(vec![c_to_a])).unwrap_err(),
+            "COLLABORATION_WAIT_CYCLE",
+        );
+        cd.source_tool_call_id = "depth-three".into();
+        refusal(
+            collaboration_call(&fixture, &cd, &wait(vec![da])).unwrap_err(),
+            "COLLABORATION_DEPTH_EXCEEDED",
+        );
+        ca.source_tool_call_id = "wait-a-second".into();
+        let wa2 = collaboration_spawn_call(fixture.state_root.clone(), ca.clone(), wait(vec![ab]));
+        collaboration_wait_count(&fixture, 3);
+        ca.source_tool_call_id = "wait-a-third".into();
+        assert_eq!(
+            collaboration_call(&fixture, &ca, &wait(vec![ab]))
+                .unwrap_err()
+                .code,
+            "COLLABORATION_NOT_ALLOWED"
+        );
+        let db = rusqlite::Connection::open(fixture.database()).unwrap();
+        let before: u64 = db
+            .query_row("SELECT count(*) FROM collaboration_exchanges", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        ca.source_tool_call_id = "blocking-cap-refused".into();
+        request["blocking"] = json!(true);
+        assert_eq!(
+            collaboration_call(&fixture, &ca, &request)
+                .unwrap_err()
+                .code,
+            "COLLABORATION_NOT_ALLOWED"
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM collaboration_exchanges", [], |r| r
+                .get::<_, u64>(0))
+                .unwrap(),
+            before
+        );
+        collaboration_core(&fixture, a, crate::domain::RunLifecycle::Idle, None);
+        collaboration_core(&fixture, b, crate::domain::RunLifecycle::Idle, None);
+        crate::collaboration::notify_waiters(a);
+        crate::collaboration::notify_waiters(b);
+        for thread in [wa, wa2, wb] {
+            refusal(thread.join().unwrap().unwrap_err(), "INTERRUPTED_UNKNOWN");
+        }
+        collaboration_wait_count(&fixture, 0);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM collaboration_wait_edges", [], |r| r
+                .get::<_, u64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM collaboration_exchanges WHERE execution_state='queued'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            before
+        );
+        collaboration_core(
+            &fixture,
+            a,
+            crate::domain::RunLifecycle::Running,
+            Some(&ca.source_turn_id),
+        );
+        let manifest = crate::run::RunStore::new(
+            crate::workspace::SystemWorkspacePlatform,
+            &fixture.state_root,
+        )
+        .load_manifest(a)
+        .unwrap();
+        let writer = crate::writer::WriterStore::new(
+            &fixture.state_root,
+            &fixture.view.workspace_id,
+            crate::darwin::DarwinSystem.current_uid(),
+        );
+        let operation = Uuid::now_v7();
+        let holder = crate::writer::WriterStore::holder(
+            a,
+            "fixture".into(),
+            &manifest.controller,
+            1,
+            "a".repeat(64),
+            1,
+            Some("native-thread".into()),
+            crate::domain::RunLifecycle::Running,
+        );
+        let (_, (_, generation)) = writer
+            .transact(|w| w.prepare_acquire(a, holder, operation))
+            .unwrap();
+        for reserved in [true, false] {
+            if !reserved {
+                writer
+                    .transact(|w| w.commit_acquire(operation, generation))
+                    .unwrap();
+            }
+            ca.source_tool_call_id = if reserved {
+                "writer-reserved"
+            } else {
+                "writer-active"
+            }
+            .into();
+            let original = writer.load().unwrap();
+            refusal(
+                collaboration_call(&fixture, &ca, &wait(vec![ab])).unwrap_err(),
+                "COLLABORATION_WRITER_HELD",
+            );
+            refusal(
+                collaboration_call(&fixture, &ca, &request).unwrap_err(),
+                "COLLABORATION_WRITER_HELD",
+            );
+            assert_eq!(writer.load().unwrap(), original);
+        }
+        request["blocking"] = json!(false);
+        ca.source_tool_call_id = "writer-nonblocking".into();
+        assert!(collaboration_call(&fixture, &ca, &request).is_ok());
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM collaboration_wait_edges", [], |r| r
+                .get::<_, u64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn collaboration_nested_root_priority_deadline_and_nonblocking_residency_are_durable() {
+        let mut policy = managed_policy();
+        policy.roles[0].collaboration_source = true;
+        policy.roles[0].collaboration_target = true;
+        policy.roles[0].max_active_instances = 3;
+        let (fixture, session, a, b, mut ca, request) = collaboration_fixture_policy(policy);
+        fixture.initialize_writer_authority();
+        let port = FakePort::new();
+        let c = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "nested-c", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        fixture.publish_member_manifest(session, c);
+        collaboration_core(&fixture, c, crate::domain::RunLifecycle::Idle, None);
+        let (parent, terminal) = collaboration_accept(
+            &fixture,
+            session,
+            a,
+            b,
+            &mut ca,
+            &request,
+            "parent-consultation",
+        );
+        collaboration_core(
+            &fixture,
+            b,
+            crate::domain::RunLifecycle::Running,
+            Some(&terminal.turn_id),
+        );
+        let child_context = crate::orchestration::PrimaryCallContext {
+            session_id: session,
+            source_run_id: b,
+            source_turn_id: terminal.turn_id.clone(),
+            source_tool_call_id: "nested-call".into(),
+            idempotency_key: "not-authority".into(),
+        };
+        let mut nested = request.clone();
+        nested["target"] = json!({"run_id":c});
+        nested["deadline_seconds"] = json!(3600);
+        let child = Uuid::parse_str(
+            collaboration_call(&fixture, &child_context, &nested).unwrap()["exchange_id"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let db = rusqlite::Connection::open(fixture.database()).unwrap();
+        let root:(String,u8,i64)=db.query_row("SELECT root_task_id,root_priority,deadline_ms FROM collaboration_exchanges WHERE exchange_id=?1",[parent.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        let inherited:(String,u8,i64,String,u8)=db.query_row("SELECT e.root_task_id,e.root_priority,e.deadline_ms,l.parent_exchange_id,l.hop_depth FROM collaboration_exchanges e JOIN collaboration_lineage l USING(exchange_id) WHERE exchange_id=?1",[child.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+        assert_eq!((inherited.0, inherited.1, inherited.2), root);
+        assert_eq!(inherited.3, parent.to_string());
+        assert_eq!(inherited.4, 2);
+        assert!(crate::collaboration::execution_record(&db, child).is_ok());
+        // A caller cannot name a parent or priority through the closed request.
+        let mut forged = nested.clone();
+        forged["parent_exchange_id"] = json!(parent);
+        assert_eq!(
+            collaboration_call(&fixture, &child_context, &forged)
+                .unwrap_err()
+                .code,
+            "COLLABORATION_NOT_ALLOWED"
+        );
+        let saved: String = db
+            .query_row(
+                "SELECT provenance_sha256 FROM collaboration_lineage WHERE exchange_id=?1",
+                [child.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        db.execute(
+            "UPDATE collaboration_lineage SET provenance_sha256='forged' WHERE exchange_id=?1",
+            [child.to_string()],
+        )
+        .unwrap();
+        assert!(crate::collaboration::execution_record(&db, child).is_err());
+        db.execute(
+            "UPDATE collaboration_lineage SET provenance_sha256=?2 WHERE exchange_id=?1",
+            rusqlite::params![child.to_string(), saved],
+        )
+        .unwrap();
+        // Independent nonblocking work does not pin its source Worker after
+        // the original task has been delivered. Target execution remains fenced.
+        db.execute(
+            "UPDATE brokered_tasks SET state='delivered' WHERE task_id=?1",
+            [root.0],
+        )
+        .unwrap();
+        collaboration_core(&fixture, a, crate::domain::RunLifecycle::Idle, None);
+        let actor = crate::scheduler::Actor {
+            owner: crate::assignment_queue::Owner::Managed(session),
+            run: a,
+        };
+        crate::scheduler::idle_mail_guards(&db, actor).unwrap();
+        let target_actor = crate::scheduler::Actor { run: b, ..actor };
+        assert!(crate::scheduler::idle_mail_guards(&db, target_actor).is_err());
+        crate::collaboration::settle_target(&fixture.state_root, b, &terminal).unwrap();
+        assert!(crate::scheduler::idle_mail_guards(&db, actor).is_err());
+        collaboration_core(
+            &fixture,
+            a,
+            crate::domain::RunLifecycle::Running,
+            Some("new-source-turn"),
+        );
+        ca.source_turn_id = "new-source-turn".into();
+        ca.source_tool_call_id = "collect-result".into();
+        let result = collaboration_call(
+            &fixture,
+            &ca,
+            &json!({"operation":"collect_collaboration_results","limit":1}),
+        )
+        .unwrap();
+        assert_eq!(result["results"][0]["exchange_id"], parent.to_string());
+        collaboration_core(&fixture, a, crate::domain::RunLifecycle::Idle, None);
+        crate::scheduler::idle_mail_guards(&db, actor).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM collaboration_execution_links",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn collaboration_worker_wait_uses_checked_notifications_and_lifetime_without_sql_polling() {
+        let (fixture, session, source, _target, mut ctx, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        ctx.source_tool_call_id = "queued-before-wait".into();
+        let queued = collaboration_call(&fixture, &ctx, &request).unwrap();
+        let exchange = Uuid::parse_str(queued["exchange_id"].as_str().unwrap()).unwrap();
+        let db = rusqlite::Connection::open(fixture.database()).unwrap();
+        let deadline: i64 = db
+            .query_row("SELECT deadline_ms FROM collaboration_exchanges", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let worker = crate::worker::tests::PrimaryWorkerFixture::new(
+            &fixture.state_root,
+            source,
+            &fixture.view.workspace_id,
+        );
+        ctx.source_tool_call_id = "native-notification-wait".into();
+        worker.dispatcher.dispatch(crate::turn::PrimaryToolCall {tool_name:crate::collaboration::TOOL_NAME.into(),source_thread_id:"native-thread".into(),request_id:91,run_generation:1,context:ctx,payload:json!({"operation":"await_consultations","exchange_ids":[exchange],"return_when":"all","transport_wait_seconds":5})}).unwrap();
+        collaboration_wait_count(&fixture, 1);
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while crate::collaboration::wait_observations(source) == 0 {
+            assert!(std::time::Instant::now() < until);
+            std::thread::yield_now();
+        }
+        let reads = crate::collaboration::wait_observations(source);
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(crate::collaboration::wait_observations(source), reads);
+        for (generation, build) in [(true, false), (false, true)] {
+            assert!(matches!(
+                crate::worker::tests::collaboration_control_hint(source, generation, build),
+                crate::worker::ControlResponseV1::Rejected { .. }
+            ));
+            assert_eq!(crate::collaboration::wait_observations(source), reads);
+        }
+        assert!(matches!(
+            crate::worker::tests::collaboration_control_hint(source, false, false),
+            crate::worker::ControlResponseV1::Status { .. }
+        ));
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while crate::collaboration::wait_observations(source) == reads {
+            assert!(std::time::Instant::now() < until);
+            std::thread::yield_now();
+        }
+        let reads = crate::collaboration::wait_observations(source);
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(crate::collaboration::wait_observations(source), reads);
+        // A real mailbox stop invalidates the original tool lifetime even
+        // before the fixture's durable projection changes or timeout expires.
+        worker.stop();
+        let completion = worker.completion();
+        assert_eq!(completion.result.unwrap_err().code, "INTERRUPTED_UNKNOWN");
+        collaboration_wait_count(&fixture, 0);
+        assert_eq!(
+            db.query_row(
+                "SELECT execution_state FROM collaboration_exchanges",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "queued"
+        );
+        assert_eq!(
+            db.query_row("SELECT deadline_ms FROM collaboration_exchanges", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            deadline
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM collaboration_wait_edges", [], |r| r
+                .get::<_, u64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM collaboration_waits WHERE session_id=?1",
+                [session.to_string()],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn collaboration_concurrent_collectors_and_failed_receipt_do_not_skip_pending_results() {
+        let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        let mut ids = Vec::new();
+        for label in ["concurrent-one", "concurrent-two", "concurrent-three"] {
+            let (id, terminal) =
+                collaboration_accept(&fixture, session, source, target, &mut ctx, &request, label);
+            crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+            ids.push(id);
+        }
+        let db = rusqlite::Connection::open(fixture.database()).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_collection_receipt BEFORE INSERT ON collaboration_tool_receipts WHEN NEW.call_id='fault-collect' BEGIN SELECT RAISE(ABORT,'collection receipt fault'); END;").unwrap();
+        let request = json!({"operation":"collect_collaboration_results","limit":1});
+        ctx.source_tool_call_id = "fault-collect".into();
+        assert!(collaboration_call(&fixture, &ctx, &request).is_err());
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM collaboration_exchanges WHERE delivery_state='acknowledged'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        db.execute_batch("DROP TRIGGER fail_collection_receipt")
+            .unwrap();
+        let mut collectors = Vec::new();
+        for label in ["collector-a", "collector-b"] {
+            let mut call = ctx.clone();
+            call.source_tool_call_id = label.into();
+            collectors.push((
+                call.clone(),
+                collaboration_spawn_call(fixture.state_root.clone(), call, request.clone()),
+            ));
+        }
+        for (call, thread) in collectors {
+            let response = thread.join().unwrap().unwrap();
+            assert_eq!(response["results"][0]["exchange_id"], ids[0].to_string());
+            assert_eq!(
+                collaboration_call(&fixture, &call, &request).unwrap(),
+                response
+            );
+        }
+        ctx.source_tool_call_id = "changed-limit".into();
+        let response = collaboration_call(
+            &fixture,
+            &ctx,
+            &json!({"operation":"collect_collaboration_results","limit":2}),
+        )
+        .unwrap();
+        assert_eq!(response["results"].as_array().unwrap().len(), 2);
+        assert!(
+            response["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["exchange_id"] == ids[1].to_string())
+        );
+        ctx.source_tool_call_id = "after-changed-limit".into();
+        assert_eq!(
+            collaboration_call(&fixture, &ctx, &request).unwrap()["results"][0]["exchange_id"],
+            ids[2].to_string()
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM collaboration_execution_links",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            3
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM collaboration_result_outbox",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn collaboration_blocking_submit_returns_original_queued_receipt_after_terminal_without_rewait()
+    {
+        let (fixture, session, source, target, mut ctx, mut request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        collaboration_captured_controller(&fixture, source);
+        collaboration_captured_controller(&fixture, target);
+        collaboration_observable_core(&fixture, source);
+        collaboration_observable_core(&fixture, target);
+        ctx.source_tool_call_id = "blocking-submit".into();
+        request["blocking"] = json!(true);
+        request["deadline_seconds"] = json!(2);
+        let pending =
+            collaboration_spawn_call(fixture.state_root.clone(), ctx.clone(), request.clone());
+        collaboration_wait_count(&fixture, 1);
+        let db = rusqlite::Connection::open(fixture.database()).unwrap();
+        let (id, deadline): (String, i64) = db
+            .query_row(
+                "SELECT exchange_id,deadline_ms FROM collaboration_exchanges",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let id = Uuid::parse_str(&id).unwrap();
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        store
+            .transact(|tx| {
+                let permit = crate::scheduler::claim(
+                    tx,
+                    crate::assignment_queue::Owner::Managed(session),
+                    target,
+                    now_ms()?,
+                )?
+                .unwrap();
+                crate::scheduler::prepare_dispatch(tx, &permit, now_ms()?)?;
+                crate::collaboration::link_turn(
+                    tx,
+                    id,
+                    target,
+                    "native-thread",
+                    "blocking-target",
+                    1,
+                )?;
+                crate::scheduler::finish_dispatch(
+                    tx,
+                    &permit,
+                    &MemberDispatchOutcome::Accepted {
+                        turn_ref: "blocking-target".into(),
+                    },
+                    now_ms()?,
+                )
+            })
+            .unwrap();
+        let original_link: (String, String, String, u64) = store.connection().query_row(
+            "SELECT target_run_id,thread_id,turn_id,generation FROM collaboration_execution_links WHERE exchange_id=?1",
+            [id.to_string()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+        ).unwrap();
+        assert_eq!(
+            store
+                .transact(|tx| crate::collaboration::link_turn(
+                    tx,
+                    id,
+                    target,
+                    "native-thread",
+                    "conflicting-target",
+                    1
+                ))
+                .unwrap_err()
+                .code,
+            "COLLABORATION_NOT_ALLOWED"
+        );
+        assert_eq!(store.connection().query_row(
+            "SELECT target_run_id,thread_id,turn_id,generation FROM collaboration_execution_links WHERE exchange_id=?1",
+            [id.to_string()], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,u64>(3)?)),
+        ).unwrap(),original_link);
+        assert_eq!(store.connection().query_row("SELECT count(*) FROM orchestration_events WHERE kind='collaboration_target_linked'",[],|r|r.get::<_,u64>(0)).unwrap(),1);
+        // A linked acceptance wins even after the original effect bound.
+        assert!(
+            store
+                .transact(|tx| crate::scheduler::reconcile_consultation_dispatch(
+                    tx,
+                    crate::scheduler::Actor {
+                        owner: crate::assignment_queue::Owner::Managed(session),
+                        run: target
+                    },
+                    deadline
+                ))
+                .unwrap()
+                .is_none()
+        );
+        let terminal = crate::turn::TerminalTurn {
+            thread_id: "native-thread".into(),
+            turn_id: "blocking-target".into(),
+            status: "completed".into(),
+            effort: "low".into(),
+            final_response: Some(crate::turn::FinalResponse::Inline {
+                text: "The exact terminal answer.".into(),
+            }),
+            usage: None,
+        };
+        crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+        let receipt = pending.join().unwrap().unwrap();
+        assert_eq!(
+            receipt,
+            json!({"operation":"submit_consultation_result","exchange_id":id,"target_run_id":target,"state":"queued"})
+        );
+        collaboration_wait_count(&fixture, 0);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            collaboration_call(&fixture, &ctx, &request).unwrap(),
+            receipt
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(
+            db.query_row("SELECT deadline_ms FROM collaboration_exchanges", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            deadline
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT execution_state FROM collaboration_exchanges",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "succeeded"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM collaboration_execution_links",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    fn collaboration_install_history(
+        fixture: &Fixture,
+        target: Uuid,
+        records: &[crate::audit::AuditRecord],
+    ) {
+        let directory = crate::run::run_root(&fixture.state_root, target);
+        let mut bytes = Vec::new();
+        let mut projection = crate::projection::RunStateProjection::starting(target);
+        for record in records {
+            bytes.extend(record.canonical_line().unwrap());
+            projection = crate::projection::project_next(target, &projection, record, |r| {
+                Ok(r.sequence().to_string())
+            })
+            .unwrap();
+        }
+        fs::write(directory.join("audit.jsonl"), bytes).unwrap();
+        fs::write(
+            directory.join("state.json"),
+            serde_json::to_vec(&projection).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn collaboration_reserved_dispatch_crash_classifies_unknown_at_original_effect_bound() {
+        let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        collaboration_captured_controller(&fixture, source);
+        collaboration_captured_controller(&fixture, target);
+        collaboration_observable_core(&fixture, source);
+        collaboration_observable_core(&fixture, target);
+        let receipt = collaboration_call(&fixture, &ctx, &request).unwrap();
+        let id = Uuid::parse_str(receipt["exchange_id"].as_str().unwrap()).unwrap();
+        let actor = crate::scheduler::Actor {
+            owner: crate::assignment_queue::Owner::Managed(session),
+            run: target,
+        };
+        let _lifecycle = crate::worker::RunLifecycleLease::acquire(
+            &fixture.state_root,
+            &fixture.view.workspace_id,
+            target,
+            1,
+        )
+        .unwrap();
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        let permit = store
+            .transact(|tx| {
+                let permit = crate::scheduler::claim(tx, actor.owner, target, now_ms()?)?.unwrap();
+                crate::scheduler::prepare_dispatch(tx, &permit, now_ms()?)?;
+                // Process loss here supplies no finish_dispatch outcome or acceptance.
+                Ok(permit)
+            })
+            .unwrap();
+        let deadline = crate::collaboration::execution_record(store.connection(), id)
+            .unwrap()
+            .deadline_ms;
+        let lease: i64 = store
+            .connection()
+            .query_row(
+                "SELECT lease_until_ms FROM scheduler_claims WHERE claim_id=?1",
+                [permit.claim.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(lease < deadline);
+        // These are controlled observation-clock boundaries, not elapsed time.
+        assert!(
+            store
+                .transact(|tx| crate::scheduler::reconcile_consultation_dispatch(tx, actor, lease))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .transact(|tx| crate::scheduler::reconcile_consultation_dispatch(
+                    tx,
+                    actor,
+                    deadline - 1
+                ))
+                .unwrap()
+                .is_none()
+        );
+        let foreign = crate::scheduler::Actor {
+            owner: crate::assignment_queue::Owner::Managed(Uuid::now_v7()),
+            run: target,
+        };
+        assert_eq!(
+            store
+                .transact(|tx| crate::scheduler::reconcile_consultation_dispatch(
+                    tx, foreign, deadline
+                ))
+                .unwrap_err()
+                .details["reason"],
+            "consultation_claim_owner_changed"
+        );
+        for fault in ["outbox", "event"] {
+            store.connection().execute_batch(if fault=="outbox" {
+                "CREATE TRIGGER crash_unknown BEFORE INSERT ON collaboration_result_outbox BEGIN SELECT RAISE(ABORT,'outbox fault'); END;"
+            } else {
+                "CREATE TRIGGER crash_unknown BEFORE INSERT ON orchestration_events WHEN NEW.kind='scheduler_dispatch_observed' BEGIN SELECT RAISE(ABORT,'event fault'); END;"
+            }).unwrap();
+            assert!(
+                store
+                    .transact(|tx| crate::scheduler::reconcile_consultation_dispatch(
+                        tx, actor, deadline
+                    ))
+                    .is_err()
+            );
+            assert_eq!(
+                store
+                    .connection()
+                    .query_row("SELECT phase FROM scheduler_claims", [], |r| r
+                        .get::<_, String>(0))
+                    .unwrap(),
+                "dispatching"
+            );
+            assert_eq!(
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT execution_state FROM collaboration_exchanges",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "dispatching"
+            );
+            assert_eq!(
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT count(*) FROM collaboration_result_outbox",
+                        [],
+                        |r| r.get::<_, u64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(store.connection().query_row("SELECT count(*) FROM orchestration_events WHERE kind='scheduler_dispatch_observed'",[],|r|r.get::<_,u64>(0)).unwrap(),0);
+            store
+                .connection()
+                .execute_batch("DROP TRIGGER crash_unknown")
+                .unwrap();
+        }
+        ctx.source_tool_call_id = "wait-crashed-dispatch".into();
+        let waiter = collaboration_spawn_call(
+            fixture.state_root.clone(),
+            ctx.clone(),
+            json!({"operation":"await_consultations","exchange_ids":[id],"return_when":"all","transport_wait_seconds":5}),
+        );
+        collaboration_wait_count(&fixture, 1);
+        assert_eq!(
+            store
+                .transact(|tx| crate::scheduler::reconcile_consultation_dispatch(
+                    tx, actor, deadline
+                ))
+                .unwrap(),
+            Some(source)
+        );
+        // The existing post-commit notifier wakes local waiters and central hints.
+        crate::collaboration::notify_exchange(&fixture.state_root, id).unwrap();
+        let waited = waiter.join().unwrap().unwrap();
+        assert_eq!(
+            waited["completed"][0]["execution_state"],
+            "interrupted_unknown"
+        );
+        assert_eq!(
+            waited["completed"][0]["safe_error_code"],
+            "INTERRUPTED_UNKNOWN"
+        );
+        drop(store);
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        for _ in 0..2 {
+            assert!(
+                store
+                    .transact(|tx| crate::scheduler::reconcile_consultation_dispatch(
+                        tx,
+                        actor,
+                        deadline + 1
+                    ))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT claim_id,phase,lease_until_ms FROM scheduler_claims",
+                    [],
+                    |r| Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?
+                    ))
+                )
+                .unwrap(),
+            (permit.claim.to_string(), "unknown".into(), lease)
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT execution_state,deadline_ms FROM collaboration_exchanges",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                )
+                .unwrap(),
+            ("interrupted_unknown".into(), deadline)
+        );
+        for (table, expected) in [
+            ("collaboration_results", 0),
+            ("collaboration_execution_links", 0),
+            ("collaboration_result_outbox", 1),
+            ("collaboration_mailbox", 1),
+        ] {
+            assert_eq!(
+                store
+                    .connection()
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                        .get::<_, u64>(0))
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(store.connection().query_row("SELECT count(*) FROM orchestration_events WHERE kind='scheduler_dispatch_observed'",[],|r|r.get::<_,u64>(0)).unwrap(),1);
+        assert!(
+            store
+                .transact(|tx| crate::scheduler::claim(tx, actor.owner, target, deadline + 1))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            crate::scheduler::idle_mail_guards(store.connection(), actor)
+                .unwrap_err()
+                .details["reason"],
+            "actor_has_claim"
+        );
+        let snapshot = crate::snapshot::RunSnapshot::load(&fixture.state_root, target, 0).unwrap();
+        store
+            .transact(|tx| {
+                crate::scheduler::reconcile_claim(
+                    tx,
+                    actor,
+                    &snapshot,
+                    deadline + 1,
+                    &fixture.state_root,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT count(*) FROM scheduler_claims", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(
+            !snapshot
+                .observed_ledger(&fixture.state_root)
+                .unwrap()
+                .records()
+                .iter()
+                .any(|r| r.kind() == crate::audit::AuditKind::TurnStarted)
+        );
+        ctx.source_tool_call_id = "collect-crashed-dispatch".into();
+        let collect = json!({"operation":"collect_collaboration_results","limit":1});
+        let unknown = collaboration_call(&fixture, &ctx, &collect).unwrap();
+        assert_eq!(
+            unknown["results"][0]["execution_state"],
+            "interrupted_unknown"
+        );
+        assert!(unknown["results"][0]["result_artifact_ref"].is_null());
+        assert_eq!(
+            collaboration_call(&fixture, &ctx, &collect).unwrap(),
+            unknown
+        );
+        assert_eq!(
+            collaboration_call(
+                &fixture,
+                &crate::orchestration::PrimaryCallContext {
+                    source_tool_call_id: "native-call".into(),
+                    ..ctx
+                },
+                &request
+            )
+            .unwrap(),
+            receipt
+        );
+    }
+
+    #[test]
+    fn collaboration_unknown_dispatch_recovers_only_original_submit_history_after_deadline() {
+        let (fixture, session, source, target, mut ctx, mut request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        collaboration_captured_controller(&fixture, source);
+        collaboration_captured_controller(&fixture, target);
+        collaboration_observable_core(&fixture, source);
+        collaboration_observable_core(&fixture, target);
+        request["deadline_seconds"] = json!(2);
+        ctx.source_tool_call_id = "unknown-dispatch".into();
+        let receipt = collaboration_call(&fixture, &ctx, &request).unwrap();
+        let id = Uuid::parse_str(receipt["exchange_id"].as_str().unwrap()).unwrap();
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        let permit = store
+            .transact(|tx| {
+                let permit = crate::scheduler::claim(
+                    tx,
+                    crate::assignment_queue::Owner::Managed(session),
+                    target,
+                    now_ms()?,
+                )?
+                .unwrap();
+                crate::scheduler::prepare_dispatch(tx, &permit, now_ms()?)?;
+                crate::scheduler::finish_dispatch(
+                    tx,
+                    &permit,
+                    &MemberDispatchOutcome::Uncertain {
+                        code: "RECOVERY_REQUIRED".into(),
+                        message: "lost reply".into(),
+                    },
+                    now_ms()?,
+                )?;
+                Ok(permit)
+            })
+            .unwrap();
+        crate::collaboration::reconcile_target(&fixture.state_root, target).unwrap();
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT execution_state FROM collaboration_exchanges",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "interrupted_unknown"
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM collaboration_execution_links",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        let snapshot = crate::snapshot::RunSnapshot::load(&fixture.state_root, target, 0).unwrap();
+        store
+            .transact(|tx| {
+                crate::scheduler::reconcile_claim(
+                    tx,
+                    crate::scheduler::Actor {
+                        owner: crate::assignment_queue::Owner::Managed(session),
+                        run: target,
+                    },
+                    &snapshot,
+                    now_ms()? + 60_000,
+                    &fixture.state_root,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT phase FROM scheduler_claims", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "unknown"
+        );
+        ctx.source_tool_call_id = "collect-original-unknown".into();
+        let collect = json!({"operation":"collect_collaboration_results","limit":1});
+        let original_unknown = collaboration_call(&fixture, &ctx, &collect).unwrap();
+        assert_eq!(
+            original_unknown["results"][0]["execution_state"],
+            "interrupted_unknown"
+        );
+        let manifest = crate::run::RunStore::new(
+            crate::workspace::SystemWorkspacePlatform,
+            &fixture.state_root,
+        )
+        .load_manifest(target)
+        .unwrap();
+        let record = crate::collaboration::execution_record(store.connection(), id).unwrap();
+        let original_deadline = record.deadline_ms;
+        let submit = crate::turn::TurnRequest {
+            write: false,
+            idempotency_key: format!("collaboration-exchange:{id}"),
+            message: record.prompt,
+            images: Vec::new(),
+            model: manifest.model.clone(),
+            effort: None,
+            delivery: crate::turn::DeliveryMode::Submit,
+        };
+        let mut foreign = manifest.controller.identity.clone();
+        foreign.controller_id = Uuid::now_v7();
+        let (_, wrong) = crate::turn::tests::collaboration_submit_history(
+            target,
+            foreign,
+            &fixture.view.workspace_id,
+            submit.clone(),
+        );
+        let prefix = wrong
+            .iter()
+            .position(|r| r.kind() == crate::audit::AuditKind::TurnTerminal)
+            .unwrap();
+        collaboration_install_history(&fixture, target, &wrong[..prefix]);
+        assert_eq!(
+            crate::collaboration::reconcile_target(&fixture.state_root, target)
+                .unwrap_err()
+                .code,
+            "COLLABORATION_NOT_ALLOWED"
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM collaboration_execution_links",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        let (accepted, records) = crate::turn::tests::collaboration_submit_history(
+            target,
+            manifest.controller.identity.clone(),
+            &fixture.view.workspace_id,
+            submit,
+        );
+        let prefix = records
+            .iter()
+            .position(|r| r.kind() == crate::audit::AuditKind::TurnTerminal)
+            .unwrap();
+        collaboration_install_history(&fixture, target, &records[..prefix]);
+        std::thread::sleep(Duration::from_millis(2100));
+        assert!(now_ms().unwrap() >= original_deadline);
+        crate::collaboration::reconcile_target(&fixture.state_root, target).unwrap();
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT turn_id FROM collaboration_execution_links",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            accepted.turn_id
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT phase FROM scheduler_claims WHERE claim_id=?1",
+                    [permit.claim.to_string()],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "accepted"
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT deadline_ms FROM collaboration_exchanges", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            original_deadline
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT count(*) FROM collaboration_results", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        collaboration_install_history(&fixture, target, &records);
+        crate::collaboration::reconcile_target(&fixture.state_root, target).unwrap();
+        crate::collaboration::reconcile_target(&fixture.state_root, target).unwrap();
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT execution_state FROM collaboration_exchanges",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "succeeded"
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM collaboration_result_outbox",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.connection().query_row("SELECT count(*) FROM orchestration_events WHERE kind='collaboration_result_published'",[],|r|r.get::<_,u64>(0)).unwrap(),1);
+        assert_eq!(
+            collaboration_call(&fixture, &ctx, &collect).unwrap(),
+            original_unknown
+        );
+        ctx.source_tool_call_id = "collect-late-original-terminal".into();
+        assert_eq!(
+            collaboration_call(&fixture, &ctx, &collect).unwrap()["results"][0]["execution_state"],
+            "succeeded"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.kind() == crate::audit::AuditKind::TurnStarted)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn collaboration_publication_respects_retained_source_artifact_quota() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        let (_, terminal) = collaboration_accept(
+            &fixture,
+            session,
+            source,
+            target,
+            &mut ctx,
+            &request,
+            "quota-result",
+        );
+        let directory = crate::run::run_root(&fixture.state_root, source).join("artifacts");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut retained = Vec::new();
+        for _ in 0..8 {
+            let path = directory.join(format!("{}.bin", Uuid::now_v7()));
+            fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap()
+                .set_len(32 * 1024 * 1024)
+                .unwrap();
+            retained.push(path);
+        }
+        assert_eq!(
+            crate::artifact::logical_artifact_bytes(&directory).unwrap(),
+            crate::artifact::MAX_RUN_ARTIFACT_BYTES
+        );
+        assert_eq!(
+            crate::collaboration::settle_target(&fixture.state_root, target, &terminal)
+                .unwrap_err()
+                .code,
+            "COLLABORATION_MAILBOX_FULL"
+        );
+        let db = rusqlite::Connection::open(fixture.database()).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT execution_state FROM collaboration_exchanges",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "running"
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM collaboration_results", [], |r| r
+                .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        fs::remove_file(retained.pop().unwrap()).unwrap();
+        crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+        let logical = crate::artifact::logical_artifact_bytes(&directory).unwrap();
+        assert!(
+            logical > 7 * 32 * 1024 * 1024 && logical <= crate::artifact::MAX_RUN_ARTIFACT_BYTES
+        );
+    }
+
+    #[test]
+    fn collaboration_replay_and_artifact_metadata_require_original_causal_binding() {
+        for case in 0..5 {
+            let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
+            fixture.initialize_writer_authority();
+            let (_, terminal) = collaboration_accept(
+                &fixture,
+                session,
+                source,
+                target,
+                &mut ctx,
+                &request,
+                "bound-result",
+            );
+            crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+            ctx.source_tool_call_id = "bound-collect".into();
+            let payload = json!({"operation":"collect_collaboration_results","limit":1});
+            let db = rusqlite::Connection::open(fixture.database()).unwrap();
+            if case < 2 {
+                let original = collaboration_call(&fixture, &ctx, &payload).unwrap();
+                assert_eq!(
+                    collaboration_call(&fixture, &ctx, &payload).unwrap(),
+                    original
+                );
+                let changed =
+                    json!({"operation":"collect_collaboration_results_result","results":[]})
+                        .to_string();
+                db.execute("UPDATE collaboration_tool_receipts SET response_json=?1 WHERE call_id='bound-collect'", [&changed]).unwrap();
+                if case == 1 {
+                    db.execute("UPDATE collaboration_tool_receipts SET response_sha256=?1 WHERE call_id='bound-collect'", [crate::jcs::sha256_hex(changed.as_bytes())]).unwrap();
+                }
+            } else {
+                match case {
+                    2 => {
+                        db.execute(
+                            "UPDATE collaboration_results SET artifact_id=?1",
+                            [Uuid::now_v7().to_string()],
+                        )
+                        .unwrap();
+                    }
+                    3 => {
+                        db.execute(
+                            "UPDATE collaboration_results SET byte_length=byte_length+1",
+                            [],
+                        )
+                        .unwrap();
+                    }
+                    _ => {
+                        db.execute("UPDATE collaboration_results SET safe_error_code='private runtime details'", []).unwrap();
+                    }
+                }
+            }
+            let error = collaboration_call(&fixture, &ctx, &payload).unwrap_err();
+            let safe = crate::collaboration::error_result(&error);
+            assert!(!safe.to_string().contains("private runtime details"));
+            assert!(
+                !safe
+                    .to_string()
+                    .contains(fixture.state_root.to_str().unwrap())
+            );
+            if case >= 2 {
+                assert_eq!(
+                    db.query_row(
+                        "SELECT delivery_state FROM collaboration_exchanges",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                    "pending"
+                );
+                assert_eq!(db.query_row("SELECT count(*) FROM collaboration_tool_receipts WHERE call_id='bound-collect'", [], |r|r.get::<_,u64>(0)).unwrap(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn collaboration_missing_invalid_private_and_corrupt_results_never_fabricate_success() {
+        for case in 0..10 {
+            let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
+            fixture.initialize_writer_authority();
+            let (id, mut terminal) = collaboration_accept(
+                &fixture,
+                session,
+                source,
+                target,
+                &mut ctx,
+                &request,
+                "unreadable-result",
+            );
+            let artifact = Uuid::now_v7();
+            let directory = crate::run::run_root(&fixture.state_root, target).join("artifacts");
+            fs::create_dir_all(&directory).unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+            terminal.final_response = match case {
+                0 => None,
+                1 => Some(crate::turn::FinalResponse::Artifact {
+                    artifact_id: artifact,
+                    byte_length: 4,
+                    sha256: crate::jcs::sha256_hex(b"body"),
+                    created_at: "2026-10-30T00:00:00Z".into(),
+                }),
+                2 => {
+                    fs::write(directory.join(format!("{artifact}.bin")), b"wrong").unwrap();
+                    Some(crate::turn::FinalResponse::Artifact {
+                        artifact_id: artifact,
+                        byte_length: 5,
+                        sha256: crate::jcs::sha256_hex(b"right"),
+                        created_at: "2026-10-30T00:00:00Z".into(),
+                    })
+                }
+                3 => Some(crate::turn::FinalResponse::Artifact {
+                    artifact_id: artifact,
+                    byte_length: crate::turn::MAX_FINAL_RESPONSE_ARTIFACT_BYTES as u64 + 1,
+                    sha256: "a".repeat(64),
+                    created_at: "2026-10-30T00:00:00Z".into(),
+                }),
+                4 => Some(crate::turn::FinalResponse::Inline {
+                    text: format!("private runtime {}", fixture.state_root.display()),
+                }),
+                5..=7 => Some(crate::turn::FinalResponse::Inline {
+                    text: [
+                        ".dolgorae/private",
+                        "controller-capability",
+                        "\"jsonrpc\":\"2.0\"",
+                    ][case - 5]
+                        .into(),
+                }),
+                8 | 9 => {
+                    let path = directory.join(format!("{artifact}.bin"));
+                    if case == 8 {
+                        let original = directory.join("symlink-body");
+                        fs::write(&original, b"body").unwrap();
+                        std::os::unix::fs::symlink(original, &path).unwrap();
+                    } else {
+                        fs::write(&path, b"body plus unreported bytes").unwrap();
+                    }
+                    Some(crate::turn::FinalResponse::Artifact {
+                        artifact_id: artifact,
+                        byte_length: 4,
+                        sha256: crate::jcs::sha256_hex(b"body"),
+                        created_at: "2026-10-30T00:00:00Z".into(),
+                    })
+                }
+                _ => unreachable!(),
+            };
+            crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+            ctx.source_tool_call_id = "collect-unavailable".into();
+            let response = collaboration_call(
+                &fixture,
+                &ctx,
+                &json!({"operation":"collect_collaboration_results","limit":1}),
+            )
+            .unwrap();
+            assert_eq!(response["results"][0]["exchange_id"], id.to_string());
+            assert_eq!(response["results"][0]["execution_state"], "failed");
+            assert!(response["results"][0]["result_artifact_ref"].is_null());
+            assert_eq!(
+                response["results"][0]["safe_error_code"],
+                "COLLABORATION_TRANSPORT_UNAVAILABLE"
+            );
+            for marker in [
+                ".dolgorae/",
+                "controller-capability",
+                "jsonrpc",
+                "unreported bytes",
+                "symlink-body",
+            ] {
+                assert!(!response.to_string().contains(marker));
+            }
+            assert!(
+                !response
+                    .to_string()
+                    .contains(fixture.state_root.to_str().unwrap())
+            );
+        }
+        let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        let (id, terminal) = collaboration_accept(
+            &fixture,
+            session,
+            source,
+            target,
+            &mut ctx,
+            &request,
+            "corrupt-result",
+        );
+        crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+        let db = rusqlite::Connection::open(fixture.database()).unwrap();
+        db.execute("UPDATE result_content SET bytes=?1 WHERE sha256=(SELECT sha256 FROM collaboration_results WHERE exchange_id=?2)",rusqlite::params![b"corrupt".to_vec(),id.to_string()]).unwrap();
+        ctx.source_tool_call_id = "corrupt-collect".into();
+        let error = collaboration_call(
+            &fixture,
+            &ctx,
+            &json!({"operation":"collect_collaboration_results","limit":1}),
+        )
+        .unwrap_err();
+        let safe = crate::collaboration::error_result(&error);
+        assert_eq!(safe["operation"], "collaboration_error");
+        assert!(
+            !safe
+                .to_string()
+                .contains(fixture.state_root.to_str().unwrap())
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT delivery_state FROM collaboration_exchanges",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "pending"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM collaboration_tool_receipts WHERE call_id='corrupt-collect'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            0
+        );
     }
 }

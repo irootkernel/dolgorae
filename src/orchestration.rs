@@ -1399,6 +1399,11 @@ impl OrchestrationStore {
         primary_run_id: Uuid,
         artifact_id: Uuid,
     ) -> Result<Option<(String, u64, String)>, MachineError> {
+        if let Some(metadata) =
+            crate::collaboration::artifact_metadata(&self.connection, primary_run_id, artifact_id)?
+        {
+            return Ok(Some(metadata));
+        }
         let has_table: bool = self
             .connection
             .query_row(
@@ -1451,7 +1456,7 @@ impl OrchestrationStore {
                 ))
             })
             .map_err(internal)?;
-        let mut artifacts = BTreeMap::new();
+        let mut artifacts = crate::collaboration::logical_artifacts(&self.connection, run_id)?;
         for row in rows {
             let (
                 id,
@@ -1519,6 +1524,26 @@ impl OrchestrationStore {
         run_id: Uuid,
         artifact_id: Uuid,
     ) -> Result<Option<File>, MachineError> {
+        if let Some(bytes) =
+            crate::collaboration::artifact_content(&self.connection, run_id, artifact_id)?
+        {
+            let digest = crate::jcs::sha256_hex(&bytes);
+            crate::storage_observation::write_shared_artifact(
+                &self.state_root,
+                run_id,
+                artifact_id,
+                &digest,
+                &bytes,
+            )?;
+            return crate::storage_observation::open_shared_artifact(
+                &self.state_root,
+                run_id,
+                artifact_id,
+                &digest,
+                bytes.len() as u64,
+            )
+            .map(Some);
+        }
         // A base-only Engagement database (no orchestration extension) has no
         // published results, exactly as in `logical_result_artifacts`.
         let normalized_namespace:bool=self.connection.query_row(

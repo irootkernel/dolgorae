@@ -1416,7 +1416,8 @@ policy per Session and consumes its retained admission limits. It provides no
 policy override operation. Assignment queue priority uses 0 for interactive,
 1 for normal and 2 for background; an eventual orchestration-state projection
 maps these ordering values to the checked policy priority classes.
-The result outbox remains TASK-083 work.
+The exchange-owned result outbox and native call receipts implement durable
+local delivery; acknowledgment does not imply remote consumption.
 The full checked orchestration-state export remains an integration obligation;
 this storage foundation adds no public exporter.
 
@@ -2512,11 +2513,53 @@ expired claim to the queue when no Turn acceptance evidence exists. It never
 silently creates a replacement Specialist and never reruns work whose acceptance
 or outcome is unknown.
 
+The existing actor lifecycle lease serializes recovery of an unresolved
+consultation dispatch reservation. Positive original acceptance recovery runs
+first. At the original exchange deadline, one checked SQLite transaction may
+mark that same reservation unknown and publish source-pending uncertainty with
+its outbox entry and causal event. Notification follows commit. The target claim
+remains fenced, and uncertainty creates no final content row that could block
+later verified original acceptance and terminal settlement.
+
 The orchestration database is not a task-planning database for an external AI.
 For an External Specialist Engagement it stores only the accepted Specialist
 boundary, member ownership, task submission, result, delivery, and recovery facts
 needed to make Dolgorae's own effects durable. Specialist-to-Specialist
 Collaboration Exchanges are accepted only for one active Orchestration Session.
+
+The collaboration result extension retains target execution links, immutable
+content references, source-owned artifact metadata, result mailbox/outbox rows,
+source-scoped tool receipts and active wait edges in this same database. Terminal
+publication commits content, reference, mailbox, delivery state and causal event
+in one transaction. Run terminal evidence is read and verified before that
+transaction; it is not part of a cross-store atomic commit. Existing shared
+content materialization reconstructs the source artifact with its original ID
+and digest after a crash, and checked artifact reads retain source Controller
+authorization and whole-content integrity.
+
+Native call receipts use Session, source Run, Turn and call identity, with a
+retained request digest. Collection atomically stores the exact checked response
+and marks its selected results operationally acknowledged. A durable per-source
+alternating pending/recovery selection and circular acknowledged-result position
+allow later calls to recover lost responses while delivering new results, even
+at limit one. The response wire remains cursor-free. Same-call replay never
+changes the batch. Socket completion is not the receipt authority.
+
+Active wait rows bind source generation, Thread, Turn, call, original transport
+expiry and owned exchange IDs. Writer-serialized admission checks the entire
+acyclic graph and depth/wait bounds before committing edges. No transaction,
+Writer serializer or Worker drain spans a wait. Reconciliation drops stale
+waits, restores source artifacts and settles only original accepted target Turns.
+Wait changes wake affected actors after commit; production candidate selection
+uses these authenticated edges for dependency boost. Pending outbox rows and
+active waits remain passivation blockers until their owning durable transition.
+The gateway forwards dirty result/source hints to the existing private Worker
+control service. Its observation-only collaboration notification validates the
+current Worker identity and composing build, signals process-local waiters, and
+changes no Run or exchange authority. Source stop/failure and durable lifecycle
+publication also signal local waiters. A waiter sleeps until a notification or
+its original transport expiry; no per-actor or per-call SQLite polling timer is
+added. The single global reconciliation scan supplies lost-notification repair.
 
 ### Mailbox Scheduling and Virtual Actor Residency
 
@@ -2530,8 +2573,8 @@ exclude `queued`; the version-1 marker distinguishes this shape, while
 `accepted`, `claimed`, `dispatching` and `running` remain unique per member.
 The central scheduler dispatches retained queued work under current owner
 authority. Live entrypoints retain their ready-target-only admission policy
-until TASK-083 wait/result semantics and TASK-027 integrated qualification are
-complete. Target readiness is separate from read-only access. Queue storage
+until TASK-027 integrated qualification is complete. Target readiness is separate
+from read-only access. Queue storage
 alone cannot authorize a Turn, reconstruct an external Controller capability
 or replay uncertain work.
 The shared `assignment_queue` module owns ordering and reuse records; the

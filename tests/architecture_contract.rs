@@ -53,22 +53,30 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "collaboration",
             &[
+                "artifact", // Source artifact quota and bounded content reads.
                 "assignment_queue",
-                "scheduler",
+                "audit",  // Original target acceptance and terminal evidence.
+                "darwin", // Same-UID private notification transport.
                 "delegation_identity",
                 "domain",
                 "engagement",
                 "jcs",
+                "ledger", // Verified retained target history.
                 "machine",
+                "operation", // Original Submit namespace for recovery.
                 "orchestration",
                 "run",
+                "scheduler",
                 "semantic",
                 "session_policy",
+                "snapshot", // Current Run and accepted configuration fences.
                 "storage_observation",
                 "successor_capture",
                 "task_request",
                 "turn",
+                "worker", // Central-runtime observation-only waiter hint.
                 "workspace",
+                "writer", // Blocking-wait admission revalidates writer ownership.
             ][..],
         ),
         (
@@ -677,6 +685,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "semantic",
                 "projection",
                 "collaboration",
+                "artifact", // Test-only source-owned collaboration result reads.
                 "assignment_queue",
                 "caller_scope",
                 "delegation_identity",
@@ -845,10 +854,9 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "protocol",
             ][..],
         ),
-        // `semantic` is the adapter-independent composition layer: it is the one
-        // module allowed to name several subsystems at once, because deciding
-        // how a Run starts and how a Run verb reaches its worker is exactly its
-        // job.  Adapters (cli, main) still carry no product logic.
+        // `semantic` composes Run startup and operations; `collaboration`
+        // composes accepted exchanges, results and waits through their owners.
+        // Adapters (cli, main) still carry no product logic.
         (
             "semantic",
             &[

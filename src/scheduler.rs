@@ -219,7 +219,10 @@ pub(crate) fn candidates(
                 deadline_ms,
                 created_ms,
                 sequence,
-                dependency_unblock: false,
+                dependency_unblock: crate::collaboration::dependency_unblock(
+                    c,
+                    Uuid::parse_str(&id).map_err(|_| error("invalid_exchange_identity"))?,
+                )?,
             });
         }
     }
@@ -792,7 +795,8 @@ pub(crate) fn actors(c: &Connection) -> Result<Vec<Actor>, MachineError> {
                 |r| r.get::<_, bool>(0),
             )
             .map_err(sql)?;
-        if seen || assigned || consulted {
+        let source_mail=table(c,"collaboration_result_outbox")? && c.query_row("SELECT EXISTS(SELECT 1 FROM collaboration_result_outbox WHERE source_run_id=?1) OR EXISTS(SELECT 1 FROM collaboration_waits WHERE source_run_id=?1 AND active=1)",[&run],|r|r.get::<_,bool>(0)).map_err(sql)?;
+        if seen || assigned || consulted || source_mail {
             enrolled.push(actor);
         }
     }
@@ -888,9 +892,8 @@ pub(crate) fn observe_actor(
     .map_err(sql)
 }
 
-/// These guards consume existing durable work/delivery facts. TASK-083 will
-/// supply actual blocking wait edges; absence of that not-yet-enabled plane
-/// does not manufacture an acknowledgment for a pending result.
+/// Active blocking waits and pending delivery prevent passivation. Absence of
+/// a wait never manufactures an acknowledgment for a pending result.
 pub(crate) fn idle_mail_guards(c: &Connection, actor: Actor) -> Result<(), MachineError> {
     if !candidates(c, actor.owner, actor.run)?.is_empty() {
         return Err(error("actor_has_mail"));
@@ -919,7 +922,10 @@ pub(crate) fn idle_mail_guards(c: &Connection, actor: Actor) -> Result<(), Machi
         return Err(error("actor_has_unsettled_task"));
     }
     if matches!(actor.owner, Owner::Managed(_)) && table(c, "collaboration_exchanges")? {
-        let pending:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM collaboration_exchanges WHERE (target_run_id=?1 AND (delivery_state='pending' OR execution_state IN ('claimed','dispatching','running','interrupted_unknown'))) OR (source_run_id=?1 AND (delivery_state='pending' OR execution_state IN ('queued','claimed','dispatching','running','interrupted_unknown'))))",[actor.run.to_string()],|r|r.get(0)).map_err(sql)?;
+        if crate::collaboration::source_waiting(c, actor.run)? {
+            return Err(error("actor_has_blocking_wait"));
+        }
+        let pending:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM collaboration_exchanges WHERE (target_run_id=?1 AND execution_state IN ('claimed','dispatching','running','interrupted_unknown')) OR (source_run_id=?1 AND delivery_state='pending'))",[actor.run.to_string()],|r|r.get(0)).map_err(sql)?;
         if pending {
             return Err(error("actor_has_outbound_or_pending_result"));
         }
@@ -1158,8 +1164,8 @@ pub(crate) fn finish_dispatch(
     .map_err(sql)?;
     if let MemberDispatchOutcome::Accepted { turn_ref } = outcome {
         if permit.kind == "consultation" {
-            // Result/outbox completion belongs to TASK-083. Keep the accepted
-            // execution and its Turn even if that later hook is unavailable.
+            // Terminal settlement owns result/outbox publication. Preserve its
+            // accepted execution independently of that publication.
             tx.execute("UPDATE collaboration_exchanges SET execution_state='running' WHERE exchange_id=?1 AND execution_state='dispatching'",[permit.work.to_string()]).map_err(sql)?;
         } else {
             let owner = if permit.scope_kind == "orchestrated_session" {
@@ -1170,6 +1176,9 @@ pub(crate) fn finish_dispatch(
             crate::assignment_queue::remove(tx, owner, permit.work)?;
         }
         let _ = turn_ref;
+    }
+    if phase == "unknown" && permit.kind == "consultation" {
+        crate::collaboration::unknown_exchange(tx, permit.work)?;
     }
     if phase == "refused" {
         // A proved nonacceptance keeps the original queue/receipt. No semantic
@@ -1210,7 +1219,8 @@ pub(crate) fn expire_queued(
     tx: &Transaction<'_>,
     actor: Actor,
     now: i64,
-) -> Result<(), MachineError> {
+) -> Result<Vec<Uuid>, MachineError> {
+    let mut sources = Vec::new();
     for candidate in candidates(tx, actor.owner, actor.run)?
         .into_iter()
         .filter(|c| c.deadline_ms <= now)
@@ -1245,7 +1255,16 @@ pub(crate) fn expire_queued(
                 crate::assignment_queue::remove(tx, actor.owner, candidate.id)?;
             }
             (Owner::Managed(_), "consultation") => {
-                tx.execute("UPDATE collaboration_exchanges SET execution_state='expired' WHERE exchange_id=?1 AND execution_state='queued'",[candidate.id.to_string()]).map_err(sql)?;
+                let source: String = tx
+                    .query_row(
+                        "SELECT source_run_id FROM collaboration_exchanges WHERE exchange_id=?1",
+                        [candidate.id.to_string()],
+                        |r| r.get(0),
+                    )
+                    .map_err(sql)?;
+                sources
+                    .push(Uuid::parse_str(&source).map_err(|_| error("invalid_source_identity"))?);
+                crate::collaboration::expire_exchange(tx, candidate.id, now)?;
             }
             _ => return Err(error("queued_scope_invalid")),
         }
@@ -1257,7 +1276,72 @@ pub(crate) fn expire_queued(
             now,
         )?;
     }
-    Ok(())
+    Ok(sources)
+}
+
+/// Called under the actor lifecycle lease, after positive acceptance recovery.
+/// A reserved dispatch can become unknown, but never become dispatchable again.
+pub(crate) fn reconcile_consultation_dispatch(
+    tx: &Transaction<'_>,
+    actor: Actor,
+    now: i64,
+) -> Result<Option<Uuid>, MachineError> {
+    let row: Option<(String, String, String, String)> = tx
+        .query_row(
+            "SELECT claim_id,work_ref,scope_kind,scope_ref
+             FROM scheduler_claims WHERE target_run_id=?1 AND kind='consultation'
+             AND phase='dispatching' AND turn_id IS NULL",
+            [actor.run.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    let Some((claim, work, scope_kind, scope_ref)) = row else {
+        return Ok(None);
+    };
+    let Owner::Managed(session) = actor.owner else {
+        return Err(error("consultation_claim_owner_changed"));
+    };
+    if scope_kind != "orchestrated_session" || scope_ref != session.to_string() {
+        return Err(error("consultation_claim_owner_changed"));
+    }
+    let work = Uuid::parse_str(&work).map_err(|_| error("claim_work_invalid"))?;
+    let record = crate::collaboration::execution_record(tx, work)?;
+    if record.session != session || record.target != actor.run {
+        return Err(error("consultation_claim_work_changed"));
+    }
+    let (state, source, linked): (String, String, bool) = tx
+        .query_row(
+            "SELECT execution_state,source_run_id,
+                EXISTS(SELECT 1 FROM collaboration_execution_links WHERE exchange_id=?1)
+         FROM collaboration_exchanges WHERE exchange_id=?1",
+            [work.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(sql)?;
+    if state != "dispatching" || linked || now < record.deadline_ms {
+        return Ok(None);
+    }
+    let source = Uuid::parse_str(&source).map_err(|_| error("consultation_source_invalid"))?;
+    let permit = AcceptedWork {
+        schema: "dolgorae.accepted-work/v1".into(),
+        claim: Uuid::parse_str(&claim).map_err(|_| error("claim_identity_invalid"))?,
+        work,
+        target: actor.run,
+        scope_kind,
+        scope_ref: session,
+        kind: "consultation".into(),
+    };
+    finish_dispatch(
+        tx,
+        &permit,
+        &crate::delegation_service::MemberDispatchOutcome::Uncertain {
+            code: "RECOVERY_REQUIRED".into(),
+            message: "reserved consultation requires original acceptance reconciliation".into(),
+        },
+        now,
+    )?;
+    Ok(Some(source))
 }
 
 /// A lease can be returned only while the durable pre-effect work and verified
@@ -1284,7 +1368,7 @@ pub(crate) fn reconcile_claim(
     let state: String = tx.query_row(query, [&work], |r| r.get(0)).map_err(sql)?;
     if matches!(
         state.as_str(),
-        "completed_not_delivered" | "delivered" | "failed" | "cancelled" | "expired"
+        "completed_not_delivered" | "delivered" | "succeeded" | "failed" | "cancelled" | "expired"
     ) && snapshot.projection.active_turn_id.is_none()
         && snapshot
             .writer
@@ -1318,9 +1402,13 @@ pub(crate) fn reconcile_claim(
         return Ok(());
     }
     let ledger = snapshot.observed_ledger(state_root)?;
-    let key=match actor.owner {
+    let key = if kind == "consultation" {
+        format!("collaboration-exchange:{work}")
+    } else {
+        match actor.owner {
         Owner::Managed(_)=>format!("successor-task:{work}"),
         Owner::External(_)=>tx.query_row("SELECT idempotency_key FROM delegation_operations WHERE json_extract(accepted_subjects_json,'$.task_ref')=?1 AND state='accepted'",[&work],|r|r.get::<_,String>(0)).map_err(sql)?,
+    }
     };
     for record in ledger.records() {
         let value: serde_json::Value = record
@@ -1332,12 +1420,16 @@ pub(crate) fn reconcile_claim(
             return Ok(());
         }
     }
-    let query = match actor.owner {
-        Owner::Managed(_) => {
-            "UPDATE brokered_tasks SET state='queued' WHERE task_id=?1 AND state='accepted' AND target_turn_id IS NULL"
-        }
-        Owner::External(_) => {
-            "UPDATE tasks SET state='queued' WHERE task_id=?1 AND state='accepted' AND turn_id IS NULL"
+    let query = if kind == "consultation" {
+        "UPDATE collaboration_exchanges SET execution_state='queued' WHERE exchange_id=?1 AND execution_state='claimed'"
+    } else {
+        match actor.owner {
+            Owner::Managed(_) => {
+                "UPDATE brokered_tasks SET state='queued' WHERE task_id=?1 AND state='accepted' AND target_turn_id IS NULL"
+            }
+            Owner::External(_) => {
+                "UPDATE tasks SET state='queued' WHERE task_id=?1 AND state='accepted' AND turn_id IS NULL"
+            }
         }
     };
     tx.execute(query, [&work]).map_err(sql)?;
@@ -1543,6 +1635,9 @@ fn reconcile_home(
             continue;
         };
         drop(store);
+        // Wake a source waiter before any lifecycle fence or semantic scan can
+        // refuse this visit. The hint itself grants no mutation authority.
+        crate::collaboration::wake_waiter(&root, run);
         // The semantic boundary owns actual Run/process effects. Failures leave
         // durable mail, claim or operation evidence for the next global scan.
         if let Err(failure) = crate::semantic::schedule_actor(&view, &root, actor)

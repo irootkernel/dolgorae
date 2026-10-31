@@ -1741,7 +1741,7 @@
       },
       "x-invariants": [
         "source and target are different active brokered members in session_id",
-        "root_task_id names a brokered delegation targeted at source_run_id",
+        "root_task_id names the original brokered delegation; nested source authority follows the parent exchange target Turn",
         "priority_class equals the root task priority",
         "blocking active exchanges form an acyclic wait graph",
         "succeeded execution stores one immutable result and uses pending or acknowledged delivery",

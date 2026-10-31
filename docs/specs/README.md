@@ -3879,9 +3879,9 @@ rejects admission. Request retries are scoped by Session, source Run, Turn and
 call; changed input under that identity conflicts. Admission stores immutable
 request and context bytes, the exchange, target mailbox, causal event and durable
 activation marker together. TASK-082 supplies centralized scheduling and actor
-activation and passivation. Blocking waits and result delivery remain TASK-083
-work. Live collaboration policy remains gated until those semantics and
-TASK-027 integrated qualification are complete.
+activation and passivation. TASK-083 supplies exchange execution linkage, result
+publication and bounded wait safety. Live collaboration policy remains gated
+until TASK-027 integrated qualification is complete.
 
 ### Durable Mailbox and Virtual Actor Activation
 
@@ -3939,8 +3939,8 @@ Assignment queue admission and compatible reuse have a staged service boundary
 for both managed Sessions and External Engagements. It commits retained tasks,
 ordering and caller accounting together. The central dispatcher executes those
 retained queues under their original owner authority. Live tools retain
-ready-target-only admission and existing reuse-policy gates pending TASK-083
-wait/result semantics and TASK-027 integrated qualification. Queue storage alone
+ready-target-only admission and existing reuse-policy gates pending TASK-027
+integrated qualification. Queue storage alone
 grants no lateral consultation or activation authority. Those effects retain
 their separate admission and captured lifecycle checks.
 
@@ -4018,11 +4018,86 @@ renew a deadline. Deadline expiry alone does not invalidate positive original
 acceptance evidence; a conflicting terminal task state still requires owning
 reconciliation.
 
+Recovery MUST first check for verified original Turn acceptance. If an unresolved
+`dispatching` consultation reaches its original exchange deadline, recovery MUST
+atomically mark the original claim unknown, publish `interrupted_unknown`, mark
+source delivery pending, retain one outbox entry and append the causal event.
+This classification is not proof of nonacceptance: it MUST NOT requeue work,
+retire the target claim, reset a deadline or start another Turn. Verified
+original acceptance and an actual late terminal remain eligible for the existing
+link and settlement path; an earlier source response stays immutable.
+
 Result notification is at least once and consumption is idempotent by exchange
 ID and immutable result artifact. A transport await ending does not cancel the
 exchange. A completed result may remain `pending` in the source mailbox and be
 awaited or collected after source restart. Dolgorae MUST NOT start an unsolicited
 continuation Turn solely because a result arrived.
+
+#### Collaboration result publication and collection
+
+The original accepted consultation is linked to its target Run, Thread and Turn
+before completion is published. Recovery uses complete verified original Submit
+acceptance; an absent reply, expired lease or missing result never authorizes a
+second execution. Nested consultations derive their parent exchange, root task,
+priority and depth from that recorded execution, never model input. Their
+absolute deadline cannot exceed the original root or parent deadline.
+
+SQLite commits bounded immutable UTF-8 result content, its source-owned artifact
+identity, terminal exchange state, source result mailbox, pending delivery outbox
+and causal event together. Exact duplicate publication preserves the original
+identity and bytes; changed content is an integrity failure. Missing or
+unverifiable final content is a typed failure, never a successful empty result.
+The source Run's existing authorized bounded artifact reader exposes these
+results. Filesystem content references are reconstructable projections of the
+committed content, not a second authority or a transaction with the Run ledger.
+A successful result response requires its source projection to be readable.
+
+Collection acknowledgment means durable local handoff into a source-owned,
+replayable tool-response receipt. It does not prove transport delivery or model,
+provider or UI consumption. The full authenticated Session/Run/Turn/call identity
+and request digest bind each exact response. Selection, local acknowledgment and
+that receipt commit atomically; the same call replays its original batch and
+states even after response loss. A later authorized Turn of the same source Run
+can collect after restart without knowing old call or exchange identities.
+
+The closed collect request has no cursor or acknowledgment argument. Internally,
+new calls alternate between oldest pending results and a circular recovery scan
+of acknowledged results, skipping duplicates within one response. The scan
+position and lane choice are durable. At limit one, both new delivery and
+recovery progress whenever both have work; changing limits and concurrent calls
+preserve this property. Previously acknowledged results remain recoverable and
+may be redelivered. Exact response receipts retain the original exchange and
+artifact identities; awaiting known identities also remains available. No
+notification, socket write or stopped source silently acknowledges a result.
+Only this durable operational acknowledgment removes its pending-result
+passivation guard. No result starts a continuation Turn.
+
+#### Authenticated blocking waits
+
+A blocking submit admits its exchange and active wait edges together, then
+returns the original queued receipt at terminal observation or the earlier of
+acceptance plus 60 seconds and the unchanged exchange deadline. Exact replay
+returns that receipt without another wait. Await observes the requested unique
+exchange IDs in request order, returns completed rows and pending IDs on its
+`any`/`all` condition or transport bound, and retains that exact response for
+call replay. Waiting never cancels the exchanges or renews their deadlines.
+
+Wait admission rechecks source Writer ownership under the existing Writer
+serializer before its short SQLite transaction. It rejects Writer-held blocking,
+more than two concurrent waits per Run, transitive cycles, or blocking depth
+above two using all edges in the requested set atomically. The eight-exchanges
+root lifetime limit remains unchanged. Source Run/Thread/Turn/generation and
+absolute transport bound identify each active wait. The wait releases SQLite,
+Writer and per-call mutation ownership before sleeping, leaving the Worker drain
+available. Completion, timeout, interruption, replaced generation and restart
+reconciliation remove stale edges without cancelling accepted execution.
+Only these authenticated active dependency facts produce scheduler unblock
+boost and block source passivation; generic Run waiting is insufficient. The
+central runtime forwards post-commit dirty hints through the existing private
+Worker control connection using a same-user, generation- and build-checked
+notification. Waiters re-observe on that notification, a local source lifecycle
+change, or their original transport bound, without a per-call SQLite polling
+timer. The existing single global reconciliation scan repairs lost hints.
 
 ### External Specialist Engagement
 

@@ -53,7 +53,7 @@ fn main() {
         println!(
             "{}",
             if std::env::var("DOLGORAE_NATIVE_COLLABORATION_COMPONENT").as_deref() == Ok("1") {
-                delegation_service::tests::native_collaboration_component(
+                driver::collaboration_component(
                     std::path::Path::new(&args[1]),
                     std::path::Path::new(&args[2]),
                 )
