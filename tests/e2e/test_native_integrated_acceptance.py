@@ -283,7 +283,7 @@ def collaboration_cleanup_timeout_preserves_first_failure() -> None:
     # Exercise the existing wrapper's failure finalizer with mocked process
     # handles. No executable, native runtime or model request is launched.
     with tempfile.TemporaryDirectory(prefix="dolgorae-collaboration-cleanup-") as temporary:
-        base=Path(temporary);target=base/"build"; (target/"debug/examples").mkdir(parents=True)
+        base=Path(temporary).resolve();target=base/"build"; (target/"debug/examples").mkdir(parents=True)
         binary=target/"debug/dolgorae";binary.write_bytes(b"offline-main-image")
         (target/"debug/examples/native_successor_pipeline").write_bytes(b"offline-driver-image")
         seen=[];state={"stopped":False}

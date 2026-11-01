@@ -2672,11 +2672,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let root = std::fs::canonicalize(std::env::temp_dir())
             .unwrap()
-            .join(format!("gr-write-{}", Uuid::now_v7().simple()));
+            .join(format!("gr-{}", Uuid::now_v7().simple()));
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let home = DolgoraeHome::from_canonical_home(root.clone()).unwrap();
-        let path = root.join("gateway.sock");
+        let path = root.join("g.sock");
         let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
         drop(reader);
         let instance = std::cell::Cell::new(None);
@@ -2685,6 +2685,9 @@ mod tests {
             Arc::new(Backend)
         })
         .unwrap_err();
+        let instance = instance
+            .get()
+            .expect("gateway did not reach backend startup before readiness write failure");
         assert_eq!(error.code, "TRANSPORT_FAILURE");
         assert!(!path.exists());
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2692,9 +2695,7 @@ mod tests {
             .build()
             .unwrap();
         let control = runtime
-            .block_on(async {
-                crate::scheduler::ControlPlaneRuntime::start(&home, instance.get().unwrap())
-            })
+            .block_on(async { crate::scheduler::ControlPlaneRuntime::start(&home, instance) })
             .expect("readiness failure retained the original control endpoint");
         runtime.block_on(control.shutdown(tokio::time::Instant::now() + DRAIN_BUDGET));
         runtime.shutdown_timeout(Duration::ZERO);

@@ -8476,7 +8476,9 @@ pub(crate) mod tests {
     }
 
     fn root() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("dolgorae-orchestration-{}", Uuid::now_v7()))
+        std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("dolgorae-orchestration-{}", Uuid::now_v7()))
     }
 
     fn policy(approval: &str) -> InstalledSpecialistPolicy {
@@ -9874,8 +9876,9 @@ pub(crate) mod tests {
         let output=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","orchestration::tests::caller_broker_current_protected_api_keeps_original_uuid_and_read_authority","--nocapture"]).env("HOME",&root).env(CHILD,serde_json::to_string(&case).unwrap()).output().unwrap();
         assert!(
             output.status.success(),
-            "current protected offline fixture failed: {}",
-            String::from_utf8_lossy(&output.stdout)
+            "current protected offline fixture failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
         let ledger =
             crate::ledger::Ledger::open(crate::run::run_root(&store.state_root, run), run).unwrap();

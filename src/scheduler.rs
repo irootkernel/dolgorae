@@ -2387,8 +2387,9 @@ mod tests {
     #[test]
     fn checked_state_refresh_requires_existing_storage_and_accepts_a_later_owner() {
         use std::os::unix::fs::PermissionsExt as _;
-        let root =
-            std::env::temp_dir().join(format!("dg-state-existing-{}", Uuid::now_v7().simple()));
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("dg-state-existing-{}", Uuid::now_v7().simple()));
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let home = crate::paths::DolgoraeHome::from_canonical_home(root.clone()).unwrap();
@@ -2472,7 +2473,9 @@ mod tests {
     #[test]
     fn checked_state_refresh_continues_after_an_independent_workspace_refuses() {
         use std::os::unix::fs::PermissionsExt as _;
-        let root = std::env::temp_dir().join(format!("dg-state-pass-{}", Uuid::now_v7().simple()));
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("dg-state-pass-{}", Uuid::now_v7().simple()));
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let home = crate::paths::DolgoraeHome::from_canonical_home(root.clone()).unwrap();
@@ -2519,7 +2522,9 @@ mod tests {
     #[test]
     fn scheduler_short_wake_delivers_for_long_home_and_preserves_unknown_nodes() {
         use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
-        let root = std::env::temp_dir().join(format!("dg-wake-{}", Uuid::now_v7().simple()));
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("dw-{}", Uuid::now_v7().simple()));
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&root)

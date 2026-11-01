@@ -85,6 +85,11 @@ The Make targets define four ordered validation layers:
 formatting, it may modify Rust source files without changing their meaning. Use
 `make format-check` when a read-only formatting check is required.
 
+Run the gate with the shell's default `TMPDIR`; use `CARGO_TARGET_DIR` to isolate
+build output. Fixtures that call canonical-path APIs must canonicalize their
+temporary roots. Keep Unix socket fixture paths short enough for the platform
+so startup reaches the failure being tested.
+
 Put product semantics in Rust and its tests. Keep Python limited to small
 independent repository checks or black-box executable tests. Any future E2E
 database or external service must use test-only credentials and namespaces;
