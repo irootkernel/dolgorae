@@ -821,6 +821,10 @@ must use the current owning recovery path for unknown work; queue records do not
 prove that a Turn was absent or authorize redispatch. Keep pending task state
 when a dispatcher or owner capability is unavailable.
 
+`DOLGORAE_CONTROL_PLANE_RECONCILIATION_REQUIRED` reports a failed control-plane
+reconciliation pass. Preserve pending work and use the current owning recovery
+path. The marker does not prove that a Turn was absent or permit redispatch.
+
 Public-v2 clients list safe summaries, fetch the full typed request with the
 current Run Controller, and resolve it using that Controller and the captured
 request, Turn and revision. Permission grants are exact requested subsets,
