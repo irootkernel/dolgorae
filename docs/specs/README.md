@@ -4132,6 +4132,16 @@ blocking waits per Run, depth two, and eight exchanges per root task; maximum
 65,536 inline request bytes; passivation after 600 idle seconds; activation
 timeout 30 seconds with three attempts; and one global reconciliation scan every
 30 seconds. Large context MUST be passed by immutable artifact reference.
+The 65,536-byte inline budget covers the complete submit request in the runtime's
+compact JSON encoding, including the objective, other fields and JSON framing.
+Per-field limits also apply; an individual field's maximum does not guarantee
+that the whole request fits.
+
+The snapshot retains `priority_classes` as metadata with interactive 3, normal 2
+and background 1. These values do not set scheduling order. The scheduler uses
+the accepted root priority: 0 for interactive, 1 for normal and 2 for background,
+within the documented scheduling order. The retained metadata is not a policy
+override.
 
 A blocking collaboration MUST be rejected if the source owns writer authority
 or if adding its wait edge creates a cycle. Collaboration never implies writer
