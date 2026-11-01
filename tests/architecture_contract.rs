@@ -16,6 +16,23 @@ fn rust_sources(directory: &Path) -> Vec<PathBuf> {
     files
 }
 
+// Only the admitted orchestration children extend source checks. Integration
+// test enumeration intentionally remains top-level.
+fn source_modules() -> Vec<PathBuf> {
+    let root = repository_root().join("src");
+    let mut paths = rust_sources(&root);
+    let children = rust_sources(&root.join("orchestration"));
+    assert_eq!(
+        children
+            .iter()
+            .map(|path| path.file_stem().unwrap().to_str().unwrap())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["approval", "checked_state", "policy_task"])
+    );
+    paths.extend(children);
+    paths
+}
+
 fn direct_crate_dependencies(source: &str) -> BTreeSet<String> {
     source
         .match_indices("crate::")
@@ -26,6 +43,33 @@ fn direct_crate_dependencies(source: &str) -> BTreeSet<String> {
                 .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
                 .collect::<String>();
             (!module.is_empty()).then_some(module)
+        })
+        .collect()
+}
+
+fn parent_defined_items(source: &str) -> BTreeSet<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let first = words.next()?;
+            let kind = if first == "pub" || first.starts_with("pub(") {
+                words.next()?
+            } else {
+                first
+            };
+            if !matches!(
+                kind,
+                "fn" | "struct" | "enum" | "trait" | "type" | "const" | "static" | "mod"
+            ) {
+                return None;
+            }
+            let name = words
+                .next()?
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect::<String>();
+            (!name.is_empty()).then_some(name)
         })
         .collect()
 }
@@ -43,13 +87,112 @@ fn review_output_production_dependencies_exclude_its_callers() {
 #[test]
 fn orchestration_production_depends_on_the_adapter_trait() {
     let source = fs::read_to_string(repository_root().join("src/orchestration.rs")).unwrap();
-    let (production, _) = source.split_once("#[cfg(test)]\nmod tests {").unwrap();
+    let (production, _) = source
+        .split_once("#[cfg(test)]\npub(crate) mod tests {")
+        .unwrap();
     assert!(!direct_crate_dependencies(production).contains("semantic"));
+    let defined = parent_defined_items(production);
+    for path in rust_sources(&repository_root().join("src/orchestration")) {
+        let source = fs::read_to_string(&path).unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        for (offset, _) in production.match_indices("super::") {
+            let suffix = &production[offset + "super::".len()..];
+            let names = if let Some(block) = suffix.strip_prefix('{') {
+                block
+                    .split_once('}')
+                    .unwrap()
+                    .0
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            } else {
+                vec![
+                    suffix
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap(),
+                ]
+            };
+            for name in names {
+                assert!(
+                    defined.contains(name),
+                    "{} imports non-parent item {name} through super",
+                    path.display()
+                );
+            }
+        }
+        assert!(
+            !direct_crate_dependencies(production).contains("semantic"),
+            "{} bypasses the orchestration adapter",
+            path.display()
+        );
+    }
 }
 
 #[test]
 fn source_module_dependencies_match_the_approved_graph() {
     let approved = BTreeMap::from([
+        // Parent-owned SQL/ledger bindings; no concrete semantic adapter.
+        (
+            "orchestration/approval",
+            &[
+                "audit",
+                "domain",
+                "interaction",
+                "ledger",
+                "operation",
+                "run",
+                "snapshot",
+                "jcs",
+                "machine",
+                "session_policy",
+                "workspace",
+            ][..],
+        ),
+        // Confidential projection reads checked owner captures, history and artifacts.
+        (
+            "orchestration/checked_state",
+            &[
+                "assignment_queue",
+                "audit",
+                "collaboration",
+                "darwin",
+                "delegation_identity",
+                "engagement",
+                "ledger",
+                "ledger_generation",
+                "operation",
+                "run",
+                "scheduler",
+                "trusted_host",
+                "domain",
+                "jcs",
+                "machine",
+                "session_policy",
+            ][..],
+        ),
+        // Worker projects primitives; this owner retains task/claim/recovery checks.
+        (
+            "orchestration/policy_task",
+            &[
+                "assignment_queue",
+                "collaboration",
+                "controller",
+                "domain",
+                "operation",
+                "run",
+                "scheduler",
+                "snapshot",
+                "storage_observation",
+                "turn",
+                "workspace",
+                "jcs",
+                "machine",
+                "primary_tool",
+                "session_policy",
+            ][..],
+        ),
         (
             "collaboration",
             &[
@@ -217,6 +360,8 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "source_binding",
             &[
+                "assignment_queue", // Test-only original queued execution.
+                "scheduler",        // Test-only claim/dispatch reservation.
                 "profile",
                 // Test-only native completion, managed connection and legacy controls.
                 "app_server",
@@ -312,6 +457,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "interaction",
             &[
+                "operation",
                 "public_resolution",
                 "audit",
                 "domain",
@@ -337,7 +483,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         ),
         (
             "public_resolution",
-            &["audit", "domain", "jcs", "operation", "turn"][..],
+            &["interaction", "audit", "domain", "jcs", "operation", "turn"][..],
         ),
         ("successor_interaction", &["interaction", "turn"][..]),
         ("cli", &[][..]),
@@ -473,7 +619,14 @@ fn source_module_dependencies_match_the_approved_graph() {
         ),
         (
             "event",
-            &["audit", "domain", "jcs", "projection", "workspace"][..],
+            &[
+                "interaction",
+                "audit",
+                "domain",
+                "jcs",
+                "projection",
+                "workspace",
+            ][..],
         ),
         ("fault", &[][..]),
         (
@@ -537,6 +690,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "ledger",
             &[
+                "interaction",
                 "audit",
                 "darwin",
                 "event",
@@ -601,6 +755,27 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "orchestration",
             &[
+                // These seventeen edges are test-only: Broker fixtures exercise the
+                // public adapters, original journals and task/Turn projections.
+                // Production remains behind the adapter trait checked above.
+                "conformance",
+                "delegation_service",
+                "event",
+                "gateway",
+                "gateway_observation",
+                // Test-only: project the same captured Caller approval view into v2.
+                "gateway_projection",
+                "gateway_projection_v2",
+                "gateway_service",
+                "interaction",
+                "ledger",
+                "operation",
+                "paths",
+                "protocol",
+                "public_resolution",
+                "scheduler",
+                "snapshot",
+                "turn",
                 "collaboration",
                 "assignment_queue",
                 "artifact",
@@ -627,6 +802,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "specialist_policy",
                 "storage_observation",
                 "workspace",
+                // Test-only: retain the writable member's original birth authority.
+                "writer",
             ][..],
         ),
         (
@@ -1163,6 +1340,8 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "snapshot",
             &[
+                "interaction",
+                "orchestration",
                 "audit",
                 "controller",
                 "darwin",
@@ -1323,8 +1502,12 @@ fn source_module_dependencies_match_the_approved_graph() {
         ),
     ]);
 
-    for path in rust_sources(&repository_root().join("src")) {
-        let module = path.file_stem().unwrap().to_str().unwrap();
+    for path in source_modules() {
+        let relative = path
+            .strip_prefix(repository_root().join("src"))
+            .unwrap()
+            .with_extension("");
+        let module = relative.to_str().unwrap();
         if matches!(module, "lib" | "main") {
             continue;
         }
@@ -1338,6 +1521,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "primary_tool",
                 "turn",
                 "profile",
+                "assignment_queue",
+                "scheduler",
             ] {
                 assert!(
                     !production.contains(test_only),
@@ -1363,8 +1548,8 @@ fn source_module_dependencies_match_the_approved_graph() {
 
 #[test]
 fn unsafe_implementation_remains_inside_the_darwin_adapter() {
-    for path in rust_sources(&repository_root().join("src")) {
-        if path.file_name().is_some_and(|name| name == "darwin.rs") {
+    for path in source_modules() {
+        if path == repository_root().join("src/darwin.rs") {
             continue;
         }
         let source = fs::read_to_string(&path).unwrap();

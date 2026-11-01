@@ -1,5 +1,9 @@
 //! Durable transport-independent Orchestrated Session authority.
 
+pub(crate) mod approval;
+mod checked_state;
+pub(crate) mod policy_task;
+
 use crate::controller::CredentialCarrier;
 use crate::domain::{ControllerIdentity, ControllerKind};
 use crate::engagement::EngagementStore;
@@ -55,6 +59,8 @@ pub enum OrchestrationBarrier {
     AfterResultPublication,
     BeforeDeliveryReceipt,
     AfterDeliveryReceipt,
+    AfterCheckedStatePreparation,
+    BeforeCheckedStateFence,
 }
 
 pub trait OrchestrationFaultInjector: Send + Sync {
@@ -1220,12 +1226,31 @@ pub struct OrchestrationStore {
 }
 
 impl OrchestrationStore {
+    /// Explicit confidential owner projection; observers never call this path.
+    pub(crate) fn refresh_checked_state(&mut self, workspace: &str) -> Result<(), MachineError> {
+        checked_state::materialize(self, workspace)
+    }
+
     pub fn open(state_root: &Path) -> Result<Self, MachineError> {
         Self::open_with_faults_and_clock(
             state_root,
             Arc::new(NoOrchestrationFaults),
             Arc::new(SystemOrchestrationClock),
         )
+    }
+
+    pub(crate) fn open_existing(state_root: &Path) -> Result<Option<Self>, MachineError> {
+        let path = EngagementStore::workspace_database_path(state_root);
+        let Some(store) = EngagementStore::open_existing(&path)? else {
+            return Ok(None);
+        };
+        Self::from_connection(
+            state_root,
+            store.into_connection(),
+            Arc::new(NoOrchestrationFaults),
+            Arc::new(SystemOrchestrationClock),
+        )
+        .map(Some)
     }
 
     pub fn open_with_faults(
@@ -1244,7 +1269,16 @@ impl OrchestrationStore {
         // `schema_version` and the `orchestration_schema_version` extension key
         // before this opener performs any write.
         let path = EngagementStore::workspace_database_path(state_root);
-        let mut connection = EngagementStore::open(&path)?.into_connection();
+        let connection = EngagementStore::open(&path)?.into_connection();
+        Self::from_connection(state_root, connection, faults, clock)
+    }
+
+    fn from_connection(
+        state_root: &Path,
+        mut connection: crate::storage_observation::CheckedConnection,
+        faults: Arc<dyn OrchestrationFaultInjector>,
+        clock: Arc<dyn OrchestrationClock>,
+    ) -> Result<Self, MachineError> {
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(internal)?;
@@ -3445,6 +3479,16 @@ impl OrchestrationStore {
         validate_assign_task(request)?;
         source_contract.admit_access(&request.requested_access)?;
         let session = self.authorize_primary(context)?;
+        if matches!(session.specialist_policy, SessionPolicySnapshot::Caller(_)) {
+            let old = self.task_by_key(context.session_id, &context.idempotency_key)?;
+            let queued = match old.as_ref() {
+                None => true,
+                Some(task) => policy_task::contains(&self.connection, task.task_id)?,
+            };
+            if queued {
+                return policy_task::admit(self, context, request, adapter, session);
+            }
+        }
         let request_sha256 = digest_value(request)?;
         let (task_id, accepted_task) = if let Some(existing) =
             self.task_by_key(context.session_id, &context.idempotency_key)?
@@ -3884,7 +3928,8 @@ impl OrchestrationStore {
         let accepted = self.accepted_task(task.task_id)?;
         let task_deadline =
             checked_deadline_ms(accepted.deadline_origin_ms, accepted.deadline_seconds)?;
-        if self.now_ms()? >= task_deadline {
+        let policy_queued = policy_task::contains(&self.connection, task.task_id)?;
+        if !policy_queued && self.now_ms()? >= task_deadline {
             let _ = self.settle_task_control(session_id, task.task_id, "expiry", adapter)?;
             return Ok(());
         }
@@ -3898,7 +3943,11 @@ impl OrchestrationStore {
         match adapter.observe_task(task, &credential) {
             Ok(
                 SpecialistTaskObservation::Running | SpecialistTaskObservation::WaitingInteraction,
-            ) => {}
+            ) => {
+                if policy_queued && self.now_ms()? >= task_deadline {
+                    self.settle_task_control(session_id, task.task_id, "expiry", adapter)?;
+                }
+            }
             Ok(SpecialistTaskObservation::OutcomeUnknown) | Err(AdapterFailure::Unknown) => {
                 self.update_task_state_if(
                     session_id,
@@ -8186,7 +8235,7 @@ fn internal(error: impl ToString) -> MachineError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::domain::{Assurance, ExecutionLane, Purpose, PurposeKind};
     use crate::run::{AgentConfigurationSnapshot, InstructionSnapshot};
@@ -8695,6 +8744,2267 @@ mod tests {
         assert_eq!(observer.connection.total_changes(), 0);
         drop(observer);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Caller policy admission with real checked manifests/ledger sources and
+    /// the existing fake effect port; no physical Codex process is launched.
+    fn caller_policy_queue_fixture() -> (
+        PathBuf,
+        OrchestrationStore,
+        OrchestratedSessionSnapshot,
+        Uuid,
+        FakeAdapter,
+    ) {
+        let (root, store, session, member, adapter) =
+            caller_policy_fixture("fully_delegated", true);
+        (root, store, session, member.unwrap(), adapter)
+    }
+
+    fn caller_policy_fixture(
+        approval: &str,
+        collaboration: bool,
+    ) -> (
+        PathBuf,
+        OrchestrationStore,
+        OrchestratedSessionSnapshot,
+        Option<Uuid>,
+        FakeAdapter,
+    ) {
+        caller_policy_fixture_with_access(approval, collaboration, "read_only")
+    }
+
+    fn caller_policy_fixture_with_access(
+        approval: &str,
+        collaboration: bool,
+        access: &str,
+    ) -> (
+        PathBuf,
+        OrchestrationStore,
+        OrchestratedSessionSnapshot,
+        Option<Uuid>,
+        FakeAdapter,
+    ) {
+        let root = root();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home = root.join(".dolgorae");
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let view = crate::workspace::WorkspaceService::new(
+            crate::workspace::SystemWorkspacePlatform,
+            crate::workspace::SystemGitRunner,
+            home.clone(),
+        )
+        .initialize(Some(&workspace), crate::workspace::WorkspaceMode::NonGit)
+        .unwrap();
+
+        let mut value: Value = serde_json::from_slice(include_bytes!(
+            "../docs/protocol/examples/accepted-policy-session-v1-captured.valid.json"
+        ))
+        .unwrap();
+        value["captures"]["home_root"] =
+            serde_json::to_value(crate::workspace::LosslessPath::from_path(&home)).unwrap();
+        value["captures"]["workspace_id"] = serde_json::json!(view.workspace_id);
+        value["captures"]["canonical_workspace"] =
+            serde_json::to_value(&view.canonical_path).unwrap();
+        value["captures"]["policy"]["approval_policy"] = serde_json::json!(approval);
+        value["captures"]["policy"]["roles"][0]["collaboration_source"] =
+            serde_json::json!(collaboration);
+        value["captures"]["policy"]["roles"][0]["collaboration_target"] =
+            serde_json::json!(collaboration);
+        value["captures"]["policy"]["roles"][0]["allowed_access"] = serde_json::json!([access]);
+        if access == "canonical_workspace_write" {
+            value["captures"]["policy"]["roles"][0]["agent_configuration"]["purpose"] =
+                serde_json::json!("implementation");
+            value["captures"]["configurations"]["reviewer"]["purpose"]["kind"] =
+                serde_json::json!("implementation");
+        }
+        let original: crate::global_runtime::GlobalProfileBinding =
+            serde_json::from_value(value["captures"]["profile_bindings"]["reviewer"].clone())
+                .unwrap();
+        let mut launch = original.launch_snapshot.clone();
+        launch.codex_version = "0.164.0".into();
+        launch.executable_identity.sha256 =
+            "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf".into();
+        launch
+            .normalized_argv
+            .extend(["--disable".into(), "shell_snapshot".into()]);
+        launch.disabled_features = vec!["shell_snapshot".into()];
+        let binding = crate::global_runtime::ResolvedGlobalProfile::from_definition(
+            &original.selected_name,
+            original.definition,
+        )
+        .unwrap()
+        .bind_qualified(launch)
+        .unwrap();
+        let hash = binding.digest().unwrap();
+        value["captures"]["profile_bindings"]["reviewer"] = serde_json::to_value(binding).unwrap();
+        value["captures"]["configurations"]["reviewer"]["global_profile_binding_sha256"] =
+            serde_json::json!(hash);
+        let accepted: AcceptedPolicySessionSnapshot = serde_json::from_value(value).unwrap();
+        let state_root = home
+            .join("workspaces")
+            .join(accepted.captures.workspace_id());
+        let mut store = OrchestrationStore::open(&state_root).unwrap();
+        for directory in [&home, &home.join("workspaces"), &state_root] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let accepted = store
+            .accept_policy_session(
+                accepted.root_run_id,
+                &accepted.idempotency_key,
+                &accepted.request_sha256,
+                accepted.captures,
+            )
+            .unwrap();
+        let session = store.prepare_caller_session(&accepted).unwrap();
+        store.mark_primary_intent(session.session_id).unwrap();
+        let session = store
+            .finish_primary_publication(session.session_id, Ok(()))
+            .unwrap();
+        let mut adapter = FakeAdapter::default();
+        let mut source = context(session.session_id, "spawn-policy");
+        source.idempotency_key = sha256_hex(
+            format!(
+                "dolgorae-primary-tool-v1\0{}\0{}\0primary-thread\0{}\0{}",
+                session.session_id,
+                session.session_id,
+                source.source_turn_id,
+                source.source_tool_call_id
+            )
+            .as_bytes(),
+        );
+        let op = store
+            .request_specialist(&source, &request(access), &mut adapter)
+            .unwrap();
+        let member = op.specialist_run_id;
+        let member_snapshot = member.map(|id| store.member(session.session_id, id).unwrap());
+        if let Some(member) = member {
+            store.member_credential(member).unwrap();
+        }
+        let configuration: crate::run::AgentConfigurationSnapshot = accepted
+            .captures
+            .child("reviewer")
+            .unwrap()
+            .clone()
+            .try_into()
+            .unwrap();
+        let profile = accepted
+            .captures
+            .profile_binding("reviewer")
+            .unwrap()
+            .clone();
+        let root_credential = root.join("primary-controller");
+        crate::controller::create_controller_credential(
+            &root_credential,
+            ControllerKind::InteractiveClient,
+            "policy-primary-fixture".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        let root_carrier =
+            crate::controller::CredentialCarrier::open_path(&root_credential).unwrap();
+        let root_controller = crate::controller::binding_from_carrier(&root_carrier, 1).unwrap();
+        let mut runs = vec![(session.root_run_id, root_controller, true)];
+        if let Some(member) = member_snapshot {
+            runs.push((member.run_id, member.controller_binding, false));
+        }
+        for (run, controller, primary) in runs {
+            let mut manifest =
+                crate::delegation_service::tests::root_manifest(&view, &controller, run);
+            manifest.schema_version = 3;
+            manifest.execution_lane = configuration.execution_lane;
+            manifest.agent_configuration = configuration.clone();
+            if primary {
+                manifest.control_mode = crate::domain::ControlMode::DirectInteractive;
+                manifest.agent_configuration.role_reference = None;
+            }
+            manifest.instructions = configuration.instructions.clone();
+            manifest.model = configuration.model.clone();
+            manifest.purpose = configuration.purpose.clone();
+            manifest.default_reasoning_effort = configuration.default_effort.clone();
+            manifest.initial_reasoning_effort = configuration.default_effort.clone();
+            manifest.required_capabilities = configuration.required_capabilities.clone();
+            manifest.global_profile_binding = Some(profile.clone());
+            manifest.profile =
+                crate::semantic::run_profile_snapshot(&profile.launch_snapshot).unwrap();
+            manifest.profile.profile_name = profile.selected_name.clone();
+            manifest.profile.initial_server_key = profile.server_key.clone();
+            manifest.profile_capability_snapshot.profile_name = profile.selected_name.clone();
+            manifest.profile_capability_snapshot.server_key = profile.server_key.clone();
+            manifest.profile_capability_snapshot.app_server_version =
+                manifest.profile.codex_version.clone();
+            manifest.profile_capability_snapshot.schema_sha256 =
+                manifest.profile.app_server_schema_sha256.clone();
+            manifest.app_server.version = Some(manifest.profile.codex_version.clone());
+            manifest.app_server.actual_codex_home =
+                Some(manifest.profile.canonical_codex_home.clone());
+            manifest.requested_access =
+                Some(if !primary && access == "canonical_workspace_write" {
+                    crate::domain::CallerWorkspaceAccess::Writable
+                } else {
+                    crate::domain::CallerWorkspaceAccess::ReadOnly
+                });
+            manifest.initial_access = if manifest.requested_access
+                == Some(crate::domain::CallerWorkspaceAccess::Writable)
+            {
+                crate::domain::Access::Write
+            } else {
+                crate::domain::Access::Read
+            };
+            manifest.selected_role = Some("reviewer".into());
+            manifest.start_contract = Some("caller_workspace/v1".into());
+            manifest.aggregate_binding = Some(if primary {
+                crate::run::AggregateBinding {
+                    aggregate_kind: crate::domain::AggregateKind::OrchestratedSession,
+                    aggregate_id: session.session_id,
+                    operation_id: session.bootstrap_operation_id,
+                    member_kind: crate::run::AggregateMemberKind::Primary,
+                    policy_sha256: Some(session.specialist_policy_sha256.clone()),
+                    role_reference: None,
+                    role_snapshot_sha256: None,
+                    agent_configuration_sha256: None,
+                }
+            } else {
+                adapter
+                    .publication_plans
+                    .iter()
+                    .find(|plan| plan.run_id == run)
+                    .unwrap()
+                    .aggregate_binding
+                    .clone()
+            });
+            if !primary {
+                manifest.parent_ref = Some(crate::run::ParentReference {
+                    namespace: "dolgorae.orchestrated-session.v1".into(),
+                    kind: "specialist".into(),
+                    id: session.session_id.to_string(),
+                });
+            }
+            let path = crate::run::run_root(&state_root, run);
+            if path.exists() {
+                std::fs::remove_dir_all(&path).unwrap();
+            }
+            crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &state_root)
+                .publish(&manifest)
+                .unwrap();
+            {
+                let mut bootstrap =
+                    crate::conformance::ConformantLedger::open_for_bootstrap(&path, run).unwrap();
+                bootstrap
+                    .bootstrap(&crate::conformance::BootstrapRequest {
+                        timestamp: "2026-10-31T00:00:00.000000Z".into(),
+                        workspace_id: view.workspace_id.clone(),
+                        intent: crate::conformance::IdempotencyIntent {
+                            schema_version: 1,
+                            operation: crate::conformance::IdempotencyOperation::StartRun,
+                            idempotency_key: "policy-fixture-start".into(),
+                            normalized_identity_sha256: "a".repeat(64),
+                            run_id: run,
+                        },
+                        record_kind: crate::conformance::BootstrapRecordKind::RunCreated,
+                        initial_access: "read".into(),
+                        default_effort: Some("medium".into()),
+                    })
+                    .unwrap();
+                bootstrap
+                    .mark_threadless_ready("2026-10-31T00:00:00.000001Z")
+                    .unwrap();
+            }
+            let mut ledger = crate::ledger::Ledger::open(path, run).unwrap();
+            ledger.append_required_payload(crate::audit::AuditKind::ThreadBound,&serde_json::json!({"thread_id":if primary {"primary-thread"} else {"member-thread"},"thread_generation":1}),1).unwrap();
+            if primary {
+                ledger.append_required_payload(crate::audit::AuditKind::TurnStarted,&serde_json::json!({"thread_id":"primary-thread","turn_id":"turn-primary","operation_id":Uuid::now_v7()}),1).unwrap();
+            }
+            ledger.close().unwrap();
+        }
+        (root, store, session, member, adapter)
+    }
+
+    pub(crate) fn caller_policy_dispatch_fixture(
+        access: &str,
+    ) -> (
+        PathBuf,
+        PathBuf,
+        OrchestratedSessionSnapshot,
+        Uuid,
+        SpecialistTaskSnapshot,
+    ) {
+        let (root, mut store, session, member, mut adapter) =
+            caller_policy_fixture_with_access("fully_delegated", true, access);
+        let member = member.unwrap();
+        if access == "canonical_workspace_write" {
+            let state = &store.state_root;
+            let manifest =
+                crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, state)
+                    .load_manifest(member)
+                    .unwrap();
+            let writers = crate::writer::WriterStore::new(
+                state,
+                &session.workspace_id,
+                crate::darwin::DarwinSystem.current_uid(),
+            );
+            let holder = crate::writer::WriterStore::holder(
+                member,
+                manifest.profile.profile_name.clone(),
+                &manifest.controller,
+                1,
+                manifest.profile.initial_server_key.clone(),
+                1,
+                Some("member-thread".into()),
+                crate::domain::RunLifecycle::Idle,
+            );
+            let id = Uuid::now_v7();
+            writers
+                .transact(|w| {
+                    let (_, g) = w.prepare_acquire(member, holder, id)?;
+                    w.commit_acquire(id, g)
+                })
+                .unwrap();
+            let original = writers.load().unwrap();
+            let mut ledger =
+                crate::ledger::Ledger::open(crate::run::run_root(state, member), member).unwrap();
+            let policy = crate::domain::EffectivePolicy {
+                access: crate::domain::Access::Write,
+                verification: crate::domain::PolicyVerification::Verified,
+                policy_epoch: crate::domain::PolicyEpoch(ledger.head().unwrap().sequence + 1),
+                thread_generation: Some(1),
+                server_epoch: Some(1),
+                writer_generation: Some(original.writer_generation),
+            };
+            ledger.append_required_payload(crate::audit::AuditKind::WriterAcquired,&serde_json::json!({"thread_id":"member-thread","thread_generation":1,"writer_generation":original.writer_generation,"transaction_id":id,"effective_policy":policy}),1).unwrap();
+            ledger.close().unwrap();
+        }
+        let task = store
+            .assign_task(
+                &context(session.session_id, "semantic-policy-task"),
+                &task_request(member, access),
+                &mut adapter,
+            )
+            .unwrap();
+        (root, store.state_root.clone(), session, member, task)
+    }
+
+    fn caller_broker_response(
+        snapshot: &crate::snapshot::RunSnapshot,
+        id: Uuid,
+        key: &str,
+        approved: bool,
+    ) -> crate::interaction::BrokerApprovalResponse {
+        let turn = snapshot
+            .projection
+            .active_turn_id
+            .as_ref()
+            .or(snapshot.projection.latest_turn_id.as_ref())
+            .unwrap()
+            .clone();
+        let generation = snapshot
+            .captured_effective_policy
+            .thread_generation
+            .unwrap();
+        crate::interaction::BrokerApprovalResponse {
+            approval_id: id,
+            idempotency_key: key.into(),
+            approved,
+            intent: crate::public_resolution::Intent {
+                schema: crate::public_resolution::INTENT_SCHEMA.into(),
+                body: crate::public_resolution::Body {
+                    run_ref: snapshot.manifest.run_id.to_string(),
+                    interaction_ref: id.to_string(),
+                    turn_ref: turn.clone(),
+                    thread_generation: generation,
+                    decision: "accept_once".into(),
+                    granted_permissions: Vec::new(),
+                    protected_input_present: false,
+                    answers: vec![crate::public_resolution::Answer {
+                        question_id: "specialist_approval".into(),
+                        selected_labels: vec![if approved { "approve" } else { "reject" }.into()],
+                        text: None,
+                    }],
+                },
+            },
+            expected_interaction_revision: snapshot.stamp.interaction_state_revision,
+            expected_turn_id: turn,
+            expected_thread_generation: generation,
+        }
+    }
+
+    pub(crate) fn prepared_broker_response_fixture() -> (
+        PathBuf,
+        PathBuf,
+        Uuid,
+        crate::interaction::BrokerApprovalResponse,
+    ) {
+        let (root, store, session, _, _) = caller_policy_fixture("user_approval_required", false);
+        let run = session.root_run_id;
+        let mut ledger =
+            crate::ledger::Ledger::open(crate::run::run_root(&store.state_root, run), run).unwrap();
+        let manifest =
+            crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &store.state_root)
+                .load_manifest(run)
+                .unwrap();
+        let event = crate::ledger::EventAppendContext {
+            workspace_id: session.workspace_id.clone(),
+            server_key: manifest.profile.initial_server_key,
+            server_epoch: 1,
+            writer_state_revision: 0,
+        };
+        ledger
+            .with_event_context(event.clone(), |ledger| {
+                approval::publish(&store.state_root, run, ledger, 1)
+            })
+            .unwrap();
+        let snapshot = crate::snapshot::RunSnapshot::load(&store.state_root, run, 0).unwrap();
+        let response = caller_broker_response(
+            &snapshot,
+            snapshot.broker_approvals().unwrap()[0].approval_id,
+            "async-answer",
+            false,
+        );
+        ledger
+            .with_event_context(event, |ledger| {
+                approval::prepare_response(&store.state_root, run, &response, ledger, 1)
+            })
+            .unwrap();
+        ledger.close().unwrap();
+        let state = store.state_root.clone();
+        drop(store);
+        (root, state, run, response)
+    }
+
+    #[test]
+    fn caller_broker_publication_concurrent_original_hire_preserves_complete_prefix() {
+        let (root, store, session, _, _) = caller_policy_fixture("user_approval_required", false);
+        let run = session.root_run_id;
+        let state_root = store.state_root.clone();
+        let mut ledger =
+            crate::ledger::Ledger::open(crate::run::run_root(&state_root, run), run).unwrap();
+        let manifest =
+            crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &state_root)
+                .load_manifest(run)
+                .unwrap();
+        let event = crate::ledger::EventAppendContext {
+            workspace_id: session.workspace_id.clone(),
+            server_key: manifest.profile.initial_server_key,
+            server_epoch: 1,
+            writer_state_revision: 0,
+        };
+        assert_eq!(store.approval_interactions(run).unwrap().len(), 1);
+        let second_state = state_root.clone();
+        approval::after_capture(move || {
+            // A second original tool call commits while the first completion publishes.
+            let mut other = OrchestrationStore::open(&second_state).unwrap();
+            let mut call = context(run, "concurrent-approval");
+            call.idempotency_key = sha256_hex(
+                format!(
+                    "dolgorae-primary-tool-v1\0{run}\0{run}\0primary-thread\0{}\0{}",
+                    call.source_turn_id, call.source_tool_call_id
+                )
+                .as_bytes(),
+            );
+            let mut adapter = FakeAdapter::default();
+            let second = other
+                .request_specialist(&call, &request("read_only"), &mut adapter)
+                .unwrap();
+            assert_eq!(second.state, "awaiting_approval");
+            assert!(adapter.publication_plans.is_empty());
+            assert_eq!(other.approval_interactions(run).unwrap().len(), 2);
+        });
+        ledger
+            .with_event_context(event.clone(), |ledger| {
+                approval::publish(&state_root, run, ledger, 1)
+            })
+            .unwrap();
+        assert_eq!(
+            crate::interaction::broker_bindings(ledger.durable_records().unwrap(), run)
+                .unwrap()
+                .len(),
+            1,
+            "first publication uses one coherent captured SQL prefix"
+        );
+        assert_eq!(store.approval_interactions(run).unwrap().len(), 2);
+        assert_eq!(
+            crate::snapshot::RunSnapshot::load(&state_root, run, 0)
+                .unwrap()
+                .broker_approvals()
+                .unwrap_err()
+                .code,
+            "RECOVERY_REQUIRED"
+        );
+        ledger
+            .with_event_context(event.clone(), |ledger| {
+                approval::publish(&state_root, run, ledger, 1)
+            })
+            .unwrap();
+        let snapshot = crate::snapshot::RunSnapshot::load(&state_root, run, 0).unwrap();
+        assert_eq!(snapshot.broker_approvals().unwrap().len(), 2);
+        let published = ledger.head().unwrap();
+        let other_state = state_root.clone();
+        approval::after_capture(move || {
+            let other = OrchestrationStore::open(&other_state).unwrap();
+            other
+                .connection
+                .execute(
+                    "UPDATE orchestrated_sessions SET revision=revision+1 WHERE session_id=?1",
+                    [run.to_string()],
+                )
+                .unwrap();
+        });
+        ledger
+            .with_event_context(event, |ledger| {
+                approval::publish(&state_root, run, ledger, 1)
+            })
+            .unwrap();
+        assert_eq!(ledger.head().unwrap(), published);
+        assert_eq!(store.members(run).unwrap().len(), 0);
+        ledger.close().unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn caller_broker_approval_uses_original_source_receipt_and_recovers_lost_publication() {
+        let (root, mut store, session, member, mut adapter) =
+            caller_policy_fixture("user_approval_required", false);
+        assert!(member.is_none());
+        let run = session.root_run_id;
+        let project = |snapshot: &crate::snapshot::RunSnapshot,
+                       observed: &crate::snapshot::RunObservation| {
+            let facts =
+                crate::gateway_projection::ProjectionFacts::from_observation(snapshot, observed)?;
+            crate::gateway_projection_v2::run_projection(snapshot, &facts)
+        };
+        let (before, observed) =
+            crate::snapshot::RunSnapshot::observe_display(&store.state_root, run, 0).unwrap();
+        assert_eq!(
+            before.broker_approvals().unwrap_err().code,
+            "RECOVERY_REQUIRED"
+        );
+        let refused = project(&before, &observed).unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        assert_eq!(refused.details["required_action"], "restore_state");
+        // A missing complete Interaction publication does not hide owner recovery sources.
+        assert_eq!(
+            before.projection.active_turn_id.as_deref(),
+            Some("turn-primary")
+        );
+        let binding = store.approval_interactions(run).unwrap().remove(0);
+        let mut ledger =
+            crate::ledger::Ledger::open(crate::run::run_root(&store.state_root, run), run).unwrap();
+        let event = crate::ledger::EventAppendContext {
+            workspace_id: session.workspace_id.clone(),
+            server_key: crate::run::RunStore::new(
+                crate::workspace::SystemWorkspacePlatform,
+                &store.state_root,
+            )
+            .load_manifest(run)
+            .unwrap()
+            .profile
+            .initial_server_key,
+            server_epoch: 1,
+            writer_state_revision: 0,
+        };
+        ledger
+            .with_event_context(event.clone(), |ledger| {
+                approval::publish(&store.state_root, run, ledger, 1)
+            })
+            .unwrap();
+        let first = ledger.head().unwrap().sequence;
+        {
+            let record = ledger.durable_records().unwrap().last().unwrap();
+            let marker = crate::interaction::broker_record(record).unwrap().unwrap();
+            assert_eq!(marker.phase, "binding");
+            assert_eq!(marker.binding.approval_id, binding.approval_request_id);
+            let projected = record.client_projection().unwrap();
+            assert_eq!(
+                projected.stamp.interaction_state_revision,
+                record.sequence()
+            );
+            assert_eq!(
+                projected.record.data,
+                crate::event::ClientEventData::InteractionOpened(
+                    crate::event::InteractionOpenedPayload {
+                        request_id: binding.approval_request_id.to_string(),
+                        interaction_kind: "user_input".into(),
+                    }
+                )
+            );
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE orchestrated_sessions SET revision=revision+1 WHERE session_id=?1",
+                [run.to_string()],
+            )
+            .unwrap();
+        ledger
+            .with_event_context(event.clone(), |ledger| {
+                approval::publish(&store.state_root, run, ledger, 1)
+            })
+            .unwrap();
+        assert_eq!(
+            ledger.head().unwrap().sequence,
+            first,
+            "unrelated Session revision is not an approval change"
+        );
+        let (snapshot, observed) =
+            crate::snapshot::RunSnapshot::observe_display(&store.state_root, run, 0).unwrap();
+        let facts =
+            crate::gateway_projection::ProjectionFacts::from_observation(&snapshot, &observed)
+                .unwrap();
+        assert_eq!(
+            facts.lane_state,
+            crate::protocol::public_v1::ServerLaneState::Unverified
+        );
+        assert_eq!(
+            observed.background,
+            crate::snapshot::BackgroundObservation::Unverified
+        );
+        let projected = crate::gateway_projection_v2::run_projection(&snapshot, &facts).unwrap();
+        assert_eq!(projected.pending_interaction_count, 1);
+        assert_eq!(
+            projected.stamp,
+            Some(crate::gateway_projection_v2::stamp(&snapshot.stamp))
+        );
+        assert_eq!(snapshot.broker_approvals().unwrap().len(), 1);
+        assert_eq!(snapshot.stamp.interaction_state_revision, first);
+        assert!(snapshot.projection.pending_requests.is_empty());
+        let page = crate::gateway_observation::list_pending(
+            &store.state_root,
+            &snapshot,
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(
+            page.items[0].interaction_id,
+            binding.approval_request_id.to_string()
+        );
+        assert_eq!(page.items[0].state_revision, first);
+        let mut stale =
+            caller_broker_response(&snapshot, binding.approval_request_id, "answer", false);
+        stale.expected_interaction_revision -= 1;
+        let head = ledger.head().unwrap();
+        assert_eq!(
+            approval::prepare_response(&store.state_root, run, &stale, &mut ledger, 1)
+                .unwrap_err()
+                .code,
+            "INTERACTION_STALE"
+        );
+        assert_eq!(ledger.head().unwrap(), head);
+        let response =
+            caller_broker_response(&snapshot, binding.approval_request_id, "answer", false);
+        ledger
+            .with_event_context(event.clone(), |ledger| {
+                approval::prepare_response(&store.state_root, run, &response, ledger, 1)
+            })
+            .unwrap();
+        {
+            let record = ledger.durable_records().unwrap().last().unwrap();
+            let marker = crate::interaction::broker_record(record).unwrap().unwrap();
+            assert_eq!(marker.phase, "intent");
+            assert_eq!(marker.binding.approval_id, binding.approval_request_id);
+            assert!(record.client_projection().is_none());
+            let (intent, observed) =
+                crate::snapshot::RunSnapshot::observe_display(&store.state_root, run, 0).unwrap();
+            let projected = project(&intent, &observed).unwrap();
+            assert_eq!(projected.pending_interaction_count, 1);
+            assert_eq!(intent.stamp.interaction_state_revision, first);
+            assert_eq!(
+                projected.stamp,
+                Some(crate::gateway_projection_v2::stamp(&intent.stamp))
+            );
+        }
+        let calls = adapter.calls.len();
+        let original = store
+            .resolve_specialist_approval(
+                run,
+                binding.approval_request_id,
+                false,
+                "answer",
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(adapter.calls.len(), calls);
+        let (gap, observed) =
+            crate::snapshot::RunSnapshot::observe_display(&store.state_root, run, 0).unwrap();
+        assert_eq!(
+            gap.broker_approvals().unwrap_err().code,
+            "RECOVERY_REQUIRED"
+        );
+        let refused = project(&gap, &observed).unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        assert_eq!(refused.details["required_action"], "restore_state");
+        ledger.close().unwrap();
+        let mut ledger =
+            crate::ledger::Ledger::open(crate::run::run_root(&store.state_root, run), run).unwrap();
+        ledger
+            .with_event_context(event.clone(), |ledger| {
+                approval::publish(&store.state_root, run, ledger, 2)
+            })
+            .unwrap();
+        {
+            let record = ledger.durable_records().unwrap().last().unwrap();
+            let marker = crate::interaction::broker_record(record).unwrap().unwrap();
+            assert_eq!(marker.phase, "decision");
+            assert_eq!(marker.binding.approval_id, binding.approval_request_id);
+            assert_eq!(
+                marker.binding.resolution_receipt_id,
+                Some(original.resolution_receipt_id)
+            );
+            let projected = record.client_projection().unwrap();
+            assert_eq!(
+                projected.stamp.interaction_state_revision,
+                record.sequence()
+            );
+            assert_eq!(
+                projected.record.data,
+                crate::event::ClientEventData::InteractionResolved(
+                    crate::event::InteractionResolvedPayload {
+                        request_id: binding.approval_request_id.to_string(),
+                        outcome: "answered".into(),
+                    }
+                )
+            );
+        }
+        let (restored, observed) =
+            crate::snapshot::RunSnapshot::observe_display(&store.state_root, run, 0).unwrap();
+        let projected = project(&restored, &observed).unwrap();
+        assert_eq!(projected.pending_interaction_count, 0);
+        assert_eq!(
+            projected.stamp,
+            Some(crate::gateway_projection_v2::stamp(&restored.stamp))
+        );
+        assert_eq!(
+            restored.broker_approvals().unwrap()[0].resolution_receipt_id,
+            Some(original.resolution_receipt_id)
+        );
+        assert!(
+            crate::gateway_observation::list_pending(
+                &store.state_root,
+                &restored,
+                Default::default()
+            )
+            .unwrap()
+            .items
+            .is_empty()
+        );
+        let receipt = approval::replay_response(
+            &store.state_root,
+            run,
+            &response,
+            &restored.controller,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(receipt, Some(original.resolution_receipt_id));
+        let mut refreshed = response.clone();
+        refreshed.expected_interaction_revision = restored.stamp.interaction_state_revision;
+        refreshed.expected_turn_id = "later-observed-turn".into();
+        refreshed.expected_thread_generation = 2;
+        assert_eq!(
+            response.normalized_request(),
+            refreshed.normalized_request()
+        );
+        assert_eq!(
+            approval::replay_response(
+                &store.state_root,
+                run,
+                &refreshed,
+                &restored.controller,
+                &ledger
+            )
+            .unwrap(),
+            receipt
+        );
+        let mut changed = response.clone();
+        changed.approved = true;
+        changed.intent.body.answers[0].selected_labels = vec!["approve".into()];
+        assert_eq!(
+            approval::replay_response(
+                &store.state_root,
+                run,
+                &changed,
+                &restored.controller,
+                &ledger
+            )
+            .unwrap_err()
+            .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(
+            ledger
+                .durable_records()
+                .unwrap()
+                .iter()
+                .filter_map(|r| crate::interaction::broker_record(r).transpose())
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .len(),
+            3
+        );
+        let before_invalid = ledger.head().unwrap();
+        let original_marker = ledger
+            .durable_records()
+            .unwrap()
+            .iter()
+            .filter_map(|r| crate::interaction::broker_record(r).transpose())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut changed_source = original_marker.clone();
+        changed_source.binding.source_call_id = "different-original-call".into();
+        assert!(
+            ledger
+                .append_required_payload(crate::audit::AuditKind::TurnIntent, &changed_source, 2)
+                .is_err()
+        );
+        let mut changed_decision = original_marker;
+        changed_decision.binding.decision = Some("approve".into());
+        assert!(
+            ledger
+                .append_required_payload(crate::audit::AuditKind::TurnIntent, &changed_decision, 2)
+                .is_err()
+        );
+        assert_eq!(ledger.head().unwrap(), before_invalid);
+        store.connection.execute("UPDATE brokered_approval_resolutions SET idempotency_key='altered' WHERE approval_request_id=?1", [binding.approval_request_id.to_string()]).unwrap();
+        assert_eq!(
+            approval::replay_response(
+                &store.state_root,
+                run,
+                &response,
+                &restored.controller,
+                &ledger
+            )
+            .unwrap_err()
+            .code,
+            "RECOVERY_REQUIRED"
+        );
+        store.connection.execute("UPDATE brokered_approval_resolutions SET idempotency_key='answer' WHERE approval_request_id=?1", [binding.approval_request_id.to_string()]).unwrap();
+        let events = ledger
+            .events_after(0, crate::event::EventProjection::Operational, false)
+            .unwrap();
+        let bytes = serde_json::to_string(&events).unwrap();
+        assert!(!bytes.contains(crate::interaction::BROKER_APPROVAL_SCHEMA));
+        assert!(!bytes.contains("source_call_id"));
+        use crate::protocol::public_v1 as pb;
+        let page = crate::gateway_observation::watch_page(
+            &store.state_root,
+            &restored,
+            "0",
+            pb::ProjectionProfile::Operational as i32,
+            1,
+        )
+        .unwrap();
+        let mut projected = Vec::new();
+        for message in page.events {
+            if let Some(pb::run_event_envelope::Item::DurableEvent(event)) = message.item {
+                assert_eq!(event.run_id, run.to_string());
+                match event.event.unwrap() {
+                    pb::durable_run_event::Event::InteractionOpened(value)
+                        if value.interaction_id == binding.approval_request_id.to_string() =>
+                    {
+                        assert_eq!(value.kind, pb::InteractionKind::UserInput as i32);
+                        projected.push("opened");
+                    }
+                    pb::durable_run_event::Event::InteractionResolved(value)
+                        if value.interaction_id == binding.approval_request_id.to_string() =>
+                    {
+                        assert_eq!(value.outcome, pb::InteractionOutcome::Answered as i32);
+                        projected.push("answered");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(projected, ["opened", "answered"]);
+        ledger.close().unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn caller_broker_current_protected_api_keeps_original_uuid_and_read_authority() {
+        use crate::protocol::public_v2 as pb;
+        use crate::protocol::public_v2::interaction_service_server::InteractionService as _;
+        const CHILD: &str = "DOLGORAE_V2_CONTROLLER_DETAIL_FIXTURE";
+        if let Ok(raw) = std::env::var(CHILD) {
+            let case: Value = serde_json::from_str(&raw).unwrap();
+            let home = crate::paths::DolgoraeHome::system().unwrap();
+            let state = home.workspace_root(case["workspace_id"].as_str().unwrap());
+            let run: Uuid = case["run_id"].as_str().unwrap().parse().unwrap();
+            let manifest =
+                crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &state)
+                    .load_manifest(run)
+                    .unwrap();
+            let (_stop, receiver) = tokio::sync::watch::channel(false);
+            let transport = crate::gateway::GatewayTransport::new(
+                Arc::new(crate::gateway_service::CoreGatewayBackend::new(
+                    home,
+                    Uuid::now_v7(),
+                )),
+                receiver,
+            );
+            let context = Some(pb::RequestContext {
+                protocol_version: 2,
+                client_request_id: Uuid::now_v7().to_string(),
+                client_instance_id: "broker-current".into(),
+            });
+            let reference = pb::RunRef {
+                workspace: Some(pb::WorkspaceRef {
+                    absolute_path: case["workspace"].as_str().unwrap().into(),
+                    expected_workspace_id: manifest.workspace_id.clone(),
+                }),
+                run_id: run.to_string(),
+            };
+            let carrier = pb::ControllerCarrierRef {
+                absolute_file_path: case["controller"].as_str().unwrap().into(),
+                expected_controller_id: manifest.controller.identity.controller_id.to_string(),
+                expected_controller_generation: manifest.controller.identity.generation,
+            };
+            let pending = transport
+                .list_pending_interactions(tonic::Request::new(
+                    pb::ListPendingInteractionsRequest {
+                        context: context.clone(),
+                        run: Some(reference.clone()),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(pending.items.len(), 1);
+            assert_eq!(
+                pending.items[0].interaction_id,
+                case["approval_id"].as_str().unwrap()
+            );
+            let request = pb::GetControllerInteractionRequest {
+                context: context.clone(),
+                run: Some(reference.clone()),
+                controller: Some(carrier.clone()),
+                interaction_id: case["approval_id"].as_str().unwrap().into(),
+            };
+            let detail = transport
+                .get_controller_interaction(tonic::Request::new(request.clone()))
+                .await
+                .unwrap()
+                .into_inner()
+                .interaction
+                .unwrap();
+            assert_eq!(
+                detail.summary.as_ref().unwrap().interaction_id,
+                pending.items[0].interaction_id
+            );
+            assert_eq!(
+                detail.summary.as_ref().unwrap().state_revision,
+                pending.stamp.as_ref().unwrap().interaction_state_revision
+            );
+            assert_eq!(
+                detail.stamp.as_ref().unwrap(),
+                pending.stamp.as_ref().unwrap()
+            );
+            let Some(pb::controller_interaction::Payload::UserInput(question)) = detail.payload
+            else {
+                panic!("original Broker question is not typed user input");
+            };
+            assert_eq!(question.questions[0].id, "specialist_approval");
+            let mut foreign = request.clone();
+            foreign.controller.as_mut().unwrap().absolute_file_path =
+                case["foreign_controller"].as_str().unwrap().into();
+            foreign.controller.as_mut().unwrap().expected_controller_id =
+                case["foreign_id"].as_str().unwrap().into();
+            let denied = transport
+                .get_controller_interaction(tonic::Request::new(foreign))
+                .await
+                .unwrap_err();
+            use prost::Message as _;
+            let rich = crate::gateway::GoogleRpcStatus::decode(denied.details()).unwrap();
+            let error = pb::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap();
+            assert_eq!(error.dolgorae_error_code, "CONTROLLER_MISMATCH");
+            let valid = pb::ResolveInteractionRequest {
+                context,
+                run: Some(reference),
+                controller: Some(carrier),
+                interaction_id: request.interaction_id,
+                idempotency_key: "invalid-answer".into(),
+                expected_run_revision: pending.stamp.as_ref().unwrap().run_state_revision,
+                expected_interaction_revision: pending
+                    .stamp
+                    .as_ref()
+                    .unwrap()
+                    .interaction_state_revision,
+                expected_turn_id: "current-protected-turn".into(),
+                expected_thread_generation: 1,
+                answer: Some(pb::InteractionAnswer {
+                    decision: pb::InteractionDecision::AcceptOnce as i32,
+                    answers: vec![pb::QuestionAnswer {
+                        question_id: "specialist_approval".into(),
+                        selected_labels: vec!["approve".into()],
+                        text: None,
+                    }],
+                    ..Default::default()
+                }),
+            };
+            for case in 0..11 {
+                let mut invalid = valid.clone();
+                invalid.idempotency_key = format!("invalid-answer-{case}");
+                let answer = invalid.answer.as_mut().unwrap();
+                match case {
+                    0 => answer.decision = pb::InteractionDecision::Decline as i32,
+                    1 => answer.protected_input = Some(pb::ProtectedInputRef::default()),
+                    2 => answer.granted_permissions.push("write".into()),
+                    3 => answer.answers.clear(),
+                    4 => answer.answers[0].question_id = "not-the-Broker-question".into(),
+                    5 => answer.answers[0].text = Some("unexpected".into()),
+                    6 => answer.answers[0].selected_labels.push("reject".into()),
+                    7 => answer.answers[0].selected_labels = vec!["unknown".into()],
+                    8 => invalid.expected_interaction_revision += 1,
+                    9 => invalid.expected_turn_id = "turn-primary".into(),
+                    10 => invalid.expected_thread_generation += 1,
+                    _ => unreachable!(),
+                }
+                let denied = transport
+                    .resolve_interaction(tonic::Request::new(invalid))
+                    .await
+                    .unwrap_err();
+                let rich = crate::gateway::GoogleRpcStatus::decode(denied.details()).unwrap();
+                let error =
+                    pb::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap();
+                assert_eq!(
+                    error.dolgorae_error_code,
+                    if case < 8 {
+                        "INVALID_ARGUMENT"
+                    } else {
+                        "INTERACTION_STALE"
+                    },
+                    "case {case}"
+                );
+                assert_eq!(error.effect, pb::EffectState::None as i32);
+                let observed = crate::snapshot::RunSnapshot::load(&state, run, 0).unwrap();
+                assert_eq!(
+                    observed.stamp.interaction_state_revision,
+                    pending.stamp.as_ref().unwrap().interaction_state_revision
+                );
+                assert_eq!(
+                    observed.stamp.run_state_revision,
+                    pending.stamp.as_ref().unwrap().run_state_revision
+                );
+                let store = OrchestrationStore::open_observer(&state).unwrap();
+                assert_eq!(
+                    store
+                        .connection
+                        .query_row(
+                            "SELECT count(*) FROM brokered_approval_resolutions",
+                            [],
+                            |r| r.get::<_, u64>(0)
+                        )
+                        .unwrap(),
+                    0
+                );
+                assert_eq!(
+                    store
+                        .connection
+                        .query_row("SELECT count(*) FROM brokered_members", [], |r| r
+                            .get::<_, u64>(0))
+                        .unwrap(),
+                    0
+                );
+                assert_eq!(store.approval_interactions(run).unwrap().len(), 1);
+            }
+            return;
+        }
+        let (root, store, session, _, _) = caller_policy_fixture("user_approval_required", false);
+        let run = session.root_run_id;
+        let mut ledger =
+            crate::ledger::Ledger::open(crate::run::run_root(&store.state_root, run), run).unwrap();
+        let manifest =
+            crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &store.state_root)
+                .load_manifest(run)
+                .unwrap();
+        let event = crate::ledger::EventAppendContext {
+            workspace_id: session.workspace_id.clone(),
+            server_key: manifest.profile.initial_server_key.clone(),
+            server_epoch: 1,
+            writer_state_revision: 0,
+        };
+        ledger.append_required_payload(crate::audit::AuditKind::TurnTerminal,
+            &serde_json::json!({"thread_id":"primary-thread","turn_id":"turn-primary","status":"completed"}),1).unwrap();
+        ledger.append_required_payload(crate::audit::AuditKind::TurnStarted,
+            &serde_json::json!({"thread_id":"primary-thread","turn_id":"current-protected-turn","operation_id":Uuid::now_v7()}),1).unwrap();
+        ledger
+            .with_event_context(event, |ledger| {
+                approval::publish(&store.state_root, run, ledger, 1)
+            })
+            .unwrap();
+        let question = store.approval_interactions(run).unwrap().remove(0);
+        let home = root.join(".dolgorae");
+        let carrier_dir = home.join("controller-carriers/client/request");
+        for path in [
+            home.join("controller-carriers"),
+            home.join("controller-carriers/client"),
+            carrier_dir.clone(),
+        ] {
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let controller = carrier_dir.join("controller.json");
+        std::fs::copy(root.join("primary-controller"), &controller).unwrap();
+        let foreign = carrier_dir.join("foreign.json");
+        crate::controller::create_controller_credential(
+            &foreign,
+            ControllerKind::InteractiveClient,
+            "foreign-fixture".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        let foreign_id = crate::controller::binding_from_carrier(
+            &CredentialCarrier::open_path(&foreign).unwrap(),
+            1,
+        )
+        .unwrap()
+        .identity
+        .controller_id;
+        let before = ledger.head().unwrap();
+        let changes = store.connection.total_changes();
+        ledger.close().unwrap();
+        let case = serde_json::json!({"workspace_id":session.workspace_id,"workspace":manifest.canonical_workspace.to_path_buf().unwrap(),"run_id":run,"approval_id":question.approval_request_id,"controller":controller,"foreign_controller":foreign,"foreign_id":foreign_id});
+        let output=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","orchestration::tests::caller_broker_current_protected_api_keeps_original_uuid_and_read_authority","--nocapture"]).env("HOME",&root).env(CHILD,serde_json::to_string(&case).unwrap()).output().unwrap();
+        assert!(
+            output.status.success(),
+            "current protected offline fixture failed: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let ledger =
+            crate::ledger::Ledger::open(crate::run::run_root(&store.state_root, run), run).unwrap();
+        assert_eq!(ledger.head().unwrap(), before);
+        assert_eq!(store.connection.total_changes(), changes);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM brokered_approval_resolutions",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        drop(ledger);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn caller_broker_approval_uses_real_idle_latest_and_current_turn_thread_context() {
+        for case in ["idle", "different-active", "later-thread-binding"] {
+            let (root, store, session, _, _) =
+                caller_policy_fixture("user_approval_required", false);
+            let run = session.root_run_id;
+            let mut ledger =
+                crate::ledger::Ledger::open(crate::run::run_root(&store.state_root, run), run)
+                    .unwrap();
+            let manifest = crate::run::RunStore::new(
+                crate::workspace::SystemWorkspacePlatform,
+                &store.state_root,
+            )
+            .load_manifest(run)
+            .unwrap();
+            let event = crate::ledger::EventAppendContext {
+                workspace_id: session.workspace_id.clone(),
+                server_key: manifest.profile.initial_server_key,
+                server_epoch: 1,
+                writer_state_revision: 0,
+            };
+            ledger
+                .with_event_context(event.clone(), |ledger| {
+                    approval::publish(&store.state_root, run, ledger, 1)
+                })
+                .unwrap();
+            let first = crate::snapshot::RunSnapshot::load(&store.state_root, run, 0).unwrap();
+            let id = first.broker_approvals().unwrap()[0].approval_id;
+            let old = caller_broker_response(&first, id, "context-answer", false);
+            ledger.append_required_payload(crate::audit::AuditKind::TurnTerminal,&serde_json::json!({"thread_id":"primary-thread","turn_id":"turn-primary","status":"completed","effort":"medium","final_response":null,"usage":null}),1).unwrap();
+            if case == "different-active" {
+                ledger.append_required_payload(crate::audit::AuditKind::TurnStarted,&serde_json::json!({"thread_id":"primary-thread","turn_id":"later-root","operation_id":Uuid::now_v7()}),1).unwrap();
+            } else if case == "later-thread-binding" {
+                // A durable native Thread binding is test data; this does not claim a physical Worker restart.
+                ledger.append_required_payload(crate::audit::AuditKind::ThreadBound,&serde_json::json!({"thread_id":"resumed-primary-thread","thread_generation":2}),1).unwrap();
+            }
+            let current = crate::snapshot::RunSnapshot::load(&store.state_root, run, 0).unwrap();
+            let response = caller_broker_response(&current, id, "context-answer", false);
+            assert_eq!(
+                response.expected_turn_id,
+                if case == "different-active" {
+                    "later-root"
+                } else {
+                    "turn-primary"
+                }
+            );
+            assert_eq!(
+                response.expected_thread_generation,
+                if case == "later-thread-binding" { 2 } else { 1 }
+            );
+            assert_eq!(
+                current.broker_approvals().unwrap()[0].source_turn_id,
+                "turn-primary"
+            );
+            let mut stale = response.clone();
+            stale.expected_turn_id = "unrecorded-turn".into();
+            stale.intent.body.turn_ref = stale.expected_turn_id.clone();
+            let before = ledger.head().unwrap();
+            assert_eq!(
+                approval::prepare_response(&store.state_root, run, &stale, &mut ledger, 1)
+                    .unwrap_err()
+                    .code,
+                "INTERACTION_STALE"
+            );
+            if case != "idle" {
+                assert_eq!(
+                    approval::prepare_response(&store.state_root, run, &old, &mut ledger, 1)
+                        .unwrap_err()
+                        .code,
+                    "INTERACTION_STALE"
+                );
+            }
+            assert_eq!(ledger.head().unwrap(), before);
+            ledger
+                .with_event_context(event, |ledger| {
+                    approval::prepare_response(&store.state_root, run, &response, ledger, 1)
+                })
+                .unwrap();
+            assert_eq!(ledger.head().unwrap().sequence, before.sequence + 1);
+            ledger.close().unwrap();
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn caller_broker_approval_abort_invalidates_without_fabricating_a_vote() {
+        let (root, mut store, session, _, mut adapter) =
+            caller_policy_fixture("user_approval_required", false);
+        let run = session.root_run_id;
+        let mut ledger =
+            crate::ledger::Ledger::open(crate::run::run_root(&store.state_root, run), run).unwrap();
+        let event = crate::ledger::EventAppendContext {
+            workspace_id: session.workspace_id.clone(),
+            server_key: crate::run::RunStore::new(
+                crate::workspace::SystemWorkspacePlatform,
+                &store.state_root,
+            )
+            .load_manifest(run)
+            .unwrap()
+            .profile
+            .initial_server_key,
+            server_epoch: 1,
+            writer_state_revision: 0,
+        };
+        ledger
+            .with_event_context(event.clone(), |ledger| {
+                approval::publish(&store.state_root, run, ledger, 1)
+            })
+            .unwrap();
+        let snapshot = crate::snapshot::RunSnapshot::load(&store.state_root, run, 0).unwrap();
+        let id = snapshot.broker_approvals().unwrap()[0].approval_id;
+        let response = caller_broker_response(&snapshot, id, "late-answer", true);
+        store.begin_session_close(run, true, 1).unwrap();
+        store.settle_session_close(run, &mut adapter).unwrap();
+        ledger
+            .with_event_context(event.clone(), |ledger| {
+                approval::publish(&store.state_root, run, ledger, 1)
+            })
+            .unwrap();
+        {
+            let records = ledger.durable_records().unwrap();
+            let record = records.last().unwrap();
+            let marker = crate::interaction::broker_record(record).unwrap().unwrap();
+            assert_eq!(marker.phase, "binding");
+            assert_eq!(marker.binding.approval_id, id);
+            let projected = record.client_projection().unwrap();
+            assert_eq!(
+                projected.stamp.interaction_state_revision,
+                record.sequence()
+            );
+            assert_eq!(
+                projected.record.data,
+                crate::event::ClientEventData::InteractionResolved(
+                    crate::event::InteractionResolvedPayload {
+                        request_id: id.to_string(),
+                        outcome: "stale".into(),
+                    }
+                )
+            );
+            assert_eq!(records.iter().filter(|record| record.client_projection().is_some_and(|event| {
+                matches!(&event.record.data,
+                    crate::event::ClientEventData::InteractionOpened(value) if value.request_id == id.to_string())
+            })).count(), 1);
+        }
+        let (closed, observed) =
+            crate::snapshot::RunSnapshot::observe_display(&store.state_root, run, 0).unwrap();
+        let facts =
+            crate::gateway_projection::ProjectionFacts::from_observation(&closed, &observed)
+                .unwrap();
+        let projected = crate::gateway_projection_v2::run_projection(&closed, &facts).unwrap();
+        assert_eq!(projected.pending_interaction_count, 0);
+        assert_eq!(
+            projected.stamp,
+            Some(crate::gateway_projection_v2::stamp(&closed.stamp))
+        );
+        let binding = &closed.broker_approvals().unwrap()[0];
+        assert_eq!(binding.status, "stale");
+        assert!(binding.decision.is_none());
+        assert!(binding.resolution_receipt_id.is_none());
+        assert!(binding.resolution_key.is_none());
+        assert!(
+            crate::gateway_observation::list_pending(
+                &store.state_root,
+                &closed,
+                Default::default()
+            )
+            .unwrap()
+            .items
+            .is_empty()
+        );
+        let head = ledger.head().unwrap();
+        assert!(
+            approval::prepare_response(&store.state_root, run, &response, &mut ledger, 1).is_err()
+        );
+        assert_eq!(ledger.head().unwrap(), head);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM brokered_approval_resolutions",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        ledger.close().unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn caller_primary_live_assignment_queues_busy_member_and_replays_original_reply() {
+        let (root, mut store, session, member, mut adapter) = caller_policy_queue_fixture();
+        let payload = serde_json::json!({"operation":"assign_specialist_task","target":{"run_id":member},"objective":"Keep exact Primary context.","context_refs":[],"expected_output":["Bounded answer"],"execution_intent":"read_only","blocking":false,"deadline_seconds":60});
+        let before = adapter.calls.clone();
+        let ctx = context(session.session_id, "policy-assign");
+        let reply = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        }
+        .dispatch_live_bridge(&ctx, &payload)
+        .unwrap();
+        let task = Uuid::parse_str(reply["task_id"].as_str().unwrap()).unwrap();
+        assert_eq!(store.task(task).unwrap().state, "queued");
+        let retained = policy_task::load(
+            &store.connection,
+            &store.state_root,
+            session.session_id,
+            task,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retained.capture.effort, "medium");
+        assert_eq!(retained.accepted.objective, "Keep exact Primary context.");
+        assert_eq!(
+            adapter.calls, before,
+            "Primary admission never submits directly"
+        );
+        assert_eq!(
+            PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter
+            }
+            .dispatch_live_bridge(&ctx, &payload)
+            .unwrap(),
+            reply
+        );
+        let mut changed = payload.clone();
+        changed["objective"] = serde_json::json!("changed");
+        assert!(
+            PrimaryOrchestrationService {
+                store: &mut store,
+                adapter: &mut adapter
+            }
+            .dispatch_live_bridge(&ctx, &changed)
+            .is_err()
+        );
+        let mut ledger =
+            crate::ledger::Ledger::open(crate::run::run_root(&store.state_root, member), member)
+                .unwrap();
+        ledger.append_required_payload(crate::audit::AuditKind::TurnStarted,&serde_json::json!({"thread_id":"member-thread","turn_id":"existing-busy-turn","operation_id":Uuid::now_v7()}),1).unwrap();
+        ledger.close().unwrap();
+        assert_eq!(
+            crate::snapshot::RunSnapshot::load(&store.state_root, member, 0)
+                .unwrap()
+                .projection
+                .lifecycle,
+            crate::domain::RunLifecycle::Running
+        );
+        let second = PrimaryOrchestrationService {
+            store: &mut store,
+            adapter: &mut adapter,
+        }
+        .dispatch_live_bridge(&context(session.session_id, "policy-tail"), &payload)
+        .unwrap();
+        assert_ne!(second["task_id"], reply["task_id"]);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM assignment_queue_entries", [], |r| r
+                    .get::<_, u64>(
+                    0
+                ))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM policy_task_dispatch_captures",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(adapter.calls, before);
+        let ids = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM collaboration_root_priorities",
+                [],
+                |r| r.get::<_, u64>(0),
+            )
+            .unwrap();
+        assert_eq!(ids, 2);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn caller_policy_activation_refuses_expired_capture_despite_queue_hint() {
+        let (root, mut store, session, member, mut adapter) = caller_policy_queue_fixture();
+        store.clock = Arc::new(ManualClock::new(1_000));
+        let mut request = task_request(member, "read_only");
+        request.deadline_seconds = 1;
+        let task = store
+            .assign_task(
+                &context(session.session_id, "expired-activation-capture"),
+                &request,
+                &mut adapter,
+            )
+            .unwrap();
+        let retained = policy_task::load(
+            &store.connection,
+            &store.state_root,
+            session.session_id,
+            task.task_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retained.capture.deadline_ms, 2_000);
+        let now = crate::scheduler::now_ms().unwrap();
+        assert!(now > retained.capture.deadline_ms);
+        store
+            .connection
+            .execute(
+                "UPDATE assignment_queue_entries SET deadline_ms=?2 WHERE task_id=?1",
+                params![task.task_id.to_string(), now + 60_000],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE brokered_members SET actor_residency='unstarted' WHERE run_id=?1",
+                [member.to_string()],
+            )
+            .unwrap();
+        let actor = crate::scheduler::Actor {
+            owner: crate::assignment_queue::Owner::Managed(session.session_id),
+            run: member,
+        };
+        {
+            let tx = store.transaction().unwrap();
+            crate::scheduler::install(&tx).unwrap();
+            tx.commit().unwrap();
+        }
+        let original_capture: (String, String) = store.connection.query_row(
+            "SELECT capture_json,capture_sha256 FROM policy_task_dispatch_captures WHERE task_id=?1",
+            [task.task_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        let before = crate::snapshot::RunSnapshot::load(&store.state_root, member, 0).unwrap();
+        let before_operations: u64 = store
+            .connection
+            .query_row("SELECT count(*) FROM scheduler_operations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let view = crate::workspace::WorkspaceView {
+            workspace_id: before.manifest.workspace_id.clone(),
+            canonical_path: before.manifest.canonical_workspace.clone(),
+            mode: crate::workspace::WorkspaceMode::NonGit,
+            created: false,
+        };
+        let error = crate::semantic::schedule_actor(&view, &store.state_root, actor).unwrap_err();
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(
+            error.details["reason"],
+            "activation_policy_acceptance_changed"
+        );
+        let after = crate::snapshot::RunSnapshot::load(&store.state_root, member, 0).unwrap();
+        assert_eq!(after.runtime_record, before.runtime_record);
+        assert_eq!(after.projection.thread_id, before.projection.thread_id);
+        assert_eq!(
+            after.projection.run_generation,
+            before.projection.run_generation
+        );
+        assert_eq!(after.writer, before.writer);
+        assert_eq!(store.task(task.task_id).unwrap().state, task.state);
+        assert!(store.task(task.task_id).unwrap().target_turn_id.is_none());
+        let after_capture: (String, String) = store.connection.query_row(
+            "SELECT capture_json,capture_sha256 FROM policy_task_dispatch_captures WHERE task_id=?1",
+            [task.task_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(after_capture, original_capture);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM scheduler_operations", [], |r| r
+                    .get::<_, u64>(0),)
+                .unwrap(),
+            before_operations
+        );
+        let claimed: String = store
+            .connection
+            .query_row(
+                "SELECT phase FROM scheduler_claims WHERE work_ref=?1 AND target_run_id=?2",
+                params![task.task_id.to_string(), member.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(claimed, "claimed");
+        assert_eq!(store.connection.query_row(
+            "SELECT writer_capture_json FROM policy_task_dispatch_captures WHERE task_id=?1",
+            [task.task_id.to_string()], |r|r.get::<_,Option<String>>(0),
+        ).unwrap(), None);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn caller_policy_original_deadline_distinguishes_queued_running_and_interaction() {
+        for observed in [
+            None,
+            Some(SpecialistTaskObservation::Running),
+            Some(SpecialistTaskObservation::WaitingInteraction),
+        ] {
+            let (root, mut store, session, member, mut adapter) = caller_policy_queue_fixture();
+            let clock = Arc::new(ManualClock::new(1_000));
+            store.clock = clock.clone();
+            let call = context(session.session_id, "original-policy-deadline");
+            let mut request = task_request(member, "read_only");
+            request.deadline_seconds = 1;
+            let task = store.assign_task(&call, &request, &mut adapter).unwrap();
+            assert_eq!(task.state, "queued");
+            let retained = policy_task::load(
+                &store.connection,
+                &store.state_root,
+                session.session_id,
+                task.task_id,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(retained.capture.deadline_ms, 2_000);
+            let capture: String = store
+                .connection
+                .query_row(
+                    "SELECT capture_json FROM policy_task_dispatch_captures WHERE task_id=?1",
+                    [task.task_id.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            adapter.calls.clear();
+            clock.now_ms.store(1_999, Ordering::SeqCst);
+            store
+                .reconcile_task_observation(session.session_id, &task, &mut adapter)
+                .unwrap();
+            assert_eq!(store.task(task.task_id).unwrap().state, "queued");
+            assert!(adapter.calls.is_empty());
+            if let Some(observed) = observed {
+                let tx = store.transaction().unwrap();
+                let permit = crate::scheduler::claim(
+                    &tx,
+                    crate::assignment_queue::Owner::Managed(session.session_id),
+                    member,
+                    1_999,
+                )
+                .unwrap()
+                .unwrap();
+                crate::scheduler::prepare_dispatch(&tx, &permit, 1_999).unwrap();
+                mark_successor_task_dispatching(&tx, session.session_id, task.task_id, 1_999)
+                    .unwrap();
+                crate::storage_observation::commit(tx).unwrap();
+                adapter.dispatch = Ok(TaskDispatch::Accepted {
+                    turn_id: "original-deadline-turn".into(),
+                });
+                let member_snapshot = store.member(session.session_id, member).unwrap();
+                let credential =
+                    BrokerCredential::load(&store.credential_root, store.uid, member).unwrap();
+                let TaskDispatch::Accepted { turn_id } = adapter
+                    .dispatch_task(&member_snapshot, &retained.accepted, &credential)
+                    .unwrap()
+                else {
+                    unreachable!()
+                };
+                let tx = store.transaction().unwrap();
+                policy_task::link_response(&tx, &retained, permit.claim, &turn_id, 1_999).unwrap();
+                crate::scheduler::finish_dispatch(
+                    &tx,
+                    &permit,
+                    &crate::delegation_service::MemberDispatchOutcome::Accepted {
+                        turn_ref: turn_id.clone(),
+                    },
+                    1_999,
+                )
+                .unwrap();
+                crate::storage_observation::commit(tx).unwrap();
+                adapter.task_observation = Ok(observed);
+                let running = store.task(task.task_id).unwrap();
+                assert_eq!(running.state, "running");
+                store
+                    .reconcile_task_observation(session.session_id, &running, &mut adapter)
+                    .unwrap();
+                assert_eq!(store.task(task.task_id).unwrap().state, "running");
+                assert!(adapter.calls.iter().all(|c| !c.starts_with("cancel:")));
+                clock.now_ms.store(2_000, Ordering::SeqCst);
+                store
+                    .reconcile_task_observation(session.session_id, &running, &mut adapter)
+                    .unwrap();
+                let expired = store.task(task.task_id).unwrap();
+                assert_eq!(expired.state, "expired");
+                assert_eq!(
+                    expired.safe_error_code.as_deref(),
+                    Some("OPERATION_TIMEOUT")
+                );
+                assert_eq!(expired.target_turn_id.as_deref(), Some(turn_id.as_str()));
+                let calls = adapter.calls.clone();
+                clock.now_ms.store(2_001, Ordering::SeqCst);
+                store
+                    .reconcile_task_observation(session.session_id, &expired, &mut adapter)
+                    .unwrap();
+                let replay = store.assign_task(&call, &request, &mut adapter).unwrap();
+                assert_eq!(replay.task_id, task.task_id);
+                assert_eq!(replay.target_turn_id, expired.target_turn_id);
+                assert_eq!(adapter.calls, calls);
+                assert_eq!(
+                    calls.iter().filter(|c| c.starts_with("dispatch:")).count(),
+                    1
+                );
+                assert_eq!(calls.iter().filter(|c| c.starts_with("cancel:")).count(), 1);
+                assert_eq!(
+                    store
+                        .connection
+                        .query_row(
+                            "SELECT intent FROM brokered_task_controls WHERE task_id=?1",
+                            [task.task_id.to_string()],
+                            |r| r.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    "expiry"
+                );
+                assert_eq!(
+                    store
+                        .connection
+                        .query_row(
+                            "SELECT turn_id FROM scheduler_claims WHERE claim_id=?1",
+                            [permit.claim.to_string()],
+                            |r| r.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    turn_id
+                );
+            } else {
+                for now in [2_000, 2_001] {
+                    clock.now_ms.store(now, Ordering::SeqCst);
+                    store
+                        .reconcile_task_observation(session.session_id, &task, &mut adapter)
+                        .unwrap();
+                    assert_eq!(store.task(task.task_id).unwrap().state, "queued");
+                    assert!(adapter.calls.is_empty());
+                    assert_eq!(
+                        store
+                            .connection
+                            .query_row(
+                                "SELECT count(*) FROM brokered_task_controls WHERE task_id=?1",
+                                [task.task_id.to_string()],
+                                |r| r.get::<_, u64>(0)
+                            )
+                            .unwrap(),
+                        0
+                    );
+                }
+            }
+            assert_eq!(
+                store
+                    .accepted_task(task.task_id)
+                    .unwrap()
+                    .deadline_origin_ms,
+                1_000
+            );
+            assert_eq!(
+                policy_task::load(
+                    &store.connection,
+                    &store.state_root,
+                    session.session_id,
+                    task.task_id
+                )
+                .unwrap()
+                .unwrap()
+                .capture
+                .deadline_ms,
+                2_000
+            );
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT capture_json FROM policy_task_dispatch_captures WHERE task_id=?1",
+                        [task.task_id.to_string()],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                capture
+            );
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn caller_primary_original_submit_links_before_source_call_and_recovers_after_deadline() {
+        for accepted in [false, true] {
+            let (root, mut store, session, member, mut adapter) = caller_policy_queue_fixture();
+            let mut request = task_request(member, "read_only");
+            request.deadline_seconds = 1;
+            let task = store
+                .assign_task(
+                    &context(session.session_id, "original-policy-task"),
+                    &request,
+                    &mut adapter,
+                )
+                .unwrap();
+            let retained = policy_task::load(
+                &store.connection,
+                &store.state_root,
+                session.session_id,
+                task.task_id,
+            )
+            .unwrap()
+            .unwrap();
+            let original_deadline = retained.capture.deadline_ms;
+            let mut owner = crate::engagement::EngagementStore::open(
+                &crate::engagement::EngagementStore::workspace_database_path(&store.state_root),
+            )
+            .unwrap();
+            let now = crate::scheduler::now_ms().unwrap();
+            let permit = owner
+                .transact(|tx| {
+                    let permit = crate::scheduler::claim(
+                        tx,
+                        crate::assignment_queue::Owner::Managed(session.session_id),
+                        member,
+                        now,
+                    )?
+                    .unwrap();
+                    crate::scheduler::prepare_dispatch(tx, &permit, now)?;
+                    mark_successor_task_dispatching(tx, session.session_id, task.task_id, now)?;
+                    Ok(permit)
+                })
+                .unwrap();
+            let original = policy_task::turn_request(
+                &retained,
+                &crate::run::RunStore::new(
+                    crate::workspace::SystemWorkspacePlatform,
+                    &store.state_root,
+                )
+                .load_manifest(member)
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                !policy_task::bind_submit(
+                    &store.state_root,
+                    session.session_id,
+                    member,
+                    "ordinary-key",
+                    "unrelated",
+                    None,
+                    true
+                )
+                .unwrap()
+            );
+            assert!(
+                policy_task::bind_submit(
+                    &store.state_root,
+                    session.session_id,
+                    member,
+                    &original.idempotency_key,
+                    &original.message,
+                    original.effort.as_deref(),
+                    false
+                )
+                .unwrap()
+            );
+            let before_inputs = owner.connection().total_changes();
+            for (message, effort, write_or_images) in [
+                ("changed", original.effort.as_deref(), false),
+                (original.message.as_str(), Some("wrong-effort"), false),
+                (original.message.as_str(), original.effort.as_deref(), true),
+            ] {
+                assert!(
+                    policy_task::bind_submit(
+                        &store.state_root,
+                        session.session_id,
+                        member,
+                        &original.idempotency_key,
+                        message,
+                        effort,
+                        write_or_images
+                    )
+                    .is_err()
+                );
+            }
+            assert_eq!(owner.connection().total_changes(), before_inputs);
+            assert!(store.task(task.task_id).unwrap().target_turn_id.is_none());
+            assert!(
+                !policy_task::recover(&store.state_root, session.session_id, member, None).unwrap()
+            );
+            if !accepted {
+                owner
+                    .transact(|tx| {
+                        crate::scheduler::finish_dispatch(
+                            tx,
+                            &permit,
+                            &crate::delegation_service::MemberDispatchOutcome::Uncertain {
+                                code: "LOST_REPLY".into(),
+                                message: "fixture lost response".into(),
+                            },
+                            now,
+                        )
+                    })
+                    .unwrap();
+                let snapshot =
+                    crate::snapshot::RunSnapshot::load(&store.state_root, member, 0).unwrap();
+                owner
+                    .transact(|tx| {
+                        crate::scheduler::reconcile_claim(
+                            tx,
+                            crate::scheduler::Actor {
+                                owner: crate::assignment_queue::Owner::Managed(session.session_id),
+                                run: member,
+                            },
+                            &snapshot,
+                            now + 60_000,
+                            &store.state_root,
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(
+                    store.task(task.task_id).unwrap().state,
+                    "interrupted_unknown"
+                );
+                assert_eq!(
+                    owner
+                        .connection()
+                        .query_row(
+                            "SELECT phase FROM scheduler_claims WHERE claim_id=?1",
+                            [permit.claim.to_string()],
+                            |r| r.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    "unknown"
+                );
+            } else {
+                let manifest = crate::run::RunStore::new(
+                    crate::workspace::SystemWorkspacePlatform,
+                    &store.state_root,
+                )
+                .load_manifest(member)
+                .unwrap();
+                let turn = policy_task::turn_request(&retained, &manifest).unwrap();
+                let operation = Uuid::now_v7();
+                let namespace = crate::operation::Namespace::submit(
+                    &retained.member.controller_binding.identity,
+                    &manifest.workspace_id,
+                    member,
+                    &turn.idempotency_key,
+                )
+                .unwrap();
+                let identity = crate::operation::SubmitIdentity::prepare(
+                    operation,
+                    namespace,
+                    &turn,
+                    &retained.capture.effort,
+                )
+                .unwrap();
+                let intent = crate::turn::OperationIntent {
+                    operation_id: operation,
+                    idempotency_key: turn.idempotency_key.clone(),
+                    request_sha256: crate::turn::normalized_request_digest(
+                        &turn,
+                        &retained.capture.effort,
+                    )
+                    .unwrap(),
+                    run_generation: 1,
+                    server_key: manifest
+                        .global_profile_binding
+                        .as_ref()
+                        .unwrap()
+                        .server_key
+                        .clone(),
+                    server_epoch: 1,
+                    provisional_thread: false,
+                    accepted_input: None,
+                };
+                let mut ledger = crate::ledger::Ledger::open(
+                    crate::run::run_root(&store.state_root, member),
+                    member,
+                )
+                .unwrap();
+                ledger
+                    .append_required_payload(
+                        crate::audit::AuditKind::IdempotencyReserved,
+                        &intent,
+                        1,
+                    )
+                    .unwrap();
+                ledger
+                    .append_required_payload(crate::audit::AuditKind::TurnIntent, &identity, 1)
+                    .unwrap();
+                ledger.append_required_payload(crate::audit::AuditKind::TurnStarted,&serde_json::json!({"operation_id":operation,"thread_id":"member-thread","turn_id":"original-policy-turn","effort":retained.capture.effort,"acceptance_controller":retained.member.controller_binding.identity}),1).unwrap();
+                ledger.close().unwrap();
+                // Exercise the actual Worker-owned dispatcher before the SQL
+                // response link. The Source read recovers only its original
+                // positive Submit witness and never dispatches another Turn.
+                assert!(store.task(task.task_id).unwrap().target_turn_id.is_none());
+                let call = crate::turn::PrimaryToolCall {
+                    tool_name: crate::collaboration::TOOL_NAME.into(),
+                    source_thread_id: "member-thread".into(),
+                    request_id: 1,
+                    run_generation: 1,
+                    context: PrimaryCallContext {
+                        session_id: session.session_id,
+                        source_run_id: member,
+                        source_turn_id: "original-policy-turn".into(),
+                        source_tool_call_id: "first-source-call".into(),
+                        idempotency_key: "trusted-source-call".into(),
+                    },
+                    payload: serde_json::json!({"operation":"collect_collaboration_results","limit":1}),
+                };
+                let first = crate::collaboration::dispatch(
+                    &store.state_root,
+                    &call,
+                    member,
+                    1,
+                    &session.workspace_id,
+                    &|| true,
+                )
+                .unwrap();
+                assert_eq!(first["operation"], "collect_collaboration_results_result");
+                assert_eq!(
+                    store.task(task.task_id).unwrap().target_turn_id.as_deref(),
+                    Some("original-policy-turn")
+                );
+                // A later owning recovery after the unchanged deadline uses
+                // that exact accepted Turn and original Submit namespace.
+                std::thread::sleep(Duration::from_millis(1100));
+                assert!(crate::scheduler::now_ms().unwrap() >= original_deadline);
+                assert!(
+                    policy_task::recover(
+                        &store.state_root,
+                        session.session_id,
+                        member,
+                        Some("original-policy-turn")
+                    )
+                    .unwrap()
+                );
+                assert!(
+                    policy_task::for_turn(
+                        &store.connection,
+                        &store.state_root,
+                        session.session_id,
+                        member,
+                        "original-policy-turn"
+                    )
+                    .unwrap()
+                    .is_some()
+                );
+                assert_eq!(
+                    store.task(task.task_id).unwrap().target_turn_id.as_deref(),
+                    Some("original-policy-turn")
+                );
+                let before_changes = owner.connection().total_changes();
+                let changed_turn = owner
+                    .transact(|tx| {
+                        crate::scheduler::finish_dispatch(
+                            tx,
+                            &permit,
+                            &crate::delegation_service::MemberDispatchOutcome::Accepted {
+                                turn_ref: "different-policy-turn".into(),
+                            },
+                            crate::scheduler::now_ms()?,
+                        )
+                    })
+                    .unwrap_err();
+                assert_eq!(
+                    changed_turn.details["reason"],
+                    "policy_original_turn_changed"
+                );
+                assert_eq!(owner.connection().total_changes(), before_changes);
+                assert_eq!(
+                    store.task(task.task_id).unwrap().target_turn_id.as_deref(),
+                    Some("original-policy-turn")
+                );
+                assert_eq!(
+                    owner
+                        .connection()
+                        .query_row(
+                            "SELECT turn_id FROM scheduler_claims WHERE claim_id=?1",
+                            [permit.claim.to_string()],
+                            |r| r.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    "original-policy-turn"
+                );
+                owner
+                    .transact(|tx| {
+                        crate::scheduler::finish_dispatch(
+                            tx,
+                            &permit,
+                            &crate::delegation_service::MemberDispatchOutcome::Uncertain {
+                                code: "LOST_REPLY".into(),
+                                message: "late transport reply".into(),
+                            },
+                            crate::scheduler::now_ms()?,
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(
+                    owner
+                        .connection()
+                        .query_row(
+                            "SELECT phase FROM scheduler_claims WHERE claim_id=?1",
+                            [permit.claim.to_string()],
+                            |r| r.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    "accepted"
+                );
+                assert_eq!(
+                    policy_task::load(
+                        &store.connection,
+                        &store.state_root,
+                        session.session_id,
+                        task.task_id
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .capture
+                    .deadline_ms,
+                    original_deadline
+                );
+                let terminal = crate::turn::TerminalTurn {
+                    thread_id: "member-thread".into(),
+                    turn_id: "original-policy-turn".into(),
+                    status: "completed".into(),
+                    effort: retained.capture.effort.clone(),
+                    final_response: Some(crate::turn::FinalResponse::Inline {
+                        text: "Original late result".into(),
+                    }),
+                    usage: None,
+                };
+                let mut ledger = crate::ledger::Ledger::open(
+                    crate::run::run_root(&store.state_root, member),
+                    member,
+                )
+                .unwrap();
+                ledger
+                    .append_required_payload(crate::audit::AuditKind::TurnTerminal, &terminal, 1)
+                    .unwrap();
+                ledger.close().unwrap();
+                assert!(
+                    crate::semantic::settle_policy_task_terminal(
+                        &store.state_root,
+                        member,
+                        &terminal
+                    )
+                    .unwrap()
+                );
+                assert_eq!(
+                    store.task(task.task_id).unwrap().state,
+                    "completed_not_delivered"
+                );
+                let observed = crate::snapshot::RunSnapshot::load(&store.state_root, member, 0)
+                    .unwrap()
+                    .observed_ledger(&store.state_root)
+                    .unwrap();
+                assert_eq!(
+                    observed
+                        .records()
+                        .iter()
+                        .filter(|r| r.kind() == crate::audit::AuditKind::TurnStarted)
+                        .count(),
+                    1
+                );
+            }
+            drop(owner);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn checked_state_owner_projects_caller_private_captures_and_refuses_foreign_output() {
+        let (root, mut store, session, member, mut adapter) = caller_policy_queue_fixture();
+        let ctx = context(session.session_id, "checked-task");
+        let task = store
+            .assign_task(&ctx, &task_request(member, "read_only"), &mut adapter)
+            .unwrap();
+        let workspace = session.workspace_id.clone();
+        store.refresh_checked_state(&workspace).unwrap();
+        let path = store.state_root.join("orchestration/state.json");
+        let original = std::fs::read(&path).unwrap();
+        let state: Value = serde_json::from_slice(&original).unwrap();
+        assert_eq!(state["schema_version"], 2);
+        assert_eq!(state["workspace_id"], workspace);
+        assert_eq!(
+            state["orchestrated_sessions"][0]["members"][0]["agent_configuration"]["schema_version"],
+            3
+        );
+        assert_eq!(
+            state["specialist_tasks"][0]["task_id"],
+            task.task_id.to_string()
+        );
+        assert_eq!(
+            state["mailbox_items"][0]["related_id"],
+            task.task_id.to_string()
+        );
+        assert_eq!(
+            state["aggregate_operations"][0]["controller_binding"],
+            Value::Null
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let observer = OrchestrationStore::open_observer(&store.state_root).unwrap();
+        assert_eq!(observer.connection.total_changes(), 0);
+        drop(observer);
+        store.refresh_checked_state(&workspace).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let mut invalid = state.clone();
+        invalid["specialist_tasks"][0]["state"] = serde_json::json!("unrecognized");
+        let invalid_bytes = serde_json::to_vec(&invalid).unwrap();
+        std::fs::write(&path, &invalid_bytes).unwrap();
+        assert!(store.refresh_checked_state(&workspace).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), invalid_bytes);
+        std::fs::write(&path, &original).unwrap();
+        let mut foreign = state.clone();
+        foreign["workspace_id"] = serde_json::json!("0".repeat(64));
+        let bytes = serde_json::to_vec(&foreign).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(store.refresh_checked_state(&workspace).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checked_state_fences_same_head_row_motion_and_replaced_pending_inode() {
+        struct MoveSource {
+            database: PathBuf,
+            directory: PathBuf,
+            barrier: OrchestrationBarrier,
+            replace_pending: bool,
+            reached: std::sync::atomic::AtomicBool,
+        }
+        impl OrchestrationFaultInjector for MoveSource {
+            fn check(&self, barrier: OrchestrationBarrier) -> Result<(), MachineError> {
+                if barrier != self.barrier || self.reached.swap(true, Ordering::SeqCst) {
+                    return Ok(());
+                }
+                if self.replace_pending {
+                    let pending = fs::read_dir(&self.directory)
+                        .unwrap()
+                        .map(|e| e.unwrap().path())
+                        .find(|p| p.extension().is_some_and(|e| e == "pending"))
+                        .unwrap();
+                    fs::remove_file(&pending).unwrap();
+                    fs::write(&pending, b"replacement must remain").unwrap();
+                    fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+                } else {
+                    let c = Connection::open(&self.database).unwrap();
+                    // A selected row moves without appending an owner event.
+                    c.execute(
+                        "UPDATE brokered_tasks SET updated_at_ms=updated_at_ms+1",
+                        [],
+                    )
+                    .unwrap();
+                }
+                Ok(())
+            }
+        }
+        for (barrier, replace_pending) in [
+            (OrchestrationBarrier::AfterCheckedStatePreparation, false),
+            (OrchestrationBarrier::BeforeCheckedStateFence, false),
+            (OrchestrationBarrier::BeforeCheckedStateFence, true),
+        ] {
+            let (root, mut store, session, member, mut adapter) = caller_policy_queue_fixture();
+            store
+                .assign_task(
+                    &context(session.session_id, "fenced-task"),
+                    &task_request(member, "read_only"),
+                    &mut adapter,
+                )
+                .unwrap();
+            store.refresh_checked_state(&session.workspace_id).unwrap();
+            let directory = store.state_root.join("orchestration");
+            let path = directory.join("state.json");
+            let original = fs::read(&path).unwrap();
+            let fault = Arc::new(MoveSource {
+                database: store.connection.path().unwrap().into(),
+                directory: directory.clone(),
+                barrier,
+                replace_pending,
+                reached: std::sync::atomic::AtomicBool::new(false),
+            });
+            store.faults = fault.clone();
+            assert!(store.refresh_checked_state(&session.workspace_id).is_err());
+            assert!(fault.reached.load(Ordering::SeqCst));
+            assert_eq!(fs::read(&path).unwrap(), original);
+            let pending = fs::read_dir(&directory)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|e| e == "pending"))
+                .collect::<Vec<_>>();
+            if replace_pending {
+                assert_eq!(pending.len(), 1);
+                assert_eq!(fs::read(&pending[0]).unwrap(), b"replacement must remain");
+            } else {
+                assert!(pending.is_empty());
+            }
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

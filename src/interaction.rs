@@ -9,6 +9,257 @@ use serde_json::{Value, json};
 use std::path::Path;
 use uuid::Uuid;
 
+/// A private Broker-origin binding. It never enters the native numeric request set.
+pub(crate) const BROKER_APPROVAL_SCHEMA: &str = "dolgorae.broker-approval-binding/v1";
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BrokerApprovalBinding {
+    pub session_id: Uuid,
+    pub operation_id: Uuid,
+    pub approval_id: Uuid,
+    pub source_turn_id: String,
+    pub source_call_id: String,
+    pub role_ref: String,
+    pub request_sha256: String,
+    pub opened_at: String,
+    pub status: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub invalidated_at: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub decision: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub resolution_key: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub resolution_receipt_id: Option<Uuid>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub resolved_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BrokerApprovalRecord {
+    pub schema: String,
+    pub phase: String,
+    pub binding: BrokerApprovalBinding,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub intent: Option<crate::public_resolution::Intent>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub namespace: Option<crate::operation::Namespace>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub public_resolution: Option<crate::public_resolution::Receipt>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerApprovalResponse {
+    pub approval_id: Uuid,
+    pub idempotency_key: String,
+    pub approved: bool,
+    pub intent: crate::public_resolution::Intent,
+    pub expected_interaction_revision: u64,
+    pub expected_turn_id: String,
+    pub expected_thread_generation: u64,
+}
+
+impl BrokerApprovalResponse {
+    pub(crate) fn normalized_request(&self) -> Value {
+        json!({"operation":"public_resolution","intent":self.intent,"request":{
+            "operation":"resolve_broker_approval","approval_id":self.approval_id,"idempotency_key":self.idempotency_key,"approved":self.approved}})
+    }
+}
+
+impl BrokerApprovalRecord {
+    pub(crate) fn validate(&self, run: Uuid) -> Result<(), MachineError> {
+        let b = &self.binding;
+        let text = |s: &str, max| !s.is_empty() && s.len() <= max;
+        if self.schema != BROKER_APPROVAL_SCHEMA
+            || b.session_id != run
+            || [b.session_id, b.operation_id, b.approval_id]
+                .iter()
+                .any(|id| id.get_version_num() != 7)
+            || !text(&b.source_turn_id, 256)
+            || !text(&b.source_call_id, 256)
+            || !text(&b.role_ref, 128)
+            || !proof_digest(&json!(b.request_sha256))
+            || !proof_date(&b.opened_at)
+            || !matches!(b.status.as_str(), "pending" | "resolved" | "stale")
+            || (b.decision.is_some() != (b.status == "resolved"))
+            || b.invalidated_at.as_deref().is_some_and(|s| !proof_date(s))
+            || (b.status != "stale" && b.invalidated_at.is_some())
+            || b.decision
+                .as_deref()
+                .is_some_and(|s| !matches!(s, "approve" | "reject"))
+            || b.resolution_key.as_deref().is_some_and(|s| !text(s, 256))
+            || b.resolution_receipt_id
+                .is_some_and(|id| id.get_version_num() != 7)
+            || b.resolved_at.as_deref().is_some_and(|s| !proof_date(s))
+            || [
+                b.resolution_key.is_some(),
+                b.resolution_receipt_id.is_some(),
+                b.resolved_at.is_some(),
+            ]
+            .iter()
+            .any(|v| *v != b.decision.is_some())
+            || !matches!(self.phase.as_str(), "binding" | "intent" | "decision")
+        {
+            return Err(invalid("Broker approval binding"));
+        }
+        match self.phase.as_str() {
+            "binding"
+                if self.intent.is_none()
+                    && self.namespace.is_none()
+                    && self.public_resolution.is_none() => {}
+            "intent" | "decision" => {
+                let intent = self
+                    .intent
+                    .as_ref()
+                    .ok_or_else(|| invalid("Broker public intent"))?;
+                intent
+                    .validate()
+                    .map_err(|_| invalid("Broker public intent"))?;
+                let ns = self
+                    .namespace
+                    .as_ref()
+                    .ok_or_else(|| invalid("Broker public namespace"))?;
+                if intent.body.run_ref != run.to_string()
+                    || intent.body.interaction_ref != b.approval_id.to_string()
+                    || intent.body.protected_input_present
+                    || !intent.body.granted_permissions.is_empty()
+                    || ns.operation_kind != "resolve_interaction"
+                    || ns.scope_ref.as_deref() != Some(run.to_string().as_str())
+                {
+                    return Err(invalid("Broker public intent authority"));
+                }
+                if self.phase == "intent" {
+                    if self.public_resolution.is_some() {
+                        return Err(invalid("Broker intent receipt"));
+                    }
+                } else {
+                    let receipt = self
+                        .public_resolution
+                        .as_ref()
+                        .ok_or_else(|| invalid("Broker public receipt"))?;
+                    receipt
+                        .validate()
+                        .map_err(|_| invalid("Broker public receipt"))?;
+                    let expected = if b.decision.as_deref() == Some("approve") {
+                        "approve"
+                    } else {
+                        "reject"
+                    };
+                    if intent.body.decision != "accept_once"
+                        || intent.body.answers.len() != 1
+                        || intent.body.answers[0].question_id != "specialist_approval"
+                        || intent.body.answers[0].selected_labels != [expected]
+                        || intent.body.answers[0].text.is_some()
+                        || b.resolution_receipt_id != Some(receipt.operation_ref)
+                        || b.resolution_key.as_deref() != Some(ns.idempotency_key.as_str())
+                        || receipt.mutation_envelope.namespace != *ns
+                        || *receipt
+                            != intent
+                                .receipt(ns.clone(), receipt.operation_ref, false)
+                                .map_err(|_| invalid("Broker public receipt"))?
+                    {
+                        return Err(invalid("Broker public receipt linkage"));
+                    }
+                }
+            }
+            _ => return Err(invalid("Broker approval phase")),
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn broker_record(
+    record: &crate::audit::AuditRecord,
+) -> Result<Option<BrokerApprovalRecord>, MachineError> {
+    if record.kind() != AuditKind::TurnIntent {
+        return Ok(None);
+    }
+    let value = record
+        .payload_value()
+        .map_err(|_| invalid("Broker approval encoding"))?;
+    if value["schema"] != BROKER_APPROVAL_SCHEMA {
+        return Ok(None);
+    }
+    let binding: BrokerApprovalRecord =
+        serde_json::from_value(value).map_err(|_| invalid("Broker approval shape"))?;
+    binding.validate(record.run_id())?;
+    Ok(Some(binding))
+}
+
+pub(crate) fn broker_bindings(
+    records: &[crate::audit::AuditRecord],
+    run: Uuid,
+) -> Result<std::collections::BTreeMap<Uuid, BrokerApprovalBinding>, MachineError> {
+    broker_binding_history(records.iter(), run)
+}
+
+pub(crate) fn broker_binding_history<'a>(
+    records: impl Iterator<Item = &'a crate::audit::AuditRecord>,
+    run: Uuid,
+) -> Result<std::collections::BTreeMap<Uuid, BrokerApprovalBinding>, MachineError> {
+    let mut latest = std::collections::BTreeMap::<Uuid, BrokerApprovalBinding>::new();
+    let mut intents = std::collections::BTreeMap::<Uuid, BrokerApprovalRecord>::new();
+    for record in records {
+        let Some(marker) = broker_record(record)? else {
+            continue;
+        };
+        let binding = &marker.binding;
+        if binding.session_id != run {
+            return Err(invalid("Broker approval Run"));
+        }
+        if let Some(original) = latest.get(&binding.approval_id) {
+            let mut refined = binding.clone();
+            refined.invalidated_at = original.invalidated_at.clone();
+            let stale_timestamp_refinement = original.status == "stale"
+                && binding.status == "stale"
+                && original.invalidated_at.is_none()
+                && binding.invalidated_at.is_some()
+                && refined == *original;
+            if original.operation_id != binding.operation_id
+                || original.source_turn_id != binding.source_turn_id
+                || original.source_call_id != binding.source_call_id
+                || original.role_ref != binding.role_ref
+                || original.request_sha256 != binding.request_sha256
+                || original.opened_at != binding.opened_at
+                || (original.status != "pending"
+                    && original != binding
+                    && !stale_timestamp_refinement)
+            {
+                return Err(invalid("Broker approval immutable binding changed"));
+            }
+        } else if marker.phase != "binding" {
+            return Err(invalid("Broker approval original binding is absent"));
+        }
+        if marker.phase == "intent" {
+            if binding.status != "pending"
+                || intents
+                    .insert(binding.approval_id, marker.clone())
+                    .is_some()
+            {
+                return Err(invalid("Broker approval intent changed"));
+            }
+            continue;
+        }
+        if marker.phase == "decision" {
+            let prior = intents
+                .get(&binding.approval_id)
+                .ok_or_else(|| invalid("Broker decision original intent is absent"))?;
+            if marker.intent != prior.intent || marker.namespace != prior.namespace {
+                return Err(invalid("Broker decision original intent changed"));
+            }
+        } else if binding.decision.is_some() && intents.contains_key(&binding.approval_id) {
+            return Err(invalid(
+                "Broker protected decision lost its original receipt",
+            ));
+        }
+        latest.insert(binding.approval_id, binding.clone());
+    }
+    Ok(latest)
+}
+
 pub(crate) const MAX_RESPONSE_BYTES: usize = 1_048_576;
 pub(crate) const MAX_PAYLOAD_BYTES: usize = 8_388_608;
 

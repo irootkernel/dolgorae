@@ -1399,6 +1399,110 @@ mod tests {
         }
     }
 
+    // Advance only the existing fixture port after the real queue reservation.
+    // Consumer result fixtures must not turn an unexecuted queued task terminal.
+    fn dispatch_queued_fixture_task(
+        owner: &VerifiedOwner,
+        aggregate: SettlementOwner,
+        member: Uuid,
+        task: Uuid,
+        port: &services::tests::FakePort,
+    ) -> bool {
+        use services::RunSettlementPort as _;
+        let queue_owner = match aggregate {
+            SettlementOwner::Managed { session_id } => {
+                crate::assignment_queue::Owner::Managed(session_id)
+            }
+            SettlementOwner::External { engagement_id } => {
+                crate::assignment_queue::Owner::External(engagement_id)
+            }
+        };
+        let mut store = crate::engagement::EngagementStore::open(
+            &crate::engagement::EngagementStore::workspace_database_path(&owner.state_root),
+        )
+        .unwrap();
+        let now = crate::scheduler::now_ms().unwrap();
+        let Some(permit) = store
+            .transact(|tx| crate::scheduler::claim(tx, queue_owner, member, now))
+            .unwrap()
+        else {
+            return false;
+        };
+        assert_eq!(permit.work, task);
+        assert_eq!(permit.kind, "assignment");
+        let retained = crate::scheduler::retained_task(
+            &store,
+            &permit,
+            &owner.view.workspace_id,
+            &owner.state_root,
+        )
+        .unwrap();
+        store
+            .transact(|tx| crate::scheduler::prepare_dispatch(tx, &permit, now))
+            .unwrap();
+        let outcome = match aggregate {
+            SettlementOwner::Managed { session_id } => {
+                port.dispatch_managed_task(services::ManagedTaskDispatch {
+                    view: &owner.view,
+                    state_root: &owner.state_root,
+                    session_id,
+                    member_ref: member,
+                    task_ref: task,
+                    execution_intent: &retained.accepted.execution_intent,
+                    accepted: &retained.accepted,
+                    contents: &retained.contents,
+                    deadline_seconds: retained.deadline_seconds,
+                })
+            }
+            SettlementOwner::External { engagement_id } => {
+                store
+                    .transact(|tx| {
+                        crate::engagement::mark_external_task_dispatching_in(
+                            tx,
+                            engagement_id,
+                            task,
+                            now,
+                        )
+                        .map(|_| ())
+                    })
+                    .unwrap();
+                port.dispatch_member_task(services::MemberTaskDispatch {
+                    view: &owner.view,
+                    state_root: &owner.state_root,
+                    engagement_id,
+                    member_ref: member,
+                    task_ref: task,
+                    idempotency_key: &retained.key,
+                    execution_intent: &retained.accepted.execution_intent,
+                    accepted: &retained.accepted,
+                    contents: &retained.contents,
+                    deadline_seconds: retained.deadline_seconds,
+                })
+            }
+        }
+        .unwrap();
+        let services::MemberDispatchOutcome::Accepted { turn_ref } = &outcome else {
+            panic!("fixture port did not accept the original task")
+        };
+        store
+            .transact(|tx| {
+                crate::semantic::link_dispatched_task(tx, aggregate, member, task, turn_ref, now)?;
+                if matches!(aggregate, SettlementOwner::External { .. }) {
+                    crate::caller_scope::accepted(tx, task)?;
+                }
+                crate::scheduler::finish_dispatch(tx, &permit, &outcome, now)
+            })
+            .unwrap();
+        assert!(
+            store
+                .transact(|tx| crate::scheduler::claim(tx, queue_owner, member, now))
+                .unwrap()
+                .is_none(),
+            "the accepted original Turn must retain its claim"
+        );
+        true
+    }
+
     #[test]
     fn native_managed_refusal_completion_preserves_failure_body_and_false_flag() {
         let scene = Scene::new(true, HostRoute::Codex, false);
@@ -1564,6 +1668,13 @@ mod tests {
         let accepted = prepare_assignment(&owner, selected.clone()).unwrap();
         let (observed, receipt) = scene.assign(&selected, accepted.clone()).unwrap();
         let task = Uuid::parse_str(&observed.task_ref).unwrap();
+        assert!(dispatch_queued_fixture_task(
+            &owner,
+            scene.aggregate,
+            scene.member,
+            task,
+            &scene.port
+        ));
         assert_eq!(
             receipt.accepted_subjects.task_ref.as_deref(),
             Some(observed.task_ref.as_str())
@@ -3325,6 +3436,51 @@ mod tests {
     }
 
     #[test]
+    fn registered_source_busy_queues_preserve_both_owners_and_exact_replay() {
+        for managed in [false, true] {
+            let scene = Scene::new(managed, HostRoute::Codex, true);
+            let owner = scene.f.owner();
+            let calls = scene.port.calls();
+            let mut accepted = Vec::new();
+            for key in ["queued-first", "queued-second"] {
+                let selection = scene.selection(key, None, "plain_text");
+                let identity = prepare_assignment(&owner, selection.clone()).unwrap();
+                let (observation, receipt) = scene.assign(&selection, identity.clone()).unwrap();
+                assert_eq!(observation.state, "queued");
+                assert_eq!(scene.assign(&selection, identity).unwrap().1, receipt);
+                accepted.push(receipt.accepted_subjects.task_ref.unwrap());
+            }
+            assert_ne!(accepted[0], accepted[1]);
+            assert_eq!(scene.port.calls(), calls, "queued admission started a Turn");
+            let store = crate::engagement::EngagementStore::open_read_only(
+                &crate::engagement::EngagementStore::workspace_database_path(&owner.state_root),
+            )
+            .unwrap();
+            for task in accepted {
+                let (priority, deadline, source): (u8,i64,String) = store.connection().query_row(
+                    "SELECT priority,deadline_ms,source_ref FROM assignment_queue_entries WHERE task_id=?1 AND target_run_id=?2",
+                    rusqlite::params![task,scene.member.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+                ).unwrap();
+                assert_eq!(priority, 1);
+                assert!(!source.is_empty());
+                let origin: i64 = if managed {
+                    store.connection().query_row("SELECT deadline_origin_ms FROM brokered_task_acceptances WHERE task_id=?1",[&task],|r|r.get(0)).unwrap()
+                } else {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT created_at_ms FROM tasks WHERE task_id=?1",
+                            [&task],
+                            |r| r.get(0),
+                        )
+                        .unwrap()
+                };
+                assert_eq!(deadline, origin + 600_000);
+            }
+        }
+    }
+
+    #[test]
     fn source_binding_both_owners_capture_once_and_replay_without_registration_or_live_sources() {
         for managed in [false, true] {
             let scene = Scene::new(managed, HostRoute::Codex, true);
@@ -3869,6 +4025,13 @@ mod tests {
         let accepted = prepare_assignment(&owner, selected.clone()).unwrap();
         let (observed, _) = scene.assign(&selected, accepted.clone()).unwrap();
         let task = Uuid::parse_str(&observed.task_ref).unwrap();
+        assert!(dispatch_queued_fixture_task(
+            &owner,
+            scene.aggregate,
+            scene.member,
+            task,
+            &scene.port
+        ));
         let verdict = json!({"summary":"Original review 界","findings":[],"criterion_assessments":[],"evidence_limits":[],"overall_assessment":"requirements_met"});
         let response = if v3 {
             serde_json::to_vec_pretty(&verdict).unwrap()
@@ -4630,6 +4793,13 @@ mod tests {
             let accepted = prepare_assignment(&owner, selected.clone()).unwrap();
             let (observed, _) = scene.assign(&selected, accepted.clone()).unwrap();
             let task = Uuid::parse_str(&observed.task_ref).unwrap();
+            assert!(dispatch_queued_fixture_task(
+                &owner,
+                scene.aggregate,
+                scene.member,
+                task,
+                &scene.port
+            ));
             let tail = "original result with Korean 한글\r\n";
             let text = if large {
                 format!(
@@ -6123,10 +6293,22 @@ mod tests {
             ),
         }
         .unwrap();
+        let aggregate = match &owner.configuration.owner {
+            OwnerKind::External => SettlementOwner::External {
+                engagement_id: Uuid::parse_str(selected.namespace.scope_ref.as_ref().unwrap())
+                    .unwrap(),
+            },
+            OwnerKind::Managed { session_ref } => SettlementOwner::Managed {
+                session_id: *session_ref,
+            },
+        };
+        let task = Uuid::parse_str(&result.0.task_ref).unwrap();
+        let dispatched =
+            dispatch_queued_fixture_task(&owner, aggregate, selected.member_ref, task, &port);
         let output = PathBuf::from(std::env::var_os("DOLGORAE_SOURCE_BINDING_RESULT").unwrap());
         private(
             &output,
-            &canonical(&json!({"receipt":result.1,"dispatches":port.calls()})).unwrap(),
+            &canonical(&json!({"receipt":result.1,"dispatches":port.calls(),"queued_execution_advanced":dispatched})).unwrap(),
         );
     }
     #[test]
@@ -6166,10 +6348,12 @@ mod tests {
             let first_path = scene.f.root.join("first.json");
             let first = run(&first_path);
             assert_eq!(first["dispatches"], 1);
+            assert_eq!(first["queued_execution_advanced"], true);
             fs::remove_file(first_path).unwrap();
             fs::remove_dir_all(owner.root.path.join(DIRECTORY)).unwrap();
             let replay = run(&scene.f.root.join("replay.json"));
             assert_eq!(replay["dispatches"], 0);
+            assert_eq!(replay["queued_execution_advanced"], false);
             assert_eq!(replay["receipt"], first["receipt"]);
         }
     }
@@ -6616,7 +6800,7 @@ mod admission_tests {
                     services::AssignExternalSpecialistTask {
                         engagement_id: external.engagement_id,
                         member_ref: external.member_ref,
-                        task,
+                        task: task.clone(),
                         execution_intent: "read_only",
                         target: None,
                         deadline_seconds: 600,
@@ -6641,6 +6825,59 @@ mod admission_tests {
                     assert_eq!(trace, ["current", "target", "task"]);
                     assert_eq!(source.resolves.get(), 1);
                     assert_eq!(source.verifies.get(), 1);
+                    let original = result.unwrap().1;
+                    let next = services::assign_external_with_source(
+                        &scope,
+                        &crate::caller_scope::fixture(3),
+                        &AcceptingPort,
+                        services::AssignExternalSpecialistTask {
+                            engagement_id: external.engagement_id,
+                            member_ref: external.member_ref,
+                            task: task.clone(),
+                            execution_intent: "read_only",
+                            target: None,
+                            deadline_seconds: 600,
+                            idempotency_key: "order-next",
+                            expected_revision: None,
+                        },
+                        &source,
+                    )
+                    .unwrap()
+                    .1;
+                    assert_ne!(
+                        next.accepted_subjects.task_ref,
+                        original.accepted_subjects.task_ref
+                    );
+                    let replay = services::assign_external_with_source(
+                        &scope,
+                        &crate::caller_scope::fixture(3),
+                        &AcceptingPort,
+                        services::AssignExternalSpecialistTask {
+                            engagement_id: external.engagement_id,
+                            member_ref: external.member_ref,
+                            task: task.clone(),
+                            execution_intent: "read_only",
+                            target: None,
+                            deadline_seconds: 600,
+                            idempotency_key: "order",
+                            expected_revision: None,
+                        },
+                        &source,
+                    )
+                    .unwrap()
+                    .1;
+                    assert_eq!(replay, original);
+                    assert_eq!(source.verifies.get(), 2, "exact replay must not recapture");
+                    let store = crate::engagement::EngagementStore::open(
+                        &crate::engagement::EngagementStore::workspace_database_path(
+                            &external.state_root,
+                        ),
+                    )
+                    .unwrap();
+                    assert_eq!(store.connection().query_row(
+                        "SELECT COUNT(*) FROM assignment_queue_entries WHERE target_run_id=?1 AND priority=1",
+                        [external.member_ref.to_string()], |r| r.get::<_,u64>(0)).unwrap(), 2);
+                    assert_eq!(external.rounds_used(), 2);
                 }
                 let managed = if old {
                     ManagedMember::historical()
@@ -6691,7 +6928,7 @@ mod admission_tests {
                     &AcceptingPort,
                     services::AssignSpecialistTask {
                         member_ref: managed.member_ref,
-                        task,
+                        task: task.clone(),
                         execution_intent: "read_only",
                         target: None,
                         deadline_seconds: 600,
@@ -6714,6 +6951,60 @@ mod admission_tests {
                     assert_eq!(trace, ["current", "target", "task"]);
                     assert_eq!(source.resolves.get(), 1);
                     assert_eq!(source.verifies.get(), 1);
+                    let original = result.unwrap().1;
+                    let next_context = services::ManagedCallContext {
+                        idempotency_key: "order-next",
+                        ..context
+                    };
+                    let next = services::assign_managed_with_source(
+                        &scope,
+                        &next_context,
+                        &crate::caller_scope::fixture(3),
+                        &AcceptingPort,
+                        services::AssignSpecialistTask {
+                            member_ref: managed.member_ref,
+                            task: task.clone(),
+                            execution_intent: "read_only",
+                            target: None,
+                            deadline_seconds: 600,
+                            expected_revision: None,
+                        },
+                        &source,
+                    )
+                    .unwrap()
+                    .1;
+                    assert_ne!(
+                        next.accepted_subjects.task_ref,
+                        original.accepted_subjects.task_ref
+                    );
+                    let replay = services::assign_managed_with_source(
+                        &scope,
+                        &context,
+                        &crate::caller_scope::fixture(3),
+                        &AcceptingPort,
+                        services::AssignSpecialistTask {
+                            member_ref: managed.member_ref,
+                            task,
+                            execution_intent: "read_only",
+                            target: None,
+                            deadline_seconds: 600,
+                            expected_revision: None,
+                        },
+                        &source,
+                    )
+                    .unwrap()
+                    .1;
+                    assert_eq!(replay, original);
+                    assert_eq!(source.verifies.get(), 2, "exact replay must not recapture");
+                    let store = crate::engagement::EngagementStore::open(
+                        &crate::engagement::EngagementStore::workspace_database_path(
+                            &managed.state_root,
+                        ),
+                    )
+                    .unwrap();
+                    assert_eq!(store.connection().query_row(
+                        "SELECT COUNT(*) FROM assignment_queue_entries WHERE target_run_id=?1 AND priority=1",
+                        [managed.member_ref.to_string()], |r| r.get::<_,u64>(0)).unwrap(), 2);
                 }
             }
         }

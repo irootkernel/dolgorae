@@ -49,6 +49,10 @@ GENERAL = "integrated-general-017"
 REVIEWER = "integrated-reviewer-017"
 PROFILE = "integrated-profile-user-017"
 AMBIENT = ("integrated-project-forbidden-017", "integrated-ancestor-forbidden-017")
+COLLABORATION_RESULT = ("TASK027 large result prefix: 한글.\n"
+                        + "한글-0123456789abcdef\n" * 4096
+                        + "TASK027 large result tail: 끝.\n")
+COLLABORATION_PAGE_LIMIT = 1030
 
 
 def successor_aquarium_sources(root: Path, archive: Path) -> None:
@@ -390,12 +394,14 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
     retained_binary.chmod(0o700)
     binary = retained_binary
     fixture: IntegratedResponses | None = None
+    foreground = None
+    census_checked = False
+    environment = isolated_environment(root)
     passed = False
     runs: list[tuple[Path, str, Path]] = []
     try:
         for name in ("home", "tmp", "config", "cache", "profile", "workspace", "git-workspace"):
             (root / name).mkdir(mode=0o700)
-        environment = isolated_environment(root)
         environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
         checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
         fixture = IntegratedResponses()
@@ -437,6 +443,16 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
                        env=environment, check=True, capture_output=True, timeout=10)
         call("init", "--non-git", str(workspace))
         call("init", str(root / "git-workspace"))
+        foreground = subprocess.Popen([str(binary), "serve", "--socket", str(root / "gateway.sock")],
+                                      env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        import select
+        if not select.select([foreground.stdout], [], [], 10)[0]:
+            raise ProbeCheckFailure("integrated_foreground_readiness_timeout")
+        ready_line = foreground.stdout.readline()
+        private_file(root / "foreground-ready.json", ready_line.encode())
+        ready = json.loads(ready_line)
+        if not ready.get("ok") or ready.get("command") != "serve":
+            raise ProbeCheckFailure("integrated_foreground_not_ready")
         overwrite_fixture_file(root / "home/.dolgorae/home/AGENTS.md", (COMMON + "\n").encode())
         overwrite_fixture_file(root / "home/.dolgorae/roles/general/AGENTS.md", (GENERAL + "\n").encode())
         overwrite_fixture_file(root / "home/.dolgorae/roles/reviewer/AGENTS.md", (REVIEWER + "\n").encode())
@@ -818,15 +834,26 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
         assert_no_source_isolation(root / "home")
         stop_fixture_profile(caller_driver, root, environment)
         cleanup_removed_root(binary, root, allow_existing_root=True)
+        foreground.terminate()
+        out, err = foreground.communicate(timeout=7)
+        private_file(root / "foreground.stdout", out.encode())
+        private_file(root / "foreground.stderr", err.encode())
+        if foreground.returncode or out:
+            raise ProbeCheckFailure("integrated_foreground_shutdown_failed")
         require_fixture_process_absence(call("runtime", "orphan", "inspect",
                                             "--owner-root-under", str(root)))
+        census_checked = True
         with patch.dict(os.environ, {caller.OPT_IN: "1"}):
             recovery = caller.campaign(caller_driver, codex)
         passed = True
         return {"schema": "dolgorae.native-integrated-acceptance/v1", "passed": True,
                 "codex_version": CODEX_VERSION, "executable_sha256": CODEX_SHA256,
                 "loopback_posts": fixture.posts, "native_turns": fixture.steps,
-                "external_provider_requests": 0, "real_account_or_credentials_used": False,
+                "external_provider_requests": 0, "account_login_performed": False,
+                "real_account_credentials_copied": False,
+                "codex_child_account_home_and_platform_tmpdir_exception": True,
+                "real_home_file_access_absence_proven": False,
+                "foreground_runtime_owned": True,
                 "production_cli_defaults": True, "same_thread_access_transitions": True,
                 "readonly_native_write_denied": True, "captured_role_replay": True,
                 "profile_guidance_observed_as_user_input": True,
@@ -841,13 +868,41 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
                 "aggregate_child_retired_and_writer_released": True,
                 "idle_writable_primary_abort_and_recovery": True}
     finally:
-        if fixture is not None:
-            fixture.close()
+        cleanup_errors = []
+        try:
+            if foreground is not None and foreground.poll() is None:
+                foreground.terminate()
+                out, err = foreground.communicate(timeout=7)
+                private_file(root / "foreground.stdout", out.encode())
+                private_file(root / "foreground.stderr", err.encode())
+                if foreground.returncode:
+                    cleanup_errors.append({"stage":"foreground_stop", "exit_code":foreground.returncode})
+        except Exception as error:
+            cleanup_errors.append({"stage":"foreground_stop", "error":type(error).__name__})
+        try:
+            if fixture is not None:
+                fixture.close()
+        except Exception as error:
+            cleanup_errors.append({"stage":"fixture_close", "error":type(error).__name__})
+        try:
+            if not census_checked:
+                inspected = subprocess.run([str(binary), "runtime", "orphan", "inspect", "--owner-root-under", str(root)],
+                                           env=environment, capture_output=True, text=True, timeout=30)
+                private_file(root / "cleanup-census.stdout", inspected.stdout.encode())
+                private_file(root / "cleanup-census.stderr", inspected.stderr.encode())
+                if inspected.returncode:
+                    raise ProbeCheckFailure("integrated_owned_process_inspection_failed")
+                require_fixture_process_absence(json.loads(inspected.stdout)["data"])
+        except Exception as error:
+            cleanup_errors.append({"stage":"strict_census", "error":type(error).__name__})
+        private_file(root / "cleanup-errors.json", json.dumps(cleanup_errors).encode())
+        if passed and cleanup_errors:
+            raise ProbeCheckFailure("integrated_cleanup_incomplete", {"cleanup_errors":cleanup_errors})
         if passed:
             shutil.rmtree(root)
         else:
             print(json.dumps({"schema": "dolgorae.native-integrated-acceptance-failure/v1",
-                              "owned_fixture_retained": str(root), "passed": False,
+                              "owned_fixture_retained": str(root), "passed": False, "cleanup_errors":cleanup_errors,
                               "loopback_posts": fixture.posts if fixture is not None else 0,
                               "fixture_failure": fixture.failure if fixture is not None else None,
                               "completed_fixture_turns": fixture.steps if fixture is not None else 0}),
@@ -1353,193 +1408,505 @@ def successor_campaign(binary: Path, codex: Path, podway: Path | None = None,
 
 
 class CollaborationResponses(ScriptedResponses):
-    """Two physical members and source restart, all using loopback responses."""
-    def __init__(self, root: Path):
+    """Normal Caller Primary, two policy members, and correlated current pages."""
+    def __init__(self, root: Path, approval_policy: str):
         super().__init__(concurrent_requests=True)
-        self.root = root
-        self.source_stage = 0
-        self.recovery_stage = 0
-        self.target_posts = 0
-        self.exchange_id = None
-        self.initial_collection = None
-        self.recovery_collection = None
-        self.await_started = None
-        self.await_seconds = None
-        self.await_artifact_ref = None
+        self.root, self.approval_policy = root, approval_policy
+        self.primary_stage = self.recovery_primary_stage = 0
+        self.source_stage = self.recovery_stage = 0
+        self.target_posts = self.blocker_posts = self.tail_posts = 0
+        self.source = self.target = self.exchange_id = None
+        self.initial_collection = self.recovery_collection = None
+        self.await_started = self.await_seconds = None
+        self.blocker_started = threading.Event()
+        self.page_witnesses = []
 
     @staticmethod
-    def checked_output(request, call, name, operation):
-        output = code_results(request, call, [name])[name]
-        if not isinstance(output, str) or not output.isascii() or len(output.encode()) > 16384:
+    def checked_output(request, call, label, operation, *, primary=False, values=None):
+        output = (code_results(request, call, [label]) if values is None else values)[label]
+        if not isinstance(output, str) or len(output.encode()) > 65_536:
             raise ProbeCheckFailure("native_collaboration_return_shape_changed")
-        try:
-            value = json.loads(output)
-            assert_valid(value, validator(PROTOCOL, "dolgorae-collaboration-tool-v1.schema.json"), "native collaboration result")
-        except (ValueError, AssertionError):
-            raise ProbeCheckFailure("native_collaboration_return_schema_changed") from None
+        value = json.loads(output)
+        name = "dolgorae-orchestration-tool-v1.schema.json" if primary else "dolgorae-collaboration-tool-v1.schema.json"
+        assert_valid(value, validator(PROTOCOL, name), "current native tool result")
         if value.get("operation") != operation:
             raise ProbeCheckFailure("native_collaboration_operation_refused", {"operation": value.get("operation"), "code": value.get("code")})
         return value
 
+    def primary_output(self, request, call, labels, operation):
+        values = code_results(request, call, labels)
+        return [self.checked_output(request, call, label, operation, primary=True, values=values) for label in labels]
+
+    @staticmethod
+    def page_spec(recovery):
+        body = COLLABORATION_RESULT.encode()
+        offset = len(body) - COLLABORATION_PAGE_LIMIT if recovery else 0
+        while body[offset] & 0xc0 == 0x80:
+            offset += 1
+        end = min(offset + COLLABORATION_PAGE_LIMIT, len(body))
+        while end < len(body) and body[end] & 0xc0 == 0x80:
+            end -= 1
+        return offset, body[offset:end], end < len(body)
+
+    def page_output(self, request, call, label):
+        value = self.checked_output(request, call, label, "read_collaboration_result_result")
+        body = COLLABORATION_RESULT.encode()
+        if (call, label) not in (("a1-read", "initial-page"), ("a2-read", "recovered-page")):
+            raise ProbeCheckFailure("current_source_page_call_changed")
+        offset, content, truncated = self.page_spec(call == "a2-read")
+        if (value["exchange_id"] != self.exchange_id or value["result_artifact_ref"] != self.artifact
+                or value["content"].encode() != content
+                or value["length"] != len(body) or value["sha256"] != hashlib.sha256(body).hexdigest()
+                or value["offset"] != offset or value["truncated"] != truncated):
+            raise ProbeCheckFailure("current_source_page_identity_changed")
+        # Select the exact new output call and per-Turn label, not prior history.
+        witness = {"call_id":call, "label":label, "exchange_id":self.exchange_id,
+                   "result_artifact_ref":self.artifact, "byte_length":value["length"],
+                   "sha256":value["sha256"], "offset":offset,
+                   "content_byte_length":len(content), "content_sha256":hashlib.sha256(content).hexdigest(),
+                   "truncated":truncated}
+        self.page_witnesses.append(witness)
+        private_file(self.root / f"current-page-{label}.json", json.dumps(witness).encode())
+        return value
+
     def respond(self, request):
-        users = [item for item in request.get("input", [])
-                 if item.get("type") == "message" and item.get("role") == "user"]
+        users = [item for item in request.get("input", []) if item.get("type") == "message" and item.get("role") == "user"]
         text = "".join(block.get("text", "") for block in users[-1].get("content", [])) if users else ""
-        marker = None
-        if "\n\nAccepted task:\n" in text:
-            task, _ = json.JSONDecoder().raw_decode(text.split("\n\nAccepted task:\n", 1)[1])
-            marker = task.get("brief")
-        target = marker is None and "TASK083_NATIVE_TARGET" in text
+        accepted = json.JSONDecoder().raw_decode(text.split("\n\nAccepted task:\n", 1)[1])[0] if "\n\nAccepted task:\n" in text else {}
+        marker = accepted.get("objective", "")
+        target = "TASK027_NATIVE_TARGET" in text
+        blocker = marker == "TASK027_B_BLOCKER"
+        tail = marker == "TASK027_B_TAIL"
         with self.lock:
             self.posts += 1
             ordinal = self.posts
-            if ordinal > 7:
+            bound = 18 if self.approval_policy == "user_approval_required" else 17
+            if ordinal > bound:
                 raise ProbeCheckFailure("native_collaboration_post_bound")
-            if target:
-                self.target_posts += 1
-                if self.target_posts != 1:
-                    raise ProbeCheckFailure("native_collaboration_target_replayed")
-        # The target barrier must not hold the shared response lock: the
-        # source's actual native await has to reach its Worker concurrently.
-        if target:
+        if blocker:
+            self.blocker_posts += 1
+            if self.blocker_posts != 1:
+                raise ProbeCheckFailure("native_blocker_replayed")
+            self.blocker_started.set()
             deadline = time.monotonic() + 10
             while not (self.root / "source-await-registered.json").exists():
                 if time.monotonic() >= deadline:
                     raise ProbeCheckFailure("native_collaboration_wait_barrier_timeout")
                 time.sleep(.01)
-            item = {"type":"message", "role":"assistant", "id":"collaboration-target-final",
-                    "content":[{"type":"output_text", "text":"Bounded target result: 한글."}]}
+            item = self.final("blocker-finished", "Original blocker completed.")
+        elif target:
+            self.target_posts += 1
+            if self.target_posts != 1 or self.tail_posts:
+                raise ProbeCheckFailure("waiting_consultation_did_not_precede_tail")
+            item = self.final("consultation-final", COLLABORATION_RESULT)
+        elif tail:
+            self.tail_posts += 1
+            if self.tail_posts != 1 or self.target_posts != 1:
+                raise ProbeCheckFailure("original_tail_order_changed")
+            item = self.final("tail-final", "Original tail completed.")
         else:
             with self.lock:
-                if marker == "collaboration-source-initial":
-                    if self.source_stage == 0:
-                        arguments = json.loads((self.root / "collaboration-request.json").read_text())
-                        item = code_call(request, "collaboration-submit", [("submitted", "dolgorae_collaboration", arguments)])
-                    elif self.source_stage == 1:
-                        accepted = self.checked_output(request, "collaboration-submit", "submitted", "submit_consultation_result")
-                        self.exchange_id = accepted["exchange_id"]
-                        self.await_started = time.monotonic()
-                        item = code_call(request, "collaboration-await", [("awaited", "dolgorae_collaboration", {
-                            "operation":"await_consultations", "exchange_ids":[self.exchange_id],
-                            "return_when":"all", "transport_wait_seconds":10})])
-                    elif self.source_stage == 2:
-                        awaited = self.checked_output(request, "collaboration-await", "awaited", "await_consultations_result")
-                        self.await_seconds = time.monotonic() - self.await_started
-                        if (awaited["pending"] or len(awaited["completed"]) != 1
-                                or awaited["completed"][0]["exchange_id"] != self.exchange_id
-                                or awaited["completed"][0]["execution_state"] != "succeeded"
-                                or awaited["completed"][0]["delivery_state"] != "pending"
-                                or not awaited["completed"][0]["result_artifact_ref"]
-                                or awaited["completed"][0]["safe_error_code"] is not None
-                                or self.await_seconds >= 9.5):
-                            raise ProbeCheckFailure("native_collaboration_pending_wait_not_notified")
-                        self.await_artifact_ref = awaited["completed"][0]["result_artifact_ref"]
-                        private_file(self.root / "native-await-response.json", json.dumps(awaited).encode())
-                        item = code_call(request, "collaboration-collect", [("collected", "dolgorae_collaboration", {"operation":"collect_collaboration_results", "limit":1})])
-                    elif self.source_stage == 3:
-                        self.initial_collection = self.checked_output(request, "collaboration-collect", "collected", "collect_collaboration_results_result")
-                        rows = self.initial_collection["results"]
-                        if (len(rows) != 1 or rows[0]["exchange_id"] != self.exchange_id
-                                or rows[0]["delivery_state"] != "acknowledged"
-                                or rows[0]["execution_state"] != "succeeded"
-                                or rows[0]["safe_error_code"] is not None
-                                or rows[0]["result_artifact_ref"] != self.await_artifact_ref):
-                            raise ProbeCheckFailure("native_collaboration_collection_unverified")
-                        item = {"type":"message", "role":"assistant", "id":"collaboration-source-final",
-                                "content":[{"type":"output_text", "text":"Initial bounded task completed."}]}
-                    else:
-                        raise ProbeCheckFailure("native_collaboration_unsolicited_source_turn")
-                    self.source_stage += 1
-                elif marker == "collaboration-source-recovery":
-                    if self.recovery_stage == 0:
-                        item = code_call(request, "collaboration-recover", [("recovered", "dolgorae_collaboration", {"operation":"collect_collaboration_results", "limit":1})])
-                    elif self.recovery_stage == 1:
-                        self.recovery_collection = self.checked_output(request, "collaboration-recover", "recovered", "collect_collaboration_results_result")
-                        if self.recovery_collection != self.initial_collection:
-                            raise ProbeCheckFailure("native_collaboration_restart_collection_changed")
-                        item = {"type":"message", "role":"assistant", "id":"collaboration-source-recovered",
-                                "content":[{"type":"output_text", "text":"Recovered original bounded result."}]}
-                    else:
-                        raise ProbeCheckFailure("native_collaboration_recovery_post_bound")
-                    self.recovery_stage += 1
-                else:
-                    raise ProbeCheckFailure("native_collaboration_accepted_task_missing")
+                needs_approval = (text == "TASK027_PRIMARY_INITIAL" and self.primary_stage == 1
+                                  and self.approval_policy == "user_approval_required")
+                if needs_approval:
+                    admitted = self.primary_output(request, "p1-spawn", ["source-member", "target-member"], "request_specialist_result")
+                needs_blocker = text == "TASK027_PRIMARY_INITIAL" and self.primary_stage == 3
+                if needs_blocker:
+                    self.primary_output(request, "p1-blocker", ["blocker"], "assign_specialist_task_result")
+            if needs_approval:
+                self.wait_approved_members([value["specialist_operation"] for value in admitted])
+            if needs_blocker and not self.blocker_started.wait(10):
+                raise ProbeCheckFailure("target_was_not_actually_busy")
+            with self.lock:
+                item = self.step(request, text, marker)
         identity = "collaboration-response-" + str(ordinal)
         return [{"type":"response.created", "response":{"id":identity}},
                 {"type":"response.output_item.done", "item":item},
                 {"type":"response.completed", "response":{"id":identity,
                  "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}]
 
+    def wait_approved_members(self, operations):
+        if any(operation["state"] != "awaiting_approval" for operation in operations):
+            raise ProbeCheckFailure("user_approval_was_bypassed")
+        deadline = json.loads((self.root / "primary-phase-deadline.json").read_text())["deadline_monotonic_ns"]
+        if not isinstance(deadline, int) or isinstance(deadline, bool) or deadline <= 0:
+            raise ProbeCheckFailure("original_approval_deadline_changed")
+        while time.clock_gettime_ns(time.CLOCK_MONOTONIC) < deadline:
+            members = []
+            for operation in operations:
+                path = self.root / f"approval-{operation['approval_request_id']}.json"
+                if not path.exists():
+                    break
+                receipt = json.loads(path.read_text())
+                if (receipt.get("approval_id") != operation["approval_request_id"]
+                        or receipt.get("operation_id") != operation["operation_id"]
+                        or receipt.get("protected_current_response") is not True
+                        or receipt.get("operation_state") != "ready"
+                        or uuid.UUID(receipt.get("original_sql_receipt", "")).version != 7
+                        or uuid.UUID(receipt.get("member_run_id", "")).version != 7):
+                    raise ProbeCheckFailure("original_approval_readiness_witness_changed")
+                members.append(receipt["member_run_id"])
+            if len(members) == len(operations):
+                if len(set(members)) != len(operations):
+                    raise ProbeCheckFailure("two_distinct_members_not_admitted")
+                return
+            time.sleep(.01)
+        raise ProbeCheckFailure("original_approval_phase_expired")
 
-def collaboration_component_campaign(binary: Path, codex: Path) -> dict[str, Any]:
+    @staticmethod
+    def final(identity, text):
+        return {"type":"message", "role":"assistant", "id":identity,
+                "content":[{"type":"output_text", "text":text}]}
+
+    def assignment(self, member, objective):
+        return {"operation":"assign_specialist_task", "target":{"run_id":member}, "objective":objective,
+                "context_refs":[], "expected_output":["Bounded final answer"], "execution_intent":"read_only",
+                "blocking":False, "deadline_seconds":60}
+
+    def step(self, request, text, marker):
+        if text == "TASK027_PRIMARY_INITIAL":
+            stage = self.primary_stage
+            if stage == 0:
+                body = {"operation":"request_specialist", "role_ref":"general", "objective":"Execute bounded evidence task.",
+                        "expected_output":["Bounded final answer"], "requested_access":"read_only", "deadline_seconds":60}
+                result = code_call(request, "p1-spawn", [("source-member", "dolgorae_orchestration", body), ("target-member", "dolgorae_orchestration", body)])
+            elif stage == 1:
+                operations = self.primary_output(request, "p1-spawn", ["source-member", "target-member"], "request_specialist_result")
+                self.operations = [v["specialist_operation"] for v in operations]
+                if self.approval_policy == "user_approval_required":
+                    if any(v["state"] != "awaiting_approval" for v in self.operations):
+                        raise ProbeCheckFailure("user_approval_was_bypassed")
+                    result = code_call(request, "p1-approved", [("approved-members", "dolgorae_orchestration", {"operation":"await_specialist_operations", "operation_ids":[v["operation_id"] for v in self.operations], "return_when":"all", "transport_wait_seconds":10})])
+                else:
+                    result = self.start_blocker(request)
+                    self.primary_stage += 1
+            elif stage == 2:
+                value = self.primary_output(request, "p1-approved", ["approved-members"], "await_specialist_operations_result")[0]
+                if value["pending"]:
+                    raise ProbeCheckFailure("approved_members_not_ready")
+                self.operations = value["operations"]
+                result = self.start_blocker(request)
+            elif stage == 3:
+                self.primary_output(request, "p1-blocker", ["blocker"], "assign_specialist_task_result")
+                if not self.blocker_started.is_set():
+                    raise ProbeCheckFailure("target_was_not_actually_busy")
+                result = code_call(request, "p1-queues", [("tail", "dolgorae_orchestration", self.assignment(self.target, "TASK027_B_TAIL")),
+                                                        ("source", "dolgorae_orchestration", self.assignment(self.source, "TASK027_A_INITIAL"))])
+            elif stage == 4:
+                receipts = self.primary_output(request, "p1-queues", ["tail", "source"], "assign_specialist_task_result")
+                if any(v["state"] != "accepted" for v in receipts):
+                    raise ProbeCheckFailure("original_primary_admission_receipt_changed")
+                result = self.final("primary-initial-final", "Original Primary assignments admitted.")
+            else:
+                raise ProbeCheckFailure("primary_initial_post_bound")
+            self.primary_stage += 1
+            return result
+        if text == "TASK027_PRIMARY_RECOVERY":
+            if self.recovery_primary_stage == 0:
+                result = code_call(request, "p2-recovery", [("prior-tasks", "dolgorae_orchestration", {"operation":"collect_specialist_results", "after_sequence":0, "limit":16}),
+                                                           ("recovery-source", "dolgorae_orchestration", self.assignment(self.source, "TASK027_A_RECOVERY"))])
+            elif self.recovery_primary_stage == 1:
+                values = code_results(request, "p2-recovery", ["prior-tasks", "recovery-source"])
+                self.checked_output(request, "p2-recovery", "prior-tasks", "collect_specialist_results_result", primary=True, values=values)
+                self.checked_output(request, "p2-recovery", "recovery-source", "assign_specialist_task_result", primary=True, values=values)
+                result = self.final("primary-recovery-final", "Original results retained and recovery admitted.")
+            else:
+                raise ProbeCheckFailure("primary_recovery_post_bound")
+            self.recovery_primary_stage += 1
+            return result
+        recovery = marker == "TASK027_A_RECOVERY"
+        if marker not in ("TASK027_A_INITIAL", "TASK027_A_RECOVERY"):
+            raise ProbeCheckFailure("accepted_original_task_missing")
+        stage = self.recovery_stage if recovery else self.source_stage
+        if not recovery and stage == 0:
+            result = code_call(request, "a1-submit", [("submitted", "dolgorae_collaboration", {"operation":"submit_consultation", "target":{"run_id":self.target}, "objective":"TASK027_NATIVE_TARGET: return the bounded retained answer.", "context_refs":[], "expected_output":["A retained UTF-8 answer with distinct prefix and tail markers."], "blocking":False, "deadline_seconds":60})])
+        elif not recovery and stage == 1:
+            value = self.checked_output(request, "a1-submit", "submitted", "submit_consultation_result")
+            self.exchange_id = value["exchange_id"]
+            self.await_started = time.monotonic()
+            result = code_call(request, "a1-await", [("awaited", "dolgorae_collaboration", {"operation":"await_consultations", "exchange_ids":[self.exchange_id], "return_when":"all", "transport_wait_seconds":10})])
+        elif not recovery and stage == 2:
+            value = self.checked_output(request, "a1-await", "awaited", "await_consultations_result")
+            self.await_seconds = time.monotonic() - self.await_started
+            completed = value["completed"]
+            if (value["pending"] or len(completed) != 1 or completed[0]["exchange_id"] != self.exchange_id
+                    or completed[0]["execution_state"] != "succeeded" or completed[0]["delivery_state"] != "pending"
+                    or completed[0]["result_artifact_ref"] is None or self.await_seconds >= 9.5):
+                raise ProbeCheckFailure("native_pending_wait_not_notified")
+            self.artifact = completed[0]["result_artifact_ref"]
+            result = code_call(request, "a1-collect", [("collected", "dolgorae_collaboration", {"operation":"collect_collaboration_results", "limit":1})])
+        elif (not recovery and stage == 3) or (recovery and stage == 1):
+            call, label = ("a2-collect", "recovered") if recovery else ("a1-collect", "collected")
+            value = self.checked_output(request, call, label, "collect_collaboration_results_result")
+            if value["results"] != [{"exchange_id":self.exchange_id,"execution_state":"succeeded","delivery_state":"acknowledged","result_artifact_ref":self.artifact,"safe_error_code":None}]:
+                raise ProbeCheckFailure("original_collection_identity_changed")
+            if recovery:
+                self.recovery_collection = value
+                if value != self.initial_collection:
+                    raise ProbeCheckFailure("restart_original_collection_changed")
+            else:
+                self.initial_collection = value
+            call, label = ("a2-read", "recovered-page") if recovery else ("a1-read", "initial-page")
+            offset, _, _ = self.page_spec(recovery)
+            result = code_call(request, call, [(label, "dolgorae_collaboration", {"operation":"read_collaboration_result", "exchange_id":self.exchange_id, "offset":offset, "limit":COLLABORATION_PAGE_LIMIT})])
+        elif (not recovery and stage == 4) or (recovery and stage == 2):
+            call, label = ("a2-read", "recovered-page") if recovery else ("a1-read", "initial-page")
+            self.page_output(request, call, label)
+            result = self.final("source-recovered-final" if recovery else "source-initial-final", "Verified the current correlated result page.")
+        elif recovery and stage == 0:
+            result = code_call(request, "a2-collect", [("recovered", "dolgorae_collaboration", {"operation":"collect_collaboration_results", "limit":1})])
+        else:
+            raise ProbeCheckFailure("source_post_bound")
+        if recovery:
+            self.recovery_stage += 1
+        else:
+            self.source_stage += 1
+        return result
+
+    def start_blocker(self, request):
+        if any(v["state"] != "ready" for v in self.operations):
+            raise ProbeCheckFailure("policy_member_not_ready")
+        self.source, self.target = [v["specialist_run_id"] for v in self.operations]
+        if self.source == self.target:
+            raise ProbeCheckFailure("two_distinct_members_not_admitted")
+        return code_call(request, "p1-blocker", [("blocker", "dolgorae_orchestration", self.assignment(self.target, "TASK027_B_BLOCKER"))])
+
+
+class CallerPolicyWriterResponses(ScriptedResponses):
+    """Private seven-POST owner/lifecycle case; task calls are synthetic HOST inputs."""
+    def __init__(self, root: Path):
+        super().__init__(concurrent_requests=True)
+        self.root = root
+        self.primary_a = self.primary_b = 0
+        self.target_stages = {"A": 0, "B": 0}
+
+    def marker(self, name, value):
+        path = self.root / name
+        pending = path.with_suffix(".pending")
+        private_file(pending, json.dumps(value).encode())
+        pending.replace(path)
+
+    def wait_release(self, phase):
+        deadline = json.loads((self.root / "primary-phase-deadline.json").read_text())["deadline_monotonic_ns"]
+        if not isinstance(deadline, int) or isinstance(deadline, bool) or deadline <= 0:
+            raise ProbeCheckFailure("writer_source_deadline_invalid")
+        while time.clock_gettime_ns(time.CLOCK_MONOTONIC) < deadline:
+            path = self.root / f"writer-{phase}-release.json"
+            if path.exists():
+                value = json.loads(path.read_text())
+                if value != {"phase": phase, "task_terminal": True}:
+                    raise ProbeCheckFailure("writer_source_release_changed")
+                return
+            time.sleep(.01)
+        raise ProbeCheckFailure("writer_source_barrier_timeout")
+
+    def respond(self, request):
+        users = [v for v in request.get("input", []) if v.get("type") == "message" and v.get("role") == "user"]
+        text = "".join(v.get("text", "") for v in users[-1].get("content", [])) if users else ""
+        accepted = json.JSONDecoder().raw_decode(text.split("\n\nAccepted task:\n", 1)[1])[0] if "\n\nAccepted task:\n" in text else {}
+        marker = accepted.get("objective")
+        hold = None
+        with self.lock:
+            self.posts += 1
+            ordinal = self.posts
+            if ordinal > 7:
+                raise ProbeCheckFailure("policy_writer_post_bound")
+            if marker in ("TASK027_WRITER_TASK_A", "TASK027_WRITER_TASK_B"):
+                phase = marker[-1]
+                if (self.primary_a != 2 or (phase == "B" and (self.primary_b != 1 or self.target_stages["A"] != 2))):
+                    raise ProbeCheckFailure("policy_writer_task_order_changed")
+                stage = self.target_stages[phase]
+                call = f"policy-writer-{phase}"
+                if stage == 0:
+                    item = code_call(request, call, [(call, "exec_command", {"cmd":f"printf 'writer-{phase}\\n' > caller-policy-writer-{phase}.txt; printf 'writer-{phase}\\n'", "yield_time_ms":1000})])
+                elif stage == 1:
+                    if terminal_output(code_results(request, call, [call])[call]) != (0, f"writer-{phase}\n"):
+                        raise ProbeCheckFailure("policy_writer_native_command_unverified")
+                    item = CollaborationResponses.final(f"policy-writer-final-{phase}", f"Bounded writer {phase} completed.")
+                else:
+                    raise ProbeCheckFailure("policy_writer_task_replayed")
+                self.target_stages[phase] += 1
+            elif text == "TASK027_WRITER_PRIMARY_A":
+                if self.primary_a == 0:
+                    item = code_call(request, "policy-writer-spawn", [("writer-member", "dolgorae_orchestration", {"operation":"request_specialist", "role_ref":"general", "objective":"Perform only the two accepted bounded Writer tasks.", "expected_output":["Bounded marker output"], "requested_access":"canonical_workspace_write", "deadline_seconds":60})])
+                    self.primary_a = 1
+                elif self.primary_a == 1:
+                    value = CollaborationResponses.checked_output(request,"policy-writer-spawn","writer-member","request_specialist_result",primary=True)
+                    operation = value["specialist_operation"]
+                    if operation["state"] != "ready" or not operation.get("specialist_run_id") or operation.get("approval_request_id"):
+                        raise ProbeCheckFailure("policy_writer_member_not_ready")
+                    self.primary_a = 2
+                    self.marker("writer-A-ready.json", {"phase":"A", "member":operation["specialist_run_id"], "operation":operation["operation_id"]})
+                    item = CollaborationResponses.final("policy-writer-root-A", "First original Writer task completed.")
+                    hold = "A"
+                else:
+                    raise ProbeCheckFailure("policy_writer_primary_replayed")
+            elif text == "TASK027_WRITER_PRIMARY_B" and self.primary_a == 2 and self.target_stages["A"] == 2 and self.primary_b == 0:
+                self.primary_b = 1
+                self.marker("writer-B-ready.json", {"phase":"B"})
+                item = CollaborationResponses.final("policy-writer-root-B", "Second task-attributed Writer completed.")
+                hold = "B"
+            else:
+                raise ProbeCheckFailure("policy_writer_source_order_changed")
+        # Source responses never retain the common request lock while targets run.
+        if hold:
+            self.wait_release(hold)
+        identity = f"policy-writer-response-{ordinal}"
+        return [{"type":"response.created", "response":{"id":identity}},
+                {"type":"response.output_item.done", "item":item},
+                {"type":"response.completed", "response":{"id":identity, "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}]
+
+
+def caller_policy_writer_component_campaign(binary: Path, codex: Path) -> dict[str, Any]:
+    return collaboration_component_campaign(binary, codex, _writer_case=True)
+
+
+def collaboration_component_campaign(binary: Path, codex: Path, *, _writer_case: bool = False) -> dict[str, Any]:
     if os.environ.get(OPT_IN) != "1" or executable_identity(codex)["sha256"] != CODEX_SHA256:
         raise ValueError("collaboration component requires the opted-in qualified executable")
     root = Path(tempfile.mkdtemp(prefix="dcc-", dir=os.environ["TMPDIR"])).resolve()
     root.chmod(0o700)
-    fixture = driver = environment = None
-    passed = False
-    try:
+    cases = []
+    cargo = shlex.split(os.environ.get("CARGO", "cargo"))
+    for name, command in [("main", cargo + ["build", "--locked", "--bin", "dolgorae"]),
+                          ("driver", cargo + ["rustc", "--locked", "--example", "native_successor_pipeline", "--",
+                                              "--cfg", "dolgorae_native_acceptance", "--cfg", "test"])]:
+        build = subprocess.run(command, cwd=PROTOCOL.parents[1], capture_output=True, text=True, timeout=600)
+        private_file(root / f"build-{name}.stdout", build.stdout.encode())
+        private_file(root / f"build-{name}.stderr", build.stderr.encode())
+        if build.returncode:
+            raise ProbeCheckFailure("collaboration_component_build_failed", {"target":name})
+    target = Path(os.environ.get("CARGO_TARGET_DIR", str(PROTOCOL.parents[1] / "target"))).resolve()
+    if binary != (target / "debug/dolgorae").resolve():
+        raise ValueError("collaboration census must use the current candidate main binary")
+    for case_name in (("caller_policy_writer",) if _writer_case else ("fully_delegated", "user_approval_required")):
+        approval = "fully_delegated" if _writer_case else case_name
+        case = root / case_name
+        case.mkdir(mode=0o700)
+        fixture = foreground = None
+        passed = False
         for name in ("home", "tmp", "config", "cache", "profile", "workspace"):
-            (root / name).mkdir(mode=0o700)
-        private_file(root / "fixture-owned", b"native-successor-pipeline/v1\n")
-        environment = isolated_environment(root)
+            (case / name).mkdir(mode=0o700)
+        private_file(case / "fixture-owned", b"native-successor-pipeline/v1\n")
+        private_file(case / "component-policy-case.json", json.dumps({"approval_policy":approval, **({"variation":"caller_policy_writer"} if _writer_case else {})}).encode())
+        environment = isolated_environment(case)
         environment.update({OPT_IN:"1", "DOLGORAE_NATIVE_COLLABORATION_COMPONENT":"1",
                             "GIT_CONFIG_NOSYSTEM":"1", "GIT_CONFIG_GLOBAL":"/dev/null"})
-        checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
-        cargo = shlex.split(os.environ.get("CARGO", "cargo"))
-        for name, command in [("main", cargo + ["build", "--locked", "--bin", "dolgorae"]),
-                              ("driver", cargo + ["rustc", "--locked", "--example", "native_successor_pipeline", "--",
-                                                  "--cfg", "dolgorae_native_acceptance", "--cfg", "test"])]:
-            build = subprocess.run(command, cwd=PROTOCOL.parents[1], capture_output=True, text=True, timeout=600)
-            private_file(root / f"build-{name}.stdout", build.stdout.encode())
-            private_file(root / f"build-{name}.stderr", build.stderr.encode())
-            if build.returncode:
-                raise ProbeCheckFailure("collaboration_component_build_failed", {"target":name})
-        target = Path(os.environ.get("CARGO_TARGET_DIR", str(PROTOCOL.parents[1] / "target"))).resolve()
-        if binary != (target / "debug/dolgorae").resolve():
-            raise ValueError("collaboration census must use the current candidate main binary")
-        driver = root / "fixture-collaboration-driver"
-        shutil.copyfile(target / "debug/examples/native_successor_pipeline", driver)
-        driver.chmod(0o700)
-        fixture = CollaborationResponses(root)
-        private_file(root / "profile/config.toml", b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n'
-                     + fixture_config(fixture.base_url) + b"\n[features]\nplugins = false\nshell_snapshot = false\n")
-        result = subprocess.run([str(driver), str(root), str(codex)], env=environment,
-                                capture_output=True, text=True, timeout=180)
-        private_file(root / "driver.stdout", result.stdout.encode())
-        private_file(root / "driver.stderr", result.stderr.encode())
-        if result.returncode or fixture.failure:
-            raise ProbeCheckFailure("collaboration_component_driver_failed", {"exit":result.returncode,"posts":fixture.posts,"fixture_failure":fixture.failure})
-        value = json.loads(result.stdout)
-        if not value.get("passed") or fixture.posts != 7 or fixture.target_posts != 1 or fixture.source_stage != 4 or fixture.recovery_stage != 2 or fixture.recovery_collection != fixture.initial_collection:
-            raise ProbeCheckFailure("collaboration_component_evidence_incomplete")
-        inspected = subprocess.run([str(binary), "runtime", "orphan", "inspect", "--owner-root-under", str(root)], env=environment, capture_output=True, text=True, timeout=30)
-        if inspected.returncode:
-            raise ProbeCheckFailure("collaboration_owned_process_inspection_failed")
-        observation = json.loads(inspected.stdout)
-        require_fixture_process_absence(observation["data"])
-        private_file(root / "owned-process-absence.json", json.dumps(observation).encode())
-        value.update(loopback_posts=fixture.posts, external_provider_requests=0,
-                     real_account_or_credentials_used=False, codex_sha256=CODEX_SHA256,
-                     driver_sha256=hashlib.sha256(driver.read_bytes()).hexdigest(),
-                     census_binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
-                     owned_fixture_retained=str(root), owned_process_absence_verified=True,
-                     notified_await_seconds=fixture.await_seconds)
-        private_file(root / "result.json", json.dumps(value).encode())
-        passed = True
-        return value
-    finally:
-        if not passed and driver is not None and environment is not None:
-            cleanup = subprocess.run([str(driver), "--cleanup", str(root)], env=environment,
-                                     capture_output=True, text=True, timeout=120)
-            private_file(root / "failure-cleanup.stdout", cleanup.stdout.encode())
-            private_file(root / "failure-cleanup.stderr", cleanup.stderr.encode())
-        if fixture is not None:
-            fixture.close()
-        if not passed:
-            print(json.dumps({"schema":"dolgorae.native-collaboration-component-failure/v2",
-                              "owned_fixture_retained":str(root)}), file=sys.stderr)
-
+        driver, current_main = case / "fixture-collaboration-driver", case / "current-main"
+        for source, destination in ((target / "debug/examples/native_successor_pipeline",driver), (binary,current_main)):
+            shutil.copyfile(source,destination)
+            destination.chmod(0o700)
+        try:
+            checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
+            fixture = CallerPolicyWriterResponses(case) if _writer_case else CollaborationResponses(case,approval)
+            private_file(case / "profile/config.toml", b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n'
+                         + fixture_config(fixture.base_url) + b"\n[features]\nplugins = false\nshell_snapshot = false\n")
+            subprocess.run(["/usr/bin/git","-C",str(case / "workspace"),"init","-q"],env=environment,check=True,capture_output=True,timeout=10)
+            initialized = subprocess.run([str(current_main),"init",str(case / "workspace")],env=environment,capture_output=True,text=True,timeout=30)
+            private_file(case / "init.stdout",initialized.stdout.encode())
+            private_file(case / "init.stderr",initialized.stderr.encode())
+            if initialized.returncode:
+                raise ProbeCheckFailure("collaboration_main_initialization_failed")
+            # This exact Child owns the foreground gateway and centralized runtime.
+            foreground = subprocess.Popen([str(current_main),"serve","--socket",str(case / "gateway.sock")],env=environment,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            import select
+            if not select.select([foreground.stdout],[],[],10)[0]:
+                raise ProbeCheckFailure("collaboration_foreground_readiness_timeout")
+            ready_line = foreground.stdout.readline()
+            ready = json.loads(ready_line)
+            private_file(case / "foreground-ready.json",ready_line.encode())
+            if not ready.get("ok") or ready.get("command") != "serve":
+                raise ProbeCheckFailure("collaboration_foreground_not_ready")
+            result = subprocess.run([str(driver),str(case),str(codex)],env=environment,capture_output=True,text=True,timeout=180)
+            private_file(case / "driver.stdout",result.stdout.encode())
+            private_file(case / "driver.stderr",result.stderr.encode())
+            if result.returncode or fixture.failure:
+                raise ProbeCheckFailure("collaboration_component_driver_failed",{"exit":result.returncode,"posts":fixture.posts,"fixture_failure":fixture.failure,"approval_policy":approval})
+            value = json.loads(result.stdout)
+            if _writer_case:
+                if (not value.get("passed") or fixture.posts != 7 or fixture.primary_a != 2 or fixture.primary_b != 1
+                        or fixture.target_stages != {"A":2,"B":2} or value.get("authority_kind") != "synthetic_trusted_host_fixture"):
+                    raise ProbeCheckFailure("policy_writer_component_evidence_incomplete")
+            else:
+                expected = 18 if approval == "user_approval_required" else 17
+                if (not value.get("passed") or fixture.posts != expected or fixture.target_posts != 1
+                        or fixture.blocker_posts != 1 or fixture.tail_posts != 1 or fixture.source_stage != 5
+                        or fixture.recovery_stage != 3 or fixture.recovery_primary_stage != 2
+                        or fixture.recovery_collection != fixture.initial_collection or len(fixture.page_witnesses) != 2):
+                    raise ProbeCheckFailure("collaboration_component_evidence_incomplete")
+            # SIGTERM is sent only through the actual foreground Child handle.
+            foreground.terminate()
+            out, err = foreground.communicate(timeout=7)
+            private_file(case / "foreground.stdout",out.encode())
+            private_file(case / "foreground.stderr",err.encode())
+            if foreground.returncode or out:
+                raise ProbeCheckFailure("collaboration_foreground_shutdown_failed")
+            value.update(loopback_posts=fixture.posts,external_provider_requests=0,
+                         account_login_performed=False,real_account_credentials_copied=False,
+                         codex_child_account_home_and_platform_tmpdir_exception=True,
+                         real_home_file_access_absence_proven=False,
+                         codex_sha256=CODEX_SHA256,driver_sha256=hashlib.sha256(driver.read_bytes()).hexdigest(),
+                         main_sha256=hashlib.sha256(current_main.read_bytes()).hexdigest(),foreground_pid=foreground.pid,
+                         owned_fixture_retained=str(case),
+                         source_authority_kind="synthetic_trusted_host_fixture" if _writer_case else "native_model_call")
+            if not _writer_case:
+                value.update(notified_await_seconds=fixture.await_seconds,current_page_outputs=fixture.page_witnesses,
+                         large_result_byte_length=len(COLLABORATION_RESULT.encode()),
+                         large_result_sha256=hashlib.sha256(COLLABORATION_RESULT.encode()).hexdigest(),
+                         model_page_scope="prefix_before_source_restart_and_tail_after",
+                         scripted_model_input_causality_verified=True,external_model_cognition_proven=False)
+            passed = True
+        finally:
+            cleanup_errors = []
+            try:
+                if not passed:
+                    cleanup = subprocess.run([str(driver), "--cleanup", str(case)], env=environment,
+                                             capture_output=True, text=True, timeout=120)
+                    private_file(case / "failure-cleanup.stdout", cleanup.stdout.encode())
+                    private_file(case / "failure-cleanup.stderr", cleanup.stderr.encode())
+                    if cleanup.returncode:
+                        cleanup_errors.append({"stage":"owner_cleanup", "exit_code":cleanup.returncode})
+            except Exception as error:
+                cleanup_errors.append({"stage":"owner_cleanup", "error":type(error).__name__})
+            try:
+                if foreground is not None and foreground.poll() is None:
+                    foreground.terminate()
+                    out, err = foreground.communicate(timeout=7)
+                    private_file(case / "foreground.stdout", out.encode())
+                    private_file(case / "foreground.stderr", err.encode())
+                    if foreground.returncode:
+                        cleanup_errors.append({"stage":"foreground_stop", "exit_code":foreground.returncode})
+            except Exception as error:
+                cleanup_errors.append({"stage":"foreground_stop", "error":type(error).__name__})
+            try:
+                if fixture is not None:
+                    fixture.close()
+            except Exception as error:
+                cleanup_errors.append({"stage":"fixture_close", "error":type(error).__name__})
+            try:
+                inspected = subprocess.run([str(current_main), "runtime", "orphan", "inspect", "--owner-root-under", str(case)],
+                                           env=environment, capture_output=True, text=True, timeout=30)
+                private_file(case / "cleanup-census.stdout", inspected.stdout.encode())
+                private_file(case / "cleanup-census.stderr", inspected.stderr.encode())
+                if inspected.returncode:
+                    raise ProbeCheckFailure("collaboration_owned_process_inspection_failed")
+                observation = json.loads(inspected.stdout)
+                require_fixture_process_absence(observation["data"])
+                private_file(case / "cleanup-process-absence.json", json.dumps(observation).encode())
+            except Exception as error:
+                cleanup_errors.append({"stage":"strict_census", "error":type(error).__name__})
+            private_file(case / "cleanup-errors.json", json.dumps(cleanup_errors).encode())
+            if not passed:
+                print(json.dumps({"schema":"dolgorae.native-collaboration-component-failure/v3",
+                                  "owned_fixture_retained":str(case), "cleanup_errors":cleanup_errors}), file=sys.stderr)
+            elif cleanup_errors:
+                raise ProbeCheckFailure("collaboration_component_cleanup_incomplete", {"cleanup_errors":cleanup_errors})
+        value["owned_process_absence_verified"] = True
+        private_file(case / "result.json", json.dumps(value).encode())
+        cases.append(value)
+    combined = {"schema":"dolgorae.native-collaboration-component-cases/v1","passed":len(cases)==(1 if _writer_case else 2),"cases":cases,"owned_fixture_retained":str(root)}
+    private_file(root / "result.json",json.dumps(combined).encode())
+    return combined
 
 def successor_startup_component_campaign(binary: Path, codex: Path) -> dict[str, Any]:
     """Actual supported successor birth, with no model Turn or consumer run."""

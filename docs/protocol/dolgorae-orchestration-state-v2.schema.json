@@ -319,7 +319,14 @@
                 "type": "null"
               },
               "external_controller_ref": {
-                "$ref": "#/$defs/opaque_ref"
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/opaque_ref"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "controller_binding": {
                 "$ref": "#/$defs/aggregate_controller_binding"
@@ -332,7 +339,8 @@
         "one bootstrap operation owns each aggregate identity",
         "create_orchestrated_session uses aggregate_id == root_run_id",
         "open_external_engagement is committed atomically with an empty External Specialist Engagement; hires are separate durable operations",
-        "same-key replay returns the same aggregate identity"
+        "same-key replay returns the same aggregate identity",
+        "An External bootstrap retains the aggregate's same original explicit or absent external Controller provenance; null is not a synthesized external identity."
       ]
     },
     "orchestrated_session": {
@@ -419,24 +427,38 @@
           "format": "date-time"
         },
         "collaboration_policy_sha256": {
-          "$ref": "#/$defs/sha256"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "collaboration_policy": {
-          "$ref": "#/$defs/collaboration_policy"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/collaboration_policy"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "specialist_policy": {
-          "$ref": "https://dolgorae.local/schema/specialist-policy/v2"
+          "$ref": "https://dolgorae.local/schema/session-policy/v3#/$defs/policy"
         }
       },
       "x-invariants": [
         "bootstrap_operation_id references the sole aggregate bootstrap operation",
         "session_id equals root_run_id in v1",
-        "approval_policy equals specialist_policy.approval_policy",
-        "specialist_policy_sha256 is the JCS SHA-256 of specialist_policy",
         "composition_state is brokered_hierarchy iff at least one member is not retired",
         "one Run may belong to at most one nonterminal aggregate",
         "collaboration policy is immutable for the session revision that accepted an exchange",
-        "the installed policy snapshot uses the global Profile v2 Agent Configuration contract"
+        "For Legacy specialist_policy_sha256 hashes unchanged specialist_policy; for Caller it hashes specialist_policy.policy, matching the original logical-policy digest.",
+        "approval_policy equals the corresponding installed policy approval_policy.",
+        "Null collaboration policy and digest require no retained snapshot and no accepted collaboration effects; observation never inserts defaults."
       ]
     },
     "brokered_member": {
@@ -516,7 +538,8 @@
             "on_mail",
             "manual",
             "keep_resident",
-            "never"
+            "never",
+            "successor"
           ]
         },
         "current_activation_operation_id": {
@@ -541,10 +564,27 @@
           "format": "date-time"
         },
         "role_snapshot": {
-          "$ref": "https://dolgorae.local/schema/specialist-policy/v2#/$defs/role_policy"
+          "oneOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/session-policy/v3#/$defs/role"
+            },
+            {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/role_snapshot"
+            }
+          ]
         },
         "agent_configuration": {
-          "$ref": "https://dolgorae.local/schema/agent-configuration/v2"
+          "oneOf": [
+            {
+              "$ref": "https://dolgorae.local/schema/agent-configuration/v2"
+            },
+            {
+              "$ref": "https://dolgorae.local/schema/workspace-execution/v1#/$defs/agent_configuration"
+            },
+            {
+              "$ref": "https://dolgorae.local/schema/successor-state/v1#/$defs/agent_configuration"
+            }
+          ]
         },
         "controller_binding": {
           "$ref": "https://dolgorae.local/schema/run-manifest/v1#/$defs/controller_binding"
@@ -560,13 +600,15 @@
       "x-invariants": [
         "retiring prevents new work and waits for authoritative task, mailbox, and delivery quiescence",
         "retired membership has terminal actor residency and retired_at",
-        "on_mail passivated target with queued mail has one requested or activating activation operation",
         "keep_resident is never passivated by idle timeout",
         "actor residency does not replace the core Run lifecycle",
-        "role_snapshot_sha256 is the JCS SHA-256 of role_snapshot",
-        "agent_configuration_sha256 is the JCS SHA-256 of agent_configuration",
-        "role_snapshot.agent_configuration equals agent_configuration",
-        "controller_binding contains only the broker public identity and capability digest"
+        "For policy-captured Legacy and Caller Roles, role_snapshot_sha256 is the original JCS SHA-256 of the complete versioned role_snapshot; delegated successors retain the original domain-tagged role-snapshot/v1 digest without its sha256: prefix.",
+        "agent_configuration_sha256 is the original JCS SHA-256 of the complete versioned agent_configuration; the nested generation-4 agent_configuration_digest remains its separate domain-tagged admitted-configuration identity.",
+        "For policy-captured Role alternatives, role_snapshot.agent_configuration equals agent_configuration. For a delegated successor, role_snapshot equals agent_configuration.instructions.role_snapshot and the captured closed identities/digests and accepted spawn binding must agree.",
+        "controller_binding contains only the broker public identity and capability digest",
+        "Accepted queued mail retains its durable activation request; current_activation_operation_id refers only to an actual allocated operation.",
+        "A policy-captured Caller role_ref is role_snapshot.role.role_ref and its configuration matches the accepted child capture; independent delegated successors need no matching Session policy Role and gain no lateral permission from this export.",
+        "successor is the original independently provisioned admission marker, not a Session activation policy; it does not imply on_mail or lateral permission. An exact accepted Role/configuration match may be used only by the existing scheduler authority."
       ]
     },
     "external_engagement": {
@@ -600,7 +642,14 @@
           "$ref": "#/$defs/uuid7"
         },
         "external_controller_ref": {
-          "$ref": "#/$defs/opaque_ref"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/opaque_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "status": {
           "enum": [
@@ -650,7 +699,8 @@
         "one Run may belong to at most one nonterminal aggregate",
         "external_controller_ref and Controller binding are immutable for the engagement",
         "an engagement may be active with zero members before the first hire",
-        "every mutating facade call revalidates the persisted Controller binding"
+        "every mutating facade call revalidates the persisted Controller binding",
+        "A registered External open with no external Caller provenance exports null external_controller_ref only after validating the original accepted open receipt, Controller identity, bootstrap event and absent provenance digest. Historical explicit external Controller references retain their original bytes and digest."
       ]
     },
     "external_member": {
@@ -743,7 +793,8 @@
         "releasing prevents new work and waits for authoritative task and delivery quiescence",
         "released membership has terminal actor residency and released_at",
         "keep_resident is never passivated by idle timeout",
-        "External Specialist Engagement members cannot originate Collaboration Exchanges"
+        "External Specialist Engagement members cannot originate Collaboration Exchanges",
+        "on_external_request denotes the original accepted External owner queue trigger, not a stored Session Role policy or lateral permission."
       ]
     },
     "spawn_operation": {
@@ -1238,7 +1289,14 @@
                 "type": "null"
               },
               "external_request_ref": {
-                "$ref": "#/$defs/opaque_ref"
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/opaque_ref"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
           }
@@ -1250,7 +1308,9 @@
         "claim leases cover only pre-dispatch ownership",
         "completed_not_delivered may redeliver the existing result but may not rerun the target Turn",
         "interrupted_unknown forbids automatic replay",
-        "a Collaboration Exchange inherits its root Specialist task priority"
+        "a Collaboration Exchange inherits its root Specialist task priority",
+        "request_artifact_ref uses the original task UUID in its typed immutable accepted-request namespace; it is not an arbitrary public ArtifactService handle.",
+        "A registered External Source assignment without an external Caller request reference exports null external_request_ref only when its original accepted Source/receipt and reservation marker validate. Explicit historical Caller references retain their original bytes; internal markers are never converted into Caller references."
       ]
     },
     "priority_class": {
@@ -1497,9 +1557,9 @@
       },
       "x-invariants": [
         "one Run has at most one requested or activating activation operation",
-        "mailbox trigger is valid only for an on_mail brokered member",
         "a ready activation corresponds to resident actor residency",
-        "activation never replays an outcome-unknown Turn"
+        "activation never replays an outcome-unknown Turn",
+        "Mailbox reactivation requires captured on_mail eligibility; first activation of an accepted unstarted member retains its original captured startup authority."
       ]
     },
     "collaboration_exchange": {
@@ -1740,12 +1800,15 @@
         }
       },
       "x-invariants": [
-        "source and target are different active brokered members in session_id",
         "root_task_id names the original brokered delegation; nested source authority follows the parent exchange target Turn",
         "priority_class equals the root task priority",
         "blocking active exchanges form an acyclic wait graph",
         "succeeded execution stores one immutable result and uses pending or acknowledged delivery",
-        "interrupted_unknown forbids automatic replay"
+        "interrupted_unknown forbids automatic replay",
+        "At acceptance source and target are distinct active brokered members of session_id; retained terminal history does not require currently active membership.",
+        "blocks_source_turn reflects only current authenticated unexpired active wait edges, not original request intent or expired durable wait identity.",
+        "request_artifact_ref and context_manifest_ref use the original exchange UUID in distinct typed internal content namespaces; an empty context manifest is null.",
+        "result_artifact_ref retains the original source-owned published artifact UUID."
       ]
     },
     "mailbox_item": {
@@ -1859,10 +1922,11 @@
         }
       },
       "x-invariants": [
-        "mailbox sequence is unique within mailbox_run_id",
         "related_id resolves to a Specialist task or Collaboration Exchange according to item_kind",
         "collaboration request mailbox is the target Run and result mailbox is the source Run",
-        "claim leases cover only pre-dispatch ownership"
+        "claim leases cover only pre-dispatch ownership",
+        "mailbox sequence is unique within mailbox_run_id",
+        "Mailbox sequence retains its original owner-type causal-event origin; the materializer rejects duplicate Run/sequence pairs across retained history and does not invent a universal counter."
       ]
     },
     "role_ref": {
@@ -1915,6 +1979,15 @@
     "every member references one matching write-ahead spawn or hire operation",
     "every Specialist task references an existing aggregate and member",
     "completed results are redelivered but never semantically replayed",
-    "interrupted_unknown forbids automatic replay"
-  ]
+    "interrupted_unknown forbids automatic replay",
+    "Only actual allocated activation operations are exported; a queued request marker does not invent an operation identity.",
+    "Publication validates current database generation/head/selected-record basis and output-file identity; a stale or unsafe publisher does not replace a newer materialization.",
+    "Legacy bytes/digests and Caller logical-policy versus complete versioned Role/configuration hash preimages remain unchanged.",
+    "head_sequence and revision are the checked sum of the maximum recorded orchestration_events and events sequences, absent domains contributing zero; this is a derived projection ordinal, not a universal event ID.",
+    "When either event domain is nonempty, head_hash is SHA-256 of the exact domain-tagged JCS head object defined in SPEC-012, binding workspace_id, sorted per-Session orchestration heads and the External global head; it is null only when both domains are empty.",
+    "Original per-Session orchestration and External global event chains keep their preimages; the derived materialization head is not a new persisted chain.",
+    "Same-head selected-record changes invalidate a captured publication even when its derived head is unchanged.",
+    "Logical mailbox/queue order uses original event sequence within aggregate owner/type and Run; no universal cross-owner event sequence is invented."
+  ],
+  "description": "Confidential owner-only internal SQLite materialization. Complete accepted private captures are not certified secret-free and never serve as public, model or provider projections. Credential carriers/stores are outside this shape."
 }

@@ -1258,6 +1258,16 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
     }
 
     fn validate_next(&self, record: &AuditRecord) -> Result<(), LedgerError> {
+        if crate::interaction::broker_record(record)
+            .map_err(LedgerError::SecurityPolicy)?
+            .is_some()
+        {
+            crate::interaction::broker_binding_history(
+                self.records.iter().chain(std::iter::once(record)),
+                self.run_id,
+            )
+            .map_err(LedgerError::SecurityPolicy)?;
+        }
         if record.run_id() != self.run_id {
             return Err(LedgerError::InvalidRecord(
                 "record run identity differs from the ledger".to_owned(),
@@ -1770,6 +1780,7 @@ fn scan_ledger<C: LedgerClock>(
                 index + 1
             )));
         }
+        crate::interaction::broker_record(&record).map_err(LedgerError::SecurityPolicy)?;
         records.push(record);
         prefix_length = prefix_length.saturating_add(u64::try_from(byte_count).unwrap_or(u64::MAX));
         check_replay_budget(clock, started_millis)?;
@@ -2829,6 +2840,8 @@ fn interaction_state_revision(records: &[AuditRecord]) -> u64 {
 
 pub(crate) fn next_interaction_revision(revision: u64, record: &AuditRecord) -> u64 {
     let changes_interactions = match record.kind() {
+        AuditKind::TurnIntent => crate::interaction::broker_record(record)
+            .is_ok_and(|r| r.is_some_and(|r| r.phase != "intent")),
         AuditKind::ApprovalRequested
         | AuditKind::ApprovalDecided
         | AuditKind::InteractionOpened
@@ -2958,6 +2971,7 @@ fn observe_records_using(
                 index + 1
             )));
         }
+        crate::interaction::broker_record(&record).map_err(LedgerError::SecurityPolicy)?;
         records.push(record);
     }
     if u64::try_from(records.len()).unwrap_or(u64::MAX) < head {
@@ -3150,7 +3164,7 @@ fn current_uid() -> u32 {
     SystemWorkspacePlatform.current_uid()
 }
 
-fn format_system_timestamp(time: SystemTime) -> String {
+pub(crate) fn format_system_timestamp(time: SystemTime) -> String {
     let duration = time.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let seconds = duration.as_secs();
     let micros = duration.subsec_micros();

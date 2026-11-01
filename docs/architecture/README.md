@@ -1091,6 +1091,24 @@ Controller capabilities. A model-originated request is advisory until accepted
 under the session's explicit approval policy. No model receives a Controller
 capability or a private Worker address.
 
+The parent `orchestration` module owns the aggregate schema and transaction
+helpers. Its three child owners share those parent-defined helpers:
+`approval` binds original Broker approvals to the private Run ledger and checks
+complete Interaction views; `policy_task` retains Caller task admission,
+claim and original Submit recovery authority; `checked_state` materializes the
+confidential typed SQLite projection. Cross-module imports name their owning
+crate modules directly, so the dependency graph can check those boundaries.
+
+The closed private Broker approval records belong to `interaction`. Five
+production edges use that ownership: `ledger` validates marker history through
+`interaction`; `event` derives sanitized Interaction invalidations from those
+markers; `public_resolution` binds normalized protected responses to the
+original approval records; `snapshot` uses `interaction`'s typed Broker approval
+bindings; and `snapshot` calls `orchestration::approval` to check the complete
+SQL/ledger view at its captured head. These observations
+retain the existing read-refusal and effect-free observation boundaries.
+Concrete runtime effects remain behind the orchestration adapter.
+
 Each broker-held capability has one owner-only mode-0600 carrier below the
 workspace state root at `orchestration/broker-credentials/<run-id>.json`. The
 carrier uses the ordinary checked Controller credential shape, remains outside
@@ -1322,6 +1340,10 @@ Internal live-Primary ownership, frozen by TASK-025:
    approval and completion without occupying `drain_run`. The owning Worker
    replies only after validating that destination. Broker approvals carry an
    internal origin and spawn-operation reference.
+   Caller Primary mailboxes reserve one of their existing bounded in-flight
+   slots for Controller approval progress. Blocking tools use the remaining
+   ordinary slots, so saturation cannot prevent the response that releases them.
+   The total cap and unrelated Run admission stay unchanged.
 3. **Business rejection versus infrastructure failure.** Commit authenticated
    final rejections, including busy assignment, onto the trusted call identity
    so exact retry returns them. Reconstruct an accepted result from the
@@ -1347,6 +1369,43 @@ orchestration alone owns the SQLite schema and publication-state interpretation.
 Broker approval observations use the same read-only boundary and cannot run
 publication recovery as a side effect of a public read. The specification fixes
 assignment receipt, wait, and UTF-8 result-page rules.
+
+For Caller-workspace Primaries, the current protected Interaction adapter reads
+Broker approval rows only through their original Run-ledger binding. The Worker
+publishes that bounded binding after the run-bound Primary call completes and
+reconciles missing bindings during its owned startup/recovery. An internal
+Turn-intent record carries the explicit Broker origin, original approval and
+spawn UUIDs, source-call authority and checked observation digest. It does not
+create a native pending-request identifier or change the Core lifecycle. Binding
+and decision records advance the complete Interaction view's existing ledger
+revision; SQL revisions are never substituted for it.
+
+The existing protected resolution route authenticates the current Root owner,
+checks its normal mutation preconditions and sends the original Broker UUID to
+the owning Worker. A closed private control request and the existing asynchronous
+semantic execution/completion mechanism preserve drain responsiveness while the
+Broker provisions a child. The original Broker resolution receipt also identifies
+the current public resolution receipt. An original durable resolution intent,
+Broker decision and ledger publication support response-loss/restart recovery;
+missing evidence remains unresolved. Reads only compare these authorities. The
+same original decision is resumed under its existing key, with no new queue,
+native-ID alias, public RPC or permission.
+
+For the Broker branch, the protected resolution precondition uses the Root's
+current active Turn, or the latest real ledger Turn when idle, and its current
+native Thread generation. The original requesting Turn remains part of the
+immutable approval binding. The existing Submit receipt or Run timeline exposes
+the real Turn context; empty values are refused. A changed active Turn or Thread
+generation requires a fresh observation. Worker generation changes do not reset
+ledger revisions or create a replacement approval identity.
+
+The existing event projector emits only its sanitized Interaction-opened or
+resolved shape for a checked Broker marker. Complete pending-count and
+Interaction invalidation projections derive from that same captured ledger
+prefix. The private marker never becomes a client payload or a native numeric
+request. A SQL-to-ledger publication gap refuses the complete protected view
+rather than treating the missing entry as absence.
+
 TASK-051 implements the reader. A page is a nonempty UTF-8-boundary-preserving
 prefix before EOF; invalid byte ranges or an undersized next-character budget
 return a checked error, not a lossy or non-progressing page.
@@ -1414,12 +1473,19 @@ retained digest and causal event before using the priority. Durable target activ
 The private extension captures the fixed SPEC-012 v1 default collaboration
 policy per Session and consumes its retained admission limits. It provides no
 policy override operation. Assignment queue priority uses 0 for interactive,
-1 for normal and 2 for background; an eventual orchestration-state projection
-maps these ordering values to the checked policy priority classes.
+1 for normal and 2 for background; the checked internal orchestration-state
+materialization maps these values to interactive, normal and background.
 The exchange-owned result outbox and native call receipts implement durable
 local delivery; acknowledgment does not imply remote consumption.
-The full checked orchestration-state export remains an integration obligation;
-this storage foundation adds no public exporter.
+The complete typed orchestration-state materializer is owned by the
+Orchestration Store. It adds no public exporter or coequal state authority.
+Caller-v3 policy tasks retain native Primary source verification. Registered
+managed and External assignments retain RegisteredAssignment verification while
+committing busy-target queue acceptance, original caller authority, deadlines,
+receipts and accounting. Native call provenance supplies Source identity and
+trusted priority; model arguments and reconstructed Controller capabilities
+grant no queued execution authority. Historical Legacy validation and exact
+receipts remain unchanged.
 
 ### CLI Front End
 
@@ -2493,6 +2559,91 @@ and JSONL exports are replaceable materializations validated against
 [`dolgorae-orchestration-state-v2.schema.json`](../protocol/dolgorae-orchestration-state-v2.schema.json)
 with cross-object invariants enforced by the Rust orchestration implementation.
 
+Full materialization stays in owner-only internal storage and retains complete
+accepted private captures. `sanitized_environment` describes launch-environment
+selection, not content-secret detection. Full captures never become observer,
+model, provider or client-export payloads. Credential carriers/stores remain
+outside the typed shape; Profile authoring still forbids secrets. Public
+projection owners select their own safe fields.
+
+The materializer maps typed accepted aggregates, both task owners, actual
+claims/activation operations, exchanges, result outboxes and current wait facts.
+Original owner-type event order supplies stable logical mailbox sequences;
+managed orchestration_events and External events have independent domains.
+Original owner UUIDs supply typed request/context references; result UUIDs
+remain unchanged.
+Caller/Legacy policy, Role and configuration alternatives retain their distinct
+original digest preimages. Missing historical collaboration policy is null only
+when no such effects were accepted. It never inserts a policy during observation.
+
+Independent provisioned successors retain generation-4 configuration and
+instructions/v3, including the closed role snapshot and domain-tagged instruction
+and admitted-configuration identities. The state materializer uses these original
+successor-state/v1 and v014-identities/v1 alternatives, rather than fabricating
+a Session policy Role or rehashing a different serialization. Legacy and
+policy-captured Caller member domains remain unchanged. The managed successor
+activation marker is retained without synthesizing a Session policy; the
+External on_external_request label describes only accepted
+owner-queue triggers. Exact captured policy/configuration reconciliation stays
+with the scheduler. This private projection does not enroll an independent
+successor into the lateral Role catalog.
+
+The registered External open's original absent external Controller reference
+also stays null in aggregate and bootstrap projections, with its original
+accepted open/Controller/bootstrap proof checked. Historical explicit references
+stay unchanged; no public binding is recast as external provenance.
+
+The normal Caller-v3 Primary policy-task owner shares the existing central
+assignment queue and claim fence with provisioned assignments. It retains the
+original AcceptedSpecialistTask shape and immutable native source/context
+capture; a narrow private dispatch capture binds original member/policy/request,
+effort, deadline and normal root priority. It neither manufactures a registered
+facade receipt nor converts a policy member to delegated configuration.
+
+A positively checked policy-task capture selects the existing Broker/Worker
+Submit path. Provisioned assignments continue through their original accepted
+facade receipt path. Semantic dispatch reuses the existing writer, startup and
+control-call helpers with the already held lifecycle lease. Original Submit
+ledger evidence restores accepted policy-task linkage before expiry/result
+settlement; uncertainty keeps the claim and target fence without replay. Old
+policy tasks without that capture retain their original owner/recovery path.
+Both lanes publish results through their existing owners, with no second queue,
+Worker or scheduling framework.
+
+The first writable policy-task dispatch may retain its member's initial active
+Writer when the original Run has no prior Turn and no outstanding task-acquisition
+capture claims that Writer. Reuse verifies the current Controller, Run generation,
+Thread, effective policy and Writer generation and preserves the original Writer
+ownership. It creates no task-acquisition capture; task settlement does not
+release that initial Writer. A later authorized writable dispatch uses the existing
+stale-member-Writer release boundary before a vacant, task-attributed acquisition.
+Foreign, transitional or unverified Writer authority remains fenced. These owner
+rules do not relax the live Primary bridge's canonical-writer refusal.
+
+Registered External assignments have no captured external Caller request
+reference. The typed projection exports null for that field only after validating
+the original registered acceptance and internal task marker; the original task
+UUID separately names immutable accepted content. Explicit historical Caller
+references retain their bytes. No internal marker becomes a Caller reference.
+
+The checked file head is a derived composition, not a new universal event chain.
+Use the sum of the two domains' maximum recorded sequences for head_sequence and
+revision. Bind sorted per-Session orchestration heads and the External global
+head in the exact domain-tagged JCS head object defined in SPEC-012; head_hash is
+null only when neither has records. Preserve all original chain hash preimages.
+
+Capture a checked SQL snapshot and its generation/two-head plus selected-row basis,
+including retained capture/content identities. Prepare an owner-only temporary
+file outside a write transaction. Under a short existing SQLite immediate
+mutation fence, recheck the generation, current head, selected-row basis and
+reserved destination identity before atomic publication/fsync. Same-head wait
+pruning invalidates stale captures. Unsafe or changed files are refused without
+unlinking them. No new semantic authority or general read-model framework is
+introduced. Central reconcile_home refreshes once per affected workspace after
+actor reconciliation and during its existing startup/global scan, including
+workspaces with no eligible actor but an existing accepted aggregate. The next
+central visit repairs lost refreshes. Public observer reads remain effect-free.
+
 The state owner creates an External Specialist Engagement entirely inside one
 SQLite transaction. Orchestrated Session bootstrap coordinates SQLite with the
 Primary Run ledger through preallocated identities and the same bootstrap
@@ -2537,6 +2688,17 @@ content materialization reconstructs the source artifact with its original ID
 and digest after a crash, and checked artifact reads retain source Controller
 authorization and whole-content integrity.
 
+The Source page operation uses the same native Source authorizer and immutable
+publication/content owner, not a null Controller passed to public ArtifactService.
+The accepted response uses the existing Source-call receipt/event owner. Full
+content integrity and output-safety validation precede bounded UTF-8 slicing.
+At EOF it returns an empty nontruncated page; a non-EOF page must make byte
+progress. Secret-assignment detection reuses jcs::is_secret_payload_key and the
+existing profile text-assignment token rule locally; both callers use the
+unchanged public secret-name vocabulary. Existing log rendering remains unchanged. Structural frame/hidden-reasoning and
+known private-path checks reject the whole body without changing accepted bytes.
+This bounded backstop does not certify arbitrary unstructured text secret-free.
+
 Native call receipts use Session, source Run, Turn and call identity, with a
 retained request digest. Collection atomically stores the exact checked response
 and marks its selected results operationally acknowledged. A durable per-source
@@ -2561,6 +2723,12 @@ publication also signal local waiters. A waiter sleeps until a notification or
 its original transport expiry; no per-actor or per-call SQLite polling timer is
 added. The single global reconciliation scan supplies lost-notification repair.
 
+Collaboration-capable Caller members require Dedicated native binding until a
+shared-profile invocation proves the same Run/Thread/Turn/call correlation.
+Fixed read-only pooling, captured native policy, actual disable availability,
+default-feature qualification and sibling/server isolation remain distinct
+obligations; enabled-but-unused is not disabled enforcement.
+
 ### Mailbox Scheduling and Virtual Actor Residency
 
 The staged assignment foundation records immutable queue ordering alongside the
@@ -2572,15 +2740,27 @@ Its first-use transaction replaces `one_active_external_task_per_member` to
 exclude `queued`; the version-1 marker distinguishes this shape, while
 `accepted`, `claimed`, `dispatching` and `running` remain unique per member.
 The central scheduler dispatches retained queued work under current owner
-authority. Live entrypoints retain their ready-target-only admission policy
-until TASK-027 integrated qualification is complete. Target readiness is separate
-from read-only access. Queue storage
-alone cannot authorize a Turn, reconstruct an external Controller capability
-or replay uncertain work.
+authority. Caller-workspace Primary policy tasks and authenticated registered
+managed or External assignments admit busy targets through that same bounded
+queue. The Primary route retains its original policy-task capture and reply;
+registered assignments retain their own accepted receipts. Historical Legacy
+entrypoints keep their original provider-policy and immediate-admission rules.
+Target readiness is separate from read-only access. Queue storage alone cannot
+authorize a Turn, reconstruct an external Controller capability or replay
+uncertain work.
 The shared `assignment_queue` module owns ordering and reuse records; the
 Engagement and Broker stores compose them with their task transactions and
-owner-specific event chains. Delegation Service owns source capture, scope
-authorization, immutable acceptance receipts and caller round accounting.
+owner-specific event chains. Managed dispatch consumes its immutable root-priority
+capture. Before removing an external queue row, the owning transaction retains
+its task, target, source, priority, original deadline and FIFO sequence with a
+new owner-chain event. The checked projection validates that record. Historical immediate admissions
+retain normal priority under their original admission contract. A task with
+queue-admission evidence requires its original captured or retained priority;
+if that priority is unavailable, materialization refuses it and preserves the
+previous output. Removing or lacking the current queue row never supplies a
+normal-priority default.
+Delegation Service owns source capture, scope authorization, immutable
+acceptance receipts and caller round accounting.
 
 The Mailbox Scheduler is event-driven and has no per-Specialist polling task.
 One in-memory dirty Run set coalesces mailbox changes, Turn completion,
@@ -4027,8 +4207,16 @@ Retained qualified bindings keep deny-rollover readiness through member start,
 reservation replay and Run recovery. Pre-policy accepted bindings retain their
 original readiness behavior; recovery does not upgrade their launch policy.
 
-Fixture-owned qualified retirement selects the retained binding and carries an
-operator capability through the existing non-interrupting stop. It retains
-membership and process-absence guards. Generic name-based lifecycle commands
-continue selecting their generic contract and do not discover or replace a
-qualified generation implicitly.
+Explicit `profile server start|stop --confirm-server-key` can select the
+current Caller-qualified launch. The main process freshly checks the selected
+definition and qualified Current candidate against that exact key. Startup
+records the checked binding before the existing deny-rollover readiness path;
+non-interrupting retirement requires the original recorded binding and Operator
+capability through the ordinary membership and process-absence fences. A key
+mismatch records no replacement and changes no server. Generic name-based
+commands without that selection retain their original contract. Status, restart
+and migration do not gain qualified selection. Qualified stop refuses
+`--interrupt`; generic interruption keeps its exact-key and Operator checks.
+The normal Caller Primary collaboration fixture may prepare an unrecorded
+read-only candidate to supply its key. That fixture uses the main CLI for
+registry publication, server startup, policy installation and retirement.

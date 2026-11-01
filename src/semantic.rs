@@ -1956,6 +1956,9 @@ pub enum RunMutationOperation {
         idempotency_key: String,
         response: Value,
     },
+    BrokerApprovalRespond {
+        request: crate::interaction::BrokerApprovalResponse,
+    },
     PublicRespond {
         request_id: String,
         idempotency_key: String,
@@ -2754,6 +2757,11 @@ impl CoreSemanticService {
             }
             RunMutationOperation::AcquireWriter => (RunVerb::AcquireWrite, Prepared::Plain, false),
             RunMutationOperation::ReleaseWriter => (RunVerb::ReleaseWrite, Prepared::Plain, false),
+            RunMutationOperation::BrokerApprovalRespond { request } => (
+                RunVerb::Respond,
+                Prepared::BrokerApprovalRespond { request },
+                false,
+            ),
             RunMutationOperation::PublicRespond {
                 request_id,
                 idempotency_key,
@@ -6057,7 +6065,10 @@ impl<'a> ProductionOrchestrationEffects<'a> {
             .aggregate_binding
             .as_ref()
             .ok_or_else(|| MachineError::invalid_argument("aggregate_binding", "missing"))?;
-        let expected_access = if member.requested_access == "isolated_write" {
+        let expected_access = if member.requested_access == "isolated_write"
+            || (manifest.schema_version == 3
+                && member.requested_access == "canonical_workspace_write")
+        {
             Access::Write
         } else {
             Access::Read
@@ -6495,7 +6506,7 @@ impl crate::orchestration::OrchestrationAdapter for ProductionOrchestrationEffec
     }
 }
 
-fn specialist_result_output(
+pub(crate) fn specialist_result_output(
     state_root: &Path,
     run_id: Uuid,
     response: &crate::turn::FinalResponse,
@@ -13376,6 +13387,9 @@ enum Prepared {
         idempotency_key: String,
         response: Value,
     },
+    BrokerApprovalRespond {
+        request: crate::interaction::BrokerApprovalResponse,
+    },
     PublicRespond {
         request_id: u64,
         idempotency_key: String,
@@ -13439,6 +13453,13 @@ impl Prepared {
                 caller: None,
                 request,
             },
+            Prepared::BrokerApprovalRespond { request } => {
+                ControlRequestV1::ResolveBrokerApproval {
+                    expected,
+                    caller: None,
+                    request,
+                }
+            }
             Prepared::PublicRespond {
                 request_id,
                 idempotency_key,
@@ -13521,6 +13542,7 @@ impl Prepared {
                 json!({"operation":"send","request":request,"timeout_ms":timeout_ms})
             }
             Self::Turn { request, .. } => json!({"operation":"submit","request":request}),
+            Self::BrokerApprovalRespond { request } => request.normalized_request(),
             Self::PublicRespond { .. } => {
                 unreachable!("public resolution identity requires authoritative records")
             }
@@ -15000,7 +15022,7 @@ fn build_manifest(
 /// a live server, the Run record pins what a Run may never change afterwards.
 /// The launch-contract digest is recomputed here because it is a statement
 /// about the Run record's shape, not the profile record's.
-fn run_profile_snapshot(
+pub(crate) fn run_profile_snapshot(
     snapshot: &crate::profile::ProfileSnapshot,
 ) -> Result<ProfileSnapshot, MachineError> {
     let mut enabled = snapshot.enabled_features.clone();
@@ -18838,6 +18860,282 @@ pub(crate) fn dispatch_accepted_external_task(
     Ok(MemberDispatchOutcome::Accepted { turn_ref: turn_id })
 }
 
+pub(crate) fn settle_policy_task_terminal(
+    root: &Path,
+    run: Uuid,
+    terminal: &crate::turn::TerminalTurn,
+) -> Result<bool, MachineError> {
+    if crate::orchestration::policy_task::member_session(root, run)?.is_none() {
+        return Ok(false);
+    }
+    record_resolved_terminal(root, run, terminal)?;
+    crate::collaboration::settle_target(root, run, terminal)?;
+    crate::orchestration::policy_task::settle_terminal(root, run, terminal, |response, carrier| {
+        specialist_result_output(root, run, response, carrier)
+    })
+}
+
+fn dispatch_policy_task(
+    view: &WorkspaceView,
+    state_root: &Path,
+    retained: &crate::orchestration::policy_task::Retained,
+    permit: &crate::scheduler::AcceptedWork,
+    lifecycle: &crate::worker::RunLifecycleLease,
+) -> Result<crate::delegation_service::MemberDispatchOutcome, MachineError> {
+    use crate::delegation_service::MemberDispatchOutcome;
+    let capture = &retained.capture;
+    if permit.work != capture.task
+        || permit.target != capture.target
+        || permit.scope_ref != capture.session
+        || permit.scope_kind != "orchestrated_session"
+        || permit.kind != "assignment"
+        || retained.member.membership_state != "active"
+        || retained.member.actor_residency != "resident"
+    {
+        return Err(crate::scheduler::error("policy_dispatch_owner_changed"));
+    }
+    let broker = crate::orchestration::OrchestrationStore::open_observer(state_root)?;
+    let credential = broker.member_credential(capture.target)?;
+    if credential.binding != retained.member.controller_binding {
+        return Err(crate::scheduler::error(
+            "policy_dispatch_controller_changed",
+        ));
+    }
+    let carrier = credential.controller_carrier()?;
+    let snapshot = crate::snapshot::RunSnapshot::load(state_root, capture.target, 0)?;
+    let request = crate::orchestration::policy_task::turn_request(retained, &snapshot.manifest)?;
+    if retained.accepted.requested_access != "canonical_workspace_write"
+        && snapshot
+            .writer
+            .holder
+            .as_ref()
+            .is_some_and(|holder| holder.run_id == capture.target)
+    {
+        return Ok(MemberDispatchOutcome::Refused {
+            code: "WRITE_AUTHORITY_HELD".into(),
+            message: "read task cannot inherit Writer authority".into(),
+        });
+    }
+    let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
+    let now = unix_time_ms_semantic()?;
+    if now >= capture.deadline_ms {
+        return Ok(MemberDispatchOutcome::Refused {
+            code: "OPERATION_TIMEOUT".into(),
+            message: "original policy task deadline expired".into(),
+        });
+    }
+    store.transact(|tx| {
+        crate::orchestration::policy_task::require_claim(tx, retained, permit.claim)?;
+        crate::orchestration::mark_successor_task_dispatching(
+            tx,
+            capture.session,
+            capture.task,
+            now,
+        )
+    })?;
+    if retained.accepted.requested_access == "canonical_workspace_write"
+        && let Err(error) =
+            acquire_policy_task_writer(view, state_root, retained, permit, lifecycle, &carrier)
+    {
+        return Ok(MemberDispatchOutcome::Uncertain {
+            code: error.code,
+            message: error.message,
+        });
+    }
+    let response = call_actor_worker(
+        state_root,
+        capture.target,
+        DarwinSystem.current_uid(),
+        Some(carrier.raw_fd()),
+        |expected| ControlRequestV1::Submit {
+            expected,
+            caller: None,
+            request: TurnControlRequest {
+                normalized_request_sha256: None,
+                write: false,
+                message: request.message,
+                idempotency_key: request.idempotency_key,
+                effort: request.effort,
+                images: Vec::new(),
+            },
+        },
+    );
+    let outcome = match response {
+        Ok(ControlResponseV1::Accepted { accepted })
+        | Ok(ControlResponseV1::AcceptedReceipt { accepted, .. }) => {
+            store.transact(|tx| {
+                crate::orchestration::policy_task::link_response(
+                    tx,
+                    retained,
+                    permit.claim,
+                    &accepted.turn_id,
+                    unix_time_ms_semantic()?,
+                )
+            })?;
+            MemberDispatchOutcome::Accepted {
+                turn_ref: accepted.turn_id,
+            }
+        }
+        Ok(ControlResponseV1::Terminal { terminal }) => {
+            store.transact(|tx| {
+                crate::orchestration::policy_task::link_response(
+                    tx,
+                    retained,
+                    permit.claim,
+                    &terminal.turn_id,
+                    unix_time_ms_semantic()?,
+                )
+            })?;
+            settle_policy_task_terminal(state_root, capture.target, &terminal)?;
+            MemberDispatchOutcome::Accepted {
+                turn_ref: terminal.turn_id,
+            }
+        }
+        Ok(ControlResponseV1::Failed { code, .. }) | Ok(ControlResponseV1::Rejected { code }) => {
+            MemberDispatchOutcome::Uncertain {
+                code,
+                message: "policy dispatch requires original Submit reconciliation".into(),
+            }
+        }
+        _ => MemberDispatchOutcome::Uncertain {
+            code: "DISPATCH_OUTCOME_UNKNOWN".into(),
+            message: "policy dispatch requires original Submit reconciliation".into(),
+        },
+    };
+    // A source callback may already have restored positive acceptance while
+    // the dispatcher's transport reply was delayed or lost.
+    crate::orchestration::policy_task::recover(state_root, capture.session, capture.target, None)?;
+    let linked: Option<String> = store
+        .connection()
+        .query_row(
+            "SELECT target_turn_id FROM brokered_tasks WHERE task_id=?1",
+            [capture.task.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(crate::scheduler::sql)?;
+    Ok(
+        linked.map_or(outcome, |turn_ref| MemberDispatchOutcome::Accepted {
+            turn_ref,
+        }),
+    )
+}
+
+fn acquire_policy_task_writer(
+    view: &WorkspaceView,
+    root: &Path,
+    retained: &crate::orchestration::policy_task::Retained,
+    permit: &crate::scheduler::AcceptedWork,
+    lifecycle: &crate::worker::RunLifecycleLease,
+    carrier: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    let mut snapshot = crate::snapshot::RunSnapshot::load(root, permit.target, 0)?;
+    let writer =
+        crate::writer::WriterStore::new(root, &view.workspace_id, DarwinSystem.current_uid());
+    if snapshot.writer.state == crate::writer::WriterAuthorityState::Active
+        && snapshot
+            .writer
+            .holder
+            .as_ref()
+            .is_some_and(|holder| holder.run_id == permit.target)
+    {
+        let store = EngagementStore::open(&EngagementStore::workspace_database_path(root))?;
+        let outstanding: bool = store.connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM policy_task_dispatch_captures p JOIN brokered_tasks t USING(task_id)
+             WHERE t.session_id=?1 AND t.target_run_id=?2 AND p.writer_capture_json IS NOT NULL AND p.writer_released=0)",
+            rusqlite::params![retained.capture.session.to_string(),permit.target.to_string()],|r|r.get(0)
+        ).map_err(crate::scheduler::sql)?;
+        if outstanding {
+            return Err(crate::scheduler::error(
+                "policy_writer_acquisition_outstanding",
+            ));
+        }
+        if snapshot.writer.transaction_id.is_some()
+            || snapshot.writer.handoff.is_some()
+            || snapshot.writer.cancelled_handoff.is_some()
+            || snapshot.writer.recovery_action.is_some()
+            || snapshot
+                .writer
+                .generation_release
+                .as_ref()
+                .is_some_and(|release| release.pending())
+        {
+            return Err(crate::scheduler::error("policy_writer_not_stable"));
+        }
+        if snapshot.projection.latest_turn_id.is_none() {
+            // Initial member authority is verified, never recast as a task acquisition.
+            let proof = call_caller_policy_proof(root, permit.target, carrier, permit.claim)?;
+            return writer.observe_locked(|current| {
+                if current != &snapshot.writer {
+                    return Err(crate::scheduler::error("policy_writer_reuse_changed"));
+                }
+                validate_caller_policy_current(
+                    root,
+                    permit.target,
+                    carrier,
+                    permit.claim,
+                    Access::Write,
+                    Some(current),
+                    &proof,
+                    crate::worker::CallerPolicyPhase::Committed,
+                )
+            })?;
+        }
+        release_stale_member_writer(
+            view,
+            root,
+            permit.target,
+            SettlementOwner::Managed {
+                session_id: retained.capture.session,
+            },
+            carrier,
+            true,
+            Some(lifecycle),
+        )?;
+        snapshot = crate::snapshot::RunSnapshot::load(root, permit.target, 0)?;
+    }
+    if snapshot.writer.state != crate::writer::WriterAuthorityState::None
+        || snapshot.writer.holder.is_some()
+        || snapshot.writer.transaction_id.is_some()
+        || snapshot.writer.handoff.is_some()
+        || snapshot.writer.cancelled_handoff.is_some()
+        || snapshot.writer.recovery_action.is_some()
+    {
+        return Err(crate::scheduler::error("policy_writer_not_vacant"));
+    }
+    let mut capture = ActorExecutionIdentity::capture(&snapshot)?;
+    capture.writer_acquire = Some(ActorWriterAcquire {
+        transaction_id: Uuid::now_v7(),
+        previous_generation: snapshot.writer.writer_generation,
+        previous_revision: snapshot.writer.authority_revision,
+        work: permit.clone(),
+    });
+    let text = serde_json::to_string(&capture)
+        .map_err(|_| crate::scheduler::error("policy_writer_capture_invalid"))?;
+    let digest = sha256_hex(text.as_bytes());
+    let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(root))?;
+    store.transact(|tx| {
+        crate::orchestration::policy_task::require_claim(tx,retained,permit.claim)?;
+        if tx.execute("UPDATE policy_task_dispatch_captures SET writer_capture_json=?2,writer_capture_sha256=?3
+            WHERE task_id=?1 AND writer_capture_json IS NULL",
+            rusqlite::params![permit.work.to_string(),text,digest]).map_err(crate::scheduler::sql)?!=1 {
+            return Err(crate::scheduler::error("policy_writer_capture_already_owned"));
+        }
+        crate::orchestration::append_event(tx,retained.capture.session,"policy_task_writer_captured",&digest,crate::scheduler::now_ms()?)
+    })?;
+    acquire_writer_authorized_with_capture(
+        view,
+        root,
+        permit.target,
+        carrier,
+        true,
+        None,
+        None,
+        None,
+        Some(lifecycle),
+        capture.writer_acquire.as_ref(),
+    )
+}
+
 pub(crate) fn dispatch_accepted_managed_task(
     request: crate::delegation_service::ManagedTaskDispatch<'_>,
     lifecycle: Option<&crate::worker::RunLifecycleLease>,
@@ -19116,7 +19414,14 @@ pub(crate) fn schedule_actor(
         .aggregate_binding
         .as_ref()
         .ok_or_else(|| scheduler::error("actor_binding_missing"))?;
-    if snapshot.manifest.schema_version != 4
+    let policy_member = match actor.owner {
+        Owner::Managed(session) => {
+            crate::orchestration::policy_task::member_session(state_root, actor.run)?
+                == Some(session)
+        }
+        Owner::External(_) => false,
+    };
+    if (snapshot.manifest.schema_version != 4 && !policy_member)
         || snapshot.manifest.workspace_id != view.workspace_id
         || binding.aggregate_id != actor.owner.scope().1
         || binding.member_kind != crate::run::AggregateMemberKind::Specialist
@@ -19363,19 +19668,42 @@ pub(crate) fn schedule_actor(
             return Ok(());
         };
         if activation_work.kind == "assignment" {
-            let retained =
-                scheduler::retained_task(&store, &activation_work, &view.workspace_id, state_root)?;
-            if now >= retained.deadline_ms
-                || retained.accepted.agent_configuration_digest
-                    != snapshot
-                        .manifest
-                        .agent_configuration
-                        .admitted_configuration
-                        .as_ref()
-                        .ok_or_else(|| scheduler::error("activation_configuration_missing"))?
-                        .digest()?
-            {
-                return Err(scheduler::error("activation_acceptance_changed"));
+            let policy_task = if let Owner::Managed(session) = actor.owner {
+                crate::orchestration::policy_task::load(
+                    store.connection(),
+                    state_root,
+                    session,
+                    activation_work.work,
+                )?
+            } else {
+                None
+            };
+            if let Some(task) = policy_task {
+                if task.capture.target != actor.run
+                    || now >= task.capture.deadline_ms
+                    || task.member.agent_configuration != snapshot.manifest.agent_configuration
+                {
+                    return Err(scheduler::error("activation_policy_acceptance_changed"));
+                }
+            } else {
+                let retained = scheduler::retained_task(
+                    &store,
+                    &activation_work,
+                    &view.workspace_id,
+                    state_root,
+                )?;
+                if now >= retained.deadline_ms
+                    || retained.accepted.agent_configuration_digest
+                        != snapshot
+                            .manifest
+                            .agent_configuration
+                            .admitted_configuration
+                            .as_ref()
+                            .ok_or_else(|| scheduler::error("activation_configuration_missing"))?
+                            .digest()?
+                {
+                    return Err(scheduler::error("activation_acceptance_changed"));
+                }
             }
         } else {
             let work =
@@ -19396,10 +19724,24 @@ pub(crate) fn schedule_actor(
         }
         let mut captured = ActorExecutionIdentity::capture(&snapshot)?;
         let write = if activation_work.kind == "assignment" {
-            scheduler::retained_task(&store, &activation_work, &view.workspace_id, state_root)?
-                .accepted
-                .execution_intent
-                == "canonical_workspace_write"
+            let policy_task = if let Owner::Managed(session) = actor.owner {
+                crate::orchestration::policy_task::load(
+                    store.connection(),
+                    state_root,
+                    session,
+                    activation_work.work,
+                )?
+            } else {
+                None
+            };
+            if let Some(task) = policy_task {
+                task.accepted.requested_access == "canonical_workspace_write"
+            } else {
+                scheduler::retained_task(&store, &activation_work, &view.workspace_id, state_root)?
+                    .accepted
+                    .execution_intent
+                    == "canonical_workspace_write"
+            }
         } else {
             false
         };
@@ -19526,6 +19868,25 @@ pub(crate) fn schedule_actor(
             return Ok(());
         };
         if permit.kind == "assignment" {
+            if let Owner::Managed(session) = actor.owner
+                && let Some(retained) = crate::orchestration::policy_task::load(
+                    store.connection(),
+                    state_root,
+                    session,
+                    permit.work,
+                )?
+            {
+                store.transact(|tx| {
+                    scheduler::prepare_dispatch(tx, &permit, scheduler::now_ms()?)
+                })?;
+                let outcome =
+                    dispatch_policy_task(view, state_root, &retained, &permit, &lifecycle)?;
+                store.transact(|tx| {
+                    scheduler::finish_dispatch(tx, &permit, &outcome, scheduler::now_ms()?)
+                })?;
+                scheduler::notify(state_root, actor.run);
+                return Ok(());
+            }
             let retained =
                 scheduler::retained_task(&store, &permit, &view.workspace_id, state_root)?;
             if now >= retained.deadline_ms {
@@ -20325,6 +20686,127 @@ pub(crate) fn recover_scheduler_assignment(
     })
 }
 
+fn reconcile_policy_member(
+    view: &WorkspaceView,
+    root: &Path,
+    session: Uuid,
+    run: Uuid,
+    lifecycle: &crate::worker::RunLifecycleLease,
+) -> Result<(), MachineError> {
+    use crate::scheduler;
+    crate::orchestration::policy_task::recover(root, session, run, None)?;
+    crate::collaboration::reconcile_target(root, run)?;
+    let mut broker = crate::orchestration::OrchestrationStore::open(root)?;
+    let mut effects = ProductionOrchestrationEffects::new(root);
+    crate::orchestration::policy_task::reconcile(&mut broker, session, run, &mut effects)?;
+    let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(root))?;
+    if !store
+        .connection()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='policy_task_dispatch_captures')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .map_err(scheduler::sql)?
+    {
+        return Ok(());
+    }
+    let row:Option<(String,String,String)>=store.connection().query_row(
+        "SELECT p.task_id,p.writer_capture_json,p.writer_capture_sha256 FROM policy_task_dispatch_captures p
+         JOIN brokered_tasks t USING(task_id) WHERE t.session_id=?1 AND t.target_run_id=?2
+         AND p.writer_capture_json IS NOT NULL AND p.writer_released=0 ORDER BY t.created_at_ms,t.task_id LIMIT 1",
+        rusqlite::params![session.to_string(),run.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+    ).optional().map_err(scheduler::sql)?;
+    let Some((task, text, digest)) = row else {
+        return Ok(());
+    };
+    if sha256_hex(text.as_bytes()) != digest {
+        return Err(scheduler::error("policy_writer_capture_changed"));
+    }
+    let captured: ActorExecutionIdentity = serde_json::from_str(&text)
+        .map_err(|_| scheduler::error("policy_writer_capture_invalid"))?;
+    let acquisition = captured
+        .writer_acquire
+        .as_ref()
+        .ok_or_else(|| scheduler::error("policy_writer_acquisition_missing"))?;
+    let task =
+        Uuid::parse_str(&task).map_err(|_| scheduler::error("policy_writer_task_invalid"))?;
+    if acquisition.work.work != task
+        || acquisition.work.target != run
+        || acquisition.work.scope_ref != session
+        || acquisition.work.scope_kind != "orchestrated_session"
+        || acquisition.work.kind != "assignment"
+    {
+        return Err(scheduler::error("policy_writer_owner_changed"));
+    }
+    let linked:bool=store.connection().query_row(
+        "SELECT EXISTS(SELECT 1 FROM orchestration_events WHERE session_id=?1 AND kind='policy_task_writer_captured' AND payload_sha256=?2)",
+        rusqlite::params![session.to_string(),digest],|r|r.get(0)
+    ).map_err(scheduler::sql)?;
+    if !linked {
+        return Err(scheduler::error("policy_writer_capture_event_missing"));
+    }
+    let state: String = store
+        .connection()
+        .query_row(
+            "SELECT state FROM brokered_tasks WHERE task_id=?1",
+            [task.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(scheduler::sql)?;
+    if !matches!(
+        state.as_str(),
+        "completed_not_delivered" | "delivered" | "failed" | "cancelled" | "expired"
+    ) {
+        return Ok(());
+    }
+    let snapshot = crate::snapshot::RunSnapshot::load(root, run, 0)?;
+    if snapshot.projection.lifecycle != RunLifecycle::Idle
+        || snapshot.projection.active_turn_id.is_some()
+        || !snapshot.projection.pending_requests.is_empty()
+    {
+        return Ok(());
+    }
+    if snapshot.writer.state == crate::writer::WriterAuthorityState::None
+        && snapshot.writer.holder.is_none()
+        && snapshot.writer.transaction_id.is_none()
+        && snapshot.writer.handoff.is_none()
+    {
+        store.transact(|tx| {
+            tx.execute("UPDATE policy_task_dispatch_captures SET writer_released=1 WHERE task_id=?1 AND writer_capture_sha256=?2",
+                rusqlite::params![task.to_string(),digest]).map_err(scheduler::sql)?;
+            Ok(())
+        })?;
+        return Ok(());
+    }
+    let (_, ledger) = observe_run_ledger(root, run, true)?;
+    prove_activation_writer(&captured, &snapshot, ledger.records())?;
+    let retained =
+        crate::orchestration::policy_task::load(store.connection(), root, session, task)?
+            .ok_or_else(|| scheduler::error("policy_writer_task_capture_absent"))?;
+    if retained.accepted.requested_access != "canonical_workspace_write" {
+        return Err(scheduler::error("policy_writer_intent_changed"));
+    }
+    let carrier = broker.member_credential(run)?.controller_carrier()?;
+    release_member_writer(
+        view,
+        root,
+        run,
+        SettlementOwner::Managed {
+            session_id: session,
+        },
+        &carrier,
+        Some(lifecycle),
+    )?;
+    store.transact(|tx| {
+        if tx.execute("UPDATE policy_task_dispatch_captures SET writer_released=1 WHERE task_id=?1 AND writer_capture_sha256=?2 AND writer_released=0",
+            rusqlite::params![task.to_string(),digest]).map_err(scheduler::sql)?!=1 {
+            return Err(scheduler::error("policy_writer_release_capture_changed"));
+        }
+        crate::orchestration::append_event(tx,session,"policy_task_writer_released",&digest,scheduler::now_ms()?)
+    })
+}
+
 fn reconcile_scheduler_writer(
     view: &WorkspaceView,
     state_root: &Path,
@@ -20336,6 +20818,12 @@ fn reconcile_scheduler_writer(
         Owner::Managed(session_id) => SettlementOwner::Managed { session_id },
         Owner::External(engagement_id) => SettlementOwner::External { engagement_id },
     };
+    if let Owner::Managed(session) = actor.owner
+        && crate::orchestration::policy_task::member_session(state_root, actor.run)?
+            == Some(session)
+    {
+        return reconcile_policy_member(view, state_root, session, actor.run, lifecycle);
+    }
     recover_scheduler_assignment(state_root, actor)?;
     if matches!(actor.owner, Owner::Managed(_)) {
         crate::collaboration::reconcile_target(state_root, actor.run)?;
@@ -35178,14 +35666,21 @@ mod managed_write_tests {
                     )
                     .unwrap();
             }
-            append_policy(
-                state_root,
-                manifest.run_id,
-                AuditKind::ThreadBound,
-                Uuid::now_v7(),
-                false,
-                0,
-            );
+            let original_thread = RunStore::new(SystemWorkspacePlatform, state_root)
+                .load_state_projection(manifest.run_id)
+                .unwrap()
+                .thread_id
+                .unwrap_or_else(|| "thread-1".into());
+            if manifest.schema_version != 3 {
+                append_policy(
+                    state_root,
+                    manifest.run_id,
+                    AuditKind::ThreadBound,
+                    Uuid::now_v7(),
+                    false,
+                    0,
+                );
+            }
             let children = Arc::clone(&fixture.children);
             let stop = Arc::clone(&fixture.stop);
             let calls = Arc::clone(&fixture.calls);
@@ -35237,6 +35732,48 @@ mod managed_write_tests {
                             .unwrap()
                             .push(request.operation_name().to_owned());
                         let response = match request {
+                            ControlRequestV1::VerifyCallerPolicy { operation_id, .. } => {
+                                let (_, policy) =
+                                    observe_caller_policy(&state_root, manifest.run_id).unwrap();
+                                let proof = crate::worker::CallerPolicyProof {
+                                    schema: "dolgorae.caller-policy-proof/v1".into(),
+                                    operation_id,
+                                    identity: identity.clone(),
+                                    control_socket_epoch: 1,
+                                    dedicated_server_identity: dedicated.clone(),
+                                    app_server_socket_identity: proof_socket.clone(),
+                                    server_key: manifest
+                                        .global_profile_binding
+                                        .as_ref()
+                                        .unwrap()
+                                        .server_key
+                                        .clone(),
+                                    server_epoch: 1,
+                                    global_profile_binding_sha256: manifest
+                                        .global_profile_binding
+                                        .as_ref()
+                                        .unwrap()
+                                        .digest()
+                                        .unwrap(),
+                                    thread_id: original_thread.clone(),
+                                    effective_policy: policy,
+                                };
+                                if failure == 10 {
+                                    crate::writer::WriterStore::new(
+                                        &state_root,
+                                        &manifest.workspace_id,
+                                        DarwinSystem.current_uid(),
+                                    )
+                                    .transact(|record| {
+                                        record.authority_revision += 1;
+                                        Ok(())
+                                    })
+                                    .unwrap();
+                                }
+                                ControlResponseV1::CallerPolicyVerified {
+                                    proof: Box::new(proof),
+                                }
+                            }
                             ControlRequestV1::SetWriterAccess {
                                 write,
                                 writer_generation,
@@ -35611,6 +36148,340 @@ mod managed_write_tests {
                 },
             )
         }
+    }
+
+    #[test]
+    fn caller_policy_initial_access_validation_preserves_generations_and_identity_fences() {
+        for access in ["read_only", "canonical_workspace_write"] {
+            let (root, state, session, run, _) =
+                crate::orchestration::tests::caller_policy_dispatch_fixture(access);
+            let owner = crate::orchestration::OrchestrationStore::open_observer(&state).unwrap();
+            let member = owner
+                .members(session.session_id)
+                .unwrap()
+                .into_iter()
+                .find(|member| member.run_id == run)
+                .unwrap();
+            let effects = ProductionOrchestrationEffects::new(&state);
+            effects.validate_task_target(&member).unwrap();
+            for field in 0..5 {
+                let mut changed = member.clone();
+                match field {
+                    0 => {
+                        changed.requested_access = if access == "read_only" {
+                            "canonical_workspace_write"
+                        } else {
+                            "read_only"
+                        }
+                        .into()
+                    }
+                    1 => changed.parent_run_id = Uuid::now_v7(),
+                    2 => changed.spawn_operation_id = Uuid::now_v7(),
+                    3 => changed.role_snapshot_sha256 = "f".repeat(64),
+                    _ => changed.controller_binding.identity.generation += 1,
+                }
+                assert_eq!(
+                    effects.validate_task_target(&changed).unwrap_err().code,
+                    "ORCHESTRATION_SCHEMA_UNSUPPORTED"
+                );
+            }
+            drop(owner);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn caller_policy_initial_writer_guards_refuse_before_submit() {
+        for case in [
+            "pin",
+            "race",
+            "outstanding",
+            "foreign",
+            "transitional",
+            "claim",
+        ] {
+            let (root, state, session, member, task) =
+                crate::orchestration::tests::caller_policy_dispatch_fixture(
+                    "canonical_workspace_write",
+                );
+            let manifest = RunStore::new(SystemWorkspacePlatform, &state)
+                .load_manifest(member)
+                .unwrap();
+            let view = WorkspaceView {
+                workspace_id: manifest.workspace_id.clone(),
+                canonical_path: manifest.canonical_workspace.clone(),
+                mode: crate::workspace::WorkspaceMode::NonGit,
+                created: false,
+            };
+            let writer = crate::writer::WriterStore::new(
+                &state,
+                &view.workspace_id,
+                DarwinSystem.current_uid(),
+            );
+            let mut owner =
+                EngagementStore::open(&EngagementStore::workspace_database_path(&state)).unwrap();
+            let mut permit = owner
+                .transact(|tx| {
+                    let p = crate::scheduler::claim(
+                        tx,
+                        crate::assignment_queue::Owner::Managed(session.session_id),
+                        member,
+                        crate::scheduler::now_ms()?,
+                    )?
+                    .unwrap();
+                    crate::scheduler::prepare_dispatch(tx, &p, crate::scheduler::now_ms()?)?;
+                    Ok(p)
+                })
+                .unwrap();
+            let retained = crate::orchestration::policy_task::load(
+                owner.connection(),
+                &state,
+                session.session_id,
+                task.task_id,
+            )
+            .unwrap()
+            .unwrap();
+            let worker = ScriptedWorker::start_member_with_witness(
+                &view,
+                &state,
+                &manifest,
+                if case == "race" { 10 } else { 0 },
+                true,
+            );
+            if case == "foreign" {
+                writer
+                    .transact(|w| {
+                        w.holder.as_mut().unwrap().run_id = Uuid::now_v7();
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            if case == "transitional" {
+                writer
+                    .transact(|w| {
+                        let transaction = Uuid::now_v7();
+                        w.prepare_release(member, transaction)?;
+                        w.block_unknown(transaction);
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            if case == "outstanding" {
+                owner.transact(|tx|{tx.execute("UPDATE policy_task_dispatch_captures SET writer_capture_json='{}',writer_capture_sha256=?1 WHERE task_id=?2",rusqlite::params!["a".repeat(64),task.task_id.to_string()]).map_err(crate::scheduler::sql)?;Ok(())}).unwrap();
+            }
+            let before = writer.load().unwrap();
+            if case == "transitional" {
+                assert_eq!(
+                    before.state,
+                    crate::writer::WriterAuthorityState::BlockedUnknown
+                );
+                assert!(before.transaction_id.is_some());
+            }
+            let lease =
+                crate::worker::RunLifecycleLease::acquire(&state, &view.workspace_id, member, 1)
+                    .unwrap();
+            if case == "claim" {
+                permit.claim = Uuid::now_v7();
+            } else {
+                let credential = crate::orchestration::OrchestrationStore::open_observer(&state)
+                    .unwrap()
+                    .member_credential(member)
+                    .unwrap()
+                    .controller_carrier()
+                    .unwrap();
+                let error = acquire_policy_task_writer(
+                    &view,
+                    &state,
+                    &retained,
+                    &permit,
+                    &lease,
+                    &credential,
+                )
+                .unwrap_err();
+                match case {
+                    "pin" => assert_eq!(error.code, "RUNTIME_PATH_COLLISION"), // The fake executable cannot qualify Current.
+                    "race" => assert_eq!(error.details["reason"], "policy_writer_reuse_changed"),
+                    "outstanding" => assert_eq!(
+                        error.details["reason"],
+                        "policy_writer_acquisition_outstanding"
+                    ),
+                    "foreign" | "transitional" => {
+                        assert_eq!(error.code, "RUN_STATE_CONFLICT");
+                        assert_eq!(error.details["operation"], "capture_snapshot");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let outcome = dispatch_policy_task(&view, &state, &retained, &permit, &lease);
+            if matches!(case, "foreign" | "transitional") {
+                let error = outcome.unwrap_err();
+                assert_eq!(error.code, "RUN_STATE_CONFLICT");
+                assert_eq!(error.details["operation"], "capture_snapshot");
+                assert_eq!(
+                    owner
+                        .connection()
+                        .query_row(
+                            "SELECT phase FROM scheduler_claims WHERE claim_id=?1",
+                            [permit.claim.to_string()],
+                            |r| r.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    "dispatching"
+                );
+            } else if case == "claim" {
+                assert!(outcome.is_err());
+            } else {
+                let outcome = outcome.unwrap();
+                assert!(matches!(
+                    outcome,
+                    crate::delegation_service::MemberDispatchOutcome::Uncertain { .. }
+                ));
+                owner
+                    .transact(|tx| {
+                        crate::scheduler::finish_dispatch(
+                            tx,
+                            &permit,
+                            &outcome,
+                            crate::scheduler::now_ms()?,
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(
+                    owner
+                        .connection()
+                        .query_row(
+                            "SELECT phase FROM scheduler_claims WHERE claim_id=?1",
+                            [permit.claim.to_string()],
+                            |r| r.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    "unknown"
+                );
+            }
+            let calls = worker.calls.lock().unwrap();
+            assert!(!calls.iter().any(|v| v == "run.submit"));
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|v| v.as_str() == "run.verify_caller_policy")
+                    .count(),
+                if matches!(case, "pin" | "race") { 2 } else { 0 }
+            );
+            drop(calls);
+            if case != "race" {
+                assert_eq!(writer.load().unwrap(), before);
+            }
+            assert_eq!(owner.connection().query_row("SELECT count(*) FROM orchestration_events WHERE session_id=?1 AND kind IN ('policy_task_writer_captured','policy_task_writer_released')",[session.session_id.to_string()],|r|r.get::<_,u64>(0)).unwrap(),0);
+            assert_eq!(
+                crate::orchestration::policy_task::load(
+                    owner.connection(),
+                    &state,
+                    session.session_id,
+                    task.task_id
+                )
+                .unwrap()
+                .unwrap()
+                .capture
+                .deadline_ms,
+                retained.capture.deadline_ms
+            );
+            drop(lease);
+            drop(worker);
+            drop(owner);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn caller_policy_read_task_refuses_its_target_writer_before_submit() {
+        let (root, state, session, member, task) =
+            crate::orchestration::tests::caller_policy_dispatch_fixture("read_only");
+        let manifest = RunStore::new(SystemWorkspacePlatform, &state)
+            .load_manifest(member)
+            .unwrap();
+        let view = WorkspaceView {
+            workspace_id: manifest.workspace_id.clone(),
+            canonical_path: manifest.canonical_workspace.clone(),
+            mode: crate::workspace::WorkspaceMode::NonGit,
+            created: false,
+        };
+        let worker = ScriptedWorker::start_member_with_witness(&view, &state, &manifest, 0, true);
+        let writer =
+            crate::writer::WriterStore::new(&state, &view.workspace_id, DarwinSystem.current_uid());
+        let holder = crate::writer::WriterStore::holder(
+            member,
+            manifest.profile.profile_name.clone(),
+            &manifest.controller,
+            1,
+            manifest.profile.initial_server_key.clone(),
+            1,
+            Some("member-thread".into()),
+            RunLifecycle::Idle,
+        );
+        writer
+            .transact(|w| {
+                let id = Uuid::now_v7();
+                let (_, g) = w.prepare_acquire(member, holder, id)?;
+                w.commit_acquire(id, g)
+            })
+            .unwrap();
+        let original = writer.load().unwrap();
+        let mut owner =
+            EngagementStore::open(&EngagementStore::workspace_database_path(&state)).unwrap();
+        let permit = owner
+            .transact(|tx| {
+                let p = crate::scheduler::claim(
+                    tx,
+                    crate::assignment_queue::Owner::Managed(session.session_id),
+                    member,
+                    crate::scheduler::now_ms()?,
+                )?
+                .unwrap();
+                crate::scheduler::prepare_dispatch(tx, &p, crate::scheduler::now_ms()?)?;
+                Ok(p)
+            })
+            .unwrap();
+        let retained = crate::orchestration::policy_task::load(
+            owner.connection(),
+            &state,
+            session.session_id,
+            task.task_id,
+        )
+        .unwrap()
+        .unwrap();
+        let original_task_state = owner
+            .connection()
+            .query_row(
+                "SELECT state FROM brokered_tasks WHERE task_id=?1",
+                [task.task_id.to_string()],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(original_task_state, "accepted");
+        let lease =
+            crate::worker::RunLifecycleLease::acquire(&state, &view.workspace_id, member, 1)
+                .unwrap();
+        let outcome = dispatch_policy_task(&view, &state, &retained, &permit, &lease).unwrap();
+        assert!(
+            matches!(outcome,crate::delegation_service::MemberDispatchOutcome::Refused {ref code,..} if code=="WRITE_AUTHORITY_HELD")
+        );
+        assert_eq!(writer.load().unwrap(), original);
+        assert!(worker.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            owner
+                .connection()
+                .query_row(
+                    "SELECT state FROM brokered_tasks WHERE task_id=?1",
+                    [task.task_id.to_string()],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            original_task_state
+        );
+        drop(lease);
+        drop(worker);
+        drop(owner);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn writers(member: &ManagedMember) -> crate::writer::WriterStore {

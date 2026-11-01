@@ -28,7 +28,8 @@ TASK-092 are COMPLETE. EPIC-020 and TASK-076 through TASK-079 are COMPLETE.
 EPIC-009 is ACTIVE; EPIC-021 and EPIC-022 remain PLANNED for v0.1.4, in that
 execution order. TASK-067 is COMPLETE;
 TASK-068 through TASK-079 are COMPLETE;
-TASK-080 and TASK-081 are COMPLETE; TASK-082 through TASK-089 remain PLANNED.
+TASK-080 through TASK-083 and TASK-027 are COMPLETE;
+TASK-084 through TASK-089 remain PLANNED.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -2764,7 +2765,7 @@ Handoff: Complete exchange execution/delivery and wait safety for TASK-027.
 
 ### TASK-027: Durable Mailbox, Virtual Actor, and Collaboration Plane
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on TASK-080 through TASK-083, completed EPIC-020, completed `EPIC-008` (`MILESTONE-BH1-P`) and the `TASK-023`/`TASK-024`
 foundations, including selected transport TASK-025 and provider acceptance

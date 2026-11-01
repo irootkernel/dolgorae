@@ -356,6 +356,50 @@ pub(crate) fn require_recorded_binding_under_lifecycle_locks(
     }
 }
 
+/// Exact qualified selection is checked again under the existing lifecycle
+/// locks. This reads the current registry and history without recording either.
+pub(crate) fn require_exact_binding_under_lifecycle_locks(
+    root: &Path,
+    expected: &ProfileBindingRecord,
+) -> Result<(), MachineError> {
+    let registry = load_registry(root)?;
+    let definition = registry
+        .profiles
+        .get(&expected.selected_name)
+        .ok_or_else(|| {
+            MachineError::new(
+                "PROFILE_NOT_FOUND",
+                "selected Profile is absent",
+                false,
+                json!({"profile":expected.selected_name}),
+            )
+        })?;
+    let text = serde_json::to_string(definition).map_err(|e| {
+        MachineError::profile_config_invalid(root.join("profiles.yaml"), e.to_string())
+    })?;
+    let parsed = crate::jcs::parse(&text).map_err(|e| {
+        MachineError::profile_config_invalid(root.join("profiles.yaml"), e.to_string())
+    })?;
+    let current = crate::jcs::sha256_hex(&crate::jcs::canonicalize(&parsed).map_err(|e| {
+        MachineError::profile_config_invalid(root.join("profiles.yaml"), e.to_string())
+    })?);
+    let history = load_binding_history(root)?;
+    if current != expected.definition_sha256
+        || history.bindings.get(&format!(
+            "{}:{}",
+            expected.selected_name, expected.server_key
+        )) != Some(expected)
+    {
+        return Err(MachineError::new(
+            "PROFILE_MISMATCH",
+            "selected Profile binding changed before retirement",
+            false,
+            json!({"profile":expected.selected_name,"field":"recorded_binding","expected":expected,"actual":history.bindings.get(&format!("{}:{}",expected.selected_name,expected.server_key))}),
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_post_cut_arguments(
     operation: ProfileOperation,
     arguments: &[OsString],

@@ -40,22 +40,7 @@ impl SessionPolicySnapshot {
         self.validate(state_root)?;
         match self {
             Self::Legacy(policy) => crate::specialist_policy::validate_live_provider_policy(policy),
-            Self::Caller(captures) => {
-                if captures.policy().roles.iter().any(|role| {
-                    role.reuse_policy == "reuse_any_compatible"
-                        || role.collaboration_source
-                        || role.collaboration_target
-                        || role.activation_policy == "on_mail"
-                }) {
-                    return Err(MachineError::new(
-                        "POLICY_REJECTED",
-                        "policy is outside the live provider slice",
-                        false,
-                        serde_json::json!({"policy":captures.policy().policy_name,"operation":"run.start"}),
-                    ));
-                }
-                Ok(())
-            }
+            Self::Caller(_) => Ok(()),
         }
     }
     pub fn digest(&self) -> Result<String, MachineError> {
@@ -180,5 +165,53 @@ impl SessionRoleSnapshot {
             Self::Legacy(role) => &role.agent_configuration,
             Self::Caller(capture) => &capture.agent_configuration,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_caller_collaboration_uses_checked_captures_and_preserves_legacy_gate() {
+        let mut value: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../docs/protocol/examples/accepted-policy-session-v1-captured.valid.json"
+        ))
+        .unwrap();
+        let role = &mut value["captures"]["policy"]["roles"][0];
+        role["reuse_policy"] = serde_json::json!("reuse_any_compatible");
+        role["collaboration_source"] = serde_json::json!(true);
+        role["collaboration_target"] = serde_json::json!(true);
+        role["activation_policy"] = serde_json::json!("on_mail");
+        let captures: PreparedPolicySession =
+            serde_json::from_value(value["captures"].clone()).unwrap();
+        let root = Path::new("/example/home/.dolgorae/workspaces").join(captures.workspace_id());
+        let snapshot = SessionPolicySnapshot::Caller(captures);
+        snapshot.validate_live(&root).unwrap();
+        assert!(
+            snapshot
+                .validate_live(Path::new("/foreign/workspace"))
+                .is_err()
+        );
+        let mut broken = value["captures"].clone();
+        broken["configurations"]["reviewer"]["model"] = serde_json::json!("changed");
+        if let Ok(captures) = serde_json::from_value::<PreparedPolicySession>(broken) {
+            assert!(
+                SessionPolicySnapshot::Caller(captures)
+                    .validate_live(&root)
+                    .is_err()
+            );
+        }
+        // Existing Legacy provider validation remains the sole Legacy gate.
+        let legacy: InstalledSpecialistPolicy = serde_json::from_slice(include_bytes!(
+            "../docs/protocol/examples/specialist-policy-v2.valid.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            SessionPolicySnapshot::Legacy(legacy.clone())
+                .validate_live(&root)
+                .map_err(|e| e.code),
+            crate::specialist_policy::validate_live_provider_policy(&legacy).map_err(|e| e.code),
+        );
     }
 }

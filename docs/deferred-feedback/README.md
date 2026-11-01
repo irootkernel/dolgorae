@@ -507,9 +507,61 @@ expiry notification wiring changes.
 - Reason for deferral: broader classification requires a defined output scope
   and evidence of which additional payloads it must recognize. Existing required
   privacy checks and the prohibition on exposing protected output still apply.
-- Revisit condition: changing model-visible result reads, result formats or
-  credential handling. Qualify each changed output path for privacy before
-  relying on any new backstop.
+- Coverage: the Source-bound model reader rejects whole immutable
+  bodies for selected credential assignments, private paths, raw frames and
+  known structural reasoning items. Exact-byte and foreign-source regressions
+  cover that bounded vocabulary; they do not certify arbitrary unlabeled text.
+- Revisit condition: further changes to model-visible result reads, result
+  formats or credential handling. Qualify each changed output path for privacy
+  before relying on an additional backstop.
+
+## DF-043: Improve immediate policy-task settlement diagnostics
+
+- Finding: the Worker terminal hook relies on owned reconciliation when direct
+  policy-task settlement fails. Repeated refusal has limited immediate
+  diagnostic detail.
+- Owner: policy-task runtime diagnostics.
+- Reason for deferral: the original terminal and accepted execution authority
+  remain durable, and central reconciliation retries their settlement. No lost
+  original result or required recovery failure is established. Diagnostic work
+  must preserve safe errors and must not log raw runtime failures or authorize
+  execution replay.
+- Revisit condition: changes to policy-task settlement or operator diagnostics.
+
+## DF-044: Bound repeated collaboration artifact validation cost
+
+- Owner: Collaboration storage maintainers
+- Finding: each Source result page rechecks the complete bounded artifact and
+  privacy vocabulary inside the receipt transaction. Paging a large artifact
+  repeats that work while other workspace writes wait.
+- Reason for deferral: every page must retain current integrity, privacy and
+  exact-replay checks. No required liveness failure is established; moving or
+  caching validation needs a separate design for changed artifact bytes and
+  receipt races, supported by contention measurements.
+- Revisit condition: changing artifact size limits, page-read concurrency or
+  the collaboration storage transaction boundary.
+
+## DF-045: Check private state and public schema evolution together
+
+- Owner: Orchestration state contract maintainers
+- Finding: checked materialization uses a private Rust representation alongside
+  the public orchestration-state-v2 JSON schema. Future field changes must keep
+  those representations consistent.
+- Reason for deferral: no current field mismatch is established. Existing
+  materialization, refusal and schema-example checks cover their current
+  contracts; a produced-document schema check would strengthen future changes.
+- Revisit condition: changing the orchestration-state-v2 fields or their owners.
+
+## DF-046: Refine inbound orchestration child dependency checks
+
+- Owner: Architecture contract maintainers
+- Finding: per-child dependency checks distinguish outbound imports, while
+  inbound graph entries name the orchestration parent. New crate-visible child
+  consumers can therefore retain the same parent-level graph entry.
+- Reason for deferral: no forbidden current caller is established. A finer
+  graph needs explicit allowed consumers for each crate-visible child and must
+  preserve existing approved calls and the private checked-state boundary.
+- Revisit condition: adding an orchestration child or changing its consumers.
 
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the

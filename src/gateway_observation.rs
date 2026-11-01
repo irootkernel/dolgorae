@@ -187,11 +187,16 @@ pub fn list_pending(
     snapshot: &RunSnapshot,
     context: pb::ResponseContext,
 ) -> Result<pb::ListPendingInteractionsResponse, MachineError> {
-    let items = interactions(state_root, snapshot)?
+    let mut items = interactions(state_root, snapshot)?
         .into_iter()
         .filter(|value| value.pending_at(snapshot))
         .map(|value| value.summary(snapshot))
         .collect::<Result<Vec<_>, _>>()?;
+    for binding in snapshot.broker_approvals()? {
+        if binding.status == "pending" {
+            items.push(broker_summary(binding, snapshot)?);
+        }
+    }
     Ok(pb::ListPendingInteractionsResponse {
         context: Some(context),
         items,
@@ -446,6 +451,81 @@ pub fn artifact_chunk(
         eof: value.eof,
         total_byte_length: value.total_byte_length,
         sha256: value.sha256,
+    })
+}
+
+pub(crate) fn broker_summary(
+    binding: &crate::interaction::BrokerApprovalBinding,
+    snapshot: &RunSnapshot,
+) -> Result<pb::InteractionSummary, MachineError> {
+    let pending = binding.status == "pending";
+    Ok(pb::InteractionSummary {
+        interaction_id: binding.approval_id.to_string(),
+        run_id: binding.session_id.to_string(),
+        kind: pb::InteractionKind::UserInput as i32,
+        status: if pending {
+            pb::InteractionStatus::Pending
+        } else if binding.status == "stale" {
+            pb::InteractionStatus::Stale
+        } else {
+            pb::InteractionStatus::Resolved
+        } as i32,
+        safe_title: if pending {
+            "User input requested"
+        } else {
+            "Interaction resolved"
+        }
+        .into(),
+        controller_kind: gateway_projection::controller_kind(snapshot.controller.kind) as i32,
+        requires_user_escalation: pending,
+        contains_protected_input: false,
+        created_at: Some(gateway_event::timestamp(&binding.opened_at)?),
+        expires_at: None,
+        resolved_at: binding
+            .resolved_at
+            .as_deref()
+            .or(binding.invalidated_at.as_deref())
+            .map(gateway_event::timestamp)
+            .transpose()?,
+        state_revision: snapshot.stamp.interaction_state_revision,
+    })
+}
+
+pub(crate) fn broker_controller(
+    binding: &crate::interaction::BrokerApprovalBinding,
+    snapshot: &RunSnapshot,
+) -> Result<pb::ControllerInteraction, MachineError> {
+    use pb::controller_interaction::Payload;
+    Ok(pb::ControllerInteraction {
+        summary: Some(broker_summary(binding, snapshot)?),
+        response_schema_id: "dolgorae.interaction.user-input/v1".into(),
+        stamp: Some(gateway_projection::stamp(&snapshot.stamp)),
+        payload: Some(Payload::UserInput(pb::UserInputInteraction {
+            is_blocking: true,
+            questions: vec![pb::InteractionQuestion {
+                id: "specialist_approval".into(),
+                header: "Specialist".into(),
+                question: format!(
+                    "Approve a {} Specialist for this request?",
+                    binding.role_ref
+                ),
+                allows_other: false,
+                is_secret: false,
+                options: Some(pb::InteractionOptions {
+                    items: vec![
+                        pb::InteractionOption {
+                            label: "approve".into(),
+                            description: "Create the policy-admitted Specialist.".into(),
+                        },
+                        pb::InteractionOption {
+                            label: "reject".into(),
+                            description: "Reject this Specialist request.".into(),
+                        },
+                    ],
+                }),
+            }],
+        })),
+        decisions: Vec::new(),
     })
 }
 

@@ -627,6 +627,32 @@ pub(crate) fn project_audit_event(
             .ok_or_else(|| invalid("semantic event is missing a typed field"))
     };
     let data = match audit.kind() {
+        AuditKind::TurnIntent => {
+            let Some(marker) = crate::interaction::broker_record(audit)
+                .map_err(|_| invalid("Broker approval event"))?
+            else {
+                return Ok(None);
+            };
+            if marker.phase == "intent" {
+                return Ok(None);
+            }
+            if marker.binding.status != "pending" {
+                ClientEventData::InteractionResolved(InteractionResolvedPayload {
+                    request_id: marker.binding.approval_id.to_string(),
+                    outcome: if marker.binding.status == "stale" {
+                        "stale"
+                    } else {
+                        "answered"
+                    }
+                    .into(),
+                })
+            } else {
+                ClientEventData::InteractionOpened(InteractionOpenedPayload {
+                    request_id: marker.binding.approval_id.to_string(),
+                    interaction_kind: "user_input".into(),
+                })
+            }
+        }
         AuditKind::RunCreated | AuditKind::WriteContinuationCreated => {
             ClientEventData::RunStateChanged(RunStateEventPayload {
                 previous: None,

@@ -36,6 +36,21 @@ and both the exact old and new confirmed server keys, whether or not
 `--interrupt` is used. Obtain keys and membership facts from current public
 status and diagnostics, never from a path name or old output.
 
+For an explicitly selected Caller-qualified generation, use the exact key from
+the owning caller's checked current preparation or accepted binding:
+
+```sh
+dolgorae profile server start <name> --confirm-server-key <key>
+dolgorae profile server stop <name> --confirm-server-key <key> --operator-file <path>
+```
+
+The start records that checked binding before its deny-rollover launch. Qualified
+stop is non-interrupting and refuses `--interrupt`; it rechecks the original
+binding, current definition, membership and process identity. Omitting the key
+keeps generic selection. Name-based status, restart and migration retain their
+generic contract and do not discover a qualified generation implicitly. A key
+never grants lifecycle authorization or permission to replace another launch.
+
 Do not infer authorization for stop, restart, migrate, membership tombstone, or
 profile-state reset from a failed doctor check. Read the current failure details,
 verify membership and process identity through supported commands, present the

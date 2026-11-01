@@ -9,8 +9,10 @@ development commits.
 
 ### Added
 
-- Add gated authenticated Specialist consultation with durable scheduling, activation, passivation, immutable results and restart-safe collection;
-  bounded blocking waits preserve execution authority while live integration remains pending.
+- Enable durable Specialist collaboration in Caller-workspace Sessions with bounded assignment queues, compatible reuse, activation guards, and source-owned immutable result reads.
+  Restart-safe collection and bounded blocking waits preserve execution authority.
+- Select qualified Profile server bindings with `--confirm-server-key` for start
+  and non-interrupting stop, refusing qualified `--interrupt` requests.
 
 - Route current permission and protected MCP forms through public-v2 Controller decisions, preserving each request's allowed decisions
   and immediate policy declines for private ownerless or fixed read-only work.

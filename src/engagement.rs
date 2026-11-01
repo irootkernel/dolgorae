@@ -635,6 +635,20 @@ impl EngagementStore {
         path: &Path,
         faults: Arc<dyn EngagementFaultInjector>,
     ) -> Result<Self, MachineError> {
+        match Self::open_existing_with_faults(path, Arc::clone(&faults))? {
+            Some(store) => Ok(store),
+            None => Self::create_fresh(path, faults),
+        }
+    }
+
+    pub(crate) fn open_existing(path: &Path) -> Result<Option<Self>, MachineError> {
+        Self::open_existing_with_faults(path, Arc::new(NoEngagementFaults))
+    }
+
+    fn open_existing_with_faults(
+        path: &Path,
+        faults: Arc<dyn EngagementFaultInjector>,
+    ) -> Result<Option<Self>, MachineError> {
         if !path.is_absolute() {
             return Err(invalid(
                 "database",
@@ -654,7 +668,7 @@ impl EngagementStore {
             if record.is_some() {
                 return Err(namespace_record_without_database());
             }
-            return Self::create_fresh(path, faults);
+            return Ok(None);
         };
         match probe.schema_generation {
             AdmittedGeneration::Six => {
@@ -670,14 +684,14 @@ impl EngagementStore {
                     crate::storage_observation::CheckedConnection::open(path, false)?;
                 publish_birth_record(path, birth_id)?;
                 crate::storage_observation::initialize_content(&mut connection)?;
-                Ok(Self { connection, faults })
+                Ok(Some(Self { connection, faults }))
             }
             AdmittedGeneration::Legacy(generation) => {
                 drop(probe);
                 if record.is_some() {
                     return Err(namespace_record_mismatch());
                 }
-                Self::migrate_legacy(path, generation, faults)
+                Self::migrate_legacy(path, generation, faults).map(Some)
             }
         }
     }
@@ -2409,27 +2423,7 @@ impl EngagementStore {
         &self,
         engagement_id: Uuid,
     ) -> Result<(String, ControllerBinding), MachineError> {
-        let row: Option<(String, Option<String>, String, String)> = self
-            .connection
-            .query_row(
-                "SELECT workspace_id,controller_binding_json,controller_sha256,authority_kind
-                 FROM engagements WHERE engagement_id=?1",
-                [engagement_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()
-            .map_err(internal)?;
-        let (workspace_id, binding_json, digest, kind) = row.ok_or_else(not_found)?;
-        if kind != "external_v1" {
-            return Err(not_found());
-        }
-        let binding_json = binding_json.ok_or_else(|| integrity("owner binding is missing"))?;
-        if digest != sha256_hex(binding_json.as_bytes()) {
-            return Err(integrity("owner binding digest does not match"));
-        }
-        let binding: ControllerBinding = serde_json::from_str(&binding_json)
-            .map_err(|_| integrity("owner binding is invalid"))?;
-        Ok((workspace_id, binding))
+        external_owner_binding_on(&self.connection, engagement_id)
     }
 
     /// Validate the successor open's immutable authority and provenance without
@@ -2438,74 +2432,7 @@ impl EngagementStore {
         &self,
         engagement_id: Uuid,
     ) -> Result<(String, ControllerBinding), MachineError> {
-        let (workspace, binding) = self.external_owner_binding(engagement_id)?;
-        let (bootstrap,external,external_hash,binding_hash):(String,Option<String>,Option<String>,String)=self.connection.query_row("SELECT bootstrap_operation_id,external_controller_ref_json,external_controller_ref_sha256,controller_sha256 FROM engagements WHERE engagement_id=?1",[engagement_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(internal)?;
-        if external.is_some() || external_hash.is_some() || Uuid::parse_str(&bootstrap).is_err() {
-            return Err(integrity("successor open provenance differs"));
-        }
-        let payload = sha256_hex(
-            format!("{bootstrap}\0{NO_EXTERNAL_PROVENANCE_SHA256}\0{binding_hash}").as_bytes(),
-        );
-        let mut events=self.connection.prepare("SELECT previous_hash,event_hash FROM events WHERE engagement_id=?1 AND kind='external_engagement_opened' AND payload_sha256=?2").map_err(internal)?;
-        let events = events
-            .query_map(params![engagement_id.to_string(), payload], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })
-            .map_err(internal)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(internal)?;
-        let [(previous, hash)] = events.as_slice() else {
-            return Err(integrity("successor open event is ambiguous"));
-        };
-        if *hash
-            != event_digest(
-                previous,
-                engagement_id,
-                "external_engagement_opened",
-                &payload,
-            )
-        {
-            return Err(integrity("successor open event differs"));
-        }
-        let mut receipts=self.connection.prepare("SELECT receipt_json,controller_principal,controller_generation FROM delegation_operations WHERE workspace_ref=?1 AND operation_kind='open_external_engagement' AND state='accepted' AND json_extract(accepted_subjects_json,'$.engagement_ref')=?2").map_err(internal)?;
-        let receipts = receipts
-            .query_map(params![workspace, engagement_id.to_string()], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, u64>(2)?,
-                ))
-            })
-            .map_err(internal)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(internal)?;
-        let [(text, principal, generation)] = receipts.as_slice() else {
-            return Err(integrity("successor open receipt is ambiguous"));
-        };
-        let receipt: OperationReceipt = serde_json::from_str(text)
-            .map_err(|_| integrity("successor open receipt is invalid"))?;
-        let expected = crate::operation::Namespace::delegation(
-            &binding.identity,
-            &workspace,
-            None,
-            "open_external_engagement",
-            &receipt.namespace.idempotency_key,
-        )
-        .map_err(|_| integrity("successor open namespace invalid"))?;
-        if principal != &expected.controller_principal
-            || *generation != binding.identity.generation
-            || receipt.accepted_subjects.engagement_ref.as_deref()
-                != Some(engagement_id.to_string().as_str())
-            || receipt.namespace.workspace_ref != workspace
-            || receipt.namespace.operation_kind != "open_external_engagement"
-        {
-            return Err(integrity("successor open owner differs"));
-        }
-        match self.intent_lookup(&receipt.namespace)? {
-            IntentLookup::Accepted(retained) if *retained == receipt => {}
-            _ => return Err(integrity("successor open authority differs")),
-        }
-        Ok((workspace, binding))
+        accepted_external_owner_on(&self.connection, engagement_id)
     }
 
     /// The accepted `install_provisioning` intent that retained one snapshot.
@@ -3848,23 +3775,7 @@ impl EngagementStore {
         engagement_id: Uuid,
         task_id: Uuid,
     ) -> Result<(String, u64), MachineError> {
-        let row: Option<(Option<String>, Option<i64>)> = self
-            .connection
-            .query_row(
-                "SELECT execution_intent,deadline_seconds FROM tasks
-                  WHERE engagement_id=?1 AND task_id=?2",
-                params![engagement_id.to_string(), task_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(internal)?;
-        let Some((Some(intent), Some(deadline))) = row else {
-            return Err(integrity("the retained dispatch facts are missing"));
-        };
-        Ok((
-            intent,
-            u64::try_from(deadline).map_err(|_| integrity("the retained deadline is invalid"))?,
-        ))
+        external_task_dispatch_facts_on(&self.connection, engagement_id, task_id)
     }
 
     /// The canonical acceptance body digest one accepted successor assignment
@@ -3875,37 +3786,12 @@ impl EngagementStore {
         engagement_id: Uuid,
         idempotency_key: &str,
     ) -> Result<Option<String>, MachineError> {
-        let row: Option<(String, String)> = self
-            .connection
-            .query_row(
-                "SELECT mutation_envelope_json,mutation_envelope_digest
-                   FROM delegation_operations
-                  WHERE workspace_ref=?1 AND scope_kind='external_engagement'
-                    AND scope_ref=?2 AND operation_kind='assign_external_specialist_task'
-                    AND idempotency_key=?3 AND state='accepted'",
-                params![workspace_ref, engagement_id.to_string(), idempotency_key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(internal)?;
-        let Some((envelope_json, digest)) = row else {
-            return Ok(None);
-        };
-        let parsed = crate::jcs::parse(&envelope_json)
-            .map_err(|_| integrity("the retained mutation envelope is not canonical JSON"))?;
-        let canonical = crate::jcs::canonicalize(&parsed)
-            .map_err(|_| integrity("the retained mutation envelope cannot be re-encoded"))?;
-        let envelope: crate::operation::Envelope = serde_json::from_slice(&canonical)
-            .map_err(|_| integrity("the retained mutation envelope is not the closed envelope"))?;
-        if crate::operation::envelope_digest(&envelope)
-            .map_err(|_| integrity("the retained mutation envelope cannot be re-digested"))?
-            != digest
-        {
-            return Err(integrity(
-                "the retained mutation envelope differs from its intent row",
-            ));
-        }
-        Ok(Some(envelope.request_body.sha256))
+        accepted_assignment_body_digest_on(
+            &self.connection,
+            workspace_ref,
+            engagement_id,
+            idempotency_key,
+        )
     }
 
     /// Every unsettled task of one member, with the Turn it is bound to.
@@ -4111,76 +3997,7 @@ impl EngagementStore {
         engagement_id: Uuid,
         task_id: Uuid,
     ) -> Result<Option<crate::delegation_identity::AcceptedTask>, MachineError> {
-        let request: Option<Option<String>> = self
-            .connection
-            .query_row(
-                "SELECT request_json FROM tasks WHERE engagement_id=?1 AND task_id=?2",
-                params![engagement_id.to_string(), task_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(internal)?;
-        let Some(Some(request)) = request else {
-            return Ok(None);
-        };
-        let accepted: crate::delegation_identity::AcceptedTask = serde_json::from_str(&request)
-            .map_err(|_| integrity("the accepted task identity is invalid"))?;
-        // The row must still be the identity the acceptance recorded, not a
-        // rewrite of the row and its bytes together.
-        let recorded: Option<(String, Option<String>)> = self
-            .connection
-            .query_row(
-                "SELECT objective_sha256,external_request_ref_json FROM tasks
-                  WHERE engagement_id=?1 AND task_id=?2",
-                params![engagement_id.to_string(), task_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(internal)?;
-        let (objective, external) =
-            recorded.ok_or_else(|| integrity("the retained task is missing"))?;
-        if let Some(external) = external {
-            let external: serde_json::Value = serde_json::from_str(&external)
-                .map_err(|_| integrity("the retained task reference is invalid"))?;
-            if let Some(accepted_digest) = external
-                .get("accepted_task_digest")
-                .and_then(serde_json::Value::as_str)
-            {
-                let digest = accepted.digest()?;
-                if accepted_digest != digest || objective != digest {
-                    return Err(integrity(
-                        "the retained task identity differs from the accepted one",
-                    ));
-                }
-            }
-        }
-        // The retained bytes are the acceptance's own evidence: every reference
-        // must still resolve to the byte it names.
-        let (task_body, contexts, target) = accepted_task_content(&self.connection, task_id)?
-            .ok_or_else(|| integrity("the accepted task bytes are missing"))?;
-        let digest_of = |bytes: &[u8]| format!("sha256:{}", sha256_hex(bytes));
-        if digest_of(&task_body) != accepted.task_body.sha256 {
-            return Err(integrity(
-                "the accepted task body differs from its reference",
-            ));
-        }
-        for reference in &accepted.contexts {
-            let bytes = match reference.kind.as_str() {
-                "accepted_context" => contexts
-                    .iter()
-                    .find(|(identity, _)| identity == &reference.identity)
-                    .map(|(_, bytes)| bytes),
-                "review_target" => target.as_ref(),
-                _ => None,
-            }
-            .ok_or_else(|| integrity("the accepted task context is missing"))?;
-            if digest_of(bytes) != reference.content.sha256 {
-                return Err(integrity(
-                    "the accepted task context differs from its reference",
-                ));
-            }
-        }
-        Ok(Some(accepted))
+        external_task_identity_on(&self.connection, engagement_id, task_id)
     }
 
     /// Read one keyed intent namespace without any write effect.
@@ -8100,6 +7917,243 @@ fn internal(reason: impl std::fmt::Display) -> MachineError {
     )
 }
 
+// Snapshot consumers share the original owner validation inside their read transaction.
+pub(crate) fn external_owner_binding_on(
+    connection: &Connection,
+    engagement_id: Uuid,
+) -> Result<(String, ControllerBinding), MachineError> {
+    let row: Option<(String, Option<String>, String, String)> = connection
+        .query_row(
+            "SELECT workspace_id,controller_binding_json,controller_sha256,authority_kind
+                 FROM engagements WHERE engagement_id=?1",
+            [engagement_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let (workspace_id, binding_json, digest, kind) = row.ok_or_else(not_found)?;
+    if kind != "external_v1" {
+        return Err(not_found());
+    }
+    let binding_json = binding_json.ok_or_else(|| integrity("owner binding is missing"))?;
+    if digest != sha256_hex(binding_json.as_bytes()) {
+        return Err(integrity("owner binding digest does not match"));
+    }
+    let binding: ControllerBinding =
+        serde_json::from_str(&binding_json).map_err(|_| integrity("owner binding is invalid"))?;
+    Ok((workspace_id, binding))
+}
+
+pub(crate) fn accepted_external_owner_on(
+    connection: &Connection,
+    engagement_id: Uuid,
+) -> Result<(String, ControllerBinding), MachineError> {
+    let (workspace, binding) = external_owner_binding_on(connection, engagement_id)?;
+    let (bootstrap,external,external_hash,binding_hash):(String,Option<String>,Option<String>,String)=connection.query_row("SELECT bootstrap_operation_id,external_controller_ref_json,external_controller_ref_sha256,controller_sha256 FROM engagements WHERE engagement_id=?1",[engagement_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(internal)?;
+    if external.is_some() || external_hash.is_some() || Uuid::parse_str(&bootstrap).is_err() {
+        return Err(integrity("successor open provenance differs"));
+    }
+    let payload = sha256_hex(
+        format!("{bootstrap}\0{NO_EXTERNAL_PROVENANCE_SHA256}\0{binding_hash}").as_bytes(),
+    );
+    let mut events=connection.prepare("SELECT previous_hash,event_hash FROM events WHERE engagement_id=?1 AND kind='external_engagement_opened' AND payload_sha256=?2").map_err(internal)?;
+    let events = events
+        .query_map(params![engagement_id.to_string(), payload], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)?;
+    let [(previous, hash)] = events.as_slice() else {
+        return Err(integrity("successor open event is ambiguous"));
+    };
+    if *hash
+        != event_digest(
+            previous,
+            engagement_id,
+            "external_engagement_opened",
+            &payload,
+        )
+    {
+        return Err(integrity("successor open event differs"));
+    }
+    let mut receipts=connection.prepare("SELECT receipt_json,controller_principal,controller_generation FROM delegation_operations WHERE workspace_ref=?1 AND operation_kind='open_external_engagement' AND state='accepted' AND json_extract(accepted_subjects_json,'$.engagement_ref')=?2").map_err(internal)?;
+    let receipts = receipts
+        .query_map(params![workspace, engagement_id.to_string()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, u64>(2)?,
+            ))
+        })
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)?;
+    let [(text, principal, generation)] = receipts.as_slice() else {
+        return Err(integrity("successor open receipt is ambiguous"));
+    };
+    let receipt: OperationReceipt =
+        serde_json::from_str(text).map_err(|_| integrity("successor open receipt is invalid"))?;
+    let expected = crate::operation::Namespace::delegation(
+        &binding.identity,
+        &workspace,
+        None,
+        "open_external_engagement",
+        &receipt.namespace.idempotency_key,
+    )
+    .map_err(|_| integrity("successor open namespace invalid"))?;
+    if principal != &expected.controller_principal
+        || *generation != binding.identity.generation
+        || receipt.accepted_subjects.engagement_ref.as_deref()
+            != Some(engagement_id.to_string().as_str())
+        || receipt.namespace.workspace_ref != workspace
+        || receipt.namespace.operation_kind != "open_external_engagement"
+    {
+        return Err(integrity("successor open owner differs"));
+    }
+    match intent_lookup(connection, &receipt.namespace)? {
+        IntentLookup::Accepted(retained) if *retained == receipt => {}
+        _ => return Err(integrity("successor open authority differs")),
+    }
+    Ok((workspace, binding))
+}
+
+pub(crate) fn external_task_identity_on(
+    connection: &Connection,
+    engagement_id: Uuid,
+    task_id: Uuid,
+) -> Result<Option<crate::delegation_identity::AcceptedTask>, MachineError> {
+    let request: Option<Option<String>> = connection
+        .query_row(
+            "SELECT request_json FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+            params![engagement_id.to_string(), task_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some(Some(request)) = request else {
+        return Ok(None);
+    };
+    let accepted: crate::delegation_identity::AcceptedTask = serde_json::from_str(&request)
+        .map_err(|_| integrity("the accepted task identity is invalid"))?;
+    // The row must still be the identity the acceptance recorded, not a
+    // rewrite of the row and its bytes together.
+    let recorded: Option<(String, Option<String>)> = connection
+        .query_row(
+            "SELECT objective_sha256,external_request_ref_json FROM tasks
+                  WHERE engagement_id=?1 AND task_id=?2",
+            params![engagement_id.to_string(), task_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let (objective, external) =
+        recorded.ok_or_else(|| integrity("the retained task is missing"))?;
+    if let Some(external) = external {
+        let external: serde_json::Value = serde_json::from_str(&external)
+            .map_err(|_| integrity("the retained task reference is invalid"))?;
+        if let Some(accepted_digest) = external
+            .get("accepted_task_digest")
+            .and_then(serde_json::Value::as_str)
+        {
+            let digest = accepted.digest()?;
+            if accepted_digest != digest || objective != digest {
+                return Err(integrity(
+                    "the retained task identity differs from the accepted one",
+                ));
+            }
+        }
+    }
+    // The retained bytes are the acceptance's own evidence: every reference
+    // must still resolve to the byte it names.
+    let (task_body, contexts, target) = accepted_task_content(connection, task_id)?
+        .ok_or_else(|| integrity("the accepted task bytes are missing"))?;
+    let digest_of = |bytes: &[u8]| format!("sha256:{}", sha256_hex(bytes));
+    if digest_of(&task_body) != accepted.task_body.sha256 {
+        return Err(integrity(
+            "the accepted task body differs from its reference",
+        ));
+    }
+    for reference in &accepted.contexts {
+        let bytes = match reference.kind.as_str() {
+            "accepted_context" => contexts
+                .iter()
+                .find(|(identity, _)| identity == &reference.identity)
+                .map(|(_, bytes)| bytes),
+            "review_target" => target.as_ref(),
+            _ => None,
+        }
+        .ok_or_else(|| integrity("the accepted task context is missing"))?;
+        if digest_of(bytes) != reference.content.sha256 {
+            return Err(integrity(
+                "the accepted task context differs from its reference",
+            ));
+        }
+    }
+    Ok(Some(accepted))
+}
+
+pub(crate) fn external_task_dispatch_facts_on(
+    connection: &Connection,
+    engagement_id: Uuid,
+    task_id: Uuid,
+) -> Result<(String, u64), MachineError> {
+    let row: Option<(Option<String>, Option<i64>)> = connection
+        .query_row(
+            "SELECT execution_intent,deadline_seconds FROM tasks
+                  WHERE engagement_id=?1 AND task_id=?2",
+            params![engagement_id.to_string(), task_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((Some(intent), Some(deadline))) = row else {
+        return Err(integrity("the retained dispatch facts are missing"));
+    };
+    Ok((
+        intent,
+        u64::try_from(deadline).map_err(|_| integrity("the retained deadline is invalid"))?,
+    ))
+}
+
+pub(crate) fn accepted_assignment_body_digest_on(
+    connection: &Connection,
+    workspace_ref: &str,
+    engagement_id: Uuid,
+    idempotency_key: &str,
+) -> Result<Option<String>, MachineError> {
+    let row: Option<(String, String)> = connection
+        .query_row(
+            "SELECT mutation_envelope_json,mutation_envelope_digest
+                   FROM delegation_operations
+                  WHERE workspace_ref=?1 AND scope_kind='external_engagement'
+                    AND scope_ref=?2 AND operation_kind='assign_external_specialist_task'
+                    AND idempotency_key=?3 AND state='accepted'",
+            params![workspace_ref, engagement_id.to_string(), idempotency_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((envelope_json, digest)) = row else {
+        return Ok(None);
+    };
+    let parsed = crate::jcs::parse(&envelope_json)
+        .map_err(|_| integrity("the retained mutation envelope is not canonical JSON"))?;
+    let canonical = crate::jcs::canonicalize(&parsed)
+        .map_err(|_| integrity("the retained mutation envelope cannot be re-encoded"))?;
+    let envelope: crate::operation::Envelope = serde_json::from_slice(&canonical)
+        .map_err(|_| integrity("the retained mutation envelope is not the closed envelope"))?;
+    if crate::operation::envelope_digest(&envelope)
+        .map_err(|_| integrity("the retained mutation envelope cannot be re-digested"))?
+        != digest
+    {
+        return Err(integrity(
+            "the retained mutation envelope differs from its intent row",
+        ));
+    }
+    Ok(Some(envelope.request_body.sha256))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8248,6 +8302,10 @@ mod tests {
             std::fs::write(namespace_birth_path(&state), record.as_bytes()).unwrap();
             let error = open_error(EngagementStore::open(&path));
             assert_eq!(error.code, "RECOVERY_REQUIRED", "empty={empty_database}");
+            match EngagementStore::open_existing(&path) {
+                Err(error) => assert_eq!(error.code, "RECOVERY_REQUIRED"),
+                Ok(_) => panic!("existing-only open hid a lost born database"),
+            }
             assert_eq!(
                 std::fs::read_to_string(namespace_birth_path(&state)).unwrap(),
                 record
@@ -8265,6 +8323,29 @@ mod tests {
                 ensure_delegation_namespace(&state).unwrap_err().code,
                 "RECOVERY_REQUIRED"
             );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn existing_owner_open_skips_bootstrap_and_preserves_legacy_migration() {
+        for generation in 0..=5 {
+            let root = generation_root();
+            let path = generation_database(&root);
+            if generation == 0 {
+                assert!(EngagementStore::open_existing(&path).unwrap().is_none());
+                assert!(!path.exists());
+                std::fs::write(&path, b"").unwrap();
+                assert!(EngagementStore::open_existing(&path).unwrap().is_none());
+                assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+                assert!(!namespace_birth_path(&root.join("state")).exists());
+                drop(EngagementStore::open(&path).unwrap());
+            } else {
+                legacy_database(&root, generation);
+                drop(EngagementStore::open_existing(&path).unwrap().unwrap());
+            }
+            assert_eq!(observed_generation(&path).as_deref(), Some("6"));
+            assert!(namespace_birth_path(&root.join("state")).exists());
             std::fs::remove_dir_all(root).unwrap();
         }
     }

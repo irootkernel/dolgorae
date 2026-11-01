@@ -500,8 +500,15 @@ pub fn run_projection(
         thread,
         active_turn,
         event_cursor: snapshot.stamp.captured_head_cursor.clone(),
-        pending_interaction_count: u32::try_from(state.pending_requests.len())
-            .map_err(|_| missing("bounded pending interaction count"))?,
+        pending_interaction_count: u32::try_from(
+            state.pending_requests.len()
+                + snapshot
+                    .broker_approvals()?
+                    .iter()
+                    .filter(|b| b.status == "pending")
+                    .count(),
+        )
+        .map_err(|_| missing("bounded pending interaction count"))?,
         recovery: Some(if facts.profile_cleanup_required {
             pb::RecoveryProjection {
                 state: pb::RecoveryState::Required as i32,

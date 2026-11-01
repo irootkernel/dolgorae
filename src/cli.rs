@@ -367,7 +367,9 @@ pub enum ProfileCommand {
 #[derive(Debug, Subcommand)]
 pub enum ProfileServerCommand {
     Status(LeafArgs),
+    /// Start the generic Profile, or confirm the exact current qualified key.
     Start(LeafArgs),
+    /// Stop with Operator authority; qualified selection is non-interrupting.
     Stop(LeafArgs),
     Restart(LeafArgs),
     Migrate(LeafArgs),
@@ -1007,7 +1009,8 @@ fn leaf_spec(command: &str) -> LeafSpec {
         "profile.list" => spec(W, &[], &[], 0, 0),
         "profile.show" | "profile.remove" | "profile.membership.verify" => spec(W, &[], &[], 1, 1),
         "profile.doctor" => spec(W, &["--launch-probe", "--leave-running"], &[], 1, 1),
-        "profile.server.status" | "profile.server.start" => spec(W, &[], &[], 1, 1),
+        "profile.server.status" => spec(W, &[], &[], 1, 1),
+        "profile.server.start" => spec(&["--workspace", "--confirm-server-key"], &[], &[], 1, 1),
         "profile.server.stop" | "profile.server.restart" => spec(
             &[
                 "--workspace",

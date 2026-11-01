@@ -5522,15 +5522,57 @@ async fn native_snapshot(
     fixture: &Fixture,
     id: &str,
 ) -> pb::RunProjection {
-    runs.get_run(pb::GetRunRequest {
-        context: context(),
-        run: fixture.run_ref(id),
-    })
+    native_snapshot_until(
+        runs,
+        fixture,
+        id,
+        tokio::time::Instant::now() + Duration::from_secs(30),
+    )
     .await
-    .unwrap()
-    .into_inner()
-    .run
-    .unwrap()
+}
+
+async fn native_snapshot_until(
+    runs: &mut pb::run_service_client::RunServiceClient<tonic::transport::Channel>,
+    fixture: &Fixture,
+    id: &str,
+    until: tokio::time::Instant,
+) -> pb::RunProjection {
+    for attempt in 0..3 {
+        let remaining = until
+            .checked_duration_since(tokio::time::Instant::now())
+            .expect("original snapshot observation deadline elapsed");
+        let mut request = tonic::Request::new(pb::GetRunRequest {
+            context: context(),
+            run: fixture.run_ref(id),
+        });
+        request.set_timeout(remaining);
+        let result = tokio::time::timeout_at(until, runs.get_run(request))
+            .await
+            .expect("original snapshot observation deadline elapsed");
+        match result {
+            Ok(response) => return response.into_inner().run.unwrap(),
+            Err(status) => {
+                assert_eq!(status.code(), Code::Aborted, "{status:?}");
+                assert_eq!(status.message(), "RUN_STATE_CONFLICT", "{status:?}");
+                let detail = semantic_error(&status, "RUN_STATE_CONFLICT");
+                assert_eq!(detail.run_id.as_deref(), Some(id));
+                assert_eq!(
+                    detail.action,
+                    pb::RequiredClientAction::RefreshSnapshot as i32
+                );
+                assert_eq!(
+                    detail.recovery_classification,
+                    pb::RecoveryClassification::SnapshotRequired as i32
+                );
+                assert_eq!(
+                    detail.retry_classification,
+                    pb::RetryClassification::Forbidden as i32
+                );
+                assert!(attempt < 2, "bounded fresh GetRun refused: {status:?}");
+            }
+        }
+    }
+    unreachable!()
 }
 
 async fn native_wait_lifecycle(
@@ -5549,10 +5591,10 @@ async fn native_wait_lifecycle(
         pb::RunLifecycle::OutcomeUnknown => "outcome_unknown",
         _ => panic!("unsupported test lifecycle"),
     };
-    // Wait on the durable publication barrier, then verify it through one
-    // public snapshot. Repeated native GetRun calls would each perform the
-    // required five-sample OS workload census for a dedicated Run.
-    tokio::time::timeout(Duration::from_secs(15), async {
+    // Keep the durable barrier and coherent public observation within the
+    // original lifecycle deadline, including any required fresh snapshot.
+    let until = tokio::time::Instant::now() + Duration::from_secs(15);
+    tokio::time::timeout_at(until, async {
         loop {
             let state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
             if state["lifecycle"] == expected {
@@ -5568,7 +5610,7 @@ async fn native_wait_lifecycle(
             fs::read_to_string(&state_path).unwrap()
         )
     });
-    let snapshot = native_snapshot(runs, fixture, id).await;
+    let snapshot = native_snapshot_until(runs, fixture, id, until).await;
     assert_eq!(
         snapshot.lifecycle, lifecycle as i32,
         "public snapshot disagrees with durable lifecycle"

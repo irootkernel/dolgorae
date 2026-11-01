@@ -4300,6 +4300,12 @@ impl WorkerHello {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlRequestV1 {
+    ResolveBrokerApproval {
+        expected: WorkerIdentity,
+        #[serde(default)]
+        caller: Option<ExecutingBuild>,
+        request: crate::interaction::BrokerApprovalResponse,
+    },
     PublicResolution {
         intent: crate::public_resolution::Intent,
         request: Box<ControlRequestV1>,
@@ -4575,6 +4581,7 @@ impl ControlRequestV1 {
             | Self::ActorPassivate { expected, .. }
             | Self::Wait { expected, .. }
             | Self::Events { expected, .. }
+            | Self::ResolveBrokerApproval { expected, .. }
             | Self::Respond { expected, .. }
             | Self::Interrupt { expected, .. }
             | Self::ExternalInterrupt { expected, .. }
@@ -4628,6 +4635,7 @@ impl ControlRequestV1 {
             Self::Send { .. }
                 | Self::Submit { .. }
                 | Self::Respond { .. }
+                | Self::ResolveBrokerApproval { .. }
                 | Self::PublicResolution { .. }
                 | Self::Interrupt { .. }
                 | Self::Pause { .. }
@@ -4660,6 +4668,7 @@ impl ControlRequestV1 {
             | Self::ActorPassivate { caller, .. }
             | Self::Wait { caller, .. }
             | Self::Events { caller, .. }
+            | Self::ResolveBrokerApproval { caller, .. }
             | Self::Respond { caller, .. }
             | Self::Interrupt { caller, .. }
             | Self::ExternalInterrupt { caller, .. }
@@ -4700,6 +4709,7 @@ impl ControlRequestV1 {
             | Self::ActorPassivate { caller, .. }
             | Self::Wait { caller, .. }
             | Self::Events { caller, .. }
+            | Self::ResolveBrokerApproval { caller, .. }
             | Self::Respond { caller, .. }
             | Self::Interrupt { caller, .. }
             | Self::ExternalInterrupt { caller, .. }
@@ -4756,6 +4766,7 @@ impl ControlRequestV1 {
                 | Self::Submit { .. }
                 | Self::ExternalSubmit { .. }
                 | Self::Respond { .. }
+                | Self::ResolveBrokerApproval { .. }
                 | Self::PublicResolution { .. }
                 | Self::Interrupt { .. }
                 | Self::ExternalInterrupt { .. }
@@ -4809,7 +4820,7 @@ impl ControlRequestV1 {
             Self::ActorPassivate { .. } => "actor.passivate",
             Self::Wait { .. } => "run.wait",
             Self::Events { .. } => "run.events",
-            Self::Respond { .. } => "run.respond",
+            Self::Respond { .. } | Self::ResolveBrokerApproval { .. } => "run.respond",
             Self::Interrupt { .. } => "run.interrupt",
             Self::ExternalInterrupt { .. } => "engagement.cancel",
             Self::InterruptTask { .. } => "run.interrupt",
@@ -4884,6 +4895,16 @@ impl ControlRequestV1 {
         &self,
         protected: bool,
     ) -> Result<MutationRequestIdentity, MachineError> {
+        if let Self::ResolveBrokerApproval { request, .. } = self {
+            let canonical = crate::operation::canonical(&request.normalized_request())
+                .map_err(|_| admission_internal("Broker response identity"))?;
+            return Ok(MutationRequestIdentity::new(
+                crate::jcs::sha256_hex(&canonical),
+                "run.respond",
+                false,
+                &[],
+            ));
+        }
         if let Self::PublicResolution { intent, request } = self {
             let mut safe = intent.clone();
             safe.redact(protected);
@@ -5265,6 +5286,13 @@ pub enum ControlResponseV1 {
         deliveries: Vec<EventDelivery>,
         next_cursor: String,
         head_cursor: String,
+    },
+    BrokerApprovalPrepared {
+        approval_id: Uuid,
+    },
+    BrokerApprovalResolved {
+        approval_id: Uuid,
+        resolution_receipt_id: Uuid,
     },
     Responded {
         request_id: u64,
@@ -6179,6 +6207,11 @@ pub const REMEMBERED_TERMINAL_TURNS: usize = 64;
 
 /// One mutation a control caller handed to the Run's drain thread.
 enum SessionCommand {
+    BrokerRespond(crate::interaction::BrokerApprovalResponse),
+    BrokerComplete {
+        request: crate::interaction::BrokerApprovalResponse,
+        result: Result<crate::orchestration::BrokerApprovalResolution, MachineError>,
+    },
     ActorPassivate {
         operation_id: Uuid,
     },
@@ -6259,6 +6292,7 @@ impl SessionCommand {
 /// The credential travels with the work rather than being checked where the
 /// work was accepted: ADR-016 wants the authoritative check on the thread that
 /// performs the effect, at the moment it performs it.
+#[derive(Clone)]
 enum SessionAdmission {
     Begin {
         expected: u64,
@@ -6274,7 +6308,7 @@ enum SessionAdmission {
     },
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MutationPreconditions {
     expected_controller_generation: Option<u64>,
     expected_state_revision: Option<u64>,
@@ -6371,8 +6405,55 @@ impl MutationOutcome {
 enum SessionWork {
     Message(Result<Value, TurnError>),
     PrimaryTool(PrimaryToolCompletion),
+    BrokerApproval(Box<BrokerApprovalCompletion>),
     Mutation(Box<SessionMutation>),
     Stop,
+}
+
+struct BrokerApprovalWork {
+    request: crate::interaction::BrokerApprovalResponse,
+    credential: CredentialCarrier,
+    preconditions: MutationPreconditions,
+    outcome: Arc<MutationOutcome>,
+}
+struct BrokerApprovalCompletion {
+    work: BrokerApprovalWork,
+    result: Result<crate::orchestration::BrokerApprovalResolution, MachineError>,
+}
+
+/// The same bounded off-drain effect/completion pattern as Primary tool work.
+fn spawn_broker_response(
+    mailbox: Arc<SessionMailbox>,
+    owner: RunControllerAuthority,
+    work: BrokerApprovalWork,
+    execute: impl FnOnce(
+        &RunControllerAuthority,
+        &crate::interaction::BrokerApprovalResponse,
+    ) -> Result<crate::orchestration::BrokerApprovalResolution, MachineError>
+    + Send
+    + 'static,
+) -> Result<thread::JoinHandle<()>, MachineError> {
+    let id = work.request.approval_id;
+    let fallback = Arc::clone(&mailbox);
+    let fallback_outcome = Arc::clone(&work.outcome);
+    thread::Builder::new()
+        .name("dolgorae-primary-approval".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                owner.authorize_mutation("run.respond", Some(&work.credential), None)?;
+                if !mailbox.primary_tool_alive() {
+                    return Err(crate::orchestration::approval::recovery());
+                }
+                execute(&owner, &work.request)
+            }))
+            .unwrap_or_else(|_| Err(crate::orchestration::approval::recovery()));
+            mailbox.complete_broker_response(BrokerApprovalCompletion { work, result });
+        })
+        .map_err(|_| {
+            let error = crate::orchestration::approval::recovery();
+            fallback.finish_broker_response(id, &fallback_outcome, refusal_from(error.clone()));
+            error
+        })
 }
 
 /// The drain thread's inbox: app-server messages the reader has read, and
@@ -6386,6 +6467,7 @@ enum SessionWork {
 struct SessionMailbox {
     facts: RunFacts,
     failure: Arc<AtomicBool>,
+    approval_progress_reserved: bool,
     connection: Mutex<Option<UnixStream>>,
     dispatch: Mutex<()>,
     state: Mutex<MailboxState>,
@@ -6412,6 +6494,8 @@ struct MailboxState {
     lost: Option<TurnError>,
     mutations: VecDeque<SessionMutation>,
     primary_tool_completions: VecDeque<PrimaryToolCompletion>,
+    broker_completions: VecDeque<BrokerApprovalCompletion>,
+    broker_in_flight: BTreeMap<Uuid, Arc<MutationOutcome>>,
     primary_tools_in_flight: usize,
     /// True once shutdown has claimed this Run.  Work already queued still
     /// drains — it was accepted before shutdown began and is ordered ahead of
@@ -6430,6 +6514,7 @@ impl SessionMailbox {
     fn with_failure_latch(facts: RunFacts, failure: Arc<AtomicBool>) -> Self {
         Self {
             facts,
+            approval_progress_reserved: false,
             failure,
             connection: Mutex::new(None),
             dispatch: Mutex::new(()),
@@ -6610,6 +6695,9 @@ impl SessionMailbox {
             if let Some(mutation) = state.mutations.pop_front() {
                 return SessionWork::Mutation(Box::new(mutation));
             }
+            if let Some(completion) = state.broker_completions.pop_front() {
+                return SessionWork::BrokerApproval(Box::new(completion));
+            }
             if let Some(completion) = state.primary_tool_completions.pop_front() {
                 return SessionWork::PrimaryTool(completion);
             }
@@ -6680,7 +6768,13 @@ impl SessionMailbox {
                 serde_json::json!({}),
             ));
         }
-        if state.primary_tools_in_flight >= MAX_PENDING_PRIMARY_TOOLS {
+        // Caller Primary waits cannot occupy the one existing-capacity slot needed to answer their Broker approvals.
+        let ordinary = state
+            .primary_tools_in_flight
+            .saturating_sub(state.broker_in_flight.len());
+        if state.primary_tools_in_flight >= MAX_PENDING_PRIMARY_TOOLS
+            || (self.approval_progress_reserved && ordinary >= MAX_PENDING_PRIMARY_TOOLS - 1)
+        {
             return Err(MachineError::new(
                 "RUN_BUSY",
                 "too many Primary tool calls are already in flight",
@@ -6695,6 +6789,75 @@ impl SessionMailbox {
     fn release_primary_tool(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.primary_tools_in_flight = state.primary_tools_in_flight.saturating_sub(1);
+        }
+        self.changed.notify_all();
+    }
+
+    fn reserve_broker_response(
+        &self,
+        id: Uuid,
+        outcome: &Arc<MutationOutcome>,
+    ) -> Result<(), MachineError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| admission_internal("Broker mailbox poisoned"))?;
+        if state.stopping || state.thread_failed || state.fenced {
+            return Err(crate::orchestration::approval::recovery());
+        }
+        if state.primary_tools_in_flight >= MAX_PENDING_PRIMARY_TOOLS
+            || state.broker_in_flight.contains_key(&id)
+        {
+            return Err(MachineError::new(
+                "RUN_BUSY",
+                "the original approval response is already in flight or its Worker is at capacity",
+                true,
+                serde_json::json!({"run_id":self.facts.run_id,"operation":"run.respond","state":"running"}),
+            ));
+        }
+        state.broker_in_flight.insert(id, Arc::clone(outcome));
+        state.primary_tools_in_flight += 1;
+        Ok(())
+    }
+    fn finish_broker_response(
+        &self,
+        id: Uuid,
+        outcome: &Arc<MutationOutcome>,
+        response: ControlResponseV1,
+    ) {
+        if let Ok(mut state) = self.state.lock()
+            && state
+                .broker_in_flight
+                .get(&id)
+                .is_some_and(|original| Arc::ptr_eq(original, outcome))
+        {
+            state.broker_in_flight.remove(&id);
+            state.primary_tools_in_flight = state.primary_tools_in_flight.saturating_sub(1);
+            outcome.settle(response);
+        }
+        self.changed.notify_all();
+    }
+
+    fn abandon_broker_responses(&self, state: &mut MailboxState) {
+        let pending = std::mem::take(&mut state.broker_in_flight);
+        state.primary_tools_in_flight = state.primary_tools_in_flight.saturating_sub(pending.len());
+        state.broker_completions.clear();
+        for outcome in pending.into_values() {
+            outcome.settle(failed(&TurnError::OutcomeUnknown, &self.facts.bare()));
+        }
+    }
+
+    fn complete_broker_response(&self, completion: BrokerApprovalCompletion) {
+        if let Ok(mut state) = self.state.lock()
+            && !state.stopping
+            && !state.thread_failed
+            && !self.failure.load(Ordering::Acquire)
+            && state
+                .broker_in_flight
+                .get(&completion.work.request.approval_id)
+                .is_some_and(|original| Arc::ptr_eq(original, &completion.work.outcome))
+        {
+            state.broker_completions.push_back(completion);
         }
         self.changed.notify_all();
     }
@@ -6734,6 +6897,7 @@ impl SessionMailbox {
         let refused = match self.state.lock() {
             Ok(mut state) => {
                 state.stopping = true;
+                self.abandon_broker_responses(&mut state);
                 state.mutations.drain(..).collect()
             }
             Err(_) => Vec::new(),
@@ -6757,6 +6921,7 @@ impl SessionMailbox {
             Ok(mut state) => {
                 state.thread_failed = true;
                 state.stopping = true;
+                self.abandon_broker_responses(&mut state);
                 state.mutations.drain(..).collect()
             }
             Err(_) => Vec::new(),
@@ -7516,10 +7681,6 @@ impl WorkerSession {
             || Arc::new(AtomicBool::new(false)),
             |control| Arc::clone(&control.thread_failed),
         );
-        let mailbox = Arc::new(SessionMailbox::with_failure_latch(
-            facts.clone(),
-            Arc::clone(&thread_failed),
-        ));
         // Resolve durable authorities before starting an owned server.
         let manifest = RunStore::new(SystemWorkspacePlatform, state_root)
             .load_manifest(facts.run_id)
@@ -7538,6 +7699,10 @@ impl WorkerSession {
                 );
                 WorkerProtocolError::LedgerReplay
             })?;
+        let mut mailbox =
+            SessionMailbox::with_failure_latch(facts.clone(), Arc::clone(&thread_failed));
+        mailbox.approval_progress_reserved = crate::orchestration::approval::caller_root(&manifest);
+        let mailbox = Arc::new(mailbox);
         let primary_tool =
             session_tool_contract(state_root, &manifest)?.map(|(session_id, contract)| {
                 PrimaryToolConfig {
@@ -9272,6 +9437,11 @@ fn settle_member_terminal(
     owner: Option<crate::delegation_service::SettlementOwner>,
     terminal: &crate::turn::TerminalTurn,
 ) {
+    let _ = crate::semantic::settle_policy_task_terminal(
+        &authority.state_root,
+        identity.run_id,
+        terminal,
+    );
     let Some(owner) = owner else {
         return;
     };
@@ -9372,7 +9542,7 @@ fn preserve_actor_terminal(
 fn drain_run(
     mut coordinator: SessionCoordinator,
     identity: &WorkerIdentity,
-    mailbox: &SessionMailbox,
+    mailbox: &Arc<SessionMailbox>,
     progress: &SessionProgress,
     control: &Mutex<WorkerControlState>,
     authority: &RunControllerAuthority,
@@ -9384,8 +9554,26 @@ fn drain_run(
         let _ =
             crate::semantic::resettle_member_tasks(&authority.state_root, identity.run_id, owner);
     }
-    let mut in_flight: Option<Arc<MutationOutcome>> = None;
+    let mut in_flight: Option<(Arc<MutationOutcome>, Option<Uuid>)> = None;
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if coordinator.primary_session_id() == Some(identity.run_id)
+            && coordinator
+                .journal()
+                .with_ledger_authority(|ledger| {
+                    crate::orchestration::approval::publish(
+                        &authority.state_root,
+                        identity.run_id,
+                        ledger,
+                        identity.run_generation,
+                    )
+                })
+                .is_err()
+        {
+            progress.fail(TurnError::Journal(
+                "Broker approval publication requires recovery".into(),
+            ));
+            return;
+        }
         publish_state(&coordinator, progress, control, &authority.state_root);
         loop {
             match mailbox.next_work() {
@@ -9431,21 +9619,138 @@ fn drain_run(
                     publish_state(&coordinator, progress, control, &authority.state_root);
                 }
                 SessionWork::PrimaryTool(completion) => {
-                    if let Err(error) = coordinator.complete_primary_tool(completion)
-                        && *coordinator.state() == CoordinatorState::OutcomeUnknown
+                    let primary_owner = coordinator.primary_session_id() == Some(identity.run_id);
+                    if let Err(error) =
+                        coordinator.complete_primary_tool_with(completion, |journal| {
+                            if !primary_owner {
+                                return Ok(());
+                            }
+                            journal
+                                .with_ledger_authority(|ledger| {
+                                    crate::orchestration::approval::publish(
+                                        &authority.state_root,
+                                        identity.run_id,
+                                        ledger,
+                                        identity.run_generation,
+                                    )
+                                })
+                                .map_err(|_| {
+                                    TurnError::Journal(
+                                        "Broker approval publication requires recovery".into(),
+                                    )
+                                })
+                        })
                     {
                         progress.fail(error);
+                        for refused in mailbox.fail_thread() {
+                            refused
+                                .outcome
+                                .settle(failed(&TurnError::OutcomeUnknown, &progress.facts.bare()));
+                        }
+                        break;
                     }
                     publish_state(&coordinator, progress, control, &authority.state_root);
                 }
+                SessionWork::BrokerApproval(completion) => {
+                    let BrokerApprovalCompletion { work, result } = *completion;
+                    let id = work.request.approval_id;
+                    let outcome = Arc::clone(&work.outcome);
+                    in_flight = Some((Arc::clone(&outcome), Some(id)));
+                    let response = perform(
+                        &mut coordinator,
+                        identity,
+                        progress,
+                        authority,
+                        SessionMutation {
+                            preconditions: work.preconditions,
+                            operation: "run.respond",
+                            credential: Some(work.credential),
+                            external_engagement: None,
+                            command: SessionCommand::BrokerComplete {
+                                request: work.request,
+                                result,
+                            },
+                            outcome: Arc::clone(&outcome),
+                        },
+                    );
+                    publish_state(&coordinator, progress, control, &authority.state_root);
+                    mailbox.finish_broker_response(id, &outcome, response);
+                    in_flight = None;
+                }
                 SessionWork::Mutation(mutation) => {
                     let outcome = Arc::clone(&mutation.outcome);
-                    in_flight = Some(Arc::clone(&outcome));
+                    in_flight = Some((Arc::clone(&outcome), None));
                     outcome.start();
+                    let broker = if let SessionCommand::BrokerRespond(request) = &mutation.command {
+                        let prepared = (|| {
+                            let credential = CredentialCarrier::duplicate_fd(
+                                mutation
+                                    .credential
+                                    .as_ref()
+                                    .ok_or_else(|| admission_internal("Broker credential absent"))?
+                                    .raw_fd(),
+                            )?;
+                            mailbox.reserve_broker_response(request.approval_id, &outcome)?;
+                            Ok::<_, MachineError>((
+                                request.clone(),
+                                credential,
+                                mutation.preconditions.clone(),
+                            ))
+                        })();
+                        match prepared {
+                            Ok(value) => Some(value),
+                            Err(error) => {
+                                outcome.settle(refusal_from(error));
+                                in_flight = None;
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some((request, _, _)) = &broker {
+                        in_flight = Some((Arc::clone(&outcome), Some(request.approval_id)));
+                    }
                     let response =
                         perform(&mut coordinator, identity, progress, authority, *mutation);
                     publish_state(&coordinator, progress, control, &authority.state_root);
-                    outcome.settle(response);
+                    if matches!(response, ControlResponseV1::BrokerApprovalPrepared { .. }) {
+                        if let Some((request, credential, mut preconditions)) = broker {
+                            preconditions.expected_state_revision = None;
+                            let id = request.approval_id;
+                            let work = BrokerApprovalWork {
+                                request,
+                                credential,
+                                preconditions,
+                                outcome: Arc::clone(&outcome),
+                            };
+                            if let Err(error) = spawn_broker_response(
+                                Arc::clone(mailbox),
+                                authority.clone(),
+                                work,
+                                |owner, request| {
+                                    crate::semantic::resolve_broker_approval(
+                                        &owner.state_root,
+                                        owner.run_id,
+                                        request.approval_id,
+                                        request.approved,
+                                        &request.idempotency_key,
+                                    )
+                                },
+                            ) {
+                                mailbox.finish_broker_response(id, &outcome, refusal_from(error));
+                            }
+                        } else {
+                            outcome
+                                .settle(internal_invariant("Broker preparation lost its executor"));
+                        }
+                    } else {
+                        if let Some((request, _, _)) = broker {
+                            mailbox.finish_broker_response(request.approval_id, &outcome, response);
+                        } else {
+                            outcome.settle(response);
+                        }
+                    }
                     in_flight = None;
                 }
             }
@@ -9479,8 +9784,13 @@ fn drain_run(
             error
         }
     };
-    if let Some(outcome) = in_flight {
-        outcome.settle(failed(&failure, &progress.facts.bare()));
+    if let Some((outcome, broker)) = in_flight {
+        let response = failed(&failure, &progress.facts.bare());
+        if let Some(id) = broker {
+            mailbox.finish_broker_response(id, &outcome, response);
+        } else {
+            outcome.settle(response);
+        }
     }
     publish_state(&coordinator, progress, control, &authority.state_root);
     let stopping = progress.facts.bare();
@@ -10042,6 +10352,40 @@ fn perform(
                     Ok(None) => {}
                 }
             }
+            SessionCommand::BrokerRespond(request) => {
+                let replay = (|| {
+                    let ledger = coordinator
+                        .journal()
+                        .ledger()
+                        .lock()
+                        .map_err(|_| admission_internal("Broker journal poisoned"))?;
+                    crate::orchestration::approval::replay_response(
+                        &authority.state_root,
+                        identity.run_id,
+                        request,
+                        &controller,
+                        &ledger,
+                    )
+                })();
+                match replay {
+                    Ok(Some(id)) => {
+                        if let Err(error) = settle_replayed_admission(
+                            coordinator,
+                            identity,
+                            authority,
+                            mutation.preconditions.admission.as_ref(),
+                        ) {
+                            return refusal_from(error);
+                        }
+                        return ControlResponseV1::BrokerApprovalResolved {
+                            approval_id: request.approval_id,
+                            resolution_receipt_id: id,
+                        };
+                    }
+                    Ok(None) => {}
+                    Err(error) => return refusal_from(error),
+                }
+            }
             SessionCommand::Respond {
                 request_id,
                 idempotency_key,
@@ -10131,7 +10475,23 @@ fn perform(
     // A generation-4 member binds every dispatched Turn to its accepted task
     // identity and preserved bytes, never a legacy operations key, and
     // independently of the generation-3 candidate-tool mechanism.
-    let collaboration_bound = match (&mutation.command, owner) {
+    let policy_session = match crate::orchestration::policy_task::member_session(
+        &authority.state_root,
+        identity.run_id,
+    ) {
+        Ok(session) => session,
+        Err(error) => return refusal_from(error),
+    };
+    if matches!(mutation.command, SessionCommand::Accept { .. })
+        && policy_session.is_some()
+        && let Err(error) =
+            crate::scheduler::require_turn_admission(&authority.state_root, identity.run_id)
+    {
+        return refusal_from(error);
+    }
+    let collaboration_owner = owner.or(policy_session
+        .map(|session_id| crate::delegation_service::SettlementOwner::Managed { session_id }));
+    let collaboration_bound = match (&mutation.command, collaboration_owner) {
         (
             SessionCommand::Accept { request, .. },
             Some(crate::delegation_service::SettlementOwner::Managed { session_id }),
@@ -10155,6 +10515,34 @@ fn perform(
         && coordinator.bind_generic_successor_task().is_err()
     {
         return refusal_from(crate::scheduler::error("consultation_tool_binding_failed"));
+    }
+    let policy_bound = match &mutation.command {
+        SessionCommand::Accept { request, .. } => {
+            match policy_session
+                .map(|session| {
+                    crate::orchestration::policy_task::bind_submit(
+                        &authority.state_root,
+                        session,
+                        identity.run_id,
+                        &request.idempotency_key,
+                        &request.message,
+                        request.effort.as_deref(),
+                        request.write || !request.images.is_empty(),
+                    )
+                })
+                .transpose()
+            {
+                Ok(bound) => bound.unwrap_or(false),
+                Err(error) => return refusal_from(error),
+            }
+        }
+        _ => false,
+    };
+    if policy_bound
+        && coordinator.uses_candidate_tools()
+        && coordinator.bind_generic_successor_task().is_err()
+    {
+        return refusal_from(crate::scheduler::error("policy_task_tool_binding_failed"));
     }
     let successor_bound = match &mutation.command {
         SessionCommand::Accept { request, .. } => {
@@ -10540,6 +10928,79 @@ fn perform(
             source_revision,
         );
     }
+    if let SessionCommand::BrokerRespond(request) = &mutation.command {
+        let prepared = coordinator.journal().with_ledger_authority(|ledger| {
+            crate::orchestration::approval::prepare_response(
+                &authority.state_root,
+                identity.run_id,
+                request,
+                ledger,
+                identity.run_generation,
+            )
+        });
+        return match prepared {
+            Ok(()) => ControlResponseV1::BrokerApprovalPrepared {
+                approval_id: request.approval_id,
+            },
+            Err(error) => refusal_from(error),
+        };
+    }
+    if let SessionCommand::BrokerComplete { request, result } = &mutation.command {
+        let completed = coordinator.journal().with_ledger_authority(|ledger| {
+            crate::orchestration::approval::publish(
+                &authority.state_root,
+                identity.run_id,
+                ledger,
+                identity.run_generation,
+            )?;
+            let id = match crate::orchestration::approval::replay_response(
+                &authority.state_root,
+                identity.run_id,
+                request,
+                &controller,
+                ledger,
+            )? {
+                Some(id) => id,
+                None => {
+                    return Err(result
+                        .as_ref()
+                        .err()
+                        .cloned()
+                        .unwrap_or_else(crate::orchestration::approval::recovery));
+                }
+            };
+            if let Some(admission) = admission_completion {
+                complete_mutation_admission(ledger, admission)?;
+            }
+            Ok(id)
+        });
+        return match completed {
+            Ok(id) => ControlResponseV1::BrokerApprovalResolved {
+                approval_id: request.approval_id,
+                resolution_receipt_id: id,
+            },
+            Err(error) => refusal_from(error),
+        };
+    }
+    if coordinator.primary_session_id() == Some(identity.run_id)
+        && matches!(
+            mutation.command,
+            SessionCommand::Close { .. } | SessionCommand::Reconcile
+        )
+        && coordinator
+            .journal()
+            .with_ledger_authority(|ledger| {
+                crate::orchestration::approval::publish(
+                    &authority.state_root,
+                    identity.run_id,
+                    ledger,
+                    identity.run_generation,
+                )
+            })
+            .is_err()
+    {
+        return refusal_from(crate::orchestration::approval::recovery());
+    }
     let policy_verification = matches!(mutation.command, SessionCommand::VerifyCallerPolicy { .. });
     let reconciled = if matches!(mutation.command, SessionCommand::Reconcile) {
         match reconcile_successor_member(
@@ -10703,6 +11164,9 @@ fn perform_command(
     typed_receipt: bool,
 ) -> ControlResponseV1 {
     match command {
+        SessionCommand::BrokerRespond(_) | SessionCommand::BrokerComplete { .. } => {
+            internal_invariant("Broker response skipped owning admission")
+        }
         SessionCommand::Accept { request, delivery } => {
             // A closed Run refusing a new Turn is a lifecycle fact about the
             // Run, not a complaint about the caller's arguments: the identical
@@ -13842,6 +14306,9 @@ fn serve_run_operation(
                     },
                     None,
                 ),
+                ControlRequestV1::ResolveBrokerApproval { request, .. } => {
+                    (SessionCommand::BrokerRespond(request), None)
+                }
                 ControlRequestV1::Respond {
                     request_id,
                     idempotency_key,
@@ -13918,6 +14385,9 @@ fn serve_run_operation(
                 }
                 (response, _) => response,
             }
+        }
+        ControlRequestV1::ResolveBrokerApproval { .. } => {
+            refusal_from(crate::orchestration::approval::recovery())
         }
         ControlRequestV1::Send {
             request,
@@ -14518,6 +14988,10 @@ pub(crate) mod tests {
         }
 
         fn with_pending_start(pending: bool) -> Self {
+            Self::with_primary_run(pending, None)
+        }
+
+        fn with_primary_run(pending: bool, primary: Option<Uuid>) -> Self {
             use std::io::Read as _;
             use std::process::Stdio;
             let root = std::env::temp_dir().join(format!("d74-{}", Uuid::now_v7().simple()));
@@ -14559,6 +15033,9 @@ pub(crate) mod tests {
             let mut identity = identity();
             identity.uid = DarwinSystem.current_uid();
             identity.run_generation = 1;
+            if let Some(run) = primary {
+                identity.run_id = run;
+            }
             let facts = RunFacts {
                 run_id: identity.run_id,
                 profile: "default".into(),
@@ -14641,7 +15118,16 @@ pub(crate) mod tests {
                     controller_id: Uuid::now_v7(),
                     control_mode: "managed_agent".into(),
                     record_accepted_user_input: false,
-                    primary_tool: None,
+                    primary_tool: primary.map(|session_id| PrimaryToolConfig {
+                        session_id,
+                        contract: crate::primary_tool::PrimaryToolContract::load().unwrap(),
+                        dispatcher: Arc::new(WorkerPrimaryToolDispatcher {
+                            run_generation: 1,
+                            workspace_id: identity.workspace_id.clone(),
+                            state_root: root.clone(),
+                            mailbox: Arc::clone(&mailbox),
+                        }),
+                    }),
                     candidate_tools: false,
                     candidate_reader: None,
                     file_change_publication_dir: None,
@@ -14760,12 +15246,440 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn broker_response_effect_yields_the_real_mailbox_and_revalidates_its_carrier() {
+        for authorized in [true, false] {
+            let (root, state, run, request) =
+                crate::orchestration::tests::prepared_broker_response_fixture();
+            let credential = if authorized {
+                CredentialCarrier::open_path(&root.join("primary-controller")).unwrap()
+            } else {
+                let path = root.join("foreign-response-controller");
+                crate::controller::create_controller_credential(
+                    &path,
+                    crate::domain::ControllerKind::InteractiveClient,
+                    "foreign-response".into(),
+                    None,
+                    None,
+                )
+                .unwrap();
+                CredentialCarrier::open_path(&path).unwrap()
+            };
+            let mut mailbox = SessionMailbox::new(RunFacts {
+                run_id: run,
+                profile: "fixture".into(),
+            });
+            let manifest = RunStore::new(SystemWorkspacePlatform, &state)
+                .load_manifest(run)
+                .unwrap();
+            mailbox.approval_progress_reserved =
+                crate::orchestration::approval::caller_root(&manifest);
+            assert!(mailbox.approval_progress_reserved);
+            let mailbox = Arc::new(mailbox);
+            for _ in 0..MAX_PENDING_PRIMARY_TOOLS - 1 {
+                mailbox.reserve_primary_tool().unwrap();
+            }
+            assert_eq!(mailbox.reserve_primary_tool().unwrap_err().code, "RUN_BUSY");
+            let outcome = Arc::new(MutationOutcome::default());
+            mailbox
+                .reserve_broker_response(request.approval_id, &outcome)
+                .unwrap();
+            let duplicate = mailbox
+                .reserve_broker_response(request.approval_id, &outcome)
+                .unwrap_err();
+            assert_eq!(duplicate.code, "RUN_BUSY");
+            assert!(duplicate.retryable);
+            let id = request.approval_id;
+            let (entered, observed) = std::sync::mpsc::channel();
+            let (release, resume) = std::sync::mpsc::channel();
+            let called = Arc::new(AtomicBool::new(false));
+            let effect = Arc::clone(&called);
+            let work = BrokerApprovalWork {
+                request,
+                credential,
+                preconditions: MutationPreconditions::default(),
+                outcome: Arc::clone(&outcome),
+            };
+            let task = spawn_broker_response(
+                Arc::clone(&mailbox),
+                RunControllerAuthority::new(state.clone(), run),
+                work,
+                move |_, _| {
+                    effect.store(true, Ordering::Release);
+                    entered.send(()).unwrap();
+                    resume.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Err(crate::orchestration::approval::recovery())
+                },
+            )
+            .unwrap();
+            if authorized {
+                observed.recv_timeout(Duration::from_secs(5)).unwrap();
+                let interrupt = Arc::new(MutationOutcome::default());
+                assert!(
+                    mailbox
+                        .submit(SessionMutation {
+                            preconditions: MutationPreconditions::default(),
+                            operation: "run.shutdown",
+                            credential: None,
+                            external_engagement: None,
+                            command: SessionCommand::ShutdownInterrupt,
+                            outcome: interrupt
+                        })
+                        .is_none()
+                );
+                let SessionWork::Mutation(next) = mailbox.next_work() else {
+                    panic!("pending semantic effect blocked the drain mailbox");
+                };
+                assert!(matches!(next.command, SessionCommand::ShutdownInterrupt));
+                release.send(()).unwrap();
+            }
+            task.join().unwrap();
+            let SessionWork::BrokerApproval(completed) = mailbox.next_work() else {
+                panic!("original Broker completion was lost");
+            };
+            assert_eq!(completed.work.request.approval_id, id);
+            assert!(Arc::ptr_eq(&completed.work.outcome, &outcome));
+            assert_eq!(called.load(Ordering::Acquire), authorized);
+            assert_eq!(
+                completed.result.as_ref().unwrap_err().code,
+                if authorized {
+                    "RECOVERY_REQUIRED"
+                } else {
+                    "CONTROLLER_MISMATCH"
+                }
+            );
+            mailbox.finish_broker_response(
+                id,
+                &outcome,
+                refusal_from(crate::orchestration::approval::recovery()),
+            );
+            // Saturated original waits remain reserved; the next Controller response can still progress.
+            let next = Arc::new(MutationOutcome::default());
+            mailbox.reserve_broker_response(id, &next).unwrap();
+            mailbox.finish_broker_response(
+                id,
+                &next,
+                refusal_from(crate::orchestration::approval::recovery()),
+            );
+            for _ in 0..MAX_PENDING_PRIMARY_TOOLS - 1 {
+                mailbox.release_primary_tool();
+            }
+            assert_eq!(mailbox.state.lock().unwrap().primary_tools_in_flight, 0);
+            assert!(mailbox.stop().is_empty());
+            let store = crate::orchestration::OrchestrationStore::open_observer(&state).unwrap();
+            assert_eq!(
+                store
+                    .collaboration_connection()
+                    .unwrap()
+                    .query_row(
+                        "SELECT count(*) FROM brokered_approval_resolutions",
+                        [],
+                        |r| r.get::<_, u64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            drop(store);
+            drop(completed);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn broker_response_terminal_mailbox_settles_executing_queued_and_popped_originals() {
+        for phase in 0..3 {
+            for fail in [false, true] {
+                let (root, state, run, request) =
+                    crate::orchestration::tests::prepared_broker_response_fixture();
+                let id = request.approval_id;
+                let mailbox = Arc::new(SessionMailbox::new(RunFacts {
+                    run_id: run,
+                    profile: "fixture".into(),
+                }));
+                let outcome = Arc::new(MutationOutcome::default());
+                mailbox.reserve_broker_response(id, &outcome).unwrap();
+                let (entered, observed) = std::sync::mpsc::channel();
+                let (release, resume) = std::sync::mpsc::channel();
+                let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let called = Arc::clone(&executions);
+                let task = spawn_broker_response(
+                    Arc::clone(&mailbox),
+                    RunControllerAuthority::new(state.clone(), run),
+                    BrokerApprovalWork {
+                        request,
+                        credential: CredentialCarrier::open_path(&root.join("primary-controller"))
+                            .unwrap(),
+                        preconditions: MutationPreconditions::default(),
+                        outcome: Arc::clone(&outcome),
+                    },
+                    move |_, _| {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        entered.send(()).unwrap();
+                        resume.recv_timeout(Duration::from_secs(5)).unwrap();
+                        Err(crate::orchestration::approval::recovery())
+                    },
+                )
+                .unwrap();
+                observed.recv_timeout(Duration::from_secs(5)).unwrap();
+                let mut task = Some(task);
+                let mut popped = None;
+                if phase != 0 {
+                    release.send(()).unwrap();
+                    task.take().unwrap().join().unwrap();
+                    assert_eq!(mailbox.state.lock().unwrap().broker_completions.len(), 1);
+                    if phase == 2 {
+                        let SessionWork::BrokerApproval(completion) = mailbox.next_work() else {
+                            panic!("original completion missing");
+                        };
+                        assert!(Arc::ptr_eq(&completion.work.outcome, &outcome));
+                        popped = Some(completion);
+                    }
+                }
+                if fail {
+                    assert!(mailbox.fail_thread().is_empty());
+                } else {
+                    assert!(mailbox.stop().is_empty());
+                }
+                let Some(ControlResponseV1::Failed {
+                    code, retryable, ..
+                }) = outcome.await_settled(Duration::from_secs(1))
+                else {
+                    panic!("original Broker caller was stranded");
+                };
+                assert_eq!(code, "OUTCOME_UNKNOWN");
+                assert!(!retryable);
+                if let Some(task) = task {
+                    release.send(()).unwrap();
+                    task.join().unwrap();
+                }
+                // Spawn/caller fallback and an already-popped completion cannot overwrite a consumed failure.
+                mailbox.finish_broker_response(
+                    id,
+                    &outcome,
+                    refusal_from(crate::orchestration::approval::recovery()),
+                );
+                if let Some(completion) = popped {
+                    mailbox.complete_broker_response(*completion);
+                }
+                assert!(outcome.await_settled(Duration::ZERO).is_none());
+                assert!(mailbox.stop().is_empty());
+                assert!(mailbox.fail_thread().is_empty());
+                let current = mailbox.state.lock().unwrap();
+                assert!(current.broker_in_flight.is_empty());
+                assert!(current.broker_completions.is_empty());
+                assert_eq!(current.primary_tools_in_flight, 0);
+                drop(current);
+                assert!(
+                    mailbox
+                        .reserve_broker_response(id, &Arc::new(MutationOutcome::default()))
+                        .is_err()
+                );
+                assert_eq!(executions.load(Ordering::SeqCst), 1);
+                let store =
+                    crate::orchestration::OrchestrationStore::open_observer(&state).unwrap();
+                let original = store.approval_interaction(run, id).unwrap().unwrap();
+                assert_eq!(original.approval_request_id, id);
+                assert!(original.decision.is_none());
+                assert!(original.resolution_receipt_id.is_none());
+                drop(store);
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn broker_response_finish_fences_fallback_after_consumption_and_reused_ids() {
+        for stop_first in [false, true] {
+            let mailbox = Arc::new(SessionMailbox::new(RunFacts {
+                run_id: Uuid::now_v7(),
+                profile: "fixture".into(),
+            }));
+            let id = Uuid::now_v7();
+            let outcome = Arc::new(MutationOutcome::default());
+            mailbox.reserve_broker_response(id, &outcome).unwrap();
+            if stop_first {
+                assert!(mailbox.stop().is_empty());
+            } else {
+                mailbox.finish_broker_response(
+                    id,
+                    &outcome,
+                    refusal_from(crate::orchestration::approval::recovery()),
+                );
+            }
+            let Some(ControlResponseV1::Failed { code, .. }) =
+                outcome.await_settled(Duration::from_secs(1))
+            else {
+                panic!("first settlement missing");
+            };
+            assert_eq!(
+                code,
+                if stop_first {
+                    "OUTCOME_UNKNOWN"
+                } else {
+                    "RECOVERY_REQUIRED"
+                }
+            );
+            let delayed = Arc::clone(&mailbox);
+            let original = Arc::clone(&outcome);
+            // This is the exact finish gate used by spawn's failure fallback and its caller.
+            thread::spawn(move || {
+                delayed.finish_broker_response(
+                    id,
+                    &original,
+                    refusal_from(crate::orchestration::approval::recovery()),
+                )
+            })
+            .join()
+            .unwrap();
+            assert!(outcome.await_settled(Duration::ZERO).is_none());
+            if !stop_first {
+                let next = Arc::new(MutationOutcome::default());
+                mailbox.reserve_broker_response(id, &next).unwrap();
+                mailbox.finish_broker_response(
+                    id,
+                    &outcome,
+                    refusal_from(crate::orchestration::approval::recovery()),
+                );
+                assert!(Arc::ptr_eq(
+                    mailbox
+                        .state
+                        .lock()
+                        .unwrap()
+                        .broker_in_flight
+                        .get(&id)
+                        .unwrap(),
+                    &next
+                ));
+                assert_eq!(mailbox.state.lock().unwrap().primary_tools_in_flight, 1);
+                assert!(next.await_settled(Duration::ZERO).is_none());
+                mailbox.finish_broker_response(
+                    id,
+                    &next,
+                    ControlResponseV1::BrokerApprovalResolved {
+                        approval_id: id,
+                        resolution_receipt_id: Uuid::now_v7(),
+                    },
+                );
+                assert!(
+                    matches!(next.await_settled(Duration::from_secs(1)), Some(ControlResponseV1::BrokerApprovalResolved { approval_id, .. }) if approval_id == id)
+                );
+                mailbox.finish_broker_response(
+                    id,
+                    &next,
+                    refusal_from(crate::orchestration::approval::recovery()),
+                );
+                assert!(next.await_settled(Duration::ZERO).is_none());
+            }
+            assert!(mailbox.stop().is_empty());
+            assert_eq!(mailbox.state.lock().unwrap().primary_tools_in_flight, 0);
+        }
+    }
+
+    #[test]
+    fn broker_publication_failure_fences_queued_drain_callers_without_new_decision() {
+        let (root, state, run, request) =
+            crate::orchestration::tests::prepared_broker_response_fixture();
+        let mut fixture = PanicFixture::with_primary_run(false, Some(run));
+        let before = fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap();
+        let outcomes = [
+            Arc::new(MutationOutcome::default()),
+            Arc::new(MutationOutcome::default()),
+        ];
+        for outcome in &outcomes {
+            assert!(
+                fixture
+                    .mailbox
+                    .submit(SessionMutation {
+                        preconditions: MutationPreconditions::default(),
+                        operation: "turn",
+                        credential: None,
+                        external_engagement: None,
+                        command: SessionCommand::ShutdownAbandon,
+                        outcome: Arc::clone(outcome),
+                    })
+                    .is_none()
+            );
+        }
+        // Real pending SQL approval, but this coordinator journal has no original
+        // requesting Turn. Owning publication must fail closed before dequeuing.
+        let authority = RunControllerAuthority::new(state.clone(), run);
+        let started = Instant::now();
+        drain_run(
+            fixture.coordinator.take().unwrap(),
+            &fixture.identity,
+            &fixture.mailbox,
+            &fixture.progress,
+            &Mutex::new(WorkerControlState {
+                lifecycle: "running".into(),
+                active_turn: Some("turn-1".into()),
+            }),
+            &authority,
+            &fixture.thread_failed,
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        for outcome in outcomes {
+            assert!(matches!(
+                outcome.await_settled(Duration::from_secs(1)),
+                Some(ControlResponseV1::Failed { .. })
+            ));
+        }
+        let after = fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap();
+        assert!(after.starts_with(&before));
+        let ledger = fixture.ledger.lock().unwrap();
+        assert_eq!(
+            ledger.projection().unwrap().lifecycle,
+            crate::domain::RunLifecycle::OutcomeUnknown
+        );
+        let records = ledger.durable_records().unwrap();
+        let original = records
+            .iter()
+            .find(|r| r.kind() == crate::audit::AuditKind::TurnIntent)
+            .unwrap()
+            .payload_value()
+            .unwrap();
+        let unknown = records
+            .iter()
+            .find(|r| r.kind() == crate::audit::AuditKind::OutcomeUnknown)
+            .unwrap()
+            .payload_value()
+            .unwrap();
+        assert_eq!(unknown["operation_id"], original["operation_id"]);
+        drop(ledger);
+        let store = crate::orchestration::OrchestrationStore::open_observer(&state).unwrap();
+        assert_eq!(
+            store.approval_interactions(run).unwrap()[0].approval_request_id,
+            request.approval_id
+        );
+        let db = rusqlite::Connection::open(
+            crate::engagement::EngagementStore::workspace_database_path(&state),
+        )
+        .unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM brokered_approval_resolutions",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        drop(store);
+        drop(fixture);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn drain_panics_wake_original_and_queued_callers_without_writing_poisoned_journal() {
         for (poison, pending) in [(false, false), (true, false), (false, true)] {
             let mut fixture = PanicFixture::with_pending_start(pending);
             let before = fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap();
             let original = Arc::new(MutationOutcome::default());
             let queued = Arc::new(MutationOutcome::default());
+            let broker = Arc::new(MutationOutcome::default());
+            let approval = Uuid::now_v7();
+            fixture
+                .mailbox
+                .reserve_broker_response(approval, &broker)
+                .unwrap();
             for (outcome, command) in [
                 (
                     Arc::clone(&original),
@@ -14824,6 +15738,33 @@ pub(crate) mod tests {
                 queued.await_settled(Duration::from_secs(1)),
                 Some(ControlResponseV1::Failed { .. })
             ));
+            assert!(
+                matches!(broker.await_settled(Duration::from_secs(1)), Some(ControlResponseV1::Failed { code, retryable: false, .. }) if code == "OUTCOME_UNKNOWN")
+            );
+            fixture.mailbox.finish_broker_response(
+                approval,
+                &broker,
+                refusal_from(crate::orchestration::approval::recovery()),
+            );
+            assert!(broker.await_settled(Duration::ZERO).is_none());
+            assert!(
+                fixture
+                    .mailbox
+                    .state
+                    .lock()
+                    .unwrap()
+                    .broker_in_flight
+                    .is_empty()
+            );
+            assert_eq!(
+                fixture
+                    .mailbox
+                    .state
+                    .lock()
+                    .unwrap()
+                    .primary_tools_in_flight,
+                0
+            );
             let after = fs::read(fixture.root.join("ledger/audit.jsonl")).unwrap();
             if poison {
                 assert!(fixture.ledger.is_poisoned());
@@ -25310,6 +26251,81 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
             .authorize_external(fixture.engagement_id, "external_submit", &fixture.owner)
             .unwrap_err();
         assert_eq!(owned_by_another.code, "CONTROLLER_MISMATCH");
+    }
+
+    /// Pure metadata validation; synthetic runtime DTOs are not Kernel evidence.
+    #[test]
+    fn caller_policy_initial_writer_committed_proof_binds_current_metadata() {
+        let (root, state, _, run, _) = crate::orchestration::tests::caller_policy_dispatch_fixture(
+            "canonical_workspace_write",
+        );
+        let manifest = RunStore::new(SystemWorkspacePlatform, &state)
+            .load_manifest(run)
+            .unwrap();
+        assert_eq!(manifest.schema_version, 3);
+        assert!(
+            manifest
+                .global_profile_binding
+                .as_ref()
+                .unwrap()
+                .caller_workspace_supported()
+        );
+        let (runtime, socket, mut proof, mut policy) = caller_policy_fixture(&manifest);
+        policy.access = crate::domain::Access::Write;
+        policy.writer_generation = Some(1);
+        proof.effective_policy = policy.clone();
+        let original_thread = proof.thread_id.clone();
+        let operation = proof.operation_id;
+        let mut writer = crate::writer::WriterRecord::empty(&manifest.workspace_id);
+        writer.state = crate::writer::WriterAuthorityState::Active;
+        writer.writer_generation = 1;
+        writer.holder = Some(crate::writer::WriterStore::holder(
+            run,
+            manifest.profile.profile_name.clone(),
+            &manifest.controller,
+            runtime.identity.run_generation,
+            proof.server_key.clone(),
+            proof.server_epoch,
+            Some(original_thread.clone()),
+            crate::domain::RunLifecycle::Idle,
+        ));
+        let validate = |proof: &CallerPolicyProof, writer: &crate::writer::WriterRecord| {
+            proof.validate_binding(&CallerPolicyExpectation {
+                manifest: &manifest,
+                runtime: &runtime,
+                app_server_socket_identity: &socket,
+                original_thread_id: &original_thread,
+                durable_policy: &policy,
+                controller: &manifest.controller,
+                access: crate::domain::Access::Write,
+                writer: Some(writer),
+                operation_id: operation,
+                phase: CallerPolicyPhase::Committed,
+            })
+        };
+        validate(&proof, &writer).unwrap();
+        for case in 0..6 {
+            let mut changed = proof.clone();
+            let mut held = writer.clone();
+            match case {
+                0 => changed.thread_id = "foreign-thread".into(),
+                1 => changed.identity.run_generation += 1,
+                2 => changed.effective_policy.writer_generation = Some(2),
+                3 => {
+                    changed.effective_policy.verification =
+                        crate::domain::PolicyVerification::Unverified
+                }
+                4 => held.holder.as_mut().unwrap().controller_generation += 1,
+                5 => held.holder.as_mut().unwrap().run_id = Uuid::now_v7(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                validate(&changed, &held),
+                Err(WorkerProtocolError::InvalidRuntimeRecord),
+                "case {case}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// The caller-policy proof accepts both caller generations and

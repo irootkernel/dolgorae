@@ -1236,7 +1236,7 @@ pub(crate) fn assign_external_with_source(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_external_specialist_task",
-        assign_external_specialist_task_in(scope, caller, port, request, Some(source), None),
+        assign_external_specialist_task_in(scope, caller, port, request, Some(source), Some(1)),
     )
 }
 
@@ -1250,7 +1250,7 @@ pub(crate) fn assign_managed_with_source(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_specialist_task",
-        assign_specialist_task_in(scope, context, caller, port, request, Some(source), None),
+        assign_specialist_task_in(scope, context, caller, port, request, Some(source), Some(1)),
     )
 }
 
@@ -12775,6 +12775,97 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(first.1, after.1);
         assert_eq!(port.calls(), 0);
+        // Removal retains the original owner-bound priority, never a normal
+        // default. Reopening and an exact repeated removal preserve that proof.
+        store
+            .transact(|tx| crate::assignment_queue::remove(tx, owner, second_id))
+            .unwrap();
+        drop(store);
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        for (task, expected) in [(first_id, 2), (second_id, 0)] {
+            let deadline: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT created_at_ms+deadline_seconds*1000 FROM tasks WHERE task_id=?1",
+                    [task.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                crate::assignment_queue::external_order_priority(
+                    store.connection(),
+                    engagement,
+                    task,
+                    member,
+                    deadline
+                )
+                .unwrap(),
+                Some(expected)
+            );
+            assert!(
+                crate::assignment_queue::external_order_priority(
+                    store.connection(),
+                    Uuid::now_v7(),
+                    task,
+                    member,
+                    deadline
+                )
+                .is_err()
+            );
+            store
+                .transact(|tx| crate::assignment_queue::remove(tx, owner, task))
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM events WHERE kind='assignment_order_retained'",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            2
+        );
+        let mut broker =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        broker
+            .refresh_checked_state(&fixture.view.workspace_id)
+            .unwrap();
+        let path = fixture.state_root.join("orchestration/state.json");
+        let bytes = fs::read(&path).unwrap();
+        let state: Value = serde_json::from_slice(&bytes).unwrap();
+        let tasks = state["specialist_tasks"].as_array().unwrap();
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|t| t["task_id"] == first_id.to_string())
+                .unwrap()["priority_class"],
+            "background"
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|t| t["task_id"] == second_id.to_string())
+                .unwrap()["priority_class"],
+            "interactive"
+        );
+        store
+            .transact(|tx| {
+                tx.execute(
+                    "DELETE FROM external_assignment_order WHERE task_id=?1",
+                    [first_id.to_string()],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            broker
+                .refresh_checked_state(&fixture.view.workspace_id)
+                .is_err()
+        );
+        assert_eq!(fs::read(path).unwrap(), bytes);
     }
 
     #[test]
@@ -14215,6 +14306,77 @@ pub(crate) mod tests {
     // -----------------------------------------------------------------------
     // Managed Broker services
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn checked_state_projects_both_registered_owners_original_heads_and_independent_roles() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::new();
+        let managed = fixture
+            .spawn(session, &candidate, "state-managed", None, &port)
+            .unwrap();
+        let engagement = fixture.open();
+        let external = fixture.hire_member(engagement, &candidate, "state-external");
+        let mut broker =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        broker
+            .refresh_checked_state(&fixture.view.workspace_id)
+            .unwrap();
+        let path = fixture.state_root.join("orchestration/state.json");
+        let bytes = fs::read(&path).unwrap();
+        let state: Value = serde_json::from_slice(&bytes).unwrap();
+        let session_state = &state["orchestrated_sessions"][0];
+        let member = &session_state["members"][0];
+        assert_eq!(member["run_id"], managed.member.member_ref);
+        assert_eq!(member["activation_policy"], "successor");
+        assert_eq!(
+            member["role_snapshot"]["schema"],
+            "dolgorae.role-snapshot/v1"
+        );
+        assert_eq!(member["agent_configuration"]["schema_version"], 4);
+        assert_eq!(
+            state["external_engagements"][0]["members"][0]["run_id"],
+            external.to_string()
+        );
+        assert_eq!(
+            state["external_engagements"][0]["external_controller_ref"],
+            Value::Null
+        );
+        assert!(
+            state["aggregate_operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|op| op["aggregate_id"] == engagement.to_string()
+                    && op["external_controller_ref"].is_null()
+                    && op["controller_binding"].is_object())
+        );
+        let c = rusqlite::Connection::open(fixture.database()).unwrap();
+        let managed_head: u64 = c
+            .query_row("SELECT max(sequence) FROM orchestration_events", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let external_head: u64 = c
+            .query_row("SELECT max(sequence) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(state["head_sequence"], managed_head + external_head);
+        assert_eq!(state["revision"], state["head_sequence"]);
+        assert!(state["head_hash"].as_str().is_some_and(|h| h.len() == 64));
+        let immutable_prefix = bytes.clone();
+        c.execute(
+            "UPDATE brokered_members SET agent_configuration_sha256=?1 WHERE run_id=?2",
+            rusqlite::params!["0".repeat(64), managed.member.member_ref],
+        )
+        .unwrap();
+        assert!(
+            broker
+                .refresh_checked_state(&fixture.view.workspace_id)
+                .is_err()
+        );
+        assert_eq!(fs::read(path).unwrap(), immutable_prefix);
+    }
 
     #[test]
     fn a_managed_spawn_admits_an_installed_snapshot_over_the_session() {
@@ -19228,6 +19390,224 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn collaboration_source_pages_bind_full_content_replay_and_utf8_progress() {
+        let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        let (exchange, mut terminal) = collaboration_accept(
+            &fixture,
+            session,
+            source,
+            target,
+            &mut ctx,
+            &request,
+            "page-result",
+        );
+        ctx.source_tool_call_id = "page-not-ready".into();
+        let pending = collaboration_call(
+            &fixture,
+            &ctx,
+            &json!({
+                "operation":"read_collaboration_result", "exchange_id":exchange,"offset":0,"limit":3
+            }),
+        )
+        .unwrap_err();
+        assert!(pending.retryable);
+        let projected = crate::collaboration::error_result(&pending);
+        assert_eq!(projected["code"], "COLLABORATION_TRANSPORT_UNAVAILABLE");
+        assert_eq!(
+            projected["message"],
+            "The consultation result is not available yet."
+        );
+        let text = format!("한{}", "safe result ".repeat(7000));
+        terminal.final_response = Some(crate::turn::FinalResponse::Inline { text: text.clone() });
+        crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+        let request = |offset, limit| {
+            json!({
+                "operation":"read_collaboration_result","exchange_id":exchange,
+                "offset":offset,"limit":limit
+            })
+        };
+        ctx.source_tool_call_id = "page-first".into();
+        let first = collaboration_call(&fixture, &ctx, &request(0, 3)).unwrap();
+        assert_eq!(first["content"], "한");
+        assert_eq!(first["length"], text.len());
+        assert_eq!(first["sha256"], crate::jcs::sha256_hex(text.as_bytes()));
+        assert_eq!(first["truncated"], true);
+        assert_eq!(
+            collaboration_call(&fixture, &ctx, &request(0, 3)).unwrap(),
+            first
+        );
+        assert_eq!(
+            collaboration_call(&fixture, &ctx, &request(3, 3))
+                .unwrap_err()
+                .code,
+            "COLLABORATION_IDEMPOTENCY_CONFLICT"
+        );
+        let checked_db = rusqlite::Connection::open(fixture.database()).unwrap();
+        let receipts_before: u64 = checked_db
+            .query_row(
+                "SELECT count(*) FROM collaboration_tool_receipts",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        for (n, offset, limit) in [
+            (0, 1, 3),
+            (1, 0, 1),
+            (2, text.len() as u64 + 1, 3),
+            (3, 0, 0),
+            (4, 0, 65_537),
+        ] {
+            ctx.source_tool_call_id = format!("page-invalid-{n}");
+            let refused = collaboration_call(&fixture, &ctx, &request(offset, limit)).unwrap_err();
+            assert_eq!(refused.code, "COLLABORATION_NOT_ALLOWED");
+            assert!(!refused.retryable);
+            assert_eq!(
+                checked_db
+                    .query_row(
+                        "SELECT count(*) FROM collaboration_tool_receipts",
+                        [],
+                        |r| r.get::<_, u64>(0)
+                    )
+                    .unwrap(),
+                receipts_before
+            );
+        }
+        ctx.source_tool_call_id = "page-eof".into();
+        let eof = collaboration_call(&fixture, &ctx, &request(text.len() as u64, 1)).unwrap();
+        assert_eq!(eof["content"], "");
+        assert_eq!(eof["truncated"], false);
+        let mut offset = 0;
+        let mut rebuilt = String::new();
+        loop {
+            ctx.source_tool_call_id = format!("page-{offset}");
+            let page = collaboration_call(&fixture, &ctx, &request(offset, 65_536)).unwrap();
+            let body = page["content"].as_str().unwrap();
+            rebuilt.push_str(body);
+            offset += body.len() as u64;
+            if page["truncated"] == false {
+                break;
+            }
+            assert!(!body.is_empty());
+        }
+        assert_eq!(rebuilt, text);
+        let foreign_ctx = collaboration_prepare_source(
+            &fixture,
+            session,
+            target,
+            &FakePort::new(),
+            "foreign-page-root",
+            "foreign-page-turn",
+        );
+        assert_eq!(
+            collaboration_call(&fixture, &foreign_ctx, &request(0, 3))
+                .unwrap_err()
+                .code,
+            "COLLABORATION_NOT_ALLOWED",
+        );
+        // Each call reopens the owner store, so exact replay is restart-independent.
+        ctx.source_tool_call_id = "page-first".into();
+        assert_eq!(
+            collaboration_call(&fixture, &ctx, &request(0, 3)).unwrap(),
+            first
+        );
+        let c = rusqlite::Connection::open(fixture.database()).unwrap();
+        let before: u64 = c
+            .query_row(
+                "SELECT count(*) FROM collaboration_tool_receipts",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let foreign = json!({"operation":"read_collaboration_result","exchange_id":Uuid::now_v7(),"offset":0,"limit":3});
+        ctx.source_tool_call_id = "foreign-page".into();
+        assert_eq!(
+            collaboration_call(&fixture, &ctx, &foreign)
+                .unwrap_err()
+                .code,
+            "COLLABORATION_NOT_ALLOWED"
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM collaboration_tool_receipts",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            before
+        );
+        let digest = first["sha256"].as_str().unwrap();
+        c.execute(
+            "UPDATE result_content SET bytes=?1 WHERE sha256=?2",
+            rusqlite::params![b"changed".as_slice(), digest],
+        )
+        .unwrap();
+        ctx.source_tool_call_id = "page-first".into();
+        let failure = collaboration_call(&fixture, &ctx, &request(0, 3)).unwrap_err();
+        assert_eq!(failure.code, "COLLABORATION_TRANSPORT_UNAVAILABLE");
+        assert!(!failure.retryable);
+    }
+
+    #[test]
+    fn checked_state_rejects_actual_result_body_motion_after_full_validation() {
+        struct ChangeBody {
+            database: PathBuf,
+            reached: std::sync::atomic::AtomicBool,
+        }
+        impl crate::orchestration::OrchestrationFaultInjector for ChangeBody {
+            fn check(
+                &self,
+                barrier: crate::orchestration::OrchestrationBarrier,
+            ) -> Result<(), MachineError> {
+                if barrier
+                    == crate::orchestration::OrchestrationBarrier::AfterCheckedStatePreparation
+                    && !self.reached.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    let c = rusqlite::Connection::open(&self.database).unwrap();
+                    assert_eq!(c.execute("UPDATE result_content SET bytes=zeroblob(length(bytes)) WHERE sha256 IN (SELECT sha256 FROM result_content_refs WHERE owner_kind='collaboration_result')",[]).unwrap(),1);
+                }
+                Ok(())
+            }
+        }
+        let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
+        fixture.initialize_writer_authority();
+        let (_, terminal) = collaboration_accept(
+            &fixture,
+            session,
+            source,
+            target,
+            &mut ctx,
+            &request,
+            "state-body-motion",
+        );
+        crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+        let mut owner =
+            crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+        owner
+            .refresh_checked_state(&fixture.view.workspace_id)
+            .unwrap();
+        let path = fixture.state_root.join("orchestration/state.json");
+        let before = fs::read(&path).unwrap();
+        drop(owner);
+        let fault = std::sync::Arc::new(ChangeBody {
+            database: fixture.database(),
+            reached: std::sync::atomic::AtomicBool::new(false),
+        });
+        let mut owner = crate::orchestration::OrchestrationStore::open_with_faults(
+            &fixture.state_root,
+            fault.clone(),
+        )
+        .unwrap();
+        assert!(
+            owner
+                .refresh_checked_state(&fixture.view.workspace_id)
+                .is_err()
+        );
+        assert!(fault.reached.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
     fn collaboration_result_atomicity_replay_source_artifact_and_collection_progress() {
         let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
         fixture.initialize_writer_authority();
@@ -21224,7 +21604,7 @@ pub(crate) mod tests {
 
     #[test]
     fn collaboration_missing_invalid_private_and_corrupt_results_never_fabricate_success() {
-        for case in 0..10 {
+        for case in 0..15 {
             let (fixture, session, source, target, mut ctx, request) = collaboration_fixture();
             fixture.initialize_writer_authority();
             let (id, mut terminal) = collaboration_accept(
@@ -21290,9 +21670,47 @@ pub(crate) mod tests {
                         created_at: "2026-10-30T00:00:00Z".into(),
                     })
                 }
+                10 => Some(crate::turn::FinalResponse::Inline {
+                    text: "api_key=private-result-canary".into(),
+                }),
+                11..=14 => Some(crate::turn::FinalResponse::Inline {
+                    text: format!(
+                        "-----BEGIN {} PRIVATE KEY-----\nY2FuYXJ5\n-----END {} PRIVATE KEY-----",
+                        ["EC", "DSA", "OPENSSH", "ENCRYPTED"][case - 11],
+                        ["EC", "DSA", "OPENSSH", "ENCRYPTED"][case - 11]
+                    ),
+                }),
                 _ => unreachable!(),
             };
             crate::collaboration::settle_target(&fixture.state_root, target, &terminal).unwrap();
+            ctx.source_tool_call_id = "await-unavailable".into();
+            let awaited = collaboration_call(&fixture, &ctx, &json!({
+                "operation":"await_consultations", "exchange_ids":[id],"return_when":"all","transport_wait_seconds":1
+            })).unwrap();
+            assert_eq!(awaited["completed"][0]["execution_state"], "failed");
+            assert_eq!(collaboration_call(&fixture, &ctx, &json!({
+                "operation":"await_consultations", "exchange_ids":[id],"return_when":"all","transport_wait_seconds":1
+            })).unwrap(), awaited);
+            ctx.source_tool_call_id = "read-unavailable".into();
+            let error = collaboration_call(
+                &fixture,
+                &ctx,
+                &json!({
+                    "operation":"read_collaboration_result","exchange_id":id,"offset":0,"limit":3
+                }),
+            )
+            .unwrap_err();
+            assert!(!error.retryable);
+            let repeated = collaboration_call(&fixture, &ctx, &json!({"operation":"read_collaboration_result","exchange_id":id,"offset":0,"limit":3})).unwrap_err();
+            assert_eq!(repeated.code, error.code);
+            assert!(!repeated.retryable);
+            let projected = crate::collaboration::error_result(&error);
+            assert_eq!(
+                projected["message"],
+                "This consultation operation is unavailable in this runtime."
+            );
+            let db = rusqlite::Connection::open(fixture.database()).unwrap();
+            assert_eq!(db.query_row("SELECT count(*) FROM collaboration_results WHERE exchange_id=?1 AND (artifact_id IS NOT NULL OR sha256 IS NOT NULL)", [id.to_string()], |r| r.get::<_,u64>(0)).unwrap(),0);
             ctx.source_tool_call_id = "collect-unavailable".into();
             let response = collaboration_call(
                 &fixture,
@@ -21300,6 +21718,15 @@ pub(crate) mod tests {
                 &json!({"operation":"collect_collaboration_results","limit":1}),
             )
             .unwrap();
+            assert_eq!(
+                collaboration_call(
+                    &fixture,
+                    &ctx,
+                    &json!({"operation":"collect_collaboration_results","limit":1})
+                )
+                .unwrap(),
+                response
+            );
             assert_eq!(response["results"][0]["exchange_id"], id.to_string());
             assert_eq!(response["results"][0]["execution_state"], "failed");
             assert!(response["results"][0]["result_artifact_ref"].is_null());
@@ -21313,6 +21740,9 @@ pub(crate) mod tests {
                 "jsonrpc",
                 "unreported bytes",
                 "symlink-body",
+                "private-result-canary",
+                "PRIVATE KEY",
+                "Y2FuYXJ5",
             ] {
                 assert!(!response.to_string().contains(marker));
             }

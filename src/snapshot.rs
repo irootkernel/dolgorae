@@ -21,6 +21,7 @@ pub use crate::domain::ProjectionStamp;
 pub struct RunSnapshot {
     pub manifest: RunManifest,
     pub projection: RunStateProjection,
+    broker_approval_view: Result<Vec<crate::interaction::BrokerApprovalBinding>, MachineError>,
     pub writer: WriterRecord,
     pub controller: crate::domain::ControllerIdentity,
     controller_authority: Option<ControllerBinding>,
@@ -399,6 +400,12 @@ impl MemberRunObservation {
 }
 
 impl RunSnapshot {
+    pub(crate) fn broker_approvals(
+        &self,
+    ) -> Result<&[crate::interaction::BrokerApprovalBinding], MachineError> {
+        self.broker_approval_view.as_deref().map_err(Clone::clone)
+    }
+
     /// Authorize against the current binding and the captured observation.
     /// Protected readers call this both before and after reading their material.
     pub(crate) fn authorize_current_controller(
@@ -470,6 +477,7 @@ impl RunSnapshot {
         Ok(Self {
             manifest,
             projection: state.clone(),
+            broker_approval_view: Ok(Vec::new()),
             writer: writer.as_ref().clone(),
             controller: controller.clone(),
             controller_authority: None,
@@ -603,13 +611,30 @@ impl RunSnapshot {
                 let revision = ledger
                     .as_ref()
                     .map_or(0, ObservedLedger::interaction_state_revision);
+                let broker_approvals = if let Some(ledger) = ledger.as_ref() {
+                    crate::orchestration::approval::checked_bindings(
+                        state_root,
+                        &sources.manifest,
+                        ledger,
+                    )
+                } else {
+                    Ok(Vec::new())
+                };
                 let effective_policy = durable_policy(sources, ledger.as_ref())?;
                 let observation = observe(sources, ledger.as_ref(), &effective_policy)?;
-                Ok(Some((revision, effective_policy, observation, ledger)))
+                Ok(Some((
+                    revision,
+                    effective_policy,
+                    observation,
+                    ledger,
+                    broker_approvals,
+                )))
             },
         )?;
-        let Some((sources, (interaction_state_revision, effective_policy, observation, ledger))) =
-            captured
+        let Some((
+            sources,
+            (interaction_state_revision, effective_policy, observation, ledger, broker_approvals),
+        )) = captured
         else {
             return Err(state_conflict(
                 run_id,
@@ -639,6 +664,7 @@ impl RunSnapshot {
                 },
                 manifest: sources.manifest,
                 projection: sources.projection,
+                broker_approval_view: broker_approvals,
                 writer: sources.writer,
                 controller: sources.controller.identity.clone(),
                 controller_authority: Some(sources.controller),

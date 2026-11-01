@@ -177,6 +177,9 @@ fn mutate(
         RunMutationOperation::PublicRespond {
             idempotency_key, ..
         } => Some(("run.respond", idempotency_key.as_str())),
+        RunMutationOperation::BrokerApprovalRespond { request } => {
+            Some(("run.respond", request.idempotency_key.as_str()))
+        }
         _ => None,
     };
     let mut resolution_lookup = None;
@@ -2634,6 +2637,28 @@ impl pb::interaction_service_server::InteractionService for GatewayTransport {
                     "controller",
                 )?))?;
                 snapshot.authorize_current_controller(&root, &carrier, "run.interaction.get")?;
+                if let Some(binding) = snapshot
+                    .broker_approvals()?
+                    .iter()
+                    .find(|b| b.approval_id.to_string() == request.interaction_id)
+                {
+                    let value = crate::gateway_observation::broker_controller(binding, &snapshot)?;
+                    snapshot.authorize_current_controller(
+                        &root,
+                        &carrier,
+                        "run.interaction.get",
+                    )?;
+                    return Ok(pb::GetControllerInteractionResponse {
+                        context: Some(context(backend)),
+                        interaction: Some(pb::ControllerInteraction {
+                            summary: value.summary.map(interaction_summary),
+                            response_schema_id: value.response_schema_id,
+                            stamp: Some(project::stamp(&snapshot.stamp)),
+                            payload: value.payload.map(interaction_payload),
+                            decisions: value.decisions,
+                        }),
+                    });
+                }
                 let interaction = current_interaction(&root, &snapshot, &request.interaction_id)?;
                 let value = if interaction.schema_version == 1 {
                     let value = crate::gateway_observation::get_interaction(
@@ -2745,6 +2770,45 @@ impl pb::interaction_service_server::InteractionService for GatewayTransport {
                     &request.idempotency_key,
                 )?;
                 (|| {
+                if let Some(binding)=snapshot.broker_approvals()?.iter().find(|b|b.approval_id.to_string()==request.interaction_id){
+                    let answer=&protected_answer.0;
+                    if answer.decision!=pb::InteractionDecision::AcceptOnce as i32 || answer.protected_input.is_some() || !answer.granted_permissions.is_empty()
+                        || answer.answers.len()!=1 || answer.answers[0].question_id!="specialist_approval" || answer.answers[0].text.is_some()
+                        || answer.answers[0].selected_labels.len()!=1 || !matches!(answer.answers[0].selected_labels[0].as_str(),"approve"|"reject") {
+                        return Err(invalid("answer","answer does not match the Broker approval question"));
+                    }
+                    let selected=snapshot.projection.active_turn_id.as_ref().or(snapshot.projection.latest_turn_id.as_ref());
+                    if binding.status=="pending" && (selected!=Some(&request.expected_turn_id)
+                        || request.expected_interaction_revision!=snapshot.stamp.interaction_state_revision
+                        || Some(request.expected_thread_generation)!=snapshot.captured_effective_policy.thread_generation){
+                        return Err(MachineError::new("INTERACTION_STALE","approval authority or observation changed",false,serde_json::json!({"run_id":snapshot.manifest.run_id,"request_id":binding.approval_id})));
+                    }
+                    let mut intent=crate::public_resolution::Intent{schema:crate::public_resolution::INTENT_SCHEMA.into(),body:crate::public_resolution::Body {
+                        run_ref:snapshot.manifest.run_id.to_string(),interaction_ref:binding.approval_id.to_string(),turn_ref:request.expected_turn_id.clone(),thread_generation:request.expected_thread_generation,
+                        decision:"accept_once".into(),granted_permissions:Vec::new(),protected_input_present:false,
+                        answers:vec![crate::public_resolution::Answer{question_id:"specialist_approval".into(),selected_labels:answer.answers[0].selected_labels.clone(),text:None}],
+                    }};
+                    if binding.status=="resolved" {
+                        let ledger=snapshot.observed_ledger(&root)?;
+                        for record in ledger.records(){
+                            if let Some(marker)=crate::interaction::broker_record(record)?
+                                && marker.phase=="decision" && marker.binding.approval_id==binding.approval_id
+                                && marker.namespace.as_ref().is_some_and(|ns|ns.idempotency_key==request.idempotency_key)
+                                && let Some(original)=marker.intent {
+                                    if original.body.answers==intent.body.answers{intent=original;}
+                                    break;
+                                }
+                        }
+                    }
+                    intent.validate().map_err(|_|invalid("answer","invalid observed approval response"))?;
+                    let approved=answer.answers[0].selected_labels[0]=="approve";
+                    let broker=crate::interaction::BrokerApprovalResponse{approval_id:binding.approval_id,idempotency_key:request.idempotency_key.clone(),approved,intent,
+                        expected_interaction_revision:request.expected_interaction_revision,expected_turn_id:request.expected_turn_id.clone(),expected_thread_generation:request.expected_thread_generation};
+                    let (receipt,_)=mutate(backend,reference,carrier_ref,request.expected_run_revision,RunMutationOperation::BrokerApprovalRespond{request:broker})?;
+                    let Some(crate::worker::ControlResponseV1::BrokerApprovalResolved{approval_id,resolution_receipt_id})=receipt.response else{return Err(invalid("resolution","original approval receipt is unavailable"));};
+                    let mut ctx=context(backend);ctx.operation_id=Some(resolution_receipt_id.to_string());
+                    return Ok(pb::ResolveInteractionResponse{context:Some(ctx),interaction_id:approval_id.to_string(),status:pb::InteractionStatus::Resolved as i32,resolution_receipt:resolution_receipt_id.to_string()});
+                }
                 let interaction = current_interaction(&root, &snapshot, &request.interaction_id)?;
                 if interaction.status == "pending"
                     && (!interaction.pending_at(&snapshot)

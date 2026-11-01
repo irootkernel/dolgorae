@@ -24,6 +24,7 @@ const STREAM_STALL: Duration = Duration::from_secs(5);
 const SEMANTIC_WORKERS: usize = 8;
 const STREAM_WORKERS: usize = 4;
 const RPC_BUDGET: Duration = Duration::from_secs(30);
+const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 const MAX_CONNECTIONS: usize = 16;
 
 /// A bounded, immediately available projection page. next_cursor may cross
@@ -1396,17 +1397,29 @@ pub fn serve(
             return Err(error);
         }
     };
-    write_readiness(
+    let readiness = write_readiness(
         &mut output,
         &SuccessEnvelope::new("serve", socket.readiness_data()),
-    )?;
+    );
     drop(output);
     let result = runtime.block_on(async {
-        let result = run_server(&mut socket, backend, async move {
-            signal.recv().await;
-        })
-        .await;
-        control.shutdown().await;
+        let mut drain_until = None;
+        let result = match readiness {
+            Ok(()) => {
+                run_server_until(&mut socket, backend, async {
+                    signal.recv().await;
+                    let until = tokio::time::Instant::now() + DRAIN_BUDGET;
+                    drain_until = Some(until);
+                    control.request_stop();
+                    until
+                })
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        control
+            .shutdown(drain_until.unwrap_or_else(|| tokio::time::Instant::now() + DRAIN_BUDGET))
+            .await;
         result
     });
     // Blocking semantic calls are bounded in count but are not cancellation-safe;
@@ -1480,6 +1493,18 @@ pub async fn run_server(
     backend: Arc<dyn GatewayBackend>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), MachineError> {
+    run_server_until(socket, backend, async {
+        shutdown.await;
+        tokio::time::Instant::now() + DRAIN_BUDGET
+    })
+    .await
+}
+
+async fn run_server_until(
+    socket: &mut GatewaySocket,
+    backend: Arc<dyn GatewayBackend>,
+    shutdown: impl Future<Output = tokio::time::Instant>,
+) -> Result<(), MachineError> {
     let listener = socket
         .take_listener()
         .ok_or_else(|| transport_error("INTERNAL_ERROR"))?;
@@ -1488,13 +1513,26 @@ pub async fn run_server(
         .map_err(|_| transport_error("TRANSPORT_FAILURE"))?;
     let listener = tokio::net::UnixListener::from_std(listener)
         .map_err(|_| transport_error("TRANSPORT_FAILURE"))?;
-    run_server_with_accept(listener, backend, shutdown).await
+    run_server_with_accept_until(listener, backend, shutdown).await
 }
 
+#[cfg(test)]
 async fn run_server_with_accept(
-    mut listener: impl AcceptSource,
+    listener: impl AcceptSource,
     backend: Arc<dyn GatewayBackend>,
     shutdown: impl Future<Output = ()>,
+) -> Result<(), MachineError> {
+    run_server_with_accept_until(listener, backend, async {
+        shutdown.await;
+        tokio::time::Instant::now() + DRAIN_BUDGET
+    })
+    .await
+}
+
+async fn run_server_with_accept_until(
+    mut listener: impl AcceptSource,
+    backend: Arc<dyn GatewayBackend>,
+    shutdown: impl Future<Output = tokio::time::Instant>,
 ) -> Result<(), MachineError> {
     let (stop, stopped) = watch::channel(false);
     let service = GatewayTransport::new(backend, stopped.clone());
@@ -1616,9 +1654,9 @@ async fn run_server_with_accept(
     let result = tokio::select! {
         Ok(()) = &mut accept_failure => Err(transport_error("TRANSPORT_FAILURE")),
         result = &mut server => result.map_err(|_| transport_error("TRANSPORT_FAILURE")),
-        () = &mut shutdown => {
+        until = &mut shutdown => {
             let _ = stop.send(true);
-            match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
+            match tokio::time::timeout_at(until, &mut server).await {
                 Ok(result) => result.map_err(|_| transport_error("TRANSPORT_FAILURE")),
                 Err(_) => Ok(()),
             }
@@ -1642,6 +1680,101 @@ mod tests {
     use pb::run_service_server::RunService as _;
     use pb::runtime_service_server::RuntimeService as _;
     use tokio_stream::StreamExt as _;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_drain_uses_supplied_deadline_without_cancelling_accepted_work() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt as _;
+        struct BlockedBackend {
+            entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+            finished: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        }
+        impl GatewayBackend for BlockedBackend {
+            fn get_capabilities(
+                &self,
+                _: pb::GetCapabilitiesRequest,
+            ) -> Result<pb::GetCapabilitiesResponse, MachineError> {
+                self.entered
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                self.finished
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                Ok(pb::GetCapabilitiesResponse::default())
+            }
+        }
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("gd-{}", Uuid::now_v7().simple()));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("g.sock");
+        let home = DolgoraeHome::from_canonical_home(root.clone()).unwrap();
+        let mut socket = GatewaySocket::bind(&home, &path).unwrap();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (finished, mut done) = tokio::sync::oneshot::channel();
+        let backend = Arc::new(BlockedBackend {
+            entered: Mutex::new(Some(entered)),
+            release: Mutex::new(wait),
+            finished: Mutex::new(Some(finished)),
+        });
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let result =
+                run_server_until(&mut socket, backend, async { stopped.await.unwrap() }).await;
+            socket.cleanup().unwrap();
+            result
+        });
+        let connect_path = path.clone();
+        let channel = tonic::transport::Endpoint::try_from("http://[::]:50051")
+            .unwrap()
+            .connect_with_connector(tower::service_fn(move |_| {
+                let path = connect_path.clone();
+                async move {
+                    tokio::net::UnixStream::connect(path)
+                        .await
+                        .map(hyper_util::rt::TokioIo::new)
+                }
+            }))
+            .await
+            .unwrap();
+        let request = tokio::spawn(async move {
+            pb::runtime_service_client::RuntimeServiceClient::new(channel)
+                .get_capabilities(pb::GetCapabilitiesRequest {
+                    context: context(0),
+                    minimum_protocol_version: 1,
+                    maximum_protocol_version: 1,
+                })
+                .await
+        });
+        started.await.unwrap();
+        stop.send(tokio::time::Instant::now()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("server reset the supplied drain deadline")
+            .unwrap()
+            .unwrap();
+        assert!(!path.exists());
+        assert!(matches!(
+            done.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        done.await.unwrap();
+        let _ = request.await.unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_work_saturation_preserves_unary_admission() {
@@ -2531,6 +2664,41 @@ mod tests {
             .unwrap()
             .unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn readiness_write_failure_retires_started_control_endpoint() {
+        use std::os::fd::IntoRawFd as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("gr-write-{}", Uuid::now_v7().simple()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home = DolgoraeHome::from_canonical_home(root.clone()).unwrap();
+        let path = root.join("gateway.sock");
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(reader);
+        let instance = std::cell::Cell::new(None);
+        let error = serve(&home, &path, Some(writer.into_raw_fd()), |id| {
+            instance.set(Some(id));
+            Arc::new(Backend)
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "TRANSPORT_FAILURE");
+        assert!(!path.exists());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let control = runtime
+            .block_on(async {
+                crate::scheduler::ControlPlaneRuntime::start(&home, instance.get().unwrap())
+            })
+            .expect("readiness failure retained the original control endpoint");
+        runtime.block_on(control.shutdown(tokio::time::Instant::now() + DRAIN_BUDGET));
+        runtime.shutdown_timeout(Duration::ZERO);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

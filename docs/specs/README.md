@@ -1086,7 +1086,18 @@ start` MAY start the singleton. `profile server stop|restart|migrate` MUST rejec
 profile with live members unless the requested handling is explicit. Stop and
 restart, migration, and membership repair always require the separate operator
 capability; `--interrupt`
-additionally requires exact `--confirm-server-key`. The manager serializes with
+additionally requires exact `--confirm-server-key`. An explicit
+`--confirm-server-key` on `profile server start|stop` MAY select the current
+Caller-qualified launch. Selection MUST freshly validate the selected Profile
+definition and qualified Current runtime, require the exact resulting key, and
+preserve the recorded launch identity. Start records that checked binding before
+the existing deny-rollover startup; non-interrupting stop requires the retained
+recorded binding and ordinary Operator, membership and absence fences. A key
+mismatch MUST refuse without recording a replacement or changing a server.
+Omitting the key preserves generic selection. Status, restart and migration
+retain their existing contracts. Qualified stop is non-interrupting only:
+qualified `--interrupt` MUST refuse. Generic interruption retains its existing
+exact-key confirmation and Operator requirements. The manager serializes with
 connection and recovery, proves membership complete, requests interruption of
 every active turn, records each observed terminal or uncertain outcome, appends
 an operator-override record to every affected run, and only then stops the
@@ -1298,8 +1309,8 @@ dolgorae [--human] profile show <name>
 dolgorae [--human] profile remove <name>
 dolgorae [--human] profile doctor <name> [--launch-probe [--leave-running]]
 dolgorae [--human] profile server status <name>
-dolgorae [--human] profile server start <name>
-dolgorae [--human] profile server stop <name> [--operator-file <path> | --operator-fd <fd>] [--interrupt --confirm-server-key <key>]
+dolgorae [--human] profile server start <name> [--confirm-server-key <key>]
+dolgorae [--human] profile server stop <name> [--operator-file <path> | --operator-fd <fd>] [--confirm-server-key <key>] [--interrupt]
 dolgorae [--human] profile server restart <name> [--operator-file <path> | --operator-fd <fd>] [--interrupt --confirm-server-key <key>]
 dolgorae [--human] profile server migrate <name> [--operator-file <path> | --operator-fd <fd>] --confirm-old-server-key <key> --confirm-new-server-key <key> [--interrupt]
 dolgorae [--human] profile membership verify <name>
@@ -3084,6 +3095,42 @@ identifier. The SQLite portion commits in one crash-consistent transaction, and
 the matching Run creation intent is fsynced with that same Operation ID before
 runtime publication. Exports are never coequal authorities.
 
+The checked orchestration materialization is a confidential internal projection
+beneath the protected orchestration directory, with owner-only files. Complete
+accepted policy, Role and Profile captures retain their original versioned
+bytes and digest meanings. Structural validation does not certify configured
+environment values or instruction text as secret-free. Profile configuration
+still MUST NOT contain secrets. The materializer reads defined aggregate
+captures, never credential carriers or credential-store contents. Full captures
+MUST NOT enter public observers, model tools, provider requests or client export
+payloads. Those surfaces retain their existing explicit safe projections.
+Redaction MUST NOT rewrite an accepted capture or reuse its digest for changed
+bytes.
+
+Materialization reads one consistent checked SQLite snapshot and validates its
+event basis, accepted captures and cross-object references. Before publication,
+it rechecks the same database generation, both event-domain heads and the
+selected-record capture basis under the workspace mutation serialization
+boundary. Whole result content
+is validated before the short write fence; database observations before and
+after preparation reject source motion even when stored lengths, digests and
+event heads are unchanged. A same-head change such as stale-wait pruning also
+invalidates an older capture. The publisher
+uses a protected directory descriptor, owner-only create-exclusive temporary
+file, file fsync, checked output identity, atomic replacement and directory
+fsync. A symlink, hardlink, foreign or unsafe destination is refused without
+unlinking it. A newer head or changed output identity is never overwritten by a
+stale publisher. A missing or stale materialization remains disposable; reading
+an observer does not create state, activate a member or recover publications.
+Task priority comes from original owner ordering: managed root captures and
+external ordering retained before queue removal in the same owner transaction
+and event chain. Historical immediate admissions retain normal priority under their original
+admission contract. A task with queue-admission evidence requires its original
+captured or retained priority; if that priority is unavailable, materialization
+refuses it and preserves the previous output. Removing or lacking the current
+queue row never supplies a normal-priority default. A failed workspace refresh does not
+prevent independent registered workspaces from refreshing.
+
 The audit contains Dolgorae lifecycle records and redacted app-server wire
 records in one total order. Each record contains schema version, sequence/event
 cursor, UTC timestamp, run ID, run generation, kind, payload,
@@ -3654,6 +3701,47 @@ upstream request twice. Broker-created approvals carry an internal origin and a
 durable spawn-operation reference; responses route to that operation, not to an
 unrelated Codex pending request that shares an identifier. A waiting tool
 request MUST NOT block approvals, interrupts, App Server events, or other Runs.
+Caller Primary admission reserves approval progress capacity within the existing
+bounded asynchronous limit, including when waiting tool requests fill their
+ordinary slots. Other Run families retain their existing admission limits.
+
+Caller-workspace Primary Broker approvals use the existing protected current
+InteractionService and the original approval UUID. They remain Broker-owned
+spawn decisions; they are never converted to native numeric request IDs. The
+Run's owning Worker records the original Broker approval binding and each
+accepted decision in its durable Run ledger before exposing that Interaction
+view or a successful resolution receipt. Its complete Interaction revision
+therefore remains an actual Run-ledger sequence. A missing or stale binding
+refuses observation or resolution with a recovery requirement; a read MUST NOT
+publish or repair it. SQL and Run-ledger publication are separate recoverable
+steps, never one cross-store transaction.
+
+Resolution retains the existing Controller, Run and complete-Interaction
+revision checks and typed answer. For a Broker approval, expected_turn_id is the
+Root's actual active Turn, or its actual latest recorded Turn while idle. An
+empty or missing recorded Turn is a recovery refusal, never a precondition
+bypass. A different active Root Turn uses that current Turn as the resolution
+context; the approval binding independently retains the original requesting
+Turn. expected_thread_generation is the current observed native Thread
+generation. A Worker restart re-reads these durable facts; it neither fabricates
+a Turn nor replaces the original source binding. The normalized resolution
+receipt carries this real resolution context and the original approval UUID.
+The Broker's original approval key, decision and resolution receipt retain their
+replay rules. An
+unchanged retry reconstructs the same receipt and cannot allocate another child;
+a changed key or decision remains already resolved. A pending Broker decision
+belongs to its durable spawn operation and is not a native request that becomes
+stale merely because the requesting Turn finished. Session closure still fences
+new approval effects. Frozen public-v1 clients and their historical receipts are
+unchanged.
+
+Broker binding and decision records also drive the existing sanitized
+Interaction-opened/resolved events and the Run projection's complete pending
+Interaction count at the same captured ledger head. Native request identifiers
+and the Core native pending-request set retain their own domain. Private marker
+bodies, Role captures and credentials MUST NOT enter client event projections.
+Missing publication is refused consistently across the complete Interaction
+view; a read cannot silently omit the SQL-owned approval.
 
 The TASK-047 bridge advertises exactly one `dolgorae_orchestration` dynamic tool
 when a starting Run manifest identifies the current Run as the Primary of an
@@ -3880,8 +3968,63 @@ call; changed input under that identity conflicts. Admission stores immutable
 request and context bytes, the exchange, target mailbox, causal event and durable
 activation marker together. TASK-082 supplies centralized scheduling and actor
 activation and passivation. TASK-083 supplies exchange execution linkage, result
-publication and bounded wait safety. Live collaboration policy remains gated
-until TASK-027 integrated qualification is complete.
+publication and bounded wait safety. Qualified Caller-workspace policy v3 may
+use the complete queue, compatible reuse and on-mail collaboration slice only
+with its integrated compatibility proof. Historical policy v2 keeps its original
+validation, shape and exact accepted or rejected receipts; enabling a current
+Caller slice MUST NOT reinterpret those records or enable unsupported Legacy
+birth paths. Registered managed and External assignments derive Source/caller
+authority and priority internally, validate the accepted registered source
+selection, and commit the original bounded task, deadline, receipt and queue
+accounting together. A busy target queues that work without preemption. Low-level RUN_BUSY and External Engagement authority
+remain unchanged.
+
+### Source-owned collaboration result pages
+
+The private tool adds `read_collaboration_result` with exactly `exchange_id`,
+`offset` and `limit`. The exchange ID is UUIDv7; the byte offset is nonnegative
+and `limit` is 1 through 65,536. Source Run, Session, Thread, Turn, call and
+current generation remain native-bound outside model arguments. The current
+Source must own the exchange in its accepted internal Session. A read grants no
+Controller, peer lifecycle, acceptance, delivery acknowledgment or new Turn
+permission.
+
+A successful `read_collaboration_result_result` contains exactly `exchange_id`,
+`result_artifact_ref`, `length`, `sha256`, `offset`, `content` and `truncated`,
+besides `operation`. Length and digest describe the complete immutable UTF-8
+result; content is a bounded page. Offset must be a character boundary no later
+than length. At EOF, including a positive EOF offset, content is empty and
+truncated is false. A non-EOF page must contain at least one complete character;
+a limit too small for the next character is refused. The next offset is the
+original offset plus the UTF-8 byte length of content. Reads never produce an
+empty truncated page or silently round a misaligned offset.
+
+Before returning bytes, verify original target execution/publication provenance,
+source-owned artifact identity, complete content length/digest and bounded output
+privacy. Native source authorization is revalidated before exact-call replay.
+An accepted successful page is durably bound to the full Source-call identity,
+request digest and exact response bytes. Changed exchange, offset or limit under
+that call conflicts. New calls may read another page or recover after restart.
+Existing submit, await and collect shapes and exact retained responses do not
+change. Collection or socket completion still does not prove model consumption.
+
+Invalid bounds or foreign ownership use nonretryable
+COLLABORATION_NOT_ALLOWED; changed-call input uses
+COLLABORATION_IDEMPOTENCY_CONFLICT. A not-yet-published result uses retryable
+COLLABORATION_TRANSPORT_UNAVAILABLE. Missing, corrupt or privacy-refused content
+uses the same safe transport code without retryability, exposes no body, path or
+partial fallback, and does not rewrite an existing immutable result.
+
+Only final-response bytes are eligible. Validate the whole body before new
+publication and again before a new model-facing page is exposed. Reuse the
+existing canonical secret-name vocabulary and bounded assignment-name handling;
+reject recognized secret-bearing JSON or text assignments, private state/socket/
+database paths, raw protocol envelopes and hidden-reasoning representations.
+Reject unsafe or unrepresentable bytes as a whole instead of publishing altered
+bytes under the original digest. Harmless protocol identifiers remain allowed.
+Required negative canaries and the actual model-input trace qualify the selected
+path; they do not establish generic detection of arbitrary unlabelled secrets or
+waive the existing output-privacy requirement.
 
 ### Durable Mailbox and Virtual Actor Activation
 
@@ -3938,10 +4081,16 @@ expiry.
 Assignment queue admission and compatible reuse have a staged service boundary
 for both managed Sessions and External Engagements. It commits retained tasks,
 ordering and caller accounting together. The central dispatcher executes those
-retained queues under their original owner authority. Live tools retain
-ready-target-only admission and existing reuse-policy gates pending TASK-027
-integrated qualification. Queue storage alone
-grants no lateral consultation or activation authority. Those effects retain
+retained queues under their original owner authority. The qualified Caller-v3
+managed-source and current registered External source routes admit busy targets
+under their captured bounds, accepted source/caller
+selection, deadline, accounting and exact receipts. External queue execution
+uses the original owner permit, never a reconstructed caller credential, and
+still grants no lateral collaboration. Compatible reuse and selectors
+consume accepted Role/configuration/access snapshots; author edits cannot change
+an accepted choice. Historical Legacy tools retain their original admission and
+replay behavior. Queue storage alone grants no lateral consultation or
+activation authority. Those effects retain
 their separate admission and captured lifecycle checks.
 
 A target Run executes at most one Turn at a time. Collaboration queueing is
@@ -4795,8 +4944,128 @@ materialized shape for aggregate bootstrap operations, both aggregates,
 membership, spawn or hire operations, Specialist tasks, collaboration exchanges,
 mailbox items, and activation
 operations. The Rust orchestration implementation owns cross-object validity;
-the JSON Schema validates only the exported structure. At minimum the SQLite
-authority records:
+the JSON Schema validates only the exported structure. Legacy policy and Role
+bytes retain their original shapes and digests. Caller policy is the complete
+accepted capture, but specialist_policy_sha256 hashes its installed `policy`,
+matching SessionPolicySnapshot::digest; Role and Agent Configuration digests hash
+their complete versioned snapshots. A historical Session with no retained
+collaboration-policy snapshot and no collaboration effects exports null policy
+and null digest, never newly inferred defaults. New collaboration or scheduling
+admission captures the fixed policy before effects; an observer never captures
+it on read.
+
+For independently provisioned successor members, the retained delegated Agent
+Configuration generation 4 and instructions/v3 remain their original closed
+successor-state/v1 shapes. Such a member need not have a Session policy Role.
+Its role_snapshot is the accepted instructions.role_snapshot, whose original
+domain-tagged role-snapshot/v1 digest supplies role_snapshot_sha256 after removing
+only the sha256: encoding prefix. The outer agent_configuration_sha256 remains
+JCS SHA-256 of the complete serialized configuration, as in
+agent_configuration_digest; the nested
+agent_configuration_digest field retains its separate original domain-tagged
+admitted-configuration identity.
+The complete instruction capture and admitted configuration stay inside the
+generation-4 configuration. Policy-captured Legacy and Caller Role alternatives
+retain their existing whole-versioned-snapshot hashes and configuration equality;
+these do not apply the policy Role shape or hash domain to delegated successors.
+For these managed members, activation_policy retains the original successor
+admission marker; it does not invent a manual or on_mail policy. A matching
+Session Role reference alone does not mean that its policy was applied to that
+independent admission. Existing scheduler reconciliation may use only an exact
+matching accepted Role/configuration; otherwise its conservative residency
+behavior remains unchanged. External members have no stored Session activation
+policy: on_external_request denotes only their existing accepted-owner queue
+trigger, never lateral permission.
+
+The internal materializer validates the retained spawn/hire binding and original
+configuration/instruction identity. It grants no lateral Role permission to an
+independently provisioned member.
+
+The corresponding registered External open also accepts no external Caller
+provenance: external_controller_ref is null in both its aggregate and bootstrap
+projection. Rust requires the original accepted open receipt, Controller
+principal/generation, bootstrap event and absent provenance digest to agree.
+Historical explicit external Controller references retain their original bytes
+and digest. A Controller public binding is not a substitute opaque Caller ref.
+
+The normal native Primary tool's Caller-v3 policy-task lane remains distinct
+from the registered provisioned-member assignment facade. New policy-task
+admission retains its existing AcceptedSpecialistTask request/context bytes and
+native Primary Run/Thread/Turn/call authority, then commits that task to the
+same central assignment queue. It uses the accepted policy Role and dedicated
+Caller configuration without conversion to a delegated generation-4 member or
+closed facade task. Its private immutable dispatch capture binds the original
+task/source/target, policy/Role/configuration identities, accepted request digest,
+acceptance-time effort, original deadline and trusted normal root priority before
+wake. The model receives no new authority, priority or receipt fields.
+
+The central dispatcher requires positive identification of that accepted
+policy-task lane, its original capture/event and the exact owning claim. Absence
+of a provisioned-task receipt is never a policy-task authorization fallback.
+Dispatch uses the existing Broker credential and Worker Submit boundary, with
+the original brokered-task key and captured prompt/effort. It borrows the owning
+Run lifecycle fence through writer and startup effects, preserving Writer
+ownership and release attribution. No queue visit resets the deadline, recreates
+a source credential or starts a second dispatcher. The registered managed and
+External facade lanes retain their own accepted caller/source and accounting.
+
+The first writable policy-task dispatch may retain its member's initial active
+Writer when the original Run has no prior Turn and no outstanding task-acquisition
+capture claims that Writer. Reuse verifies the current Controller, Run generation,
+Thread, effective policy and Writer generation and preserves the original Writer
+ownership. It creates no task-acquisition capture; task settlement does not
+release that initial Writer. A later authorized writable dispatch uses the existing
+stale-member-Writer release boundary before a vacant, task-attributed acquisition.
+Foreign, transitional or unverified Writer authority remains fenced. These owner
+rules do not relax the live Primary bridge's canonical-writer refusal.
+
+Original positive Submit acceptance may restore the policy-task Turn link and
+ordinary terminal/result settlement, including after the original deadline.
+Recovery verifies the exact original namespace/request/capture and existing
+ledger evidence; missing, foreign, changed or unresolved evidence remains fenced
+and grants no replay. It does not repair historical tasks lacking this positive
+policy-queue capture. A delayed transport reply cannot justify a second Turn,
+and a late verified terminal retains its original identity. The existing
+Primary submit response remains its immutable admission receipt, including the
+unchanged state value; waits and collection report later execution separately.
+Accepted old keys, exact cached replies and the historical Legacy immediate
+path retain their original behavior and bytes.
+
+A registered External Source assignment captures its accepted task and lookup
+namespace, not an external Caller request reference. Its internal reservation
+marker is not an opaque external_request_ref: the checked task exports null
+there, with its original task UUID still in request_artifact_ref. Rust validates
+that absence against the original accepted registered Source/receipt and marker;
+it never manufactures a Caller reference or converts the marker into one.
+Historical explicit external Caller references retain their original identities
+and bytes. These separate fields grant no new public artifact or caller authority.
+
+Request references name the original immutable task or exchange in its typed
+internal content namespace; a nonempty context manifest uses the original
+exchange identity. They are not arbitrary public ArtifactService handles and
+allocate no new UUID during export. Result references retain the actual original
+source-owned artifact UUID. Logical mailbox sequences use the original event
+order within their aggregate owner/type and Run, including after transient queue
+rows are removed; independent
+managed and External event sequences are not a universal mailbox counter. Active
+blocking flags come only from current authenticated unexpired wait facts.
+Activation operations are actual allocated operations; a queued request marker
+is not fabricated into a physical activation identity. Uncertainty and absent
+optional timestamps remain explicit, never synthesized as success or delivery.
+The root event basis composes the existing independent domains. Let O be the
+maximum recorded orchestration_events sequence, with each Session's latest
+recorded sequence/hash sorted by Session UUID, and E the latest recorded events
+sequence/hash. An absent domain has sequence zero and no head hash. The root
+head_sequence and revision are the checked sum O+E, a derived projection ordinal,
+not an event ID. head_hash is null only when both domains are absent; otherwise
+it is SHA-256 of the JCS object {domain: "orchestration-state-v2-head",
+workspace_id, orchestration_events: {sequence: O, session_heads: [[session_id,
+sequence, event_hash], ...]}, events: {sequence: E, event_hash: hash-or-null}}.
+Validate the original per-Session orchestration chains and External global chain
+without changing their hashes. This derived file basis is not a newly persisted
+universal event chain or an accepted policy/Role hash. Same-head operational
+changes are covered by the separate selected-record publication fence.
+At minimum the SQLite authority records:
 
 - aggregate bootstrap operation ID, kind, idempotency key, request digest,
   provenance, state, and timestamps;

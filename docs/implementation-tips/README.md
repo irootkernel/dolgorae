@@ -545,20 +545,49 @@ succeeds after both subphases complete. Activation, pre-effect claim and task
 expiry observations use controlled fixture clocks; they do not extend an
 accepted deadline or promise automatic retry.
 
-The existing `--collaboration-component-only` scenario prepares an enabled
-captured-policy Session before starting two physical Dedicated members. Its
-Primary identity is fixture data with no native Thread; this does not qualify
-live policy admission or Primary model provenance. Seven bounded loopback POSTs
-cover nonblocking source submit, blocking await, collect, the target answer,
-and new-call collection after an explicit owner-controlled Worker restart.
-Blocking submit has direct unit coverage through the shared wait-lifetime path;
-this physical scenario does not exercise blocking submit or interruption during
-its admission. The source artifact reader
-uses its own Controller authority. Local collection receipts and the fixture's
-artifact read do not establish model consumption. The original 180-second
-driver bound remains unchanged. Ordinary member release, Profile retirement and
-a current-main process census must complete before success; failed roots and
-unverified absence remain explicit. TASK-027 owns complete live integration.
+Run `--collaboration-component-only` only with explicit native authorization and
+its documented opt-in. The bounded qualification uses two isolated
+approval-policy cases, ordinary launch-intent Primary/native Thread creation,
+two physical Dedicated members and foreground current-main `serve` ownership.
+The fully-delegated trace has 17 POSTs/7 Turns and the approval-required trace
+has 18 POSTs/7 Turns; bind each observed count to its exact script and inputs.
+The separate 17-Turn/34-POST integrated campaign retains its own checks and
+budget, with its own foreground main `serve` Child and strict process census.
+Earlier seven-POST prepared-Primary evidence retains its narrower scope.
+
+The component uses the current main CLI for Profile and policy publication,
+explicit exact-key qualified server start/stop, credential setup and all Run
+mutations. Its driver only observes an unrecorded Profile candidate. Source
+Pause/Resume uses that member's original fixture-owned Broker carrier through
+main CLI `--controller-fd`; no Primary or peer capability substitutes for it.
+The carrier stays private and never enters a model request. Cleanup preserves
+the first failure, independently attempts ordinary owner closure and exact
+foreground Child termination, then records the current-main strict census on
+both success and failure. A cleanup error cannot establish absence.
+
+The trace covers normal Primary policy-task busy-target assignment, lateral nonblocking
+submit/blocking await/collect, and ordinary owner Pause/independent captured
+Kernel absence/Resume before collection on the original Thread. The target
+artifact exceeds 64 KiB. One bounded Source read supplies its UTF-8 prefix in
+the next native request; after restart, a new read supplies its tail. Each
+current call and label binds the page bytes and offset to the same original
+artifact's full byte length and digest. Page-level input provenance is recorded
+separately from the driver's whole-artifact byte verification. Preserve each task's
+original deadline and the existing 180-second driver, build, outer and cleanup
+bounds. Direct unit coverage retains blocking submit; this physical trace does
+not prove blocking-submit interruption, shared collaboration binding or runtime
+subagent-disable enforcement. Pool/default-feature and frozen-consumer
+qualification remain separate.
+
+Keep normal `dolgorae` processes, including foreground serve, on fixture HOME
+so DolgoraeHome::system resolves only private fixture state. Product-launched
+Codex child account HOME/platform TMPDIR are a distinct explicitly authorized
+environment exception. Report no account login, account credential copy or
+external provider requests separately from that HOME policy; private CODEX_HOME
+does not prove absence of real-home file access. Ordinary member release,
+Profile retirement, foreground Child termination and current-main owned-root
+process census must finish before success. Failed roots, unknown effects and
+unproved absence remain explicit.
 
 MCP host qualification additionally selects Claude Code `2.1.310`
 (`ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd`). The
@@ -567,6 +596,30 @@ owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-run
 owns the current pins and acceptance boundary. Schema generation at 0.159.3 and
 0.164.0 establishes protocol differences, while native campaigns establish
 behavior. The historical H1 qualification remains unchanged.
+
+Caller Primary asynchronous admission keeps one existing slot available for
+Controller approval responses, even when blocking tools occupy the ordinary
+slots. Do not raise the total cap or apply that reservation to unrelated Run
+families. External queue removal preserves its original ordering record in the
+owning SQL transaction and event chain. Historical immediate admissions
+retain normal priority under their original admission contract. A task with
+queue-admission evidence requires its original captured or retained priority;
+if that priority is unavailable, materialization refuses it and preserves the
+previous output. Removing or lacking the current queue row never supplies a
+normal-priority default. Prepare and validate full immutable content outside the short
+publication write fence, then recheck database motion, selected metadata and the
+pending/output inode identities. One failing workspace must not starve later
+independent refreshes.
+
+A separate native policy-Writer fixture uses Caller3 members and the main-owned
+runtime, with fixture-owned trusted-host task admission. It exercises the initial
+Writer and a later task-attributed acquisition and release. Its synthetic source
+calls qualify owner wiring and physical lifecycle behavior; they do not qualify
+canonical-write assignment through the live Primary bridge or all native
+model-source authorization. The existing live-bridge refusal remains. Each source
+phase retains its original bounded deadline; failed or ambiguous qualification
+never widens the expected request or Turn count. Runtime qualification requires
+separate explicit native execution and its actual evidence.
 
 ## Source preparation checks
 

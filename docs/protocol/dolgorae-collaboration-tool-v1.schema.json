@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dolgorae.local/schema/collaboration-tool/v1",
   "title": "Dolgorae private run-bound Brokered Specialist Collaboration tool v1",
-  "description": "Private MCP payloads. Source Run, Turn, tool-call identity, and idempotency are bound out of band and are deliberately absent.",
+  "description": "Private run-bound collaboration payloads. Source Run, Session, Thread, Turn, generation and call identity are bound out of band; no model-supplied credential or idempotency authority.",
   "oneOf": [
     {
       "$ref": "#/$defs/submit_request"
@@ -21,6 +21,12 @@
     },
     {
       "$ref": "#/$defs/collect_result"
+    },
+    {
+      "$ref": "#/$defs/read_request"
+    },
+    {
+      "$ref": "#/$defs/read_result"
     },
     {
       "$ref": "#/$defs/error_result"
@@ -342,7 +348,89 @@
           "x-maxUtf8Bytes": 1024
         }
       }
+    },
+    "read_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "exchange_id",
+        "offset",
+        "limit"
+      ],
+      "properties": {
+        "operation": {
+          "const": "read_collaboration_result"
+        },
+        "exchange_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 33554432
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        }
+      }
+    },
+    "read_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "exchange_id",
+        "result_artifact_ref",
+        "length",
+        "sha256",
+        "offset",
+        "content",
+        "truncated"
+      ],
+      "properties": {
+        "operation": {
+          "const": "read_collaboration_result_result"
+        },
+        "exchange_id": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "result_artifact_ref": {
+          "$ref": "#/$defs/uuid7"
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 33554432
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 33554432
+        },
+        "content": {
+          "type": "string",
+          "x-maxUtf8Bytes": 65536
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "x-invariants": [
+        "Source owns exchange_id and the immutable published artifact under current native Session/Run/Thread/Turn/call/generation authority.",
+        "length and sha256 describe complete verified UTF-8 content, not the page.",
+        "offset is a UTF-8 character boundary no later than length; content contains at most requested limit bytes.",
+        "At EOF content is empty and truncated is false; a non-EOF page contains at least one complete character.",
+        "Same accepted Source-call request replays identical response bytes; changed exchange/range conflicts.",
+        "Whole-body privacy/integrity refusal exposes no content and never rewrites accepted bytes or digest."
+      ]
     }
   },
-  "x-privateTransport": "TASK-025 retains its inert probe. TASK-081 adds the Specialist-only native_run_bound admission and mailbox foundation; live policy remains gated, scheduling belongs to TASK-082 and wait/result delivery to TASK-083 before TASK-027 integration. Outside dolgorae.public.v1."
+  "x-privateTransport": "Specialist-only native_run_bound transport in qualified Caller-v3 internal Sessions. Existing submit/await/collect and retained replies preserve their original meanings; Source-owned bounded reads use the same current authorizer and receipt owner. Historical Legacy gates remain unchanged. Outside dolgorae.public.v1; no public collaboration RPC."
 }

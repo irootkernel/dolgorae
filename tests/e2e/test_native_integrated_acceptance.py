@@ -11,7 +11,7 @@ import tempfile
 import subprocess
 from http.client import HTTPConnection
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import run_native_integrated_acceptance as probe
 from test_native_workspace_policy_fixture import code_advertisement, custom_result
@@ -51,65 +51,309 @@ def returned(value: probe.IntegratedResponses, *, content: bytes = b"candidate\n
 
 
 def collaboration_component_offline() -> None:
-    exchange = "018f0000-0000-7000-8000-000000000001"
-    target = "018f0000-0000-7000-8000-000000000002"
-    artifact = "018f0000-0000-7000-8000-000000000003"
-
-    def request(marker, call=None, name=None, body=None):
+    exchange, source, target, artifact = [f"018f0000-0000-7000-8000-{i:012d}" for i in range(1,5)]
+    def request(marker, call=None, outputs=None, *, primary=False):
         advertisement = code_advertisement()
-        advertisement["tools"][0]["tools"][0]["description"] += "\n### `dolgorae_collaboration`"
-        result = {"input":[{"type":"message", "role":"user", "content":[{
-            "type":"input_text", "text":"\n\nAccepted task:\n" + json.dumps({"brief":marker})}]}, advertisement]}
+        advertisement["tools"][0]["tools"][0]["description"] += "\n### `dolgorae_orchestration`\n### `dolgorae_collaboration`"
+        text = marker if primary else "\n\nAccepted task:\n" + json.dumps({"objective":marker})
+        result = {"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":text}]},advertisement]}
         if call:
-            result["input"].extend(custom_result(call, {name:json.dumps(body)})["input"])
+            result["input"].extend(custom_result(call,{k:json.dumps(v) for k,v in outputs.items()})["input"])
         return result
-
+    def operation(i, member, approval):
+        return {"operation":"request_specialist_result","specialist_operation":{"operation_id":f"018f0000-0000-7000-8000-{i:012d}","role_ref":"general","state":"awaiting_approval" if approval else "ready","specialist_run_id":None if approval else member,"approval_request_id":f"018f0000-0000-7000-8000-{i+2:012d}" if approval else None,"reused":False,"safe_error_code":None}}
+    def approval_receipt(operation, member):
+        return {"approval_id":operation["approval_request_id"],"operation_id":operation["operation_id"],
+                "original_sql_receipt":f"018f0000-0000-7000-8000-{20 if member == source else 21:012d}",
+                "protected_current_response":True,"operation_state":"ready","member_run_id":member}
+    def publish_receipt(root, receipt, approval_id):
+        pending=root/f"approval-{approval_id}.pending"
+        pending.write_text(json.dumps(receipt))
+        pending.replace(root/f"approval-{approval_id}.json")
+    row = {"exchange_id":exchange,"execution_state":"succeeded","delivery_state":"pending","result_artifact_ref":artifact,"safe_error_code":None}
+    collected = {"operation":"collect_collaboration_results_result","results":[dict(row,delivery_state="acknowledged")]}
+    body = probe.COLLABORATION_RESULT.encode()
+    assert len(body) > 65_536
+    def page(recovery):
+        offset, content, truncated = probe.CollaborationResponses.page_spec(recovery)
+        return {"operation":"read_collaboration_result_result","exchange_id":exchange,"result_artifact_ref":artifact,
+                "offset":offset,"content":content.decode(),"length":len(body),
+                "sha256":probe.hashlib.sha256(body).hexdigest(),"truncated":truncated}
+    prefix, tail = page(False), page(True)
+    assert prefix["offset"] == 0 and prefix["truncated"]
+    assert tail["offset"] > 65_536 and not tail["truncated"]
+    assert 0 < len(prefix["content"].encode()) <= 1030
+    assert 0 < len(tail["content"].encode()) <= 1030
+    assert body[:len(prefix["content"].encode())].decode() == prefix["content"]
+    assert body[tail["offset"]:].decode() == tail["content"]
     with tempfile.TemporaryDirectory(prefix="dolgorae-collaboration-offline-") as temporary:
-        root = Path(temporary)
-        (root / "collaboration-request.json").write_text(json.dumps({"operation":"submit_consultation", "target":{"run_id":target}, "objective":"Bounded question", "context_refs":[], "expected_output":["Bounded answer"], "blocking":False, "deadline_seconds":60}))
-        value = probe.CollaborationResponses(root)
-        try:
-            initial = "collaboration-source-initial"
-            emitted = value.respond(request(initial))[1]["item"]
-            assert "tools.dolgorae_collaboration(" in emitted["input"]
-            accepted = {"operation":"submit_consultation_result", "exchange_id":exchange, "target_run_id":target, "state":"queued"}
-            emitted = value.respond(request(initial, "collaboration-submit", "submitted", accepted))[1]["item"]
-            assert "await_consultations" in emitted["input"]
-            (root / "source-await-registered.json").write_text("{}")
-            target_request = {"input":[{"type":"message", "role":"user", "content":[{"type":"input_text", "text":"Complete this bounded read-only consultation. TASK083_NATIVE_TARGET"}]}]}
-            answer = value.respond(target_request)[1]["item"]
-            assert answer["content"][0]["text"] == "Bounded target result: 한글."
-            row = {"exchange_id":exchange, "execution_state":"succeeded", "delivery_state":"pending", "result_artifact_ref":artifact, "safe_error_code":None}
-            awaited = {"operation":"await_consultations_result", "completed":[row], "pending":[]}
-            emitted = value.respond(request(initial, "collaboration-await", "awaited", awaited))[1]["item"]
-            assert "collect_collaboration_results" in emitted["input"]
-            collected = {"operation":"collect_collaboration_results_result", "results":[dict(row, delivery_state="acknowledged")]}
-            value.respond(request(initial, "collaboration-collect", "collected", collected))
-            recovery = "collaboration-source-recovery"
-            value.respond(request(recovery))
-            value.respond(request(recovery, "collaboration-recover", "recovered", collected))
-            assert value.posts == 7 and value.target_posts == 1
-            assert value.source_stage == 4 and value.recovery_stage == 2
-            assert value.initial_collection == value.recovery_collection
-            rejected(lambda: value.respond(request(recovery)))
-        finally:
-            value.close()
-        # The fixture refuses a terminal observation with a foreign identity,
-        # missing bytes, changed artifact or pre-existing acknowledgment.
-        for field, replacement in (("exchange_id",target), ("execution_state","failed"),
-                                   ("result_artifact_ref",None), ("delivery_state","acknowledged")):
-            value = probe.CollaborationResponses(root)
+        for policy in ("fully_delegated","user_approval_required"):
+            root=Path(temporary)/policy
+            root.mkdir()
+            value=probe.CollaborationResponses(root,policy)
             try:
-                value.respond(request(initial))
-                value.respond(request(initial, "collaboration-submit", "submitted", accepted))
-                changed = dict(row, **{field:replacement})
-                rejected(lambda: value.respond(request(initial, "collaboration-await", "awaited", dict(awaited, completed=[changed]))))
+                pending=policy=="user_approval_required"
+                value.respond(request("TASK027_PRIMARY_INITIAL",primary=True))
+                operations={"source-member":operation(10,source,pending),"target-member":operation(11,target,pending)}
+                if pending:
+                    deadline=probe.time.clock_gettime_ns(probe.time.CLOCK_MONOTONIC)+60_000_000_000
+                    (root/"primary-phase-deadline.json").write_text(json.dumps({"deadline_monotonic_ns":deadline}))
+                    admitted=[v["specialist_operation"] for v in operations.values()]
+                    receipts=[approval_receipt(op,member) for op,member in zip(admitted,[source,target])]
+                    waiting, first_ready = threading.Event(), threading.Event()
+                    replies, failures = [], []
+                    original_sleep=probe.time.sleep
+                    def approval_wait(seconds):
+                        count=sum((root/f"approval-{op['approval_request_id']}.json").exists() for op in admitted)
+                        (first_ready if count else waiting).set()
+                        original_sleep(seconds)
+                    def before_approvals():
+                        try:
+                            replies.append(value.respond(request("TASK027_PRIMARY_INITIAL","p1-spawn",operations,primary=True)))
+                        except Exception as error:
+                            failures.append(error)
+                    with patch.object(probe.time,"sleep",side_effect=approval_wait):
+                        primary=threading.Thread(target=before_approvals)
+                        primary.start()
+                        try:
+                            assert waiting.wait(2), "Primary did not wait for original approval receipts"
+                            assert value.lock.acquire(timeout=1), "approval barrier held the request mutex"
+                            value.lock.release()
+                            publish_receipt(root,receipts[0],admitted[0]["approval_request_id"])
+                            assert first_ready.wait(2) and primary.is_alive(), "one approval prematurely released both operations"
+                        finally:
+                            for op,receipt in zip(admitted,receipts):
+                                publish_receipt(root,receipt,op["approval_request_id"])
+                            primary.join(2)
+                        assert not primary.is_alive()
+                        if failures:
+                            raise failures[0]
+                        assert len(replies)==1 and "p1-approved" in json.dumps(replies[0])
+                    for key,bad in [("approval_id",artifact),("operation_id",artifact),
+                                    ("protected_current_response",False),("operation_state","provisioning"),
+                                    ("original_sql_receipt","not-a-receipt")]:
+                        publish_receipt(root,dict(receipts[0],**{key:bad}),admitted[0]["approval_request_id"])
+                        rejected(lambda:value.wait_approved_members(admitted))
+                    publish_receipt(root,receipts[0],admitted[0]["approval_request_id"])
+                    publish_receipt(root,dict(receipts[1],member_run_id=source),admitted[1]["approval_request_id"])
+                    rejected(lambda:value.wait_approved_members(admitted))
+                    publish_receipt(root,receipts[1],admitted[1]["approval_request_id"])
+                    with patch.object(probe.time,"clock_gettime_ns",return_value=deadline):
+                        rejected(lambda:value.wait_approved_members(admitted))
+                    still_pending={"operation":"await_specialist_operations_result","operations":admitted,"pending":[op["operation_id"] for op in admitted]}
+                    rejected(lambda:value.step(request("TASK027_PRIMARY_INITIAL","p1-approved",{"approved-members":still_pending},primary=True),"TASK027_PRIMARY_INITIAL",""))
+                    ready=[dict(v["specialist_operation"],state="ready",specialist_run_id=member) for v,member in zip(operations.values(),[source,target])]
+                    value.respond(request("TASK027_PRIMARY_INITIAL","p1-approved",{"approved-members":{"operation":"await_specialist_operations_result","operations":ready,"pending":[]}},primary=True))
+                else:
+                    value.respond(request("TASK027_PRIMARY_INITIAL","p1-spawn",operations,primary=True))
+                assigned={"operation":"assign_specialist_task_result","task_id":exchange,"target_run_id":target,"state":"accepted"}
+                waiting, replies, failures = threading.Event(), [], []
+                original_wait = value.blocker_started.wait
+                def wait_for_blocker(timeout):
+                    waiting.set()
+                    return original_wait(timeout)
+                def respond_concurrently(incoming):
+                    try:
+                        replies.append(value.respond(incoming))
+                    except Exception as error:
+                        failures.append(error)
+                # Primary arrives before the blocker. Its positive busy wait
+                # must leave the shared request lock available to that request.
+                with patch.object(value.blocker_started, "wait", side_effect=wait_for_blocker):
+                    primary = threading.Thread(target=respond_concurrently, args=(request("TASK027_PRIMARY_INITIAL","p1-blocker",{"blocker":assigned},primary=True),))
+                    blocker = None
+                    primary.start()
+                    try:
+                        assert waiting.wait(2), "Primary never entered its original blocker barrier"
+                        blocker = threading.Thread(target=respond_concurrently, args=(request("TASK027_B_BLOCKER"),))
+                        blocker.start()
+                        primary.join(2)
+                        assert not primary.is_alive(), "Primary held the request lock across its blocker wait"
+                        assert value.blocker_started.is_set() and blocker.is_alive()
+                        assert value.primary_stage == 4 and "p1-queues" in json.dumps(replies[0])
+                    finally:
+                        # This unit Source-wait marker releases the already
+                        # started blocker response; it never sets its busy event.
+                        (root/"source-await-registered.json").write_text("{}")
+                        primary.join(10)
+                        if blocker is not None:
+                            blocker.join(10)
+                    assert not primary.is_alive() and blocker is not None and not blocker.is_alive()
+                    if failures:
+                        raise failures[0]
+                    assert len(replies) == 2
+                value.respond(request("TASK027_PRIMARY_INITIAL","p1-queues",{"tail":assigned,"source":dict(assigned,target_run_id=source)},primary=True))
+                value.respond(request("TASK027_A_INITIAL"))
+                accepted={"operation":"submit_consultation_result","exchange_id":exchange,"target_run_id":target,"state":"queued"}
+                value.respond(request("TASK027_A_INITIAL","a1-submit",{"submitted":accepted}))
+                value.respond(request("TASK027_NATIVE_TARGET"))
+                value.respond(request("TASK027_B_TAIL"))
+                value.respond(request("TASK027_A_INITIAL","a1-await",{"awaited":{"operation":"await_consultations_result","completed":[row],"pending":[]}}))
+                value.respond(request("TASK027_A_INITIAL","a1-collect",{"collected":collected}))
+                value.respond(request("TASK027_A_INITIAL","a1-read",{"initial-page":prefix}))
+                value.respond(request("TASK027_PRIMARY_RECOVERY",primary=True))
+                value.respond(request("TASK027_PRIMARY_RECOVERY","p2-recovery",{"prior-tasks":{"operation":"collect_specialist_results_result","tasks":[],"next_after_sequence":0},"recovery-source":dict(assigned,target_run_id=source)},primary=True))
+                value.respond(request("TASK027_A_RECOVERY"))
+                value.respond(request("TASK027_A_RECOVERY","a2-collect",{"recovered":collected}))
+                value.respond(request("TASK027_A_RECOVERY","a2-read",{"recovered-page":tail}))
+                assert value.posts==(18 if pending else 17)
+                assert value.initial_collection==value.recovery_collection
+                assert [w["call_id"] for w in value.page_witnesses]==["a1-read","a2-read"]
+                # Old history or another call cannot satisfy the current read.
+                rejected(lambda:value.page_output(request("TASK027_A_RECOVERY","a1-read",{"initial-page":prefix}),"a2-read","recovered-page"))
+                rejected(lambda:value.page_output(request("TASK027_A_RECOVERY","a2-read",{"recovered-page":prefix}),"a2-read","recovered-page"))
+                changed=dict(tail,content="different current bytes")
+                rejected(lambda:value.page_output(request("TASK027_A_RECOVERY","a2-read",{"recovered-page":changed}),"a2-read","recovered-page"))
+                changed=dict(tail,sha256="0"*64)
+                rejected(lambda:value.page_output(request("TASK027_A_RECOVERY","a2-read",{"recovered-page":changed}),"a2-read","recovered-page"))
+                changed=dict(tail,offset=body.index("한글".encode())+1)
+                rejected(lambda:value.page_output(request("TASK027_A_RECOVERY","a2-read",{"recovered-page":changed}),"a2-read","recovered-page"))
+                assert value.page_witnesses[0]["sha256"] == value.page_witnesses[1]["sha256"]
+                assert value.page_witnesses[0]["offset"] == 0 < value.page_witnesses[1]["offset"]
+                rejected(lambda:value.respond(request("TASK027_A_RECOVERY")))
             finally:
                 value.close()
 
 
+def caller_policy_writer_component_offline() -> None:
+    """State/correlation and lock-free barriers, never physical Writer qualification."""
+    def request(marker, call=None, outputs=None, *, source=False):
+        text = marker if source else "\n\nAccepted task:\n" + json.dumps({"objective":marker})
+        value = {"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":text}]},code_advertisement()]}
+        if call:
+            value["input"].extend(custom_result(call, outputs)["input"])
+        return value
+    ready = {"operation":"request_specialist_result","specialist_operation":{
+        "operation_id":"018f0000-0000-7000-8000-000000000001","role_ref":"general","state":"ready",
+        "specialist_run_id":"018f0000-0000-7000-8000-000000000002","approval_request_id":None,"reused":False,"safe_error_code":None}}
+    with tempfile.TemporaryDirectory(prefix="policy-writer-offline-") as directory:
+        root=Path(directory)
+        value=probe.CallerPolicyWriterResponses(root)
+        errors=[]
+        def held(operation):
+            def run():
+                try: operation()
+                except Exception as error: errors.append(error)
+            thread=threading.Thread(target=run)
+            thread.start()
+            return thread
+        def wait_marker(phase):
+            until=probe.time.monotonic()+2
+            while not (root/f"writer-{phase}-ready.json").exists():
+                assert probe.time.monotonic()<until
+                probe.time.sleep(.001)
+        try:
+            (root/"primary-phase-deadline.json").write_text(json.dumps({"deadline_monotonic_ns":probe.time.clock_gettime_ns(probe.time.CLOCK_MONOTONIC)+2_000_000_000}))
+            value.respond(request("TASK027_WRITER_PRIMARY_A",source=True))
+            first=held(lambda:value.respond(request("TASK027_WRITER_PRIMARY_A","policy-writer-spawn",{"writer-member":json.dumps(ready)},source=True)))
+            wait_marker("A")
+            for phase in ["A","B"]:
+                if phase=="B":
+                    (root/"primary-phase-deadline.json").write_text(json.dumps({"deadline_monotonic_ns":probe.time.clock_gettime_ns(probe.time.CLOCK_MONOTONIC)+2_000_000_000}))
+                    second=held(lambda:value.respond(request("TASK027_WRITER_PRIMARY_B",source=True)))
+                    wait_marker("B")
+                # Target requests progress while the original source holds its HTTP response.
+                output=value.respond(request(f"TASK027_WRITER_TASK_{phase}"))
+                command=json.loads(output[1]["item"]["input"].split("tools.exec_command(",1)[1].split(")",1)[0])
+                assert command["cmd"]==f"printf 'writer-{phase}\\n' > caller-policy-writer-{phase}.txt; printf 'writer-{phase}\\n'"
+                value.respond(request(f"TASK027_WRITER_TASK_{phase}",f"policy-writer-{phase}",{f"policy-writer-{phase}":{"exit_code":0,"output":f"writer-{phase}\n"}}))
+                (root/f"writer-{phase}-release.json").write_text(json.dumps({"phase":phase,"task_terminal":True}))
+                (first if phase=="A" else second).join(2)
+                assert not (first if phase=="A" else second).is_alive()
+            assert not errors and value.posts==7 and value.target_stages=={"A":2,"B":2}
+            rejected(lambda:value.respond(request("TASK027_WRITER_PRIMARY_B",source=True)))
+        finally:
+            value.close()
+        for malformed in ["wrong-call","not-ready","expired","forged-release"]:
+            case=root/malformed;case.mkdir();fixture=probe.CallerPolicyWriterResponses(case)
+            try:
+                fixture.respond(request("TASK027_WRITER_PRIMARY_A",source=True))
+                changed=json.loads(json.dumps(ready))
+                if malformed=="not-ready":
+                    changed["specialist_operation"].update(state="awaiting_approval", specialist_run_id=None,
+                        approval_request_id="018f0000-0000-7000-8000-000000000003")
+                (case/"primary-phase-deadline.json").write_text(json.dumps({"deadline_monotonic_ns":probe.time.clock_gettime_ns(probe.time.CLOCK_MONOTONIC)+(1_000_000_000 if malformed=="forged-release" else -1)}))
+                if malformed=="forged-release":(case/"writer-A-release.json").write_text(json.dumps({"phase":"B","task_terminal":True}))
+                rejected(lambda:fixture.respond(request("TASK027_WRITER_PRIMARY_A","wrong-call" if malformed=="wrong-call" else "policy-writer-spawn",{"writer-member":json.dumps(changed)},source=True)))
+                if malformed in ["wrong-call","not-ready"]:assert not (case/"writer-A-ready.json").exists()
+            finally:fixture.close()
+
+
+def collaboration_cleanup_timeout_preserves_first_failure() -> None:
+    # Exercise the existing wrapper's failure finalizer with mocked process
+    # handles. No executable, native runtime or model request is launched.
+    with tempfile.TemporaryDirectory(prefix="dolgorae-collaboration-cleanup-") as temporary:
+        base=Path(temporary);target=base/"build"; (target/"debug/examples").mkdir(parents=True)
+        binary=target/"debug/dolgorae";binary.write_bytes(b"offline-main-image")
+        (target/"debug/examples/native_successor_pipeline").write_bytes(b"offline-driver-image")
+        seen=[];state={"stopped":False}
+        foreground=Mock(stdout=io.StringIO('{"ok":true,"command":"serve"}\n'),pid=123,returncode=0)
+        foreground.poll.side_effect=lambda:0 if state["stopped"] else None
+        foreground.terminate.side_effect=lambda:state.update(stopped=True)
+        foreground.communicate.return_value=("","")
+        fixture=Mock(failure=None,base_url="http://127.0.0.1:1/v1")
+        def run(argv, **kwargs):
+            seen.append(argv)
+            if "--cleanup" in argv:
+                raise subprocess.TimeoutExpired(argv,120)
+            if "orphan" in argv:
+                return subprocess.CompletedProcess(argv,0,json.dumps({"data":{"candidates":[]}}),"")
+            if str(argv[0]).endswith("fixture-collaboration-driver"):
+                return subprocess.CompletedProcess(argv,1,"","original driver refusal")
+            return subprocess.CompletedProcess(argv,0,"{}","")
+        with patch.dict(os.environ,{probe.OPT_IN:"1","TMPDIR":str(base),"CARGO_TARGET_DIR":str(target)}), \
+             patch.object(probe,"executable_identity",return_value={"sha256":probe.CODEX_SHA256}), \
+             patch.object(probe,"checked_codex"),patch.object(probe,"CollaborationResponses",return_value=fixture), \
+             patch.object(probe.subprocess,"run",side_effect=run),patch.object(probe.subprocess,"Popen",return_value=foreground), \
+             patch("select.select",return_value=([foreground.stdout],[],[])):
+            try:
+                probe.collaboration_component_campaign(binary,base/"codex")
+            except probe.ProbeCheckFailure as error:
+                assert error.kind=="collaboration_component_driver_failed"
+            else:
+                raise AssertionError("original driver failure was lost")
+        assert state["stopped"] and foreground.communicate.called and fixture.close.called
+        assert any("orphan" in argv for argv in seen)
+        reports=list(base.glob("dcc-*/fully_delegated/cleanup-errors.json"))
+        assert len(reports)==1
+        assert json.loads(reports[0].read_text())==[{"stage":"owner_cleanup","error":"TimeoutExpired"}]
+
+
 def main() -> int:
+    checked = validator(probe.PROTOCOL, "dolgorae-collaboration-tool-v1.schema.json")
+    for name, field, value in (("collaboration-read-request.invalid-limit.json", "limit", 1),
+                               ("collaboration-submit.invalid-source-injection.json", "source_run_id", None)):
+        invalid = json.loads((probe.PROTOCOL / "examples" / name).read_text())
+        assert not checked.is_valid(invalid), name
+        if value is None:
+            del invalid[field]
+        else:
+            invalid[field] = value
+        assert_valid(invalid, checked, "repaired " + name)
+    state_checked = validator(probe.PROTOCOL, "dolgorae-orchestration-state-v2.schema.json")
+    caller_state = json.loads((probe.PROTOCOL / "examples/orchestration-state-v2.caller.valid.json").read_text())
+    assert_valid(caller_state, state_checked, "current Caller private state alternatives")
+    cases = [
+        (["orchestrated_sessions",0,"members",0,"role_snapshot","schema_version"],4),
+        (["orchestrated_sessions",0,"members",0,"agent_configuration","schema_version"],2),
+        (["orchestrated_sessions",0,"members",0,"agent_configuration","schema_version"],4),
+        (["orchestrated_sessions",0,"members",0,"role_snapshot"],caller_state["orchestrated_sessions"][0]["members"][0]["role_snapshot"]["role"]),
+        (["orchestrated_sessions",0,"members",0,"agent_configuration"],None),
+        (["orchestrated_sessions",0,"specialist_policy"],None),
+        (["aggregate_operations",0,"controller_binding"],caller_state["external_engagements"][0]["controller_binding"]),
+        (["external_engagements",0,"controller_binding"],None),
+        (["external_engagements",0,"external_controller_ref"],{}),
+    ]
+    for path, value in cases:
+        invalid = json.loads(json.dumps(caller_state))
+        parent = invalid
+        for key in path[:-1]:
+            parent = parent[key]
+        parent[path[-1]] = value
+        assert not state_checked.is_valid(invalid), (path,value)
     collaboration_component_offline()
+    caller_policy_writer_component_offline()
+    collaboration_cleanup_timeout_preserves_first_failure()
     root = Path("/owned-integrated-fixture")
     effects = []
     retirement = subprocess.CompletedProcess([], 0, '{"retained_profiles_retired":true}', "")

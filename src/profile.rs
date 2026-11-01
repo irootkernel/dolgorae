@@ -563,6 +563,7 @@ pub(crate) fn retire_review_server(
             None,
             false,
             Some(owner),
+            None,
             &mut OperatorHandoff::none(),
         )?
         .ok_or_else(|| internal("owned review generation disappeared before stop"))?;
@@ -1274,10 +1275,85 @@ fn server_status(parsed: &Parsed) -> Result<Value, MachineError> {
     }))
 }
 
+// Explicit selection never records a generic candidate merely to discover
+// that the caller confirmed a different contract.
+fn confirmed_lifecycle_binding(
+    context: &Context,
+    name: &str,
+    profile: &RuntimeProfile,
+    confirmed: &str,
+) -> Result<crate::global_runtime::GlobalProfileBinding, MachineError> {
+    require_canonical_server_key("--confirm-server-key", confirmed)?;
+    let resolved =
+        crate::global_runtime::ResolvedGlobalProfile::from_definition(name, profile.clone())?;
+    let generic = resolved
+        .clone()
+        .bind(observe_snapshot(context, name, profile)?)?;
+    select_confirmed_lifecycle_binding(name, confirmed, generic, || {
+        resolved.bind_qualified(observe_snapshot_policy(context, name, profile, true)?)
+    })
+}
+
+fn select_confirmed_lifecycle_binding(
+    name: &str,
+    confirmed: &str,
+    generic: crate::global_runtime::GlobalProfileBinding,
+    qualified: impl FnOnce() -> Result<crate::global_runtime::GlobalProfileBinding, MachineError>,
+) -> Result<crate::global_runtime::GlobalProfileBinding, MachineError> {
+    if generic.server_key == confirmed {
+        return Ok(generic);
+    }
+    let qualified = qualified()?;
+    if qualified.server_key != confirmed {
+        return Err(profile_mismatch(
+            name,
+            "confirm_server_key",
+            json!(confirmed),
+            json!(qualified.server_key),
+        ));
+    }
+    if !qualified.caller_workspace_supported() {
+        return Err(profile_mismatch(
+            name,
+            "qualified_current_runtime",
+            json!("qualified Current runtime"),
+            json!({"codex_version":qualified.launch_snapshot.codex_version,"executable_sha256":qualified.launch_snapshot.executable_identity.sha256}),
+        ));
+    }
+    Ok(qualified)
+}
+
 fn server_start(parsed: &Parsed) -> Result<Value, MachineError> {
     let (context, name, profile, _) = selected_profile_from(parsed)?;
-    let snapshot = snapshot_for(&context, &name, &profile)?;
-    let state = start_snapshot(&context, &snapshot, &mut OperatorHandoff::none())?;
+    let state = if let Some(confirmed) = parsed
+        .values
+        .get("--confirm-server-key")
+        .and_then(|v| v.last())
+    {
+        let binding = confirmed_lifecycle_binding(&context, &name, &profile, confirmed)?;
+        if binding.caller_workspace_supported() {
+            let home = DolgoraeHome::system()?;
+            binding.record_qualified(&home)?;
+            ensure_qualified_global_server(&binding)?
+        } else {
+            // Preserve the ordinary path after its exact key was confirmed.
+            crate::global_profile::GlobalProfileStore::from_root(&context.dolgorae_home_root)
+                .record_binding(crate::global_profile::ProfileBindingRecord {
+                    selected_name: binding.selected_name.clone(),
+                    definition_sha256: binding.definition_sha256.clone(),
+                    server_key: binding.server_key.clone(),
+                    launch_snapshot_sha256: binding.launch_snapshot_sha256.clone(),
+                })?;
+            start_snapshot(
+                &context,
+                &binding.launch_snapshot,
+                &mut OperatorHandoff::none(),
+            )?
+        }
+    } else {
+        let snapshot = snapshot_for(&context, &name, &profile)?;
+        start_snapshot(&context, &snapshot, &mut OperatorHandoff::none())?
+    };
     Ok(json!({"profile": name, "started": true, "state": state}))
 }
 
@@ -1290,8 +1366,43 @@ fn server_stop(
     if !allow_without_operator {
         parsed.precheck_operator("profile.server.stop")?;
     }
-    let snapshot = snapshot_for(&context, &name, &profile)?;
     let interrupt = parsed.flag("--interrupt");
+    let snapshot = if let Some(confirmed) = parsed
+        .values
+        .get("--confirm-server-key")
+        .and_then(|v| v.last())
+    {
+        let binding = confirmed_lifecycle_binding(&context, &name, &profile, confirmed)?;
+        if binding.caller_workspace_supported() {
+            if interrupt {
+                return Err(MachineError::invalid_argument(
+                    "--interrupt",
+                    "qualified Profile stop is non-interrupting",
+                ));
+            }
+            let expected = crate::global_profile::ProfileBindingRecord {
+                selected_name: binding.selected_name.clone(),
+                definition_sha256: binding.definition_sha256.clone(),
+                server_key: binding.server_key.clone(),
+                launch_snapshot_sha256: binding.launch_snapshot_sha256.clone(),
+            };
+            let mut operator = parsed.authorize_operator("profile.server.stop")?;
+            let stopped = stop_snapshot_inner(
+                &context,
+                &binding.launch_snapshot,
+                Some(expected),
+                false,
+                &mut operator,
+                &mut || parsed.authorize_operator("profile.server.stop"),
+                member_quiescer,
+            )?;
+            return Ok(json!({"profile":name,"server_key":binding.server_key,"stopped":stopped}));
+        } else {
+            binding.launch_snapshot
+        }
+    } else {
+        snapshot_for(&context, &name, &profile)?
+    };
     require_interrupt_confirmation(parsed, &name, &snapshot, interrupt)?;
     let mut operator = if allow_without_operator {
         OperatorHandoff::none()
@@ -5053,14 +5164,15 @@ impl MigrationStopFailure {
 fn stop_snapshot_inner(
     context: &Context,
     snapshot: &ProfileSnapshot,
-    migration_id: Option<Uuid>,
+    binding: Option<crate::global_profile::ProfileBindingRecord>,
     interrupt: bool,
     operator: &mut OperatorHandoff,
     authorize_phase: &mut impl FnMut() -> Result<OperatorHandoff, MachineError>,
     member_quiescer: ProfileMemberQuiescer,
 ) -> Result<bool, MachineError> {
     let paths = LifecyclePaths::open(context, snapshot)?;
-    let Some(reservation) = prepare_stop(&paths, snapshot, migration_id, interrupt, operator)?
+    let Some(reservation) =
+        prepare_stop_with_review_owner(&paths, snapshot, None, interrupt, None, binding, operator)?
     else {
         return Ok(false);
     };
@@ -5081,6 +5193,7 @@ fn stop_snapshot_inner(
 /// The stopping lifetime PREPARE reserved.
 #[derive(Clone)]
 struct StopReservation {
+    binding: Option<crate::global_profile::ProfileBindingRecord>,
     state: ServerState,
     token: Uuid,
     interrupt: bool,
@@ -5096,7 +5209,15 @@ fn prepare_stop(
     interrupt: bool,
     operator: &mut OperatorHandoff,
 ) -> Result<Option<StopReservation>, MachineError> {
-    prepare_stop_with_review_owner(paths, snapshot, migration_id, interrupt, None, operator)
+    prepare_stop_with_review_owner(
+        paths,
+        snapshot,
+        migration_id,
+        interrupt,
+        None,
+        None,
+        operator,
+    )
 }
 
 fn prepare_stop_with_review_owner(
@@ -5105,6 +5226,7 @@ fn prepare_stop_with_review_owner(
     migration_id: Option<Uuid>,
     interrupt: bool,
     review_owner: Option<&ReviewServerOwner>,
+    binding: Option<crate::global_profile::ProfileBindingRecord>,
     operator: &mut OperatorHandoff,
 ) -> Result<Option<StopReservation>, MachineError> {
     let (home_lock, server_lock) = paths.lock()?;
@@ -5112,6 +5234,14 @@ fn prepare_stop_with_review_owner(
     // authorized this stop can retire into the locks that replace it. Waiting
     // for the server to quiesce happens in APPLY, under no lock at all.
     operator.handoff(&home_lock);
+    if let Some(expected) = &binding {
+        let root = paths
+            .root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| internal("global Profile root has no home"))?;
+        crate::global_profile::require_exact_binding_under_lifecycle_locks(root, expected)?;
+    }
     verify_migration_fence(
         &paths.home_root.join("migration.json"),
         migration_id,
@@ -5228,6 +5358,7 @@ fn prepare_stop_with_review_owner(
     drop(server_lock);
     drop(home_lock);
     Ok(Some(StopReservation {
+        binding,
         state,
         token,
         interrupt,
@@ -5361,6 +5492,14 @@ fn prepare_shutdown(
 ) -> Result<(), MachineError> {
     let (home_lock, server_lock) = paths.lock()?;
     operator.handoff(&home_lock);
+    if let Some(expected) = &reservation.binding {
+        let root = paths
+            .root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| internal("global Profile root has no home"))?;
+        crate::global_profile::require_exact_binding_under_lifecycle_locks(root, expected)?;
+    }
     require_transition(
         &paths.active_path,
         snapshot,
@@ -5664,6 +5803,14 @@ fn commit_stop(
 ) -> Result<(), MachineError> {
     let (home_lock, server_lock) = paths.lock()?;
     operator.handoff(&home_lock);
+    if let Some(expected) = &reservation.binding {
+        let root = paths
+            .root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| internal("global Profile root has no home"))?;
+        crate::global_profile::require_exact_binding_under_lifecycle_locks(root, expected)?;
+    }
     require_transition(
         &paths.active_path,
         snapshot,
@@ -7189,6 +7336,7 @@ impl ProfileOperation {
         }
         match self {
             Self::Add => matches!(name, "--codex-home" | "--native-subagents" | "--env"),
+            Self::ServerStart => name == "--confirm-server-key",
             Self::ServerStop | Self::ServerRestart => matches!(
                 name,
                 "--operator-file" | "--operator-fd" | "--confirm-server-key"
@@ -7225,7 +7373,6 @@ impl ProfileOperation {
             | Self::Remove
             | Self::Doctor
             | Self::ServerStatus
-            | Self::ServerStart
             | Self::MembershipVerify => false,
         }
     }
@@ -7425,6 +7572,7 @@ mod tests {
             inode: 1,
             sha256: "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf".into(),
         };
+        let mut phase_binding = None;
         for variant in 0..4 {
             definition.argv.truncate(1);
             if variant == 2 {
@@ -7503,6 +7651,118 @@ mod tests {
             .bind_qualified(qualified.clone())
             .unwrap();
             assert!(binding.caller_workspace_supported());
+            let ordinary = crate::global_runtime::ResolvedGlobalProfile::from_definition(
+                "profile-0",
+                definition.clone(),
+            )
+            .unwrap()
+            .bind(generic.clone())
+            .unwrap();
+            let history_before = fs::read(home.root().join("profile-bindings.json")).unwrap();
+            let selected = select_confirmed_lifecycle_binding(
+                "profile-0",
+                &binding.server_key,
+                ordinary.clone(),
+                || Ok(binding.clone()),
+            )
+            .unwrap();
+            assert_eq!(selected, binding);
+            assert_eq!(
+                select_confirmed_lifecycle_binding(
+                    "profile-0",
+                    &ordinary.server_key,
+                    ordinary.clone(),
+                    || panic!("ordinary key must not request qualified observation")
+                )
+                .unwrap(),
+                ordinary
+            );
+            assert_eq!(
+                select_confirmed_lifecycle_binding("profile-0", &"0".repeat(64), ordinary, || Ok(
+                    binding.clone()
+                ))
+                .unwrap_err()
+                .code,
+                "PROFILE_MISMATCH"
+            );
+            assert_eq!(
+                fs::read(home.root().join("profile-bindings.json")).unwrap(),
+                history_before
+            );
+            if variant == 0 {
+                phase_binding = Some(binding.clone());
+                assert!(
+                    crate::global_profile::require_recorded_binding_under_lifecycle_locks(
+                        home.root(),
+                        "profile-0",
+                        &binding.server_key
+                    )
+                    .is_err()
+                );
+                binding.record_qualified(&home).unwrap();
+                crate::global_profile::require_recorded_binding_under_lifecycle_locks(
+                    home.root(),
+                    "profile-0",
+                    &binding.server_key,
+                )
+                .unwrap();
+                let expected = crate::global_profile::ProfileBindingRecord {
+                    selected_name: binding.selected_name.clone(),
+                    definition_sha256: binding.definition_sha256.clone(),
+                    server_key: binding.server_key.clone(),
+                    launch_snapshot_sha256: binding.launch_snapshot_sha256.clone(),
+                };
+                crate::global_profile::require_exact_binding_under_lifecycle_locks(
+                    home.root(),
+                    &expected,
+                )
+                .unwrap();
+                let history_path = home.root().join("profile-bindings.json");
+                let original_history = fs::read(&history_path).unwrap();
+                let mut changed: Value = serde_json::from_slice(&original_history).unwrap();
+                changed["bindings"][format!("profile-0:{}", binding.server_key)]["launch_snapshot_sha256"] =
+                    json!("0".repeat(64));
+                fs::write(&history_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+                assert_eq!(
+                    crate::global_profile::require_exact_binding_under_lifecycle_locks(
+                        home.root(),
+                        &expected
+                    )
+                    .unwrap_err()
+                    .code,
+                    "PROFILE_MISMATCH"
+                );
+                fs::write(&history_path, &original_history).unwrap();
+                let registry_path = home.root().join("profiles.yaml");
+                let original_registry = fs::read(&registry_path).unwrap();
+                let mut registry = crate::global_profile::GlobalProfileStore::new(&home)
+                    .load()
+                    .unwrap();
+                // An alias can resolve to the same launch identity while its
+                // accepted definition preimage has changed.
+                let alias_directory = root.join("alias");
+                fs::create_dir(&alias_directory).unwrap();
+                let alias = alias_directory.join("codex");
+                std::os::unix::fs::symlink(&definition.argv[0], &alias).unwrap();
+                registry.profiles.get_mut("profile-0").unwrap().argv[0] =
+                    alias.to_str().unwrap().into();
+                fs::write(&registry_path, serde_yaml_ng::to_string(&registry).unwrap()).unwrap();
+                assert_eq!(
+                    crate::global_profile::require_exact_binding_under_lifecycle_locks(
+                        home.root(),
+                        &expected
+                    )
+                    .unwrap_err()
+                    .code,
+                    "PROFILE_MISMATCH"
+                );
+                fs::write(&registry_path, &original_registry).unwrap();
+                crate::global_profile::require_exact_binding_under_lifecycle_locks(
+                    home.root(),
+                    &expected,
+                )
+                .unwrap();
+            }
             let history = fs::read(home.root().join("profile-bindings.json")).unwrap();
             let observation =
                 observe_qualified_global_profile(&home, "profile-0", qualified).unwrap();
@@ -7523,6 +7783,48 @@ mod tests {
                 );
             }
         }
+        let binding = phase_binding.unwrap();
+        let paths = LifecyclePaths::open(&context, &binding.launch_snapshot).unwrap();
+        let bad = crate::global_profile::ProfileBindingRecord {
+            selected_name: binding.selected_name.clone(),
+            definition_sha256: binding.definition_sha256.clone(),
+            server_key: binding.server_key.clone(),
+            launch_snapshot_sha256: "0".repeat(64),
+        };
+        assert!(
+            matches!(prepare_stop_with_review_owner(&paths,&binding.launch_snapshot,None,false,None,Some(bad.clone()),&mut OperatorHandoff::none()),Err(error) if error.code=="PROFILE_MISMATCH")
+        );
+        let reservation = StopReservation {
+            binding: Some(bad),
+            state: stopped_state(),
+            token: Uuid::now_v7(),
+            interrupt: false,
+            members: Vec::new(),
+        };
+        assert_eq!(
+            prepare_shutdown(
+                &paths,
+                &binding.launch_snapshot,
+                &reservation,
+                &mut OperatorHandoff::none()
+            )
+            .unwrap_err()
+            .code,
+            "PROFILE_MISMATCH"
+        );
+        assert_eq!(
+            commit_stop(
+                &paths,
+                &binding.launch_snapshot,
+                &reservation,
+                &mut OperatorHandoff::none()
+            )
+            .unwrap_err()
+            .code,
+            "PROFILE_MISMATCH"
+        );
+        assert!(!paths.state_path.exists());
+        assert!(!paths.active_path.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -8052,6 +8354,16 @@ mod tests {
     }
 
     #[test]
+    fn qualified_lifecycle_key_is_explicit_and_does_not_expand_other_operations() {
+        let args = ["demo", "--confirm-server-key", &"a".repeat(64)].map(OsString::from);
+        assert!(validate_arguments(ProfileOperation::ServerStart, &args).is_ok());
+        assert!(validate_arguments(ProfileOperation::ServerStop, &args).is_ok());
+        assert!(validate_arguments(ProfileOperation::ServerStatus, &args).is_err());
+        assert!(validate_arguments(ProfileOperation::Doctor, &args).is_err());
+        assert!(validate_arguments(ProfileOperation::ServerStart, &["demo".into()]).is_ok());
+    }
+
+    #[test]
     fn operator_carrier_conflict_preserves_invalid_argument() {
         let args = [
             "demo",
@@ -8446,6 +8758,7 @@ mod tests {
         )
         .unwrap();
         let reservation = StopReservation {
+            binding: None,
             state: state.clone(),
             token,
             interrupt: false,
@@ -8471,6 +8784,7 @@ mod tests {
         )
         .unwrap();
         let interrupt_reservation = StopReservation {
+            binding: None,
             token: interrupt_token,
             interrupt: true,
             ..reservation.clone()
@@ -8501,6 +8815,7 @@ mod tests {
         )
         .unwrap();
         let unknown_reservation = StopReservation {
+            binding: None,
             token: unknown_token,
             interrupt: false,
             ..reservation
@@ -8984,6 +9299,7 @@ mod tests {
                 None,
                 false,
                 Some(&record.owner),
+                None,
                 &mut OperatorHandoff::none(),
             );
             assert!(matches!(result, Err(error) if error.code == "PROFILE_SERVER_BUSY"));
@@ -9055,6 +9371,7 @@ mod tests {
                 None,
                 false,
                 Some(&record.owner),
+                None,
                 &mut OperatorHandoff::none(),
             )
             .is_err()
@@ -9080,6 +9397,7 @@ mod tests {
             None,
             false,
             Some(&record.owner),
+            None,
             &mut OperatorHandoff::none(),
         )
         .unwrap()
@@ -9576,6 +9894,7 @@ mod tests {
         state.membership_revision = first.revision;
         let token = Uuid::now_v7();
         let reservation = StopReservation {
+            binding: None,
             state: state.clone(),
             token,
             interrupt: true,
@@ -9721,6 +10040,7 @@ else:
             &paths,
             &snapshot,
             &StopReservation {
+                binding: None,
                 state,
                 token,
                 interrupt: false,

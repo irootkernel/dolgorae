@@ -35,8 +35,6 @@ pub(crate) fn capture_root_priority(
     if priority > 2 || task.source_run_id != task.session_id {
         return Err(denied());
     }
-    install(tx)?;
-    let _ = policy(tx, task.session_id)?;
     let record = RootPriority {
         schema: "dolgorae.collaboration-root-priority/v1".into(),
         session_id: task.session_id,
@@ -47,15 +45,47 @@ pub(crate) fn capture_root_priority(
         accepted_task_sha256: task.accepted_request_sha256.into(),
         request_sha256: task.request_sha256.into(),
     };
+    retain_root_priority(tx, record, task.now_ms)
+}
+
+pub(crate) fn capture_policy_task_priority(
+    tx: &Transaction<'_>,
+    task: &crate::orchestration::policy_task::Capture,
+    now: i64,
+) -> Result<(), MachineError> {
+    retain_root_priority(
+        tx,
+        RootPriority {
+            schema: "dolgorae.collaboration-root-priority/v1".into(),
+            session_id: task.session,
+            root_task_id: task.task,
+            source_run_id: task.session,
+            member_run_id: task.target,
+            priority: 1,
+            accepted_task_sha256: task.accepted_sha256.clone(),
+            request_sha256: task.request_sha256.clone(),
+        },
+        now,
+    )
+}
+
+fn retain_root_priority(
+    tx: &Transaction<'_>,
+    record: RootPriority,
+    now: i64,
+) -> Result<(), MachineError> {
+    install(tx)?;
+    let _ = policy(tx, record.session_id)?;
     let text = serde_json::to_string(&record).map_err(|_| denied())?;
     let digest = crate::jcs::sha256_hex(text.as_bytes());
-    tx.execute("INSERT INTO collaboration_root_priorities(root_task_id,session_id,member_run_id,record_json,record_sha256) VALUES(?1,?2,?3,?4,?5)",params![task.task_id.to_string(),task.session_id.to_string(),task.member_run_id.to_string(),text,digest]).map_err(sql)?;
+    tx.execute("INSERT INTO collaboration_root_priorities(root_task_id,session_id,member_run_id,record_json,record_sha256) VALUES(?1,?2,?3,?4,?5)",
+        params![record.root_task_id.to_string(),record.session_id.to_string(),record.member_run_id.to_string(),text,digest]).map_err(sql)?;
     crate::orchestration::append_event(
         tx,
-        task.session_id,
+        record.session_id,
         "collaboration_root_priority_captured",
         &digest,
-        task.now_ms,
+        now,
     )
 }
 
@@ -163,6 +193,12 @@ enum Request {
     },
     #[serde(rename = "collect_collaboration_results")]
     Collect { limit: u64 },
+    #[serde(rename = "read_collaboration_result")]
+    Read {
+        exchange_id: Uuid,
+        offset: u64,
+        limit: u32,
+    },
 }
 
 pub(crate) fn tool_spec() -> Value {
@@ -171,12 +207,13 @@ pub(crate) fn tool_spec() -> Value {
     ))
     .expect("checked collaboration schema");
     json!({"type":"function", "name":TOOL_NAME,
-        "description":"Submit bounded consultations to provisioned peers in this internal Session.",
+        "description":"Submit bounded consultations, await their completion, collect results, and read immutable result pages from provisioned peers in this internal Session.",
         "inputSchema":{"$schema":"https://json-schema.org/draft/2020-12/schema",
             "$defs":schema["$defs"],"oneOf":[
                 {"$ref":"#/$defs/submit_request"},
                 {"$ref":"#/$defs/await_request"},
-                {"$ref":"#/$defs/collect_request"}]}})
+                {"$ref":"#/$defs/collect_request"},
+                {"$ref":"#/$defs/read_request"}]}})
 }
 
 fn members(
@@ -295,7 +332,11 @@ pub(crate) fn error_result(error: &MachineError) -> Value {
         "COLLABORATION_TRANSPORT_UNAVAILABLE" => (
             "COLLABORATION_TRANSPORT_UNAVAILABLE",
             error.retryable,
-            "This consultation operation is unavailable in this runtime.",
+            if error.retryable {
+                "The consultation result is not available yet."
+            } else {
+                "This consultation operation is unavailable in this runtime."
+            },
         ),
         "INVALID_ARGUMENT" => (
             "COLLABORATION_NOT_ALLOWED",
@@ -465,6 +506,24 @@ fn admit_inner(
             return Err(denied());
         }
     }
+    // Positive original Submit recovery commits in its owning store before
+    // this tool's admission transaction; it does not dispatch another Turn.
+    crate::orchestration::policy_task::recover(
+        &state_root,
+        context.session_id,
+        context.source_run_id,
+        Some(&context.source_turn_id),
+    )?;
+    if let Request::Read {
+        exchange_id,
+        offset,
+        limit,
+    } = request
+    {
+        // Successful replay revalidates the publication and whole content;
+        // an old page cannot hide a missing or changed artifact.
+        return read_result(store, context, payload, exchange_id, offset, limit);
+    }
     if let Some(response) = replay(
         store.collaboration_connection()?,
         context,
@@ -478,6 +537,7 @@ fn admit_inner(
         return Ok(response);
     }
     match request {
+        Request::Read { .. } => unreachable!("read handled after source authorization"),
         Request::Await {
             exchange_ids,
             return_when,
@@ -1384,6 +1444,202 @@ fn materialize_results(
     Ok(())
 }
 
+/// Read only a source-owned immutable publication after native authorization.
+fn read_result(
+    store: &mut OrchestrationStore,
+    ctx: &PrimaryCallContext,
+    payload: &Value,
+    exchange: Uuid,
+    offset: u64,
+    limit: u32,
+) -> Result<Value, MachineError> {
+    if exchange.get_version_num() != 7 || offset > 33_554_432 || !(1..=65_536).contains(&limit) {
+        return Err(denied());
+    }
+    let root = store.collaboration_state_root().to_owned();
+    let tx = store.collaboration_transaction()?;
+    install(&tx)?;
+    let digest = request_digest(payload)?;
+    let owned: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM collaboration_exchanges WHERE exchange_id=?1 AND session_id=?2 AND source_run_id=?3)",
+        params![exchange.to_string(),ctx.session_id.to_string(),ctx.source_run_id.to_string()],
+        |r| r.get(0),
+    ).map_err(sql)?;
+    if !owned {
+        return Err(denied());
+    }
+    let record = execution_record(&tx, exchange)?;
+    if record.session != ctx.session_id {
+        return Err(denied());
+    }
+    let retained = replay(&tx, ctx, &digest)?;
+    let unreadable = || failure("COLLABORATION_TRANSPORT_UNAVAILABLE");
+    let result = exchange_result(&tx, ctx, exchange).map_err(|_| unreadable())?;
+    if result["execution_state"] != "succeeded" {
+        let mut error = unreadable();
+        error.retryable = !terminal(result["execution_state"].as_str().ok_or_else(unreadable)?);
+        return Err(error);
+    }
+    let artifact = result["result_artifact_ref"]
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(unreadable)?;
+    let (_, length, sha256) = artifact_metadata(&tx, ctx.source_run_id, artifact)
+        .map_err(|_| unreadable())?
+        .ok_or_else(unreadable)?;
+    let bytes = artifact_content(&tx, ctx.source_run_id, artifact)
+        .map_err(|_| unreadable())?
+        .ok_or_else(unreadable)?;
+    if bytes.len() as u64 != length
+        || crate::jcs::sha256_hex(&bytes) != sha256
+        || !result_body_is_safe(&root, &bytes)
+    {
+        return Err(unreadable());
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| unreadable())?;
+    let offset = usize::try_from(offset).map_err(|_| denied())?;
+    if !text.is_char_boundary(offset) {
+        return Err(denied());
+    }
+    let mut end = offset.saturating_add(limit as usize).min(bytes.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    if offset < bytes.len() && end == offset {
+        return Err(denied());
+    }
+    let response = json!({
+        "operation":"read_collaboration_result_result",
+        "exchange_id":exchange,"result_artifact_ref":artifact,
+        "length":length,"sha256":sha256,"offset":offset,
+        "content":&text[offset..end],"truncated":end < bytes.len()
+    });
+    if let Some(retained) = retained {
+        if retained != response {
+            return Err(unreadable());
+        }
+        drop(tx);
+        materialize_results(&root, store.collaboration_connection()?, ctx.source_run_id)
+            .map_err(|_| unreadable())?;
+        return Ok(retained);
+    }
+    retain_response(&tx, ctx, &digest, &response)?;
+    crate::storage_observation::commit(tx).map_err(sql)?;
+    materialize_results(&root, store.collaboration_connection()?, ctx.source_run_id)
+        .map_err(|_| unreadable())?;
+    Ok(response)
+}
+
+/// Bounded named/structural checks, not arbitrary unlabelled-secret detection.
+/// Refusal never rewrites the immutable result preimage.
+fn result_body_is_safe(root: &Path, bytes: &[u8]) -> bool {
+    if bytes.len() > crate::turn::MAX_FINAL_RESPONSE_ARTIFACT_BYTES {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    fn is_secret_assignment_name(name: &str) -> bool {
+        let token = name
+            .rsplit(|character: char| {
+                character.is_whitespace() || matches!(character, ',' | ';' | '"' | '\'' | '[' | '(')
+            })
+            .find(|candidate| !candidate.is_empty())
+            .unwrap_or_default();
+        !token.is_empty() && crate::jcs::is_secret_payload_key(token)
+    }
+    fn text_safe(root: &Path, text: &str) -> bool {
+        if text.contains(root.to_string_lossy().as_ref())
+            || text.contains(".dolgorae/")
+            || text.contains(".dolgorae\\")
+            || text.contains("controller-capability")
+            || text
+                .split_whitespace()
+                .collect::<String>()
+                .contains("\"jsonrpc\":")
+            || text.contains("/tmp/dolgorae-")
+            || text.contains("/private/tmp/dolgorae-")
+            || text.contains("-----BEGIN PRIVATE KEY")
+            || text.contains("-----BEGIN RSA PRIVATE KEY")
+            || text.contains("-----BEGIN EC PRIVATE KEY")
+            || text.contains("-----BEGIN DSA PRIVATE KEY")
+            || text.contains("-----BEGIN OPENSSH PRIVATE KEY")
+            || text.contains("-----BEGIN ENCRYPTED PRIVATE KEY")
+            || text.contains("Bearer ")
+        {
+            return false;
+        }
+        for line in text.lines() {
+            let mut rest = line;
+            while let Some(at) = rest.find([':', '=']) {
+                if is_secret_assignment_name(&rest[..at]) && !rest[at + 1..].trim().is_empty() {
+                    return false;
+                }
+                rest = &rest[at + 1..];
+            }
+            if line.split_whitespace().any(|word| {
+                let word = word.trim_matches(['"', '\'', ',', ';', ')', ']', '}']);
+                word.starts_with('/')
+                    && [".sock", ".sqlite", ".sqlite3", ".db", "/auth.json"]
+                        .iter()
+                        .any(|suffix| word.ends_with(suffix))
+            }) {
+                return false;
+            }
+        }
+        true
+    }
+    fn json_safe(root: &Path, value: &crate::jcs::LosslessJson) -> bool {
+        use crate::jcs::LosslessJson;
+        match value {
+            LosslessJson::String(text) => text_safe(root, text),
+            LosslessJson::Array(items) => items.iter().all(|item| json_safe(root, item)),
+            LosslessJson::Object(fields) => {
+                let native_type =
+                    fields
+                        .iter()
+                        .find_map(|(key, value)| match (key.as_str(), value) {
+                            ("type", LosslessJson::String(value)) => Some(value.as_str()),
+                            _ => None,
+                        });
+                let native_reasoning = native_type == Some("reasoning")
+                    && fields
+                        .iter()
+                        .any(|(key, _)| matches!(key.as_str(), "summary" | "content"));
+                let reasoning_delta = native_type.is_some_and(|value| {
+                    value.starts_with("response.reasoning_") && value.ends_with(".delta")
+                }) && fields.iter().any(|(key, _)| key == "delta");
+                !native_reasoning
+                    && !reasoning_delta
+                    && !fields.iter().any(|(key, _)| {
+                        crate::jcs::is_secret_payload_key(key)
+                            || matches!(
+                                key.as_str(),
+                                "jsonrpc"
+                                    | "reasoning"
+                                    | "reasoning_content"
+                                    | "chain_of_thought"
+                                    | "encrypted_content"
+                            )
+                            || !text_safe(root, key)
+                    })
+                    && fields.iter().all(|(_, value)| json_safe(root, value))
+                    && !(fields.iter().any(|(key, _)| key == "method")
+                        && fields.iter().any(|(key, _)| key == "params"))
+            }
+            _ => true,
+        }
+    }
+    if !text_safe(root, text) {
+        return false;
+    }
+    let trimmed = text.trim_start();
+    if trimmed.starts_with(['{', '[']) {
+        return crate::jcs::parse(text).is_ok_and(|value| json_safe(root, &value));
+    }
+    true
+}
+
 fn collect(
     store: &mut OrchestrationStore,
     ctx: &PrimaryCallContext,
@@ -1500,15 +1756,9 @@ pub(crate) fn settle_target(
         )?,
         _ => None,
     };
-    let valid = bytes.as_ref().is_some_and(|b| {
-        b.len() <= crate::turn::MAX_FINAL_RESPONSE_ARTIFACT_BYTES
-            && std::str::from_utf8(b).is_ok_and(|s| {
-                !s.contains(&state_root.to_string_lossy().to_string())
-                    && !s.contains(".dolgorae/")
-                    && !s.contains("controller-capability")
-                    && !s.contains("\"jsonrpc\":")
-            })
-    });
+    let valid = bytes
+        .as_ref()
+        .is_some_and(|bytes| result_body_is_safe(state_root, bytes));
     let (state, error) = match terminal.status.as_str() {
         "completed" if valid => ("succeeded", None),
         "completed" => ("failed", Some("COLLABORATION_TRANSPORT_UNAVAILABLE")),
@@ -2148,6 +2398,31 @@ fn source_provenance(
     context: &PrimaryCallContext,
     source: &crate::orchestration::BrokeredMemberSnapshot,
 ) -> Result<SourceProvenance, MachineError> {
+    if let Some(retained) = crate::orchestration::policy_task::for_turn(
+        tx,
+        tx.path()
+            .and_then(|path| Path::new(path).parent()?.parent())
+            .ok_or_else(denied)?,
+        context.session_id,
+        source.run_id,
+        &context.source_turn_id,
+    )? {
+        let task = retained.capture.task;
+        let priority = root_priority(
+            tx,
+            context,
+            task,
+            &retained.capture.accepted_sha256,
+            &retained.capture.request_sha256,
+        )?;
+        return Ok(SourceProvenance {
+            task,
+            priority,
+            deadline: retained.capture.deadline_ms,
+            parent: None,
+            depth: 1,
+        });
+    }
     if let Some((task, accepted)) = crate::orchestration::successor_task_for_turn(
         tx,
         context.session_id,
@@ -2410,4 +2685,46 @@ pub(crate) fn notify_exchange(root: &Path, exchange: Uuid) -> Result<(), Machine
     notify_waiters(source);
     crate::scheduler::notify(root, source);
     Ok(())
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::result_body_is_safe;
+    use std::path::Path;
+
+    #[test]
+    fn result_privacy_refuses_selected_bytes_without_redaction_or_id_heuristics() {
+        let root = Path::new("/private/test-owned-state");
+        for body in [
+            r#"{"api_key":"canary"}"#,
+            r#"{"nested":{"accessToken":"canary"}}"#,
+            "Authorization: Bearer canary",
+            "-----BEGIN EC PRIVATE KEY-----\nY2FuYXJ5\n-----END EC PRIVATE KEY-----",
+            "-----BEGIN DSA PRIVATE KEY-----\nY2FuYXJ5\n-----END DSA PRIVATE KEY-----",
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nY2FuYXJ5\n-----END OPENSSH PRIVATE KEY-----",
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nY2FuYXJ5\n-----END ENCRYPTED PRIVATE KEY-----",
+            "prefix API_KEY=canary with spaces",
+            r#"{"path":"\u002fprivate\u002ftest-owned-state/rpc/worker.sock"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"turn/start","params":{}}"#,
+            r#"{"nested":{"reasoning_content":"hidden"}}"#,
+            r#"{"type":"reasoning","summary":[{"type":"summary_text","text":"hidden"}]}"#,
+            r#"{"type":"response.reasoning_summary_text.delta","delta":"hidden"}"#,
+            "/private/tmp/dolgorae-501/s/private.sock",
+            "/private/owned/workspace.sqlite3",
+            "{malformed json with a credential",
+        ] {
+            assert!(!result_body_is_safe(root, body.as_bytes()), "{body}");
+        }
+        for body in [
+            r#"{"thread_id":"safe","turn_id":"safe","id":7,"nonce":"safe","token":"ordinary-word"}"#,
+            r#"{"description":"the word jsonrpc is harmless","method":"a method name"}"#,
+            "안전한 결과와 ordinary safe output",
+            "-----BEGIN PUBLIC KEY-----\nY2FuYXJ5\n-----END PUBLIC KEY-----",
+            "-----BEGIN CERTIFICATE-----\nY2FuYXJ5\n-----END CERTIFICATE-----",
+            "The private key remains in its protected store.",
+            "",
+        ] {
+            assert!(result_body_is_safe(root, body.as_bytes()), "{body}");
+        }
+    }
 }

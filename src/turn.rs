@@ -5032,18 +5032,30 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         &mut self,
         completion: PrimaryToolCompletion,
     ) -> Result<(), TurnError> {
+        self.complete_primary_tool_with(completion, |_| Ok(()))
+    }
+
+    pub(crate) fn complete_primary_tool_with(
+        &mut self,
+        completion: PrimaryToolCompletion,
+        publish: impl FnOnce(&mut J) -> Result<(), TurnError>,
+    ) -> Result<(), TurnError> {
         if completion.run_generation != self.run_generation {
             return Ok(());
         }
         let Some(pending) = self
             .pending_primary_tools
-            .remove(&completion.source_tool_call_id)
+            .get(&completion.source_tool_call_id)
+            .cloned()
         else {
             return Ok(());
         };
         if !pending.request_ids.contains(&completion.request_id) {
             return Err(TurnError::CorrelationMismatch);
         }
+        publish(&mut self.journal)?;
+        self.pending_primary_tools
+            .remove(&completion.source_tool_call_id);
         for request_id in pending.request_ids {
             self.respond_primary_tool(
                 request_id,
@@ -8357,6 +8369,26 @@ pub(crate) mod tests {
                 result: Ok(serde_json::json!({"ignored":true})),
             })
             .unwrap();
+        assert_eq!(coordinator.server.responses.len(), 1);
+        assert!(
+            coordinator
+                .complete_primary_tool_with(
+                    PrimaryToolCompletion {
+                        request_id: 41,
+                        run_generation: 1,
+                        source_tool_call_id: "call-1".into(),
+                        result: Ok(serde_json::json!({"operation":"list_specialists_result"})),
+                    },
+                    |_| Err(TurnError::Journal(
+                        "injected owning publication failure".into()
+                    ))
+                )
+                .is_err()
+        );
+        assert_eq!(
+            coordinator.pending_primary_tools["call-1"].request_ids,
+            vec![41, 42]
+        );
         assert_eq!(coordinator.server.responses.len(), 1);
         coordinator
             .complete_primary_tool(PrimaryToolCompletion {

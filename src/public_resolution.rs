@@ -200,6 +200,19 @@ pub(crate) fn lookup(
 ) -> Result<Value, TurnError> {
     let mut accepted: Option<(Receipt, u64, u64)> = None;
     for record in records {
+        if let Some(marker) = crate::interaction::broker_record(record)
+            .map_err(|_| TurnError::Journal("Broker resolution journal".into()))?
+        {
+            if let Some(receipt) = marker.public_resolution
+                && &receipt.mutation_envelope.namespace == namespace
+            {
+                if accepted.is_some() {
+                    return Err(TurnError::Journal("duplicate public resolution key".into()));
+                }
+                accepted = Some((receipt, record.sequence(), record.run_generation()));
+            }
+            continue;
+        }
         if record.kind() != crate::audit::AuditKind::ApprovalDecided {
             continue;
         }

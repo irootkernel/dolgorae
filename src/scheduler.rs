@@ -316,8 +316,33 @@ pub(crate) fn retained_task(
     if permit.schema != "dolgorae.accepted-work/v1" || permit.kind != "assignment" {
         return Err(error("accepted_work_scope_invalid"));
     }
-    let c = store.connection();
-    let operation = match permit.scope_kind.as_str() {
+    let owner = match permit.scope_kind.as_str() {
+        "orchestrated_session" => Owner::Managed(permit.scope_ref),
+        "external_engagement" => Owner::External(permit.scope_ref),
+        _ => return Err(error("accepted_work_owner_invalid")),
+    };
+    retained_assignment(
+        store.connection(),
+        owner,
+        permit.work,
+        permit.target,
+        workspace,
+        state_root,
+    )
+}
+
+/// Validate an original assignment in the caller's already captured SQL snapshot.
+/// This read grants no scheduler claim or effect authority.
+pub(crate) fn retained_assignment(
+    c: &Connection,
+    owner: Owner,
+    work: Uuid,
+    target_run: Uuid,
+    workspace: &str,
+    state_root: &Path,
+) -> Result<RetainedTask, MachineError> {
+    let (scope_kind, scope_ref) = owner.scope();
+    let operation = match scope_kind {
         "external_engagement" => "assign_external_specialist_task",
         "orchestrated_session" => "assign_specialist_task",
         _ => return Err(error("accepted_work_owner_invalid")),
@@ -327,10 +352,10 @@ pub(crate) fn retained_task(
         .query_map(
             params![
                 workspace,
-                permit.scope_kind,
-                permit.scope_ref.to_string(),
+                scope_kind,
+                scope_ref.to_string(),
                 operation,
-                permit.work.to_string()
+                work.to_string()
             ],
             |r| {
                 Ok((
@@ -349,28 +374,26 @@ pub(crate) fn retained_task(
     let receipt: crate::delegation_identity::OperationReceipt =
         serde_json::from_str(text).map_err(|_| error("accepted_receipt_invalid"))?;
     receipt.validate()?;
-    match store.intent_lookup(&receipt.namespace)? {
+    match crate::engagement::intent_lookup(c, &receipt.namespace)? {
         crate::engagement::IntentLookup::Accepted(retained) if *retained == receipt => {}
         _ => return Err(error("accepted_receipt_changed")),
     }
-    if receipt.accepted_subjects.task_ref.as_deref() != Some(permit.work.to_string().as_str())
-        || receipt.accepted_subjects.member_ref.as_deref()
-            != Some(permit.target.to_string().as_str())
+    if receipt.accepted_subjects.task_ref.as_deref() != Some(work.to_string().as_str())
+        || receipt.accepted_subjects.member_ref.as_deref() != Some(target_run.to_string().as_str())
         || receipt.namespace.workspace_ref != workspace
-        || receipt.namespace.scope_kind.as_deref() != Some(permit.scope_kind.as_str())
-        || receipt.namespace.scope_ref.as_deref() != Some(permit.scope_ref.to_string().as_str())
+        || receipt.namespace.scope_kind.as_deref() != Some(scope_kind)
+        || receipt.namespace.scope_ref.as_deref() != Some(scope_ref.to_string().as_str())
         || receipt.namespace.operation_kind != operation
     {
         return Err(error("accepted_receipt_mismatch"));
     }
-    let (accepted, key, deadline_seconds, origin, recorded) = if permit.scope_kind
-        == "external_engagement"
+    let (accepted, key, deadline_seconds, origin, recorded) = if scope_kind == "external_engagement"
     {
-        let (_, owner) = store.accepted_external_owner(permit.scope_ref)?;
+        let (_, owner) = crate::engagement::accepted_external_owner_on(c, scope_ref)?;
         let expected = crate::operation::Namespace::delegation(
             &owner.identity,
             workspace,
-            Some(("external_engagement", &permit.scope_ref.to_string())),
+            Some(("external_engagement", &scope_ref.to_string())),
             operation,
             &receipt.namespace.idempotency_key,
         )
@@ -378,32 +401,37 @@ pub(crate) fn retained_task(
         if principal != &expected.controller_principal || *generation != owner.identity.generation {
             return Err(error("accepted_owner_changed"));
         }
-        let task = store.external_task(permit.scope_ref, permit.work)?;
-        if task.specialist_run_id != permit.target {
+        let member: String = c
+            .query_row(
+                "SELECT specialist_run_id FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+                params![scope_ref.to_string(), work.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        if member != target_run.to_string() {
             return Err(error("accepted_target_changed"));
         }
-        let accepted = store
-            .external_task_identity(permit.scope_ref, permit.work)?
+        let accepted = crate::engagement::external_task_identity_on(c, scope_ref, work)?
             .ok_or_else(|| error("accepted_identity_missing"))?;
         let (intent, seconds) =
-            store.external_task_dispatch_facts(permit.scope_ref, permit.work)?;
+            crate::engagement::external_task_dispatch_facts_on(c, scope_ref, work)?;
         if intent != accepted.execution_intent {
             return Err(error("accepted_intent_changed"));
         }
         let origin: i64 = c
             .query_row(
                 "SELECT created_at_ms FROM tasks WHERE task_id=?1",
-                [permit.work.to_string()],
+                [work.to_string()],
                 |r| r.get(0),
             )
             .map_err(sql)?;
-        let recorded = store
-            .accepted_assignment_body_digest(
-                workspace,
-                permit.scope_ref,
-                &receipt.namespace.idempotency_key,
-            )?
-            .ok_or_else(|| error("accepted_body_unbound"))?;
+        let recorded = crate::engagement::accepted_assignment_body_digest_on(
+            c,
+            workspace,
+            scope_ref,
+            &receipt.namespace.idempotency_key,
+        )?
+        .ok_or_else(|| error("accepted_body_unbound"))?;
         (
             accepted,
             receipt.namespace.idempotency_key,
@@ -412,12 +440,11 @@ pub(crate) fn retained_task(
             recorded,
         )
     } else {
-        let root =
-            crate::controller::load_reconciled_controller_binding(state_root, permit.scope_ref)?;
+        let root = crate::controller::load_reconciled_controller_binding(state_root, scope_ref)?;
         let expected = crate::operation::Namespace::delegation(
             &root.identity,
             workspace,
-            Some(("orchestrated_session", &permit.scope_ref.to_string())),
+            Some(("orchestrated_session", &scope_ref.to_string())),
             operation,
             &receipt.namespace.idempotency_key,
         )
@@ -425,9 +452,9 @@ pub(crate) fn retained_task(
         if principal != &expected.controller_principal || *generation != root.identity.generation {
             return Err(error("accepted_owner_changed"));
         }
-        let task = crate::orchestration::successor_task(c, permit.scope_ref, permit.work)?
+        let task = crate::orchestration::successor_task(c, scope_ref, work)?
             .ok_or_else(|| error("accepted_identity_missing"))?;
-        if task.member_ref != permit.target.to_string() {
+        if task.member_ref != target_run.to_string() {
             return Err(error("accepted_target_changed"));
         }
         let accepted =
@@ -440,24 +467,24 @@ pub(crate) fn retained_task(
         let seconds = marker["deadline_seconds"]
             .as_u64()
             .ok_or_else(|| error("accepted_deadline_missing"))?;
-        let (origin,digest):(i64,String)=c.query_row("SELECT deadline_origin_ms,accepted_request_sha256 FROM brokered_task_acceptances WHERE task_id=?1",[permit.work.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).map_err(sql)?;
+        let (origin,digest):(i64,String)=c.query_row("SELECT deadline_origin_ms,accepted_request_sha256 FROM brokered_task_acceptances WHERE task_id=?1",[work.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).map_err(sql)?;
         if crate::jcs::sha256_hex(task.accepted_request_json.as_bytes()) != digest {
             return Err(error("accepted_identity_changed"));
         }
         (
             accepted,
-            format!("successor-task:{}", permit.work),
+            format!("successor-task:{}", work),
             seconds,
             origin,
             format!("sha256:{}", task.source_request_sha256),
         )
     };
-    let (task_body, contexts, target) = crate::engagement::accepted_task_content(c, permit.work)?
+    let (task_body, contexts, target) = crate::engagement::accepted_task_content(c, work)?
         .ok_or_else(|| error("accepted_bytes_missing"))?;
     let request: crate::task_request::SpecialistTaskRequest =
         serde_json::from_slice(&task_body).map_err(|_| error("accepted_body_invalid"))?;
     if !crate::successor_capture::verify_accepted_assignment(
-        permit.target,
+        target_run,
         &request,
         &accepted,
         deadline_seconds,
@@ -1150,6 +1177,26 @@ pub(crate) fn finish_dispatch(
     now: i64,
 ) -> Result<(), MachineError> {
     use crate::delegation_service::MemberDispatchOutcome;
+    if permit.kind == "assignment"
+        && permit.scope_kind == "orchestrated_session"
+        && crate::orchestration::policy_task::contains(tx, permit.work)?
+    {
+        let accepted:Option<String>=tx.query_row(
+            "SELECT s.turn_id FROM scheduler_claims s JOIN brokered_tasks t ON t.task_id=s.work_ref
+             WHERE s.claim_id=?1 AND s.work_ref=?2 AND s.target_run_id=?3 AND s.scope_ref=?4
+             AND s.scope_kind='orchestrated_session' AND s.kind='assignment' AND s.phase='accepted'
+             AND s.turn_id IS NOT NULL AND t.target_turn_id=s.turn_id",
+            params![permit.claim.to_string(),permit.work.to_string(),permit.target.to_string(),permit.scope_ref.to_string()],
+            |r|r.get(0)).optional().map_err(sql)?;
+        if let Some(turn) = accepted {
+            if let MemberDispatchOutcome::Accepted { turn_ref } = outcome
+                && turn_ref != &turn
+            {
+                return Err(error("policy_original_turn_changed"));
+            }
+            return Ok(());
+        }
+    }
     let (phase, turn, blocker) = match outcome {
         MemberDispatchOutcome::Accepted { turn_ref } => ("accepted", Some(turn_ref.as_str()), None),
         MemberDispatchOutcome::Refused { .. } => ("refused", None, Some("dispatch_refused")),
@@ -1176,6 +1223,14 @@ pub(crate) fn finish_dispatch(
             crate::assignment_queue::remove(tx, owner, permit.work)?;
         }
         let _ = turn_ref;
+    }
+    if phase == "unknown"
+        && permit.kind == "assignment"
+        && permit.scope_kind == "orchestrated_session"
+        && crate::orchestration::policy_task::contains(tx, permit.work)?
+    {
+        tx.execute("UPDATE brokered_tasks SET state='interrupted_unknown',safe_error_code='TARGET_TURN_OUTCOME_UNKNOWN',updated_at_ms=?2 WHERE task_id=?1 AND state='dispatching' AND target_turn_id IS NULL",
+            params![permit.work.to_string(),now]).map_err(sql)?;
     }
     if phase == "unknown" && permit.kind == "consultation" {
         crate::collaboration::unknown_exchange(tx, permit.work)?;
@@ -1406,7 +1461,9 @@ pub(crate) fn reconcile_claim(
         format!("collaboration-exchange:{work}")
     } else {
         match actor.owner {
-        Owner::Managed(_)=>format!("successor-task:{work}"),
+        Owner::Managed(session)=>if crate::orchestration::policy_task::load(tx,state_root,session,work_id)?.is_some() {
+            format!("brokered-task:{work}")
+        } else {format!("successor-task:{work}")},
         Owner::External(_)=>tx.query_row("SELECT idempotency_key FROM delegation_operations WHERE json_extract(accepted_subjects_json,'$.task_ref')=?1 AND state='accepted'",[&work],|r|r.get::<_,String>(0)).map_err(sql)?,
     }
     };
@@ -1475,6 +1532,7 @@ impl ControlPlaneRuntime {
             let mut bytes = [0_u8; 2049];
             loop {
                 let reconcile = tokio::select! {
+                    biased;
                     _=stopped.changed()=>break,
                     _=timer.tick()=>true,
                     message=listener.recv(&mut bytes)=>{
@@ -1498,13 +1556,21 @@ impl ControlPlaneRuntime {
                         _ => break,
                     }
                 }
+                if *stopped.borrow() {
+                    break;
+                }
                 let batch = std::mem::take(&mut dirty);
                 let home = home.clone();
                 // One bounded gateway job owns the current pass. There is no
                 // actor task, timer, model loop or authoritative memory registry.
-                let _ =
+                if !matches!(
                     tokio::task::spawn_blocking(move || reconcile_home(&home, batch, reconcile))
-                        .await;
+                        .await,
+                    Ok(Ok(()))
+                ) {
+                    // Static diagnostic only: no capture, path or transport body.
+                    eprintln!("DOLGORAE_CONTROL_PLANE_RECONCILIATION_REQUIRED");
+                }
             }
         });
         Ok(Self {
@@ -1515,12 +1581,16 @@ impl ControlPlaneRuntime {
         })
     }
 
-    pub(crate) async fn shutdown(self) {
-        use std::os::unix::fs::MetadataExt as _;
+    pub(crate) fn request_stop(&self) {
         let _ = self.stop.send(true);
-        // Claims/operations commit before every external effect. A foreground
-        // drain timeout leaves their durable uncertainty for restart recovery.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(35), self.task).await;
+    }
+
+    pub(crate) async fn shutdown(self, until: tokio::time::Instant) {
+        use std::os::unix::fs::MetadataExt as _;
+        self.request_stop();
+        // An accepted blocking pass is not cancelled by this bounded join.
+        // Its durable uncertainty remains available to restart recovery.
+        let _ = tokio::time::timeout_at(until, self.task).await;
         if std::fs::symlink_metadata(&self.socket)
             .is_ok_and(|m| (m.dev(), m.ino()) == self.identity)
         {
@@ -1583,7 +1653,11 @@ fn reconcile_home(
     home: &crate::paths::DolgoraeHome,
     mut dirty: std::collections::BTreeSet<(String, Uuid)>,
     full: bool,
-) {
+) -> Result<(), MachineError> {
+    let mut workspaces = dirty
+        .iter()
+        .map(|(workspace, _)| workspace.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     if full && let Ok(entries) = std::fs::read_dir(home.root().join("workspaces")) {
         for entry in entries.flatten() {
             let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
@@ -1600,11 +1674,11 @@ fn reconcile_home(
             let Ok(observer) = crate::engagement::EngagementStore::open_read_only(&database) else {
                 continue;
             };
-            if actors(observer.connection()).map_or(true, |actors| actors.is_empty()) {
-                continue;
-            }
+            // Closed or currently empty aggregates still have protected state.
+            workspaces.insert(id.clone());
             drop(observer);
-            let Ok(mut store) = crate::engagement::EngagementStore::open(&database) else {
+            let Ok(Some(mut store)) = crate::engagement::EngagementStore::open_existing(&database)
+            else {
                 continue;
             };
             let initialized = store.transact(|tx| {
@@ -1641,7 +1715,7 @@ fn reconcile_home(
         // The semantic boundary owns actual Run/process effects. Failures leave
         // durable mail, claim or operation evidence for the next global scan.
         if let Err(failure) = crate::semantic::schedule_actor(&view, &root, actor)
-            && let Ok(mut store) = crate::engagement::EngagementStore::open(
+            && let Ok(Some(mut store)) = crate::engagement::EngagementStore::open_existing(
                 &crate::engagement::EngagementStore::workspace_database_path(&root),
             )
         {
@@ -1680,6 +1754,22 @@ fn reconcile_home(
             });
         }
     }
+    let mut first_error = None;
+    for workspace in workspaces {
+        let result = (|| {
+            registered_workspace(home, &workspace)?;
+            let root = home.workspace_root(&workspace);
+            if let Some(mut owner) = crate::orchestration::OrchestrationStore::open_existing(&root)?
+            {
+                owner.refresh_checked_state(&workspace)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 #[derive(Clone, Copy)]
@@ -2108,7 +2198,24 @@ fn reserved_dispatch_deadline(
     }
     let manifest = crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, state_root)
         .load_manifest(permit.target)?;
-    let task = retained_task(store, permit, &manifest.workspace_id, state_root)?;
+    let policy_task = if permit.scope_kind == "orchestrated_session" {
+        crate::orchestration::policy_task::load(
+            store.connection(),
+            state_root,
+            permit.scope_ref,
+            permit.work,
+        )?
+    } else {
+        None
+    };
+    let deadline = if let Some(task) = policy_task {
+        if task.capture.target != permit.target {
+            return Err(error("dispatch_policy_target_changed"));
+        }
+        task.capture.deadline_ms
+    } else {
+        retained_task(store, permit, &manifest.workspace_id, state_root)?.deadline_ms
+    };
     let (state, turn) = match permit.scope_kind.as_str() {
         "external_engagement" => {
             let task = store.external_task(permit.scope_ref, permit.work)?;
@@ -2126,7 +2233,7 @@ fn reserved_dispatch_deadline(
         _ => return Err(error("dispatch_scope_invalid")),
     };
     if matches!(state.as_str(), "accepted" | "dispatching") && turn.is_none() {
-        return Ok(Some(task.deadline_ms));
+        return Ok(Some(deadline));
     }
     if matches!(
         state.as_str(),
@@ -2170,6 +2277,244 @@ fn operation_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn control_stop_precedes_ready_timer_and_queued_hint() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("dg-stop-{}", Uuid::now_v7().simple()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home = crate::paths::DolgoraeHome::from_canonical_home(root.clone()).unwrap();
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let view = crate::workspace::WorkspaceService::new(
+            crate::workspace::SystemWorkspacePlatform,
+            crate::workspace::SystemGitRunner,
+            home.root().to_owned(),
+        )
+        .initialize(Some(&workspace), crate::workspace::WorkspaceMode::NonGit)
+        .unwrap();
+        let state = home.workspace_root(&view.workspace_id);
+        drop(crate::orchestration::OrchestrationStore::open(&state).unwrap());
+        let output = state.join("orchestration/state.json");
+        assert!(!output.exists());
+        let control = ControlPlaneRuntime::start(&home, Uuid::now_v7()).unwrap();
+        let wake = serde_json::to_vec(&Wake {
+            workspace: view.workspace_id,
+            run: Uuid::now_v7(),
+        })
+        .unwrap();
+        std::os::unix::net::UnixDatagram::unbound()
+            .unwrap()
+            .send_to(&wake, &control.socket)
+            .unwrap();
+        let socket = control.socket.clone();
+        // On this current-thread runtime the stop, first timer tick and hint
+        // are all ready before the control task receives its first poll.
+        control.request_stop();
+        control
+            .shutdown(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await;
+        assert!(!socket.exists());
+        assert!(!output.exists(), "a stopped runtime began a new SQL pass");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_join_uses_remaining_deadline_and_preserves_replaced_inode() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        for replace in [false, true] {
+            let root = std::env::temp_dir().join(format!("dg-join-{}", Uuid::now_v7().simple()));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (socket, listener) = bind_wake_socket(&root, Uuid::now_v7()).unwrap();
+            let meta = std::fs::symlink_metadata(&socket).unwrap();
+            let (stop, stopped) = tokio::sync::watch::channel(false);
+            let (release, wait) = std::sync::mpsc::channel();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let (finished, mut done) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    entered.send(()).unwrap();
+                    wait.recv().unwrap();
+                })
+                .await
+                .unwrap();
+                finished.send(()).unwrap();
+            });
+            started.await.unwrap();
+            let replacement = if replace {
+                std::fs::remove_file(&socket).unwrap();
+                let node = std::os::unix::net::UnixDatagram::bind(&socket).unwrap();
+                assert_ne!(
+                    std::fs::symlink_metadata(&socket).unwrap().ino(),
+                    meta.ino()
+                );
+                Some(node)
+            } else {
+                None
+            };
+            let control = ControlPlaneRuntime {
+                stop,
+                task,
+                socket: socket.clone(),
+                identity: (meta.dev(), meta.ino()),
+            };
+            // The server has already consumed the entire common budget.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                control.shutdown(tokio::time::Instant::now()),
+            )
+            .await
+            .expect("control join started a second drain budget");
+            assert!(*stopped.borrow());
+            assert_eq!(socket.exists(), replace);
+            assert!(matches!(
+                done.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            release.send(()).unwrap();
+            done.await.unwrap();
+            drop(listener);
+            drop(replacement);
+            if replace {
+                std::fs::remove_file(socket).unwrap();
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn checked_state_refresh_requires_existing_storage_and_accepts_a_later_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root =
+            std::env::temp_dir().join(format!("dg-state-existing-{}", Uuid::now_v7().simple()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home = crate::paths::DolgoraeHome::from_canonical_home(root.clone()).unwrap();
+        let service = crate::workspace::WorkspaceService::new(
+            crate::workspace::SystemWorkspacePlatform,
+            crate::workspace::SystemGitRunner,
+            home.root().to_owned(),
+        );
+        let workspace = root.join("ordinary");
+        std::fs::create_dir(&workspace).unwrap();
+        let view = service
+            .initialize(Some(&workspace), crate::workspace::WorkspaceMode::NonGit)
+            .unwrap();
+        let state = home.workspace_root(&view.workspace_id);
+        let database = crate::engagement::EngagementStore::workspace_database_path(&state);
+        let output = state.join("orchestration/state.json");
+        let dirty = std::collections::BTreeSet::from([(view.workspace_id.clone(), Uuid::now_v7())]);
+        reconcile_home(&home, dirty.clone(), false).unwrap();
+        reconcile_home(&home, Default::default(), true).unwrap();
+        assert!(!database.exists());
+        assert!(!output.exists());
+
+        let carrier = root.join("external-owner.json");
+        crate::controller::create_controller_credential(
+            &carrier,
+            crate::domain::ControllerKind::Automation,
+            "late-external-owner".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        let binding = crate::controller::binding_from_carrier(
+            &crate::controller::CredentialCarrier::open_path(&carrier).unwrap(),
+            1,
+        )
+        .unwrap();
+        let mut owner = crate::engagement::EngagementStore::open(&database).unwrap();
+        let accepted = owner
+            .open_external_engagement(
+                &view.workspace_id,
+                &binding,
+                &serde_json::json!({"client":"late-external-owner"}),
+                None,
+                "late-owner",
+            )
+            .unwrap();
+        drop(owner);
+        reconcile_home(&home, Default::default(), true).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        assert_eq!(
+            value["external_engagements"][0]["engagement_id"],
+            accepted.engagement_id.to_string()
+        );
+        std::fs::remove_file(&output).unwrap();
+        reconcile_home(&home, dirty, false).unwrap();
+        assert!(output.exists());
+
+        let malformed = root.join("malformed");
+        std::fs::create_dir(&malformed).unwrap();
+        let view = service
+            .initialize(Some(&malformed), crate::workspace::WorkspaceMode::NonGit)
+            .unwrap();
+        let state = home.workspace_root(&view.workspace_id);
+        let database = crate::engagement::EngagementStore::workspace_database_path(&state);
+        std::fs::set_permissions(
+            database.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::write(&database, b"unrecognized database").unwrap();
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let dirty = std::collections::BTreeSet::from([(view.workspace_id, Uuid::now_v7())]);
+        assert!(reconcile_home(&home, dirty, false).is_err());
+        assert_eq!(std::fs::read(database).unwrap(), b"unrecognized database");
+        assert!(!state.join("orchestration/state.json").exists());
+        assert!(!crate::engagement::namespace_birth_path(&state).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checked_state_refresh_continues_after_an_independent_workspace_refuses() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("dg-state-pass-{}", Uuid::now_v7().simple()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home = crate::paths::DolgoraeHome::from_canonical_home(root.clone()).unwrap();
+        let service = crate::workspace::WorkspaceService::new(
+            crate::workspace::SystemWorkspacePlatform,
+            crate::workspace::SystemGitRunner,
+            home.root().to_owned(),
+        );
+        let mut ids = Vec::new();
+        for name in ["one", "two"] {
+            let path = root.join(name);
+            std::fs::create_dir(&path).unwrap();
+            let view = service
+                .initialize(Some(&path), crate::workspace::WorkspaceMode::NonGit)
+                .unwrap();
+            let mut store = crate::orchestration::OrchestrationStore::open(
+                &home.workspace_root(&view.workspace_id),
+            )
+            .unwrap();
+            store.refresh_checked_state(&view.workspace_id).unwrap();
+            ids.push(view.workspace_id);
+        }
+        ids.sort();
+        let broken = home
+            .workspace_root(&ids[0])
+            .join("orchestration/state.json");
+        std::fs::write(&broken, b"unrecognized existing owner output").unwrap();
+        let healthy = home
+            .workspace_root(&ids[1])
+            .join("orchestration/state.json");
+        std::fs::remove_file(&healthy).unwrap();
+        let dirty = ids.into_iter().map(|id| (id, Uuid::now_v7())).collect();
+        assert!(reconcile_home(&home, dirty, false).is_err());
+        assert_eq!(
+            std::fs::read(&broken).unwrap(),
+            b"unrecognized existing owner output"
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(healthy).unwrap()).unwrap();
+        assert_eq!(value["schema_version"], 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn scheduler_short_wake_delivers_for_long_home_and_preserves_unknown_nodes() {

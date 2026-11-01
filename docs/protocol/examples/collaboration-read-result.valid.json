@@ -1,0 +1,10 @@
+{
+  "operation": "read_collaboration_result_result",
+  "exchange_id": "018f0000-0000-7000-8000-000000000001",
+  "result_artifact_ref": "018f0000-0000-7000-8000-000000000002",
+  "length": 30,
+  "sha256": "266624e1c5d1817fb6eb27af663418844100f745371cba8e267773a36c097392",
+  "offset": 30,
+  "content": "",
+  "truncated": false
+}

@@ -1,9 +1,8 @@
 //! Durable assignment ordering shared by internal and external owners.
 //!
 //! The central scheduler consumes this ordering under retained owner authority.
-//! Live entrypoints retain ready-target-only admission pending TASK-083
-//! wait/result semantics and TASK-027 integration; target readiness is not an
-//! access mode.
+//! Registered assignment entrypoints retain source authority when admitting busy
+//! targets. Queue storage grants neither lateral permission nor lifecycle authority.
 
 use crate::machine::MachineError;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
@@ -229,6 +228,125 @@ pub(crate) fn claim(
     Ok((changed == 1).then_some(task))
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedOrder {
+    schema: String,
+    scope_kind: String,
+    scope_ref: Uuid,
+    task_id: Uuid,
+    target_run_id: Uuid,
+    source_ref: String,
+    priority: u8,
+    deadline_ms: i64,
+    sequence: i64,
+}
+
+// The external owner has no managed root-priority capture. Preserve its exact
+// accepted ordering before removal, in the same owner transaction and chain.
+fn retain_external_order(
+    tx: &Transaction<'_>,
+    owner: Owner,
+    task: Uuid,
+) -> Result<(), MachineError> {
+    let Owner::External(scope) = owner else {
+        return Ok(());
+    };
+    let row: Option<(String,String,u8,i64,i64)> = tx.query_row(
+        "SELECT target_run_id,source_ref,priority,deadline_ms,sequence FROM assignment_queue_entries WHERE task_id=?1 AND scope_kind='external_engagement' AND scope_ref=?2",
+        params![task.to_string(),scope.to_string()],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+    ).optional().map_err(sql)?;
+    let Some((target, source, priority, deadline, sequence)) = row else {
+        return Ok(());
+    };
+    let record = RetainedOrder {
+        schema: "dolgorae.external-assignment-order/v1".into(),
+        scope_kind: "external_engagement".into(),
+        scope_ref: scope,
+        task_id: task,
+        target_run_id: Uuid::parse_str(&target).map_err(|_| error("invalid queued target"))?,
+        source_ref: source,
+        priority,
+        deadline_ms: deadline,
+        sequence,
+    };
+    let text = serde_json::to_string(&record).map_err(|_| error("invalid retained queue order"))?;
+    let digest = crate::jcs::sha256_hex(text.as_bytes());
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS external_assignment_order (
+        task_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL
+    ) STRICT;",
+    )
+    .map_err(sql)?;
+    let previous: Option<(String, String)> = tx
+        .query_row(
+            "SELECT record_json,record_sha256 FROM external_assignment_order WHERE task_id=?1",
+            [task.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    if let Some(previous) = previous {
+        if previous != (text, digest) {
+            return Err(error("retained queue order differs"));
+        }
+    } else {
+        tx.execute(
+            "INSERT INTO external_assignment_order VALUES(?1,?2,?3)",
+            params![task.to_string(), text, digest],
+        )
+        .map_err(sql)?;
+        crate::engagement::append_event(tx, scope, "assignment_order_retained", &digest)?;
+    }
+    Ok(())
+}
+
+/// Read only positively retained original ordering; absence conveys no default.
+pub(crate) fn external_order_priority(
+    c: &Connection,
+    scope: Uuid,
+    task: Uuid,
+    target: Uuid,
+    deadline: i64,
+) -> Result<Option<u8>, MachineError> {
+    let present: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='external_assignment_order')",[],|r|r.get(0)).map_err(sql)?;
+    if !present {
+        return Ok(None);
+    }
+    let row: Option<(String, String)> = c
+        .query_row(
+            "SELECT record_json,record_sha256 FROM external_assignment_order WHERE task_id=?1",
+            [task.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    let Some((text, digest)) = row else {
+        return Ok(None);
+    };
+    let record: RetainedOrder =
+        serde_json::from_str(&text).map_err(|_| error("invalid retained queue order"))?;
+    if record.schema != "dolgorae.external-assignment-order/v1"
+        || record.scope_kind != "external_engagement"
+        || record.scope_ref != scope
+        || record.task_id != task
+        || record.target_run_id != target
+        || record.source_ref != scope.to_string()
+        || record.deadline_ms != deadline
+        || record.priority > 2
+        || record.sequence <= 0
+        || crate::jcs::sha256_hex(text.as_bytes()) != digest
+    {
+        return Err(error("retained queue order differs"));
+    }
+    let linked: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE engagement_id=?1 AND kind='assignment_order_retained' AND payload_sha256=?2)",params![scope.to_string(),crate::jcs::sha256_hex(digest.as_bytes())],|r|r.get(0)).map_err(sql)?;
+    if !linked {
+        return Err(error("retained queue order event is absent"));
+    }
+    Ok(Some(record.priority))
+}
+
 /// Cancellation, expiry and a proved dispatch remove only the exact entry.
 /// An uncertain dispatched Turn belongs to the existing task recovery owner.
 pub(crate) fn remove(
@@ -239,6 +357,7 @@ pub(crate) fn remove(
     if !present(transaction)? {
         return Ok(());
     }
+    retain_external_order(transaction, owner, task)?;
     let (kind, scope) = owner.scope();
     let changed=transaction.execute(
         "DELETE FROM assignment_queue_entries WHERE task_id=?1 AND scope_kind=?2 AND scope_ref=?3",
