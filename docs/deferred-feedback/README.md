@@ -563,6 +563,61 @@ expiry notification wiring changes.
   preserve existing approved calls and the private checked-state boundary.
 - Revisit condition: adding an orchestration child or changing its consumers.
 
+## DF-047: Keep captured scheduler policy and recovery checks aligned
+
+- Owner: Scheduler and collaboration policy maintainers
+- Finding: managed and External policy defaults are pinned separately, while
+  the control-plane reconciliation interval is also fixed in its timer. Direct
+  negative assertions for changed retained policy rows and post-queue source or
+  priority changes would strengthen future regression coverage.
+- Reason for deferral: current values and guards match the fixed policy, and
+  existing bounds, ordering, fairness and recovery checks cover their present
+  behavior. No current wrong policy value or unsafe claim is established.
+- Revisit condition: changing captured policy values, policy integrity checks or
+  restart-time candidate reconstruction. Add owner-specific corruption and
+  reopening checks with that change.
+
+## DF-048: Keep queue claims and lifecycle state sets synchronized
+
+- Owner: Assignment queue, scheduler and aggregate storage maintainers
+- Finding: foundation claim helpers used by tests overlap the live scheduler's
+  claim path, while task and exchange state sets appear in several store owners.
+  A later transition change could leave a helper or active-state set behind.
+- Reason for deferral: no omitted current state or unsafe transition is
+  established. Existing owning transactions, admission guards and activation
+  fences retain their present contracts; a broad helper refactor is not needed
+  for current correctness.
+- Revisit condition: adding a task or exchange state, or changing reservation,
+  requeue or claim ownership. Review the affected sets together and retire or
+  narrow obsolete helpers as part of that change.
+
+## DF-049: Bind scheduler wake-record reads to the verified file
+
+- Owner: Scheduler wake transport maintainers
+- Finding: wake-path lookup verifies the gateway record and then reads its path
+  again. A same-user replacement between those operations could change the
+  non-authoritative wake endpoint.
+- Reason for deferral: the state home is within the trusted user boundary, wake
+  hints grant no authority, and global reconciliation repairs missed hints. No
+  exploit across an untrusted boundary is established.
+- Revisit condition: changing the state-home trust boundary or wake protocol.
+  Reconsider reading and checking one open file descriptor at that boundary.
+
+## DF-050: Preserve immutable Submit receipts across live approval gaps
+
+- Owner: Gateway acceptance and approval projection maintainers
+- Finding: live Run projections use checked Broker approvals. SubmitAccepted
+  keeps an immutable acceptance snapshot, and LookupSubmit reads retained
+  operation facts without that projection. A combined regression scenario would
+  protect this separation during an approval publication gap.
+- Reason for deferral: the current paths preserve their separate contracts.
+  Existing checks cover live projection refusal, lookup recovery and accepted
+  receipts; no incorrect current receipt or unsafe replay is established.
+- Revisit condition: changing acceptance capture, either converter or approval
+  recovery. Check that the accepted snapshot stays unchanged and the original
+  operation facts remain readable when a live projection refuses the gap.
+  Preserve LookupSubmit's separate current-outcome observation.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical
