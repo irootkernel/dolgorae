@@ -807,9 +807,16 @@ removing the fixture.
 
 ### Current permission and MCP interactions
 
-Assignment queues and reuse-any remain unavailable on live tool entrypoints
-until the central dispatcher is integrated. Their staged storage preserves
-accepted bytes, original receipts and conservative round accounting. An operator
+Qualified Caller-v3 managed-source and current registered External source routes
+admit busy-target assignments through the central dispatcher under their
+captured bounds and accepted source/caller selection. Queued work keeps its
+accepted bytes, original receipts and conservative round accounting. Dispatch
+uses the original owner authority. Caller-v3 Sessions permit
+`reuse_any_compatible` under their accepted policy. Compatible reuse uses
+accepted Role, configuration and access snapshots; author edits do not change an
+accepted choice. Historical Legacy tools retain their original admission and
+replay behavior. External queues grant no lateral collaboration, and queue
+storage alone grants no consultation or activation authority. An operator
 must use the current owning recovery path for unknown work; queue records do not
 prove that a Turn was absent or authorize redispatch. Keep pending task state
 when a dispatcher or owner capability is unavailable.
