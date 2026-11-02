@@ -244,6 +244,31 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "workspace",
             ][..],
         ),
+        // Delegation child owns exact merge/publication and synthesis input
+        // binding; ordinary assignment and execution retain their existing owners.
+        (
+            "research_merge",
+            &[
+                "artifact", // Genuine Run quota lease and immutable output reads.
+                "caller_scope",
+                "controller",
+                "delegation_identity",
+                "domain",
+                "host_invocation",
+                "operation",
+                "orchestration",
+                "result_component_artifact", // Authentic original Result/manifest proof.
+                "review", // AssignmentSource target-selection type; no review execution.
+                "run",
+                "specialist_facade",
+                "storage_observation",
+                "structured_findings",
+                "successor_capture",
+                "task_request",
+                "turn", // Shared complete-input limit before acceptance and on recovery.
+                "workspace",
+            ][..],
+        ),
         (
             "specialist_stdio",
             &[
@@ -326,7 +351,6 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "semantic",
                 "snapshot",
                 "successor_capture",
-                "task_request",
                 "worker", // Reuse the private per-UID socket-root validation.
                 "workspace",
             ][..],
@@ -461,7 +485,6 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "podway_client",
                 "review_output",
                 "specialist",
-                "task_request",
                 "trusted_host",
             ][..],
         ),
@@ -779,11 +802,10 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "orchestration",
             &[
-                // These seventeen edges are test-only: Broker fixtures exercise the
+                // These fixture edges exercise the
                 // public adapters, original journals and task/Turn projections.
                 // Production remains behind the adapter trait checked above.
                 "conformance",
-                "delegation_service",
                 "event",
                 "gateway",
                 "gateway_observation",
@@ -812,6 +834,9 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "darwin",
                 "domain",
                 "engagement",
+                // Production verifies accepted Controller group/synthesis origins;
+                // concrete execution still stays behind the adapter trait.
+                "delegation_service",
                 // Test-only: seal the original historical policy binding before acceptance.
                 "global_runtime",
                 "jcs",
@@ -881,6 +906,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "delegation_service",
             &[
                 "controller",
+                "group_quota", // Test-only: immutable source capture charges across merge placement.
                 "result_component_artifact",
                 "specialist_facade",
                 "scheduler",
@@ -935,6 +961,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "successor_capture",
             &[
                 "delegation_identity",
+                "host_invocation", // Check the original public task body before projection.
                 // `instructions` is test-only: the fixture builds one closed
                 // instruction snapshot to admit a configuration.
                 "instructions",
@@ -1451,6 +1478,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "artifact",
             &[
                 "result_component_artifact",
+                "delegation_service", // Retained merge charges share the Run artifact quota.
                 "audit",
                 "controller",
                 "darwin",
@@ -1558,6 +1586,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "semantic",
                 "delegation_service",
                 "delegation_identity",
+                "engagement", // Read the authenticated merge's retained publication.
                 "jcs",
             ][..],
         ),

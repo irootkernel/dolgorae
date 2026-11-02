@@ -833,3 +833,29 @@ group, current Controller and unchanged Turn, records one exclusive attempt,
 and writes a separate result. It never resubmits work or overwrites the failed
 cleanup record. A successful terminal result allows ordinary owner cleanup to
 continue while retaining both records; an existing attempt prevents blind retry.
+
+### Exact findings merge implementation
+
+`delegation_service::research_merge` consumes one checked original source at a
+time. Keep coverage separate from the accumulator, retain complete finding
+content for exact equivalence, and budget encoded output as variants and source
+links grow. Summing raw source lengths is not a merge-capacity check: large
+equivalent sources can produce a small valid output. Persist actual result and
+manifest references instead of copying every large CompleteResult identity.
+Body-free identity-only sources retain their real ID, exact small identity and
+explicit discovery-unavailable reason.
+
+Keep the real Run quota lease before the publication transaction. The new merge
+charge includes the complete retained output; existing captures, component
+artifacts and previous merges remain cumulative. Competing original-key calls
+must return the winning publication and owner without allocating a second
+charge. Synthesis uses the ordinary task acceptance and caller accounting. Its
+retained input binding and shared renderer must govern initial dispatch,
+Worker verification and recovery. Public structured task bytes are distinct from
+an execution projection and remain unchanged, including constraints.
+
+Run `cargo test --lib task085`, the selected facade/consumer corpus checks and
+historical generation-7 tests before the complete gate. Preserve failed receipts
+and bind final focused evidence to the final candidate. Accountless fixture
+checks establish these code paths; native runtime and consumer qualification
+remain separate authorities.

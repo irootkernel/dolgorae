@@ -15685,9 +15685,12 @@ pub(crate) fn reconciliation_executions_from_records(
                 let accepted = store
                     .external_task_identity(engagement_id, task_ref)?
                     .ok_or_else(|| reconciliation_error("accepted_task_missing"))?;
-                let key:String = store.connection().query_row("SELECT idempotency_key FROM delegation_operations WHERE workspace_ref=?1 AND scope_kind='external_engagement' AND scope_ref=?2 AND operation_kind='assign_external_specialist_task' AND state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref')=?3",rusqlite::params![manifest.workspace_id,engagement_id.to_string(),task_ref.to_string()],|row|row.get(0)).map_err(|_| reconciliation_error("accepted_assignment_missing"))?;
                 let digest = store
-                    .accepted_assignment_body_digest(&manifest.workspace_id, engagement_id, &key)?
+                    .assignment_body_digest_for_task(
+                        &manifest.workspace_id,
+                        engagement_id,
+                        task_ref,
+                    )?
                     .ok_or_else(|| reconciliation_error("accepted_assignment_missing"))?;
                 (
                     accepted,
@@ -15721,11 +15724,15 @@ pub(crate) fn reconciliation_executions_from_records(
         };
         let (body, _, _) = crate::engagement::accepted_task_content(store.connection(), task_ref)?
             .ok_or_else(|| reconciliation_error("accepted_content_missing"))?;
-        let task: crate::task_request::SpecialistTaskRequest = serde_json::from_slice(&body)
-            .map_err(|_| reconciliation_error("accepted_content_invalid"))?;
         if intent != accepted.execution_intent
-            || !crate::successor_capture::verify_accepted_assignment(
-                member, &task, &accepted, deadline, &digest,
+            || !crate::delegation_service::research_merge::verify_bound_assignment(
+                store.connection(),
+                task_ref,
+                member,
+                &accepted,
+                &body,
+                deadline,
+                &digest,
             )?
             || manifest
                 .agent_configuration
@@ -16312,8 +16319,11 @@ pub(crate) fn converge_successor_history(
     let (body, _, _) =
         crate::engagement::accepted_task_content(store.connection(), execution.task_ref)?
             .ok_or_else(|| reconciliation_error("accepted_content_missing"))?;
-    let task: crate::task_request::SpecialistTaskRequest = serde_json::from_slice(&body)
-        .map_err(|_| reconciliation_error("accepted_content_invalid"))?;
+    let task = crate::delegation_service::research_merge::task_projection(
+        store.connection(),
+        execution.task_ref,
+        &body,
+    )?;
     let current = successor_reconciliation_executions(state_root, execution.member_ref)?;
     if current
         .iter()
@@ -17001,8 +17011,11 @@ fn settle_successor_task_from_turn(
     let task_body = crate::engagement::accepted_task_content(store.connection(), task_ref)?
         .map(|(task_body, _, _)| task_body)
         .ok_or_else(|| internal("the accepted task bytes are unavailable"))?;
-    let task = serde_json::from_slice(&task_body)
-        .map_err(|_| internal("the accepted task bytes are invalid"))?;
+    let task = crate::delegation_service::research_merge::task_projection(
+        store.connection(),
+        task_ref,
+        &task_body,
+    )?;
     let (changes, retained) = match produced {
         Some(produced) => (Some(produced.changes), produced.retained),
         // A read-only task publishes its empty change set; a writable task whose
@@ -18790,6 +18803,11 @@ pub(crate) fn dispatch_accepted_external_task(
             return refused_after_release(release(request.state_root), error.code, error.message);
         }
     };
+    let prompt = crate::delegation_service::research_merge::task_prompt(
+        request.state_root,
+        request.task_ref,
+        prompt,
+    )?;
     let now = unix_time_ms_semantic()?;
     if write {
         // Capture under the held authority, then record and mark dispatching
@@ -18854,7 +18872,11 @@ pub(crate) fn dispatch_accepted_external_task(
         });
     }
     let uid = DarwinSystem.current_uid();
-    let key = request.idempotency_key.to_owned();
+    let key = crate::delegation_service::research_merge::dispatch_key(
+        store.connection(),
+        request.task_ref,
+        request.idempotency_key,
+    )?;
     let response = call_actor_worker(
         request.state_root,
         request.member_ref,
@@ -19223,6 +19245,11 @@ pub(crate) fn dispatch_accepted_managed_task(
         request.accepted,
         request.execution_intent,
         request.deadline_seconds,
+    )?;
+    let prompt = crate::delegation_service::research_merge::task_prompt(
+        request.state_root,
+        request.task_ref,
+        prompt,
     )?;
     let broker = crate::orchestration::OrchestrationStore::open(request.state_root)?;
     let credential = broker.member_credential(request.member_ref)?;
@@ -20909,11 +20936,19 @@ pub(crate) fn recover_scheduler_assignment(
     }
     let request = crate::turn::TurnRequest {
         write: false,
-        idempotency_key: retained.key,
-        message: retained.contents.prompt(
-            &retained.accepted,
-            &retained.accepted.execution_intent,
-            retained.deadline_seconds,
+        idempotency_key: crate::delegation_service::research_merge::dispatch_key(
+            store.connection(),
+            permit.work,
+            &retained.key,
+        )?,
+        message: crate::delegation_service::research_merge::task_prompt(
+            state_root,
+            permit.work,
+            retained.contents.prompt(
+                &retained.accepted,
+                &retained.accepted.execution_intent,
+                retained.deadline_seconds,
+            )?,
         )?,
         images: Vec::new(),
         model: manifest.model.clone(),

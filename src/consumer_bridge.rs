@@ -332,9 +332,17 @@ impl ProductSource<'_> {
                     let raw = views
                         .get(&view_key(&View::FinalResponse)?)
                         .ok_or_else(source_unavailable)?;
-                    let task: crate::task_request::SpecialistTaskRequest =
-                        serde_json::from_slice(&accepted.task_body)
-                            .map_err(|_| source_integrity())?;
+                    let store = crate::engagement::EngagementStore::open_read_only(
+                        &crate::engagement::EngagementStore::workspace_database_path(
+                            &self.owner.state_root,
+                        ),
+                    )?;
+                    let task = service::research_merge::task_projection(
+                        store.connection(),
+                        uuid::Uuid::parse_str(&result.source.task_ref)
+                            .map_err(|_| source_integrity())?,
+                        &accepted.task_body,
+                    )?;
                     let text = std::str::from_utf8(raw).map_err(|_| source_integrity())?;
                     let output = crate::specialist::parse_reviewer_output_v3(Some(text), &task)
                         .map_err(|_| source_integrity())?;
@@ -1593,6 +1601,8 @@ pub(crate) fn semantic_presentation(public: &Value) -> Value {
         "wait_timed_out",
         "group_ref",
         "manifest_digest",
+        "merged_identity",
+        "merged_digest",
         "coverage",
         "predicate_satisfied",
     ] {
@@ -2147,6 +2157,8 @@ mod tests {
                 "wait_timed_out",
                 "group_ref",
                 "manifest_digest",
+                "merged_identity",
+                "merged_digest",
                 "coverage",
                 "predicate_satisfied",
             ] {
@@ -2178,7 +2190,7 @@ mod tests {
                 presented["semantic"]
             );
         }
-        assert_eq!(seen.len(), 23);
+        assert_eq!(seen.len(), 25);
         // Frozen candidate and the actual hire request consumer require these
         // exact authoritative next-step fields, including the installed state.
         let candidate = &corpus["cases"]

@@ -41,7 +41,7 @@ fn outcome(value: &str) -> Result<i32, MachineError> {
         "expired" => pb::TaskOutcome::Expired,
         "unknown" => pb::TaskOutcome::Unknown,
         "missing" => pb::TaskOutcome::Missing,
-        "queued" => pb::TaskOutcome::Queued,
+        "queued" | "claimed" | "dispatching" => pb::TaskOutcome::Queued,
         "running" => pb::TaskOutcome::Running,
         _ => {
             return Err(projection_unavailable(
@@ -50,6 +50,65 @@ fn outcome(value: &str) -> Result<i32, MachineError> {
             ));
         }
     } as i32)
+}
+
+fn context_value(value: &pb::ContextRef) -> Result<Value, MachineError> {
+    let content = required(value.content.as_ref(), "context.content")?;
+    Ok(
+        json!({"kind":value.kind,"identity":value.identity,"content":{"byte_length":content.byte_length,"sha256":content.sha256},"media_type":value.media_type}),
+    )
+}
+fn accepted_task_value(value: &pb::AcceptedTaskIdentity) -> Result<Value, MachineError> {
+    let body = required(value.task_body.as_ref(), "identity.task_body")?;
+    let intent = match pb::CreationMode::try_from(value.execution_intent) {
+        Ok(pb::CreationMode::ReadOnly) => "read_only",
+        Ok(pb::CreationMode::Writable) => "canonical_workspace_write",
+        _ => return Err(invalid("execution_intent", "unknown execution intent")),
+    };
+    let images=value.images.iter().map(|image| {
+        let content=required(image.content.as_ref(),"images.content")?;
+        let detail=match pb::ImageDetail::try_from(image.detail) {Ok(pb::ImageDetail::Auto)=>"auto",Ok(pb::ImageDetail::Low)=>"low",Ok(pb::ImageDetail::High)=>"high",_=>return Err(invalid("images.detail","unknown image detail"))};
+        Ok(json!({"content":{"byte_length":content.byte_length,"sha256":content.sha256},"media_type":image.media_type,"detail":detail}))
+    }).collect::<Result<Vec<_>,MachineError>>()?;
+    Ok(
+        json!({"schema":value.schema,"purpose":value.purpose,"task_body_schema":value.task_body_schema,"task_body":{"byte_length":body.byte_length,"sha256":body.sha256},"contexts":value.contexts.iter().map(context_value).collect::<Result<Vec<_>,MachineError>>()?,"images":images,"expected_output_schema":value.expected_output_schema,"execution_intent":intent,"admitted_model":value.admitted_model,"admitted_effort":value.admitted_effort,"role_snapshot_digest":value.role_snapshot_digest,"agent_configuration_digest":value.agent_configuration_digest}),
+    )
+}
+
+fn source_value(value: &pb::GroupSource) -> Result<Value, MachineError> {
+    let state = match pb::TaskOutcome::try_from(value.state)
+        .map_err(|_| invalid("sources.state", "unknown source outcome"))?
+    {
+        pb::TaskOutcome::Completed => "completed",
+        pb::TaskOutcome::Failed => "failed",
+        pb::TaskOutcome::Cancelled => "cancelled",
+        pb::TaskOutcome::Expired => "expired",
+        pb::TaskOutcome::Unknown => "unknown",
+        pb::TaskOutcome::Missing => "missing",
+        _ => {
+            return Err(invalid(
+                "sources.state",
+                "merge sources must be terminal, unknown or missing",
+            ));
+        }
+    };
+    Ok(
+        json!({"entry_key":value.entry_key,"worker_ref":value.worker_ref,"task_ref":value.task_ref,"role_snapshot_digest":value.role_snapshot_digest,"agent_configuration_digest":value.agent_configuration_digest,"accepted_task_digest":value.accepted_task_digest,"state":state,"result_digest":value.result_digest,"safe_failure_code":value.safe_failure_code}),
+    )
+}
+fn source_projection(value: &Value) -> Result<pb::GroupSource, MachineError> {
+    let optional = |key: &str| value[key].as_str().map(str::to_owned);
+    Ok(pb::GroupSource {
+        entry_key: text(value, "entry_key")?.into(),
+        worker_ref: optional("worker_ref"),
+        task_ref: optional("task_ref"),
+        role_snapshot_digest: optional("role_snapshot_digest"),
+        agent_configuration_digest: optional("agent_configuration_digest"),
+        accepted_task_digest: optional("accepted_task_digest"),
+        state: outcome(text(value, "state")?)?,
+        result_digest: optional("result_digest"),
+        safe_failure_code: optional("safe_failure_code"),
+    })
 }
 
 fn projection(value: &Value) -> Result<pb::GroupProjection, MachineError> {
@@ -221,7 +280,17 @@ fn receipt(value: &Value) -> Result<pb::OperationReceipt, MachineError> {
                 workspace_id: namespace.workspace_ref.clone(),
                 aggregate: Some(aggregate),
             }),
-            operation_kind: pb::OperationKind::AssignGroup as i32,
+            operation_kind: match namespace.operation_kind.as_str() {
+                "assign_group" => pb::OperationKind::AssignGroup,
+                "merge_group_results" => pb::OperationKind::MergeGroupResults,
+                "assign_synthesis" => pb::OperationKind::AssignSynthesis,
+                _ => {
+                    return Err(projection_unavailable(
+                        "operation_kind",
+                        "unexpected receipt operation",
+                    ));
+                }
+            } as i32,
             idempotency_key: namespace.idempotency_key.clone(),
         }),
         accepted_input_digest: retained.accepted_input_digest,
@@ -264,10 +333,12 @@ fn accepted_projection_error(mut error: MachineError, value: &Value) -> MachineE
         "workspace_id":ns["workspace_ref"],"scope_kind":ns["scope_kind"],"scope_ref":ns["scope_ref"],
         "idempotency_key":ns["idempotency_key"]}));
     details.insert("public_v2_accepted".into(), json!(true));
-    details.insert(
-        "group_ref".into(),
-        retained["accepted_subjects"]["group_ref"].clone(),
-    );
+    for subject in ["group_ref", "merge_ref", "task_ref"] {
+        details.insert(
+            subject.into(),
+            retained["accepted_subjects"][subject].clone(),
+        );
+    }
     error.details = Value::Object(details);
     error
 }
@@ -655,16 +726,198 @@ impl pb::group_service_server::GroupService for GatewayTransport {
 
     async fn merge_group_results(
         &self,
-        _request: Request<pb::MergeGroupResultsRequest>,
+        request: Request<pb::MergeGroupResultsRequest>,
     ) -> Result<Response<pb::MergeGroupResultsResponse>, Status> {
-        Err(unsupported("GroupService.MergeGroupResults"))
+        execute!(self, request, "GroupService.MergeGroupResults", backend, {
+            let admission = required(request.admission.as_ref(), "admission")?;
+            if admission.trusted_invocation.is_some() {
+                return Err(invalid(
+                    "trusted_invocation",
+                    "public merge uses its authenticated Controller",
+                ));
+            }
+            let sources = request
+                .sources
+                .iter()
+                .map(source_value)
+                .collect::<Result<Vec<_>, MachineError>>()?;
+            let value = call(
+                backend,
+                required(request.scope.as_ref(), "scope")?,
+                required(admission.controller.as_ref(), "controller")?,
+                "merge_group_results",
+                Some(&admission.idempotency_key),
+                Some(admission.expected_revision),
+                json!({"group_ref":request.group_id,"sources":sources,"algorithm":request.algorithm}),
+            )?;
+            let identity = &value["response"]["merged_identity"];
+            bounded(pb::MergeGroupResultsResponse {
+                context: Some(context(backend)),
+                merge_id: text(&value, "merge_id")?.into(),
+                identity: Some(pb::MergedFindingsIdentity {
+                    schema: text(identity, "schema")?.into(),
+                    algorithm: text(identity, "algorithm")?.into(),
+                    group_assignment_digest: text(identity, "group_assignment_digest")?.into(),
+                    sources: identity["sources"]
+                        .as_array()
+                        .ok_or_else(|| projection_unavailable("sources", "missing sources"))?
+                        .iter()
+                        .map(source_projection)
+                        .collect::<Result<Vec<_>, MachineError>>()?,
+                    merged_output: Some(bytes(&identity["merged_output"])?),
+                }),
+                merged_findings_digest: text(&value["response"], "merged_digest")?.into(),
+                merged_output: content(&value["merged_output"])?,
+                receipt: Some(receipt(&value)?),
+            })
+            .map_err(|error| accepted_projection_error(error, &value))
+        })
     }
 
     async fn assign_synthesis(
         &self,
-        _request: Request<pb::AssignSynthesisRequest>,
+        request: Request<pb::AssignSynthesisRequest>,
     ) -> Result<Response<pb::AssignSynthesisResponse>, Status> {
-        Err(unsupported("GroupService.AssignSynthesis"))
+        execute!(self, request, "GroupService.AssignSynthesis", backend, {
+            let admission = required(request.admission.as_ref(), "admission")?;
+            if admission.trusted_invocation.is_some() {
+                return Err(invalid(
+                    "trusted_invocation",
+                    "public synthesis uses its authenticated Controller",
+                ));
+            }
+            let input = required(request.task.as_ref(), "task")?;
+            let accepted = required(input.identity.as_ref(), "task.identity")?;
+            let expected = accepted_task_value(accepted)?;
+            let expected: crate::delegation_identity::AcceptedTask =
+                serde_json::from_value(expected)
+                    .map_err(|_| invalid("task.identity", "invalid accepted task"))?;
+            if expected.digest()? != input.accepted_task_digest {
+                return Err(invalid(
+                    "accepted_task_digest",
+                    "task identity digest differs",
+                ));
+            }
+            let body = match required(input.body.as_ref(), "task.body")? {
+                pb::task_input::Body::Structured(body) => {
+                    json!({"schema":body.schema,"brief":body.brief,"context":body.context.iter().map(context_value).collect::<Result<Vec<_>,MachineError>>()?,"criteria":body.criteria.iter().map(|criterion|json!({"criterion_id":criterion.criterion_id,"text":criterion.text,"context_ids":criterion.context_ids})).collect::<Vec<_>>(),"constraints":body.constraints})
+                }
+                _ => {
+                    return Err(invalid(
+                        "task.body",
+                        "AssignSynthesis requires its complete structured task body",
+                    ));
+                }
+            };
+            let (workspace_ref, _, _, _) = scope(required(request.scope.as_ref(), "scope")?)?;
+            let view = backend.workspace(&workspace_ref)?;
+            let state_root = backend.home().workspace_root(&view.workspace_id);
+            let (_, primary, scope_kind, scope_ref) =
+                scope(required(request.scope.as_ref(), "scope")?)?;
+            let authenticated = backend.controller(&controller(required(
+                admission.controller.as_ref(),
+                "controller",
+            )?))?;
+            crate::delegation_service::research_group::public_owner_binding(
+                &state_root,
+                &view.workspace_id,
+                &authenticated,
+                scope_kind,
+                scope_ref,
+                primary,
+            )?;
+            let selected_merge = crate::delegation_service::research_merge::record(
+                &crate::engagement::EngagementStore::open_read_only(
+                    &crate::engagement::EngagementStore::workspace_database_path(&state_root),
+                )?,
+                uuid(&request.merge_id, "merge_id")?,
+            )?;
+            if selected_merge["scope_kind"] != scope_kind
+                || selected_merge["scope_ref"] != scope_ref.to_string()
+                || selected_merge["workspace_id"] != view.workspace_id
+            {
+                return Err(invalid("merge_id", "merge belongs to another aggregate"));
+            }
+            if selected_merge["digest"] != request.merged_findings_digest {
+                return Err(invalid("merged_findings_digest", "merge identity differs"));
+            }
+            let value = call(
+                backend,
+                required(request.scope.as_ref(), "scope")?,
+                required(admission.controller.as_ref(), "controller")?,
+                "assign_synthesis",
+                Some(&admission.idempotency_key),
+                Some(admission.expected_revision),
+                json!({"member_ref":request.member_id,"merged_findings_digest":request.merged_findings_digest,"merged_input":selected_merge["identity"]["merged_output"],"assignment":{"task_body":body,"accepted_task_identity":expected,"deadline_seconds":input.deadline_seconds}}),
+            )?;
+            let retained = receipt(&value)?;
+            let accepted_task: crate::delegation_identity::AcceptedTask =
+                serde_json::from_value(value["accepted_task"].clone()).map_err(|_| {
+                    projection_unavailable("accepted_task", "invalid retained task identity")
+                })?;
+            let state = text(&value["response"]["task"], "state")?;
+            let disposition = match value["disposition"].as_str() {
+                Some("idle") => pb::MemberDisposition::Idle,
+                Some("busy") => pb::MemberDisposition::Busy,
+                Some("released") => pb::MemberDisposition::Released,
+                Some("unresolved") => pb::MemberDisposition::Unresolved,
+                Some("passivated") => pb::MemberDisposition::Passivated,
+                Some("recovery_needed") => pb::MemberDisposition::RecoveryNeeded,
+                _ => pb::MemberDisposition::Unresolved,
+            };
+            bounded(pb::AssignSynthesisResponse {
+                context: Some(context(backend)),
+                task: Some(pb::TaskProjection {
+                    task_id: text(&value["response"]["task"], "task_ref")?.into(),
+                    member_id: text(&value["response"]["task"], "member_ref")?.into(),
+                    outcome: outcome(state)?,
+                    identity: Some(accepted.clone()),
+                    accepted_task_digest: accepted_task.digest()?,
+                    result: result_rows(&value)?.into_iter().next(),
+                    recovery: None,
+                }),
+                receipt: Some(retained.clone()),
+                identity: Some(pb::DelegationIdentity {
+                    schema: "dolgorae.delegation-identity/v1".into(),
+                    scope: request.scope,
+                    worker_ref: request.member_id,
+                    task_ref: value["response"]["task"]["task_ref"]
+                        .as_str()
+                        .map(str::to_owned),
+                    role_body_sha256: text(&value["role_body"], "sha256")?
+                        .trim_start_matches("sha256:")
+                        .into(),
+                    role_body_byte_length: value["role_body"]["byte_length"].as_u64().ok_or_else(
+                        || projection_unavailable("role_body", "missing role body length"),
+                    )?,
+                    role_snapshot_digest: text(&value, "role_snapshot_digest")?.into(),
+                    instruction_identity_digest: text(&value, "instruction_identity_digest")?
+                        .into(),
+                    agent_configuration_digest: accepted_task.agent_configuration_digest.clone(),
+                    accepted_task_digest: Some(accepted_task.digest()?),
+                    result_id: value["results"]
+                        .as_array()
+                        .and_then(|rows| rows.first())
+                        .and_then(|row| row["result_id"].as_str())
+                        .map(str::to_owned),
+                    result_digest: value["results"]
+                        .as_array()
+                        .and_then(|rows| rows.first())
+                        .and_then(|row| row["result_digest"].as_str())
+                        .map(str::to_owned),
+                    rounds: u32::try_from(value["rounds"].as_u64().ok_or_else(|| {
+                        projection_unavailable("rounds", "missing accepted rounds")
+                    })?)
+                    .map_err(|_| projection_unavailable("rounds", "round count out of range"))?,
+                    disposition: disposition as i32,
+                    source_revision: value["source_revision"].as_u64().ok_or_else(|| {
+                        projection_unavailable("source_revision", "missing revision")
+                    })?,
+                    accepted_operation: retained.operation,
+                }),
+            })
+            .map_err(|error| accepted_projection_error(error, &value))
+        })
     }
 }
 

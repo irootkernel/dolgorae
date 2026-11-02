@@ -141,6 +141,21 @@ original one.
 
 ## Keyed intents, receipts and lookup
 
+### TASK-085 writer fence: generation 8
+
+Generation 8 adds immutable merged-artifact charges and synthesis input bindings.
+A writable open upgrades a verified generation 7 database atomically, retaining
+its group marker, base-six tables, namespace birth and orchestration extension 3.
+It records `research_merge_schema_version = 1` before accepting merge or
+synthesis work. Read-only opens support verified generations 6, 7 and 8.
+Generation-7 writers reject generation 8 before effects; incomplete or unknown
+markers remain typed schema refusals. No source content is backfilled.
+Historical migration steps keep their literal target generations and are no-ops
+when already applied to a verified generation 6, 7 or 8 database. They preserve
+existing rows, namespace birth and extension markers. A historical generation
+carrying a later merge marker still fails admission; fixtures representing old
+databases must remove that marker with the other later-generation metadata.
+
 ### Protected host setup and invocation ownership
 
 The private administrative entry point `__trusted-specialist-host` separates
@@ -1224,3 +1239,79 @@ proof still requires coherent settled work. Reads never start, recover, cancel o
 External and managed exports preserve their existing mapping IDs, caller scope,
 accepted authority, complete result and digest. This observation does not resolve
 native full-output receiver compatibility or establish actual consumer acceptance.
+
+### Deterministic findings merge and explicit synthesis
+
+`research_merge` authenticates the aggregate and derives every source from the
+complete accepted group manifest and original task/result owners. Caller source
+rows must name that entire collected set. It sorts them by unique `entry_key`
+before normalization, so permutations have identical accepted input and result
+bytes. An accepted original key returns its frozen source set before observing
+later group progress.
+
+`merge-exact-findings-v1` validates each completed source's original
+`structured_findings_v1` bytes. It groups exact stable keys, orders variants by
+complete JCS finding bytes, and collapses only byte-equivalent checked findings.
+Each variant retains every sorted unique source entry key. Different variants
+remain explicit conflicts. Coverage retains failed, cancelled, expired, unknown
+and missing sources. A key with more than 64 inequivalent variants or a complete
+output over 32 MiB is a typed capacity refusal with no accepted merge; sources
+are retained intact. Merge and collection never invoke a model or resolve claims.
+The merged identity and digest use the existing immutable MDC domain and schema.
+
+The merged output is retained atomically with its genuine UUIDv7 merge and
+artifact identities and keyed receipt. Managed publication charges the actual
+Session root Run; external publication charges the first proven existing source
+Run with output capacity in entry-key order. An external group without a genuine
+owner returns `COMPLETE_RESULT_UNAVAILABLE`. Exhausted eligible owners return
+`ARTIFACT_CAPACITY_EXCEEDED`; both refusals retain complete source coverage. Charges
+share the existing 256 MiB Run quota and serialization lease. Public result
+references and Artifact metadata/chunks read these exact bytes under current
+aggregate Controller authorization, with no observation-time publication.
+
+`assign_synthesis` is an explicit ordinary task acceptance, with its own actual
+Task, caller round and complete result. The request binds a retained merged digest
+and exact merged-output BytesRef. Public task-body syntax retains its 16 MiB
+JCS ceiling; the complete rendered synthesis input must also satisfy the shared
+ordinary Turn 8 MiB validator. Capacity is checked on that exact rendered input
+before task acceptance, caller-round reservation or dispatch. No input is
+truncated, and an accepted original key replays before fresh source/capacity
+checks. Acceptance retains that dependency before dispatch. Dispatch and recovery
+render the same immutable input as data.
+The facade task body retains its existing schema. Public structured task bodies
+retain their original complete JCS bytes, ordered contexts, criteria and
+constraints under `dolgorae.structured-task/v1`; an internal execution projection
+never replaces their accepted bytes or identity. Controller synthesis uses its
+own authenticated acceptance origin, without manufacturing a native source call,
+Podway round scope or group receipt.
+
+Queued synthesis and restart reconstruction resolve the original accepted
+`assign_synthesis` operation by its actual Task binding. They verify the complete
+original public or facade task bytes before constructing the internal execution
+projection. The scheduler and worker use the same retained merged-input renderer
+and original deadline; recovery neither accepts another task nor spends another
+caller round.
+
+A body-free capacity-finalized source keeps its genuine Result UUID and complete
+identity. Its source manifest is null with the explicit artifact-capacity reason;
+merge provenance retains that identity without inventing an artifact. Selecting
+another eligible genuine Run places only the newly merged artifact. Existing
+source and capture charges remain with their original Run.
+
+Synthesis context references must resolve to retained, authenticated bytes. The
+public adapter resolves its exact merged input with JSON media type and exact
+`accepted_context` references already retained by authenticated source Tasks in
+that immutable merge. Source context identity, kind, media type, complete hash
+and length must all match the original accepted Task and bytes. Other references
+fail before acceptance when this bounded source set has no original data owner;
+there is no file discovery or global hash lookup. Ordered aliases remain part of
+the exact task identity. Their complete rendered input and capture size are
+bounded before body replication, including repeated aliases, and actual context
+bodies enter the rendered input in accepted order. This preserves the public task
+syntax and the merge deduplication rules.
+
+External Submit binding selects the actual dispatching Task and compares its
+exact ordinary key or Task-bound synthesis key. An unrelated key supplies no
+assignment binding; a generation-4 Worker returns
+`ACCEPTED_ASSIGNMENT_NOT_FOUND` before submitting a Turn. An exact accepted key
+still requires its original Run, dispatch claim and complete rendered bytes.

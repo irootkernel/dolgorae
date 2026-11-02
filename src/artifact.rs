@@ -996,10 +996,13 @@ pub fn logical_artifact_bytes(directory: &Path) -> Result<u64, MachineError> {
             Ok(_) => {
                 normalized = crate::orchestration::OrchestrationStore::open_observer(state_root)?
                     .logical_result_artifacts(run_id)?;
+                let merge_bytes =
+                    crate::delegation_service::research_merge::logical_bytes(state_root, run_id)?;
                 capture_bytes = crate::group_quota::reserved_bytes(state_root, run_id)?
                     .checked_add(crate::result_component_artifact::logical_bytes(
                         state_root, run_id,
                     )?)
+                    .and_then(|bytes| bytes.checked_add(merge_bytes))
                     .ok_or_else(|| quota_integrity("artifact logical byte sum overflow"))?;
             }
         }

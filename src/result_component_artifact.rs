@@ -436,25 +436,31 @@ fn read_component(
         "structured_output" => {
             let retained =
                 crate::delegation_service::original_delegation_response(state_root, result, true)?;
-            let projected = if result.structured_output_schema.as_deref()
-                == Some("structured_review_v3")
-            {
-                let raw = crate::delegation_service::original_delegation_response(
-                    state_root, result, false,
-                )?
-                .ok_or_else(unavailable)?;
-                let accepted =
-                    crate::delegation_service::original_delegation_task(state_root, result)?;
-                let task = serde_json::from_slice(&accepted.task_body).map_err(|_| integrity())?;
-                let output = crate::specialist::parse_reviewer_output_v3(
-                    Some(std::str::from_utf8(&raw).map_err(|_| integrity())?),
-                    &task,
-                )
-                .map_err(|_| integrity())?;
-                Some(crate::trusted_host::canonical(&output)?)
-            } else {
-                None
-            };
+            let projected =
+                if result.structured_output_schema.as_deref() == Some("structured_review_v3") {
+                    let raw = crate::delegation_service::original_delegation_response(
+                        state_root, result, false,
+                    )?
+                    .ok_or_else(unavailable)?;
+                    let accepted =
+                        crate::delegation_service::original_delegation_task(state_root, result)?;
+                    let store = EngagementStore::open_read_only(
+                        &EngagementStore::workspace_database_path(state_root),
+                    )?;
+                    let task = crate::delegation_service::research_merge::task_projection(
+                        store.connection(),
+                        Uuid::parse_str(&result.source.task_ref).map_err(|_| integrity())?,
+                        &accepted.task_body,
+                    )?;
+                    let output = crate::specialist::parse_reviewer_output_v3(
+                        Some(std::str::from_utf8(&raw).map_err(|_| integrity())?),
+                        &task,
+                    )
+                    .map_err(|_| integrity())?;
+                    Some(crate::trusted_host::canonical(&output)?)
+                } else {
+                    None
+                };
             if retained
                 .as_ref()
                 .zip(projected.as_ref())
@@ -508,6 +514,70 @@ fn read_component(
         return Err(integrity());
     }
     Ok(bytes)
+}
+pub(crate) fn retained_source_identity(
+    connection: &Connection,
+    task: &str,
+    digest: &str,
+    body_free: Option<&CompleteResult>,
+) -> Result<(CompleteResult, Value), MachineError> {
+    if let Some(publication) = load(connection, task)? {
+        if publication.result.digest()? != digest {
+            return Err(integrity());
+        }
+        let reference = json!({"result_id":publication.result_id,"result_digest":digest,"source_manifest":generated_ref(&publication,publication.manifest_id,&manifest(&publication)?)});
+        return Ok((publication.result, reference));
+    }
+    let record: IdentityPublication = serde_json::from_str(
+        &crate::engagement::result_component_record(
+            connection,
+            &format!("{IDENTITY_PREFIX}{task}"),
+        )?
+        .ok_or_else(unavailable)?,
+    )
+    .map_err(|_| integrity())?;
+    let result = body_free.ok_or_else(unavailable)?;
+    if record.schema != "dolgorae.result-component-identity/v1"
+        || record.result_id.get_version_num() != 7
+        || record.result_digest != digest
+        || result.digest()? != digest
+        || result.source.task_ref != task
+        || result.source.worker_ref != record.run_id.to_string()
+        || result.final_response.is_some()
+        || result.structured_output.is_some()
+        || !result.changes.is_empty()
+        || !result.attachments.is_empty()
+    {
+        return Err(integrity());
+    }
+    Ok((
+        result.clone(),
+        json!({"result_id":record.result_id,"result_digest":digest,"source_manifest":null,"discovery_unavailable_reason":"artifact_capacity_exceeded"}),
+    ))
+}
+pub(crate) fn source_identity(
+    state_root: &Path,
+    view: &WorkspaceView,
+    result: &CompleteResult,
+) -> Result<Value, MachineError> {
+    let store =
+        EngagementStore::open_read_only(&EngagementStore::workspace_database_path(state_root))?;
+    if load(store.connection(), &result.source.task_ref)?.is_none() {
+        let row = public_result(state_root, view, result)?;
+        return Ok(
+            json!({"result_id":row["result_id"],"result_digest":row["result_digest"],"source_manifest":null,"discovery_unavailable_reason":row["discovery_unavailable_reason"]}),
+        );
+    }
+    let publication = load(store.connection(), &result.source.task_ref)?.ok_or_else(unavailable)?;
+    if publication.workspace_id != view.workspace_id
+        || publication.result.digest()? != result.digest()?
+    {
+        return Err(integrity());
+    }
+    verify_source(state_root, &publication)?;
+    Ok(
+        json!({"result_id":publication.result_id,"result_digest":result.digest()?,"source_manifest":generated_ref(&publication,publication.manifest_id,&manifest(&publication)?)}),
+    )
 }
 pub(crate) fn public_result(
     state_root: &Path,
@@ -627,6 +697,11 @@ pub(crate) fn read_bound(
     id: Uuid,
     carrier: Option<&CredentialCarrier>,
 ) -> Result<Option<(ArtifactReference, Vec<u8>)>, MachineError> {
+    if let Some(artifact) =
+        crate::delegation_service::research_merge::read_artifact(state_root, run, id, carrier)?
+    {
+        return Ok(Some(artifact));
+    }
     let database = EngagementStore::workspace_database_path(state_root);
     if !database.exists() {
         return Ok(None);

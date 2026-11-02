@@ -16,6 +16,8 @@ pub(crate) const PUBLIC_LIMIT: usize = 16 * 1024 * 1024;
 pub(crate) const FRAME_LIMIT: usize = PUBLIC_LIMIT + 65_536;
 pub(crate) const MANAGED_TOOL: &str = "dolgorae_specialists";
 pub(crate) const EXTERNAL: &[&str] = &[
+    "merge_group_results",
+    "assign_synthesis",
     "assign_group",
     "await_group",
     "collect_group",
@@ -34,6 +36,8 @@ pub(crate) const EXTERNAL: &[&str] = &[
     "lookup_operation",
 ];
 pub(crate) const MANAGED: &[&str] = &[
+    "merge_group_results",
+    "assign_synthesis",
     "assign_group",
     "await_group",
     "collect_group",
@@ -332,7 +336,10 @@ pub(crate) fn external_with_port(
                 };
                 match lookup {
                     crate::engagement::IntentLookup::Accepted(receipt) => {
-                        if operation == "assign_group" {
+                        if matches!(
+                            operation,
+                            "assign_group" | "merge_group_results" | "assign_synthesis"
+                        ) {
                             // Group replay resumes only undispatched original-key
                             // children from its retained capture, including a
                             // crash immediately after the group receipt commit.
@@ -570,6 +577,19 @@ pub(crate) fn dispatch(
     )?;
     let key = request["idempotency_key"].as_str().unwrap_or("");
     match operation {
+        "assign_synthesis" => {
+            return service::research_merge::assign(
+                scope,
+                managed,
+                Some(&caller),
+                port,
+                request,
+                false,
+            );
+        }
+        "merge_group_results" => {
+            return service::research_merge::merge(scope, managed, port, request, false);
+        }
         "assign_group" => {
             return service::research_group::assign(scope, managed, &caller, port, request);
         }
@@ -1183,7 +1203,7 @@ mod tests {
                 assert!(!validates(&extra, &definition));
             }
         }
-        assert_eq!(selected, 23);
+        assert_eq!(selected, 25);
     }
     #[test]
     fn external_actual_scope_and_typed_references_precede_delivery_markers() {

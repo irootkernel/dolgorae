@@ -205,6 +205,13 @@ accepts immutable research assignments, waits for any/all/k terminal tasks and
 collects complete coverage under the aggregate Controller. Sources are captured
 before acknowledgement; recovery uses the original operation key and retained
 bytes. The checked managed and external facades expose the same group owner.
+`MergeGroupResults` publishes deterministic findings with the exact collected
+source set, explicit conflicts and coverage; it never invokes a model.
+`AssignSynthesis` explicitly accepts a separate task over that immutable merged
+input. Retain its own key and receipt, and read merged bytes through their
+recorded Artifact owner. Source progress after an accepted merge does not change
+its frozen identity. See the [group operations guide](docs/ops/README.md#findings-merge-and-synthesis-recovery)
+for recovery and capacity limits.
 Public-v1 listing returns accepted legacy Runs in mixed workspaces, and its
 workspace Writer status remains readable when a modern Run holds the slot.
 

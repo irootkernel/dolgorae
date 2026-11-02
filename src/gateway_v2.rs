@@ -398,8 +398,12 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         method == "RunService.SubmitTurn" && error.details["public_v2_accepted"] == true;
     let accepted_resolve = method == "InteractionService.ResolveInteraction"
         && error.details["public_v2_accepted"] == true;
-    let accepted_group =
-        method == "GroupService.AssignGroup" && error.details["public_v2_accepted"] == true;
+    let accepted_group = matches!(
+        method,
+        "GroupService.AssignGroup"
+            | "GroupService.MergeGroupResults"
+            | "GroupService.AssignSynthesis"
+    ) && error.details["public_v2_accepted"] == true;
     let accepted = accepted_start || accepted_submit || accepted_resolve || accepted_group;
     let unknown = mutating
         && (!accepted || accepted_resolve)
@@ -419,6 +423,8 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         subjects: if accepted_group {
             Some(pb::SubjectIdentities {
                 group_id: error.details["group_ref"].as_str().map(str::to_owned),
+                merge_id: error.details["merge_ref"].as_str().map(str::to_owned),
+                task_id: error.details["task_ref"].as_str().map(str::to_owned),
                 ..Default::default()
             })
         } else {
@@ -844,6 +850,8 @@ const METHODS: &[&str] = &[
     "GroupService.AssignGroup",
     "GroupService.AwaitGroup",
     "GroupService.CollectGroup",
+    "GroupService.MergeGroupResults",
+    "GroupService.AssignSynthesis",
     "InteractionService.ListPendingInteractions",
     "InteractionService.GetControllerInteraction",
     "InteractionService.ResolveInteraction",
@@ -2003,6 +2011,8 @@ impl pb::operation_service_server::OperationService for GatewayTransport {
                     Ok(pb::OperationKind::SubmitTurn) => "submit_turn",
                     Ok(pb::OperationKind::ResolveInteraction) => "resolve_interaction",
                     Ok(pb::OperationKind::AssignGroup) => "assign_group",
+                    Ok(pb::OperationKind::MergeGroupResults) => "merge_group_results",
+                    Ok(pb::OperationKind::AssignSynthesis) => "assign_synthesis",
                     _ => {
                         return Err(invalid(
                             "operation_kind",
@@ -2013,11 +2023,11 @@ impl pb::operation_service_server::OperationService for GatewayTransport {
                 let group_scope = match (&scope.aggregate, kind) {
                     (
                         Some(pb::caller_scope::Aggregate::ExternalEngagementId(id)),
-                        "assign_group",
+                        "assign_group" | "merge_group_results" | "assign_synthesis",
                     ) => Some(("external_engagement", id.as_str())),
                     (
                         Some(pb::caller_scope::Aggregate::OrchestratedSessionId(id)),
-                        "assign_group",
+                        "assign_group" | "merge_group_results" | "assign_synthesis",
                     ) => Some(("orchestrated_session", id.as_str())),
                     _ => None,
                 };
@@ -2042,7 +2052,7 @@ impl pb::operation_service_server::OperationService for GatewayTransport {
                 let value = match (&scope.aggregate, kind) {
                     (
                         Some(pb::caller_scope::Aggregate::ExternalEngagementId(id)),
-                        "assign_group",
+                        "assign_group" | "merge_group_results" | "assign_synthesis",
                     ) => crate::delegation_service::research_group::public_lookup(
                         &root,
                         &scope.workspace_id,
@@ -2054,7 +2064,7 @@ impl pb::operation_service_server::OperationService for GatewayTransport {
                     )?,
                     (
                         Some(pb::caller_scope::Aggregate::OrchestratedSessionId(id)),
-                        "assign_group",
+                        "assign_group" | "merge_group_results" | "assign_synthesis",
                     ) => crate::delegation_service::research_group::public_lookup(
                         &root,
                         &scope.workspace_id,

@@ -2487,8 +2487,16 @@ fn all_content_references(
                     | "external_artifact"
                     | "legacy_engagement"
                     | "brokered_chunk_receipt"
+                    | "research_merge"
+                    | "synthesis_task"
             )
-            || !matches!(representation.as_str(), "json" | "raw")
+            || !match owner_kind.as_str() {
+                "research_merge" => {
+                    matches!(representation.as_str(), "publication" | "merged_output")
+                }
+                "synthesis_task" => representation == "input",
+                _ => matches!(representation.as_str(), "json" | "raw"),
+            }
             || sha256.len() != 64
             || !sha256
                 .bytes()
@@ -2530,6 +2538,9 @@ pub(crate) fn content_delivered(
     if r.owner_kind == "external_artifact"
         && crate::result_component_artifact::protects_external_artifact(connection, &r.owner_id)?
     {
+        return Ok(false);
+    }
+    if matches!(r.owner_kind.as_str(), "research_merge" | "synthesis_task") {
         return Ok(false);
     }
     let sql = match r.owner_kind.as_str() {

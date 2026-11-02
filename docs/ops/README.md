@@ -877,3 +877,53 @@ failed, expired, unknown and missing source with its original identities.
 Read complete result component references under their recorded owner. Group
 completion does not synthesize findings, adjudicate conflicts or create a
 single Podway Action receipt.
+
+### Findings merge and synthesis recovery
+
+Collect the complete accepted group's source pages before calling
+`GroupService.MergeGroupResults` or checked `merge_group_results`. Supply every
+source, including failed, cancelled, expired, unknown and missing entries, and
+select `merge-exact-findings-v1`. Retain the merge ID, merged digest, complete
+output reference and original operation receipt. A source permutation has the
+same normalized identity; a changed source snapshot under that key conflicts.
+Replaying an accepted key returns the original snapshot even after later source
+progress. A merge does not spend an Agent round or call a model.
+
+Read the merged output with Artifact metadata/chunks under its recorded genuine
+Run and the current aggregate Controller. Verify the complete content's length
+and SHA-256; chunks are at most 1 MiB and the artifact is at most 32 MiB. Managed
+merges use the Session root Run. External merges choose the first source Run in
+entry-key order that has output capacity. Existing capture charges stay with
+their original Runs; only the new merged artifact is placed on the selected
+owner. Released source Runs remain valid retained owners.
+
+`ARTIFACT_CAPACITY_EXCEEDED` refuses an oversized output, more than 64 inequivalent
+variants of one key, or insufficient eligible Run quota. External groups with no
+proven source Run return `COMPLETE_RESULT_UNAVAILABLE`. These refusals create no
+accepted merge, ArtifactRef or merged-artifact charge. Collect the original
+group again to inspect its unchanged complete coverage and recover uncertain
+individual work through its existing owner. Do not drop sources, change keys or
+invent a Run to bypass a refusal. A body-free source retained without artifact
+capacity still has its real result ID; a null source manifest is explicit and
+never becomes a fabricated ArtifactRef.
+
+Call `GroupService.AssignSynthesis` or checked `assign_synthesis` only when a
+separate synthesis task is intended. Bind the exact retained merged digest and
+complete output BytesRef, prepare the complete task identity and retain the new
+acceptance receipt. The task keeps its own result and accounting. Public
+structured bodies preserve all ordered contexts, criteria and constraints in
+complete JCS bytes. Contexts resolve only to the exact merged input or matching
+context bytes retained by its authenticated source Tasks. An unresolved reference
+fails before acceptance. The service bounds repeated aliases before copying
+context bodies, then validates the complete rendered input. The 16 MiB task-body
+syntax ceiling does not enlarge the
+ordinary 8 MiB complete Turn input bound: the service checks the fully rendered
+task and merged data before acceptance and refuses excess input without
+truncation. After reply loss, look up the original `AssignSynthesis` key before
+submitting another task. Merge and synthesis success do not adjudicate claims or
+establish a Podway group-as-one-Action receipt.
+
+Writer generation 8 protects merged-artifact quota and synthesis recovery
+bindings. Open an older verified workspace through the supported writable
+upgrade; preserve its namespace birth and receipts. Generation-7 writers must
+refuse generation 8. There is no operator downgrade or manual marker repair.

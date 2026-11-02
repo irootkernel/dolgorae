@@ -218,6 +218,21 @@ pub(crate) fn authorize_external_recovery(
         "origin",
     )?
     else {
+        if super::research_merge::verify_accounted_task(store.connection(), task)? {
+            let facts = store.external_task(engagement_id, task)?;
+            if facts.specialist_run_id != member
+                || manifest.run_id != member
+                || manifest.workspace_id != view.workspace_id
+            {
+                return Err(retained_source_invalid());
+            }
+            let (workspace, binding) = store.accepted_external_owner(engagement_id)?;
+            if workspace != view.workspace_id {
+                return Err(owner_refusal_for("reconcile_member_task"));
+            }
+            crate::controller::authorize_controller(member, "run.reconcile", &binding, carrier)?;
+            return Ok(true);
+        }
         return Ok(false);
     };
     let origin_value = decode(&bytes)?;
@@ -324,7 +339,7 @@ fn uuid_field(value: &Value, field: &str) -> Result<Uuid, MachineError> {
         .and_then(|v| Uuid::parse_str(v).ok())
         .ok_or_else(invalid)
 }
-fn owner(request: &Value) -> Result<SettlementOwner, MachineError> {
+pub(super) fn owner(request: &Value) -> Result<SettlementOwner, MachineError> {
     let id = uuid_field(request, "scope_ref")?;
     match request["scope_kind"].as_str() {
         Some("external_engagement") => Ok(SettlementOwner::External { engagement_id: id }),
@@ -333,7 +348,7 @@ fn owner(request: &Value) -> Result<SettlementOwner, MachineError> {
     }
 }
 
-fn authorize_owner(
+pub(super) fn authorize_owner(
     scope: &DelegationScope<'_>,
     own: SettlementOwner,
     context: Option<&ManagedCallContext<'_>>,
@@ -455,7 +470,7 @@ fn member_pending(
     };
     Ok(actual.saturating_add(reserved))
 }
-fn require_active_group_owner(
+pub(super) fn require_active_group_owner(
     connection: &rusqlite::Transaction<'_>,
     scope: &DelegationScope<'_>,
     own: SettlementOwner,
@@ -690,7 +705,7 @@ fn capture_source(
 fn normalized(request: &Value) -> Value {
     json!({"manifest":request["manifest"],"inputs":request["inputs"].as_array().unwrap_or(&Vec::new()).iter().map(|s|json!({"entry_key":s["entry_key"],"content":s["content"]})).collect::<Vec<_>>()})
 }
-fn read_document(store: &EngagementStore, group: &str) -> Result<Value, MachineError> {
+pub(super) fn read_document(store: &EngagementStore, group: &str) -> Result<Value, MachineError> {
     let bytes =
         crate::storage_observation::read_content(store.connection(), KIND, group, "manifest")?
             .ok_or_else(retained_source_invalid)?;
@@ -1177,14 +1192,109 @@ pub(crate) fn public_call(
     if request["scope_kind"] != scope_kind
         || request["scope_ref"] != scope_ref.to_string()
         || request["operation"] != operation
-        || (operation == "assign_group"
-            && (request["idempotency_key"].as_str() != key
-                || request["expected_revision"].as_u64() != expected_revision))
+        || (matches!(
+            operation,
+            "assign_group" | "merge_group_results" | "assign_synthesis"
+        ) && (request["idempotency_key"].as_str() != key
+            || request["expected_revision"].as_u64() != expected_revision))
     {
         return Err(invalid());
     }
     let own = owner(request)?;
     let execute = || -> Result<Value, MachineError> {
+        if operation == "assign_synthesis" {
+            let exact_replay = super::research_merge::accepted_key(
+                &scope,
+                operation,
+                request["idempotency_key"].as_str().ok_or_else(invalid)?,
+                own,
+            )?;
+            let response = super::research_merge::assign(&scope, None, None, port, request, true)?;
+            let member = Uuid::parse_str(
+                response["task"]["member_ref"]
+                    .as_str()
+                    .ok_or_else(retained_source_invalid)?,
+            )
+            .map_err(|_| retained_source_invalid())?;
+            let task = Uuid::parse_str(
+                response["task"]["task_ref"]
+                    .as_str()
+                    .ok_or_else(retained_source_invalid)?,
+            )
+            .map_err(|_| retained_source_invalid())?;
+            let collected = collect_group_task(&scope, None, port, own, member, task)?;
+            let store = open_store(&scope)?;
+            let accepted = match own {
+                SettlementOwner::External { engagement_id } => store
+                    .external_task_identity(engagement_id, task)?
+                    .ok_or_else(retained_source_invalid)?,
+                SettlementOwner::Managed { session_id } => {
+                    crate::successor_capture::retained_accepted_task(
+                        &crate::orchestration::successor_task(
+                            store.connection(),
+                            session_id,
+                            task,
+                        )?
+                        .ok_or_else(retained_source_invalid)?
+                        .accepted_request_json,
+                    )?
+                }
+            };
+            let manifest =
+                crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &state_root)
+                    .load_manifest(member)?;
+            let delegation = manifest
+                .instructions
+                .delegation()
+                .ok_or_else(retained_source_invalid)?;
+            let revision = engagement::scope_membership_revision(
+                store.connection(),
+                &view.workspace_id,
+                own.scope_kind(),
+                &own.scope_ref().to_string(),
+            )?;
+            let rounds:u64=store.connection().query_row("SELECT COUNT(*) FROM delegation_operations WHERE operation_kind='assign_synthesis' AND state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref')=?1",[task.to_string()],|row|row.get(0)).map_err(|_|retained_source_invalid())?;
+            let result = collected
+                .complete_result
+                .as_ref()
+                .map(|value| {
+                    let result = serde_json::from_value(value.clone())
+                        .map_err(|_| retained_source_invalid())?;
+                    crate::result_component_artifact::public_result(&state_root, view, &result)
+                })
+                .transpose()?;
+            return Ok(
+                json!({"response":response,"accepted_task":accepted,"source_revision":revision,"rounds":rounds,"disposition":collected.disposition.state,"role_body":delegation.role_snapshot.role_body,"role_snapshot_digest":delegation.role_snapshot_digest,"instruction_identity_digest":delegation.instruction_identity_digest,"controller_kind":binding.identity.kind,"exact_replay":exact_replay,"results":result.into_iter().collect::<Vec<_>>() }),
+            );
+        }
+        if operation == "merge_group_results" {
+            let mut request = request.clone();
+            if request["group_assignment_digest"].is_null() {
+                let store = open_store(&scope)?;
+                request["group_assignment_digest"] = read_document(
+                    &store,
+                    request["group_ref"].as_str().ok_or_else(invalid)?,
+                )?["digest"]
+                    .clone();
+            }
+            let exact_replay = super::research_merge::accepted_key(
+                &scope,
+                "merge_group_results",
+                request["idempotency_key"].as_str().ok_or_else(invalid)?,
+                own,
+            )?;
+            let response = super::research_merge::merge(&scope, None, port, &request, true)?;
+            let merge = Uuid::parse_str(
+                response["receipt"]["accepted_subjects"]["merge_ref"]
+                    .as_str()
+                    .ok_or_else(retained_source_invalid)?,
+            )
+            .map_err(|_| retained_source_invalid())?;
+            let publication = super::research_merge::public_merged(&scope, merge)?;
+            return Ok(
+                json!({"response":response,"merge_id":publication["merge_id"],"merged_output":publication["merged_output"],"controller_kind":binding.identity.kind,"exact_replay":exact_replay}),
+            );
+        }
         let (mut response, exact_replay) = match operation {
             "assign_group" => assign_in(&scope, None, None, port, request)?,
             "await_group" => (await_in(&scope, None, port, request, true)?, false),
@@ -1244,11 +1354,11 @@ pub(crate) fn public_call(
     };
     execute().map_err(|mut error| {
         if let Some(key) = key
-            && let Ok(value) = public_lookup(&state_root, &view.workspace_id, carrier, scope_kind, scope_ref, "assign_group", key) {
+            && let Ok(value) = public_lookup(&state_root, &view.workspace_id, carrier, scope_kind, scope_ref, operation, key) {
                 let mut details = error.details.as_object().cloned().unwrap_or_default();
                 details.insert("public_v2_operation".into(), json!({"controller_kind":binding.identity.kind,"principal_ref":binding.identity.controller_id,"controller_generation":binding.identity.generation,"workspace_id":view.workspace_id,"scope_kind":scope_kind,"scope_ref":scope_ref,"idempotency_key":key}));
                 details.insert("public_v2_accepted".into(), json!(value["state"] == "accepted"));
-                if value["state"] == "accepted" { details.insert("group_ref".into(),value["accepted_subjects"]["group_ref"].clone()); }
+                if value["state"] == "accepted" { for subject in ["group_ref", "merge_ref", "task_ref"] { details.insert(subject.into(),value["accepted_subjects"][subject].clone()); } }
                 if value["state"] == "unresolved" { details.insert("effect".into(),json!("unresolved")); }
                 error.details = Value::Object(details);
         }
@@ -1330,7 +1440,7 @@ fn public_results(
     Ok((results, source_manifest))
 }
 
-fn collect_group_task(
+pub(super) fn collect_group_task(
     scope: &DelegationScope<'_>,
     context: Option<&ManagedCallContext<'_>>,
     port: &dyn RunSettlementPort,
@@ -1388,7 +1498,10 @@ pub(crate) fn public_lookup(
     operation: &str,
     key: &str,
 ) -> Result<Value, MachineError> {
-    if operation != "assign_group" {
+    if !matches!(
+        operation,
+        "assign_group" | "merge_group_results" | "assign_synthesis"
+    ) {
         return Err(invalid());
     }
     let binding = public_owner_binding(
@@ -1413,6 +1526,87 @@ pub(crate) fn public_lookup(
         EngagementStore::open_read_only(&EngagementStore::workspace_database_path(state_root))?;
     match engagement::intent_lookup(store.connection(), &lookup)? {
         IntentLookup::Accepted(receipt) => {
+            if operation == "merge_group_results" {
+                let merge = Uuid::parse_str(
+                    receipt
+                        .accepted_subjects
+                        .merge_ref
+                        .as_deref()
+                        .ok_or_else(retained_source_invalid)?,
+                )
+                .map_err(|_| retained_source_invalid())?;
+                let publication = super::research_merge::record(&store, merge)?;
+                if publication["workspace_id"] != workspace_id
+                    || publication["scope_kind"] != scope_kind
+                    || publication["scope_ref"] != scope_ref.to_string()
+                {
+                    return Err(owner_refusal_for("lookup_operation"));
+                }
+                return Ok(
+                    json!({"schema":LOOKUP_SCHEMA,"namespace":lookup,"state":"accepted","operation_ref":receipt.operation_ref,"accepted_input_digest":receipt.accepted_input_digest,"accepted_subjects":receipt.accepted_subjects,"receipt":receipt,"current_outcome":"completed","result_ref":merge,"result_digest":publication["digest"]}),
+                );
+            }
+            if operation == "assign_synthesis" {
+                let task = Uuid::parse_str(
+                    receipt
+                        .accepted_subjects
+                        .task_ref
+                        .as_deref()
+                        .ok_or_else(retained_source_invalid)?,
+                )
+                .map_err(|_| retained_source_invalid())?;
+                let binding = super::research_merge::task_binding(store.connection(), task)?
+                    .ok_or_else(retained_source_invalid)?;
+                if binding["workspace_id"] != workspace_id
+                    || binding["scope_kind"] != scope_kind
+                    || binding["scope_ref"] != scope_ref.to_string()
+                    || binding["controller"] != true
+                {
+                    return Err(owner_refusal_for("lookup_operation"));
+                }
+                let member = uuid_field(&binding, "member_ref")?;
+                let own = owner(&binding)?;
+                let state: String = store
+                    .connection()
+                    .query_row(
+                        if scope_kind == "external_engagement" {
+                            "SELECT state FROM tasks WHERE task_id=?1"
+                        } else {
+                            "SELECT state FROM brokered_tasks WHERE task_id=?1"
+                        },
+                        [task.to_string()],
+                        |row| row.get(0),
+                    )
+                    .map_err(|_| retained_source_invalid())?;
+                let accepted: AcceptedTask = serde_json::from_value(
+                    binding["normalized"]["assignment"]["accepted_task_identity"].clone(),
+                )
+                .map_err(|_| retained_source_invalid())?;
+                let result = complete_result_of(
+                    &store,
+                    own,
+                    member,
+                    task,
+                    &accepted.digest()?,
+                    &state,
+                    operation,
+                )?;
+                let publication = result
+                    .as_ref()
+                    .map(|(digest, _, result)| {
+                        crate::result_component_artifact::retained_source_identity(
+                            store.connection(),
+                            &task.to_string(),
+                            digest,
+                            Some(result),
+                        )
+                        .map(|(_, publication)| publication)
+                    })
+                    .transpose()?;
+                return Ok(
+                    json!({"schema":LOOKUP_SCHEMA,"namespace":lookup,"state":"accepted","operation_ref":receipt.operation_ref,"accepted_input_digest":receipt.accepted_input_digest,"accepted_subjects":receipt.accepted_subjects,"receipt":receipt,"current_outcome":result.as_ref().map(|(_,_,result)|result.terminal_outcome.as_str()).unwrap_or("pending"),"result_ref":publication.as_ref().map(|publication|publication["result_id"].clone()),"result_digest":result.as_ref().map(|(_,_,result)|result.digest()).transpose()?}),
+                );
+            }
             let group = receipt
                 .accepted_subjects
                 .group_ref
@@ -1603,7 +1797,7 @@ pub(crate) fn collect(
 ) -> Result<Value, MachineError> {
     collect_in(scope, context, port, request, false)
 }
-fn collect_in(
+pub(super) fn collect_in(
     scope: &DelegationScope<'_>,
     context: Option<&ManagedCallContext<'_>>,
     port: &dyn RunSettlementPort,

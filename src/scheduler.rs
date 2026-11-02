@@ -342,12 +342,17 @@ pub(crate) fn retained_assignment(
     state_root: &Path,
 ) -> Result<RetainedTask, MachineError> {
     let (scope_kind, scope_ref) = owner.scope();
-    let operation = match scope_kind {
-        "external_engagement" => "assign_external_specialist_task",
-        "orchestrated_session" => "assign_specialist_task",
-        _ => return Err(error("accepted_work_owner_invalid")),
+    let synthesis = crate::delegation_service::research_merge::task_binding(c, work)?.is_some();
+    let operation = if synthesis {
+        "assign_synthesis"
+    } else {
+        match scope_kind {
+            "external_engagement" => "assign_external_specialist_task",
+            "orchestrated_session" => "assign_specialist_task",
+            _ => return Err(error("accepted_work_owner_invalid")),
+        }
     };
-    let mut statement=c.prepare("SELECT receipt_json,controller_principal,controller_generation FROM delegation_operations WHERE workspace_ref=?1 AND scope_kind=?2 AND scope_ref=?3 AND operation_kind=?4 AND state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref')=?5").map_err(sql)?;
+    let mut statement=c.prepare("SELECT receipt_json,controller_principal,controller_generation,mutation_envelope_json FROM delegation_operations WHERE workspace_ref=?1 AND scope_kind=?2 AND scope_ref=?3 AND operation_kind=?4 AND state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref')=?5").map_err(sql)?;
     let receipts = statement
         .query_map(
             params![
@@ -362,13 +367,14 @@ pub(crate) fn retained_assignment(
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, u64>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             },
         )
         .map_err(sql)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(sql)?;
-    let [(text, principal, generation)] = receipts.as_slice() else {
+    let [(text, principal, generation, envelope)] = receipts.as_slice() else {
         return Err(error("accepted_receipt_ambiguous"));
     };
     let receipt: crate::delegation_identity::OperationReceipt =
@@ -425,16 +431,21 @@ pub(crate) fn retained_assignment(
                 |r| r.get(0),
             )
             .map_err(sql)?;
-        let recorded = crate::engagement::accepted_assignment_body_digest_on(
-            c,
-            workspace,
-            scope_ref,
-            &receipt.namespace.idempotency_key,
-        )?
-        .ok_or_else(|| error("accepted_body_unbound"))?;
+        let envelope: crate::operation::Envelope =
+            serde_json::from_str(envelope).map_err(|_| error("accepted_body_unbound"))?;
+        if crate::delegation_identity::LookupNamespace::from(&envelope.namespace)
+            != receipt.namespace
+        {
+            return Err(error("accepted_body_unbound"));
+        }
+        let recorded = envelope.request_body.sha256;
         (
             accepted,
-            receipt.namespace.idempotency_key,
+            crate::delegation_service::research_merge::dispatch_key(
+                c,
+                work,
+                &receipt.namespace.idempotency_key,
+            )?,
             seconds,
             origin,
             recorded,
@@ -481,12 +492,12 @@ pub(crate) fn retained_assignment(
     };
     let (task_body, contexts, target) = crate::engagement::accepted_task_content(c, work)?
         .ok_or_else(|| error("accepted_bytes_missing"))?;
-    let request: crate::task_request::SpecialistTaskRequest =
-        serde_json::from_slice(&task_body).map_err(|_| error("accepted_body_invalid"))?;
-    if !crate::successor_capture::verify_accepted_assignment(
+    if !crate::delegation_service::research_merge::verify_bound_assignment(
+        c,
+        work,
         target_run,
-        &request,
         &accepted,
+        &task_body,
         deadline_seconds,
         &recorded,
     )? {
@@ -497,7 +508,11 @@ pub(crate) fn retained_assignment(
         contexts,
         target,
     };
-    contents.prompt(&accepted, &accepted.execution_intent, deadline_seconds)?;
+    crate::delegation_service::research_merge::task_prompt(
+        state_root,
+        work,
+        contents.prompt(&accepted, &accepted.execution_intent, deadline_seconds)?,
+    )?;
     let deadline_ms = origin
         .checked_add(
             i64::try_from(deadline_seconds)

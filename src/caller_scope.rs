@@ -363,7 +363,8 @@ fn transition(connection: &Connection, task: Uuid, state: &str) -> Result<(), Ma
         )
         .map_err(|_| integrity())?;
     if changed == 0
-        && crate::delegation_service::research_group::verify_accounted_task(connection, task)?
+        && (crate::delegation_service::research_group::verify_accounted_task(connection, task)?
+            || crate::delegation_service::research_merge::verify_accounted_task(connection, task)?)
     {
         // Standalone Controller groups have their own immutable accepted origin,
         // not a Podway binding or a fictitious 1..32-round Action. The owning

@@ -44,6 +44,8 @@ const SPAWN_BODY_SCHEMA: &str = "https://dolgorae.local/schema/external-speciali
 /// namespace is derived from it, never from caller-supplied identity text.
 #[path = "research_group.rs"]
 pub(crate) mod research_group;
+#[path = "research_merge.rs"]
+pub(crate) mod research_merge;
 
 pub struct DelegationScope<'a> {
     pub view: &'a WorkspaceView,
@@ -1165,6 +1167,18 @@ fn source_event(event: &'static str) {
 /// An adapter supplies a resolver, never an acceptance or pre-captured task.
 /// The service invokes it only after fresh member/runtime admission.
 pub(crate) trait AssignmentSource {
+    fn synthesis(&self) -> Option<&research_merge::SynthesisSource> {
+        None
+    }
+    fn capture(
+        &self,
+        configuration: &crate::run::AgentConfigurationSnapshot,
+        task: &crate::task_request::SpecialistTaskRequest,
+        intent: &str,
+        target: Option<(&str, &[u8])>,
+    ) -> Result<(AcceptedTask, crate::successor_capture::AcceptedTaskContents), MachineError> {
+        crate::successor_capture::capture_facade_task(configuration, task, intent, target)
+    }
     fn expected(&self) -> &AcceptedTask;
     fn selection(&self) -> Result<Option<crate::review::ReviewTargetRequest>, MachineError>;
     fn verify_capture(
@@ -1400,6 +1414,12 @@ fn assign_external_specialist_task_in(
     source: Option<&dyn AssignmentSource>,
     queued_priority: Option<u8>,
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    let synthesis = source.and_then(AssignmentSource::synthesis);
+    let operation = if synthesis.is_some() {
+        "assign_synthesis"
+    } else {
+        "assign_external_specialist_task"
+    };
     let key = checked_key(request.idempotency_key)?;
     if !(1..=MAX_ASSIGN_DEADLINE_SECONDS).contains(&request.deadline_seconds) {
         return Err(MachineError::invalid_argument(
@@ -1412,7 +1432,7 @@ fn assign_external_specialist_task_in(
     // The scope Controller must be the authenticated aggregate owner (MDC:137).
     let (owner_workspace, owner) = store.external_owner_binding(request.engagement_id)?;
     if owner_workspace != scope.view.workspace_id || owner != *scope.controller {
-        return Err(owner_refusal_for("assign_external_specialist_task"));
+        return Err(owner_refusal_for(operation));
     }
     // MD2: a non-Git workspace cannot capture delegated write changes, so a
     // writable delegation is refused before any intent row exists.
@@ -1432,12 +1452,13 @@ fn assign_external_specialist_task_in(
         request.execution_intent,
         request.target.as_ref(),
         source.map(AssignmentSource::expected),
+        synthesis,
         request.deadline_seconds,
         key,
     )? {
         caller.verify_replay(&store, &receipt)?;
         return accepted_boundary(
-            "assign_external_specialist_task",
+            operation,
             Some(replay_operation_ref(&receipt)),
             assigned_observation(&store, &receipt),
         );
@@ -1451,7 +1472,7 @@ fn assign_external_specialist_task_in(
             "member Profile binding differs from its accepted configuration",
         ));
     }
-    require_current_member_runtime(&runtime, "assign_external_specialist_task")?;
+    require_current_member_runtime(&runtime, operation)?;
     let registered_selection = source.map(AssignmentSource::selection).transpose()?;
     let selection = registered_selection
         .as_ref()
@@ -1470,7 +1491,11 @@ fn assign_external_specialist_task_in(
     )?;
     let target = admit_assignment_target(scope, selection)?;
     source_event("task");
-    let (accepted, contents) = crate::successor_capture::capture_facade_task(
+    let capture = |configuration, task, intent, target| match source {
+        Some(source) => source.capture(configuration, task, intent, target),
+        None => crate::successor_capture::capture_facade_task(configuration, task, intent, target),
+    };
+    let (accepted, contents) = capture(
         &configuration,
         &request.task,
         request.execution_intent,
@@ -1488,29 +1513,25 @@ fn assign_external_specialist_task_in(
     let scope_ref = request.engagement_id.to_string();
     // The acceptance body and the dispatch re-derivation share one producer, so
     // the frozen envelope digest binds the retained task to this acceptance.
-    let body = crate::successor_capture::assignment_body(
+    let ordinary_body = crate::successor_capture::assignment_body(
         request.member_ref,
         &request.task,
         &accepted,
         request.deadline_seconds,
     )?;
+    let body = synthesis.map_or(ordinary_body, |source| source.normalized_body().clone());
     let identity = intent_identity(
         scope,
-        "assign_external_specialist_task",
+        operation,
         Some(("external_engagement", scope_ref.as_str())),
         key,
-        ASSIGN_BODY_SCHEMA,
+        synthesis.map_or(ASSIGN_BODY_SCHEMA, |source| source.schema()),
         &body,
     )?;
-    if let Some(receipt) = replay(
-        &store,
-        &identity.lookup,
-        &identity.digest,
-        "assign_external_specialist_task",
-    )? {
+    if let Some(receipt) = replay(&store, &identity.lookup, &identity.digest, operation)? {
         caller.verify_replay(&store, &receipt)?;
         return accepted_boundary(
-            "assign_external_specialist_task",
+            operation,
             Some(replay_operation_ref(&receipt)),
             assigned_observation(&store, &receipt),
         );
@@ -1536,20 +1557,17 @@ fn assign_external_specialist_task_in(
         IntentPreparation::Created => operation_ref,
         IntentPreparation::Accepted(receipt) => {
             return accepted_boundary(
-                "assign_external_specialist_task",
+                operation,
                 Some(replay_operation_ref(&receipt)),
                 caller.replay_observation(&store, &receipt),
             );
         }
         IntentPreparation::Unresolved { operation_ref } => {
-            return Err(unresolved_refusal(
-                "assign_external_specialist_task",
-                operation_ref,
-            ));
+            return Err(unresolved_refusal(operation, operation_ref));
         }
     };
     let acceptance = store.transact(|transaction| {
-        accept_assign_in_mode(
+        let accepted_result = accept_assign_in_mode(
             transaction,
             AssignAcceptance {
                 caller,
@@ -1575,7 +1593,20 @@ fn assign_external_specialist_task_in(
                 workspace_ref: &scope.view.workspace_id,
             },
             queued_priority,
-        )
+        )?;
+        if let Some(source) = synthesis {
+            source.retain(
+                transaction,
+                &crate::caller_scope::CallerAssignment {
+                    assignment_id: task_id,
+                    workspace_ref: &scope.view.workspace_id,
+                    aggregate_scope_kind: "external_engagement",
+                    aggregate_scope_ref: &scope_ref,
+                    member_ref: request.member_ref,
+                },
+            )?;
+        }
+        Ok(accepted_result)
     });
     let (receipt, _revision) = match acceptance {
         Ok(accepted) => accepted,
@@ -1594,7 +1625,7 @@ fn assign_external_specialist_task_in(
             })?;
             return Err(successor_error(
                 &error.code,
-                "assign_external_specialist_task",
+                operation,
                 Some(operation_ref),
                 "none",
                 "Rejected",
@@ -1609,7 +1640,7 @@ fn assign_external_specialist_task_in(
             });
             return Err(unresolved_effect(
                 &error.code,
-                "assign_external_specialist_task",
+                operation,
                 operation_ref,
                 &error.message,
             ));
@@ -1618,7 +1649,7 @@ fn assign_external_specialist_task_in(
     if queued_priority.is_some() {
         crate::scheduler::notify(scope.state_root, request.member_ref);
         return accepted_boundary(
-            "assign_external_specialist_task",
+            operation,
             Some(operation_ref),
             assigned_observation(&store, &receipt),
         );
@@ -1638,7 +1669,7 @@ fn assign_external_specialist_task_in(
     });
     match outcome {
         Ok(MemberDispatchOutcome::Accepted { .. }) => accepted_boundary(
-            "assign_external_specialist_task",
+            operation,
             Some(operation_ref),
             assigned_observation(&store, &receipt),
         ),
@@ -1649,7 +1680,7 @@ fn assign_external_specialist_task_in(
             // The step stays inside the accepted boundary, so a failure here
             // reports the accepted effect with its operation reference.
             let cancelled = accepted_boundary(
-                "assign_external_specialist_task",
+                operation,
                 Some(operation_ref),
                 store.transact(|transaction| {
                     if assignment_cancelled(
@@ -1682,14 +1713,14 @@ fn assign_external_specialist_task_in(
             )?;
             if cancelled {
                 return accepted_boundary(
-                    "assign_external_specialist_task",
+                    operation,
                     Some(operation_ref),
                     assigned_observation(&store, &receipt),
                 );
             }
             Err(successor_error(
                 &code,
-                "assign_external_specialist_task",
+                operation,
                 Some(operation_ref),
                 "accepted",
                 "RecoveryNeeded",
@@ -1698,7 +1729,7 @@ fn assign_external_specialist_task_in(
             ))
         }
         Ok(MemberDispatchOutcome::Uncertain { code, message }) => Err(uncertain_dispatch(
-            "assign_external_specialist_task",
+            operation,
             &code,
             Some(operation_ref),
             &message,
@@ -1706,11 +1737,7 @@ fn assign_external_specialist_task_in(
         Err(error) => {
             // An error escaping the dispatch port is uncertain too: the Turn may
             // have reached the Run, so the round stays counted and recovery owns it.
-            Err(accepted_error(
-                "assign_external_specialist_task",
-                Some(operation_ref),
-                error,
-            ))
+            Err(accepted_error(operation, Some(operation_ref), error))
         }
     }
 }
@@ -1943,6 +1970,13 @@ pub(crate) fn retained_managed_recovery(
             member_ref,
             session_id,
         )?;
+    } else if marker["controller_synthesis_origin"].is_object() {
+        research_merge::validate_managed_origin(
+            &transaction,
+            &marker["controller_synthesis_origin"],
+            member_ref,
+            session_id,
+        )?;
     } else {
         checked_provenance(&source_turn, &source_call).map_err(|_| refused())?;
     }
@@ -1956,8 +1990,16 @@ pub(crate) fn retained_managed_recovery(
     if namespace.workspace_ref != scope.view.workspace_id
         || namespace.scope_kind.as_deref() != Some("orchestrated_session")
         || namespace.scope_ref.as_deref() != Some(session_id.to_string().as_str())
-        || namespace.operation_kind != "assign_specialist_task"
-        || envelope.request_schema != ASSIGN_MANAGED_BODY_SCHEMA
+        || !matches!(
+            namespace.operation_kind.as_str(),
+            "assign_specialist_task" | "assign_synthesis"
+        )
+        || (namespace.operation_kind == "assign_specialist_task"
+            && envelope.request_schema != ASSIGN_MANAGED_BODY_SCHEMA)
+        || (namespace.operation_kind == "assign_synthesis"
+            && research_merge::task_binding(&transaction, task_ref)?
+                .as_ref()
+                .is_none_or(|binding| binding["request_schema"] != envelope.request_schema))
         || namespace.idempotency_key != key
         || envelope.request_body.sha256 != format!("sha256:{}", facts.source_request_sha256)
     {
@@ -1981,15 +2023,16 @@ pub(crate) fn retained_managed_recovery(
         .ok_or_else(refused)?;
     let (body, _, _) =
         engagement::accepted_task_content(&transaction, task_ref)?.ok_or_else(refused)?;
-    let task = serde_json::from_slice(&body).map_err(|_| refused())?;
     if marker["schema"] != crate::orchestration::SUCCESSOR_TASK_MARKER_SCHEMA
         || marker["member_ref"] != member_ref.to_string()
         || marker["accepted_task_digest"] != accepted.digest()?
         || marker["execution_intent"] != accepted.execution_intent
-        || !crate::successor_capture::verify_accepted_assignment(
+        || !research_merge::verify_bound_assignment(
+            &transaction,
+            task_ref,
             member_ref,
-            &task,
             &accepted,
+            &body,
             deadline,
             &envelope.request_body.sha256,
         )?
@@ -2982,12 +3025,19 @@ fn assign_specialist_task_in(
     source: Option<&dyn AssignmentSource>,
     queued_priority: Option<u8>,
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    let synthesis = source.and_then(AssignmentSource::synthesis);
+    let operation = if synthesis.is_some() {
+        "assign_synthesis"
+    } else {
+        "assign_specialist_task"
+    };
     let key = checked_key(context.idempotency_key)?;
     match caller {
         AssignmentAccounting::Native(_) => {
             checked_provenance(context.source_turn_id, context.source_tool_call_id)?
         }
         AssignmentAccounting::Group(origin) => origin.verify(open_store(scope)?.connection())?,
+        AssignmentAccounting::Synthesis(_) => {}
     }
     if !(1..=MAX_ASSIGN_DEADLINE_SECONDS).contains(&request.deadline_seconds) {
         return Err(MachineError::invalid_argument(
@@ -3005,7 +3055,7 @@ fn assign_specialist_task_in(
     let broker = crate::orchestration::OrchestrationStore::open(scope.state_root)?;
     let scope_ref = context.session_id.to_string();
     let mut store = open_store(scope)?;
-    managed_session(&broker, scope, context, "assign_specialist_task")?;
+    managed_session(&broker, scope, context, operation)?;
     if let Some(receipt) = assignment_replay(
         scope,
         &store,
@@ -3017,12 +3067,13 @@ fn assign_specialist_task_in(
         request.execution_intent,
         request.target.as_ref(),
         source.map(AssignmentSource::expected),
+        synthesis,
         request.deadline_seconds,
         key,
     )? {
         caller.verify_replay(&store, &receipt)?;
         return accepted_boundary(
-            "assign_specialist_task",
+            operation,
             Some(replay_operation_ref(&receipt)),
             managed_assigned_observation(&broker, context.session_id, &receipt),
         );
@@ -3033,13 +3084,13 @@ fn assign_specialist_task_in(
         .expected_revision
         .is_some_and(|expected| expected != fence)
     {
-        return Err(revision_conflict("assign_specialist_task"));
+        return Err(revision_conflict(operation));
     }
     let member = managed_member(&store, context.session_id, request.member_ref)?;
     if member.membership_state != "active" {
         return Err(successor_error(
             "SPECIALIST_NOT_MEMBER",
-            "assign_specialist_task",
+            operation,
             None,
             "none",
             "Rejected",
@@ -3054,7 +3105,7 @@ fn assign_specialist_task_in(
             "member Profile binding differs from its accepted configuration",
         ));
     }
-    require_current_member_runtime(&runtime, "assign_specialist_task")?;
+    require_current_member_runtime(&runtime, operation)?;
     let registered_selection = source.map(AssignmentSource::selection).transpose()?;
     let selection = registered_selection
         .as_ref()
@@ -3073,7 +3124,11 @@ fn assign_specialist_task_in(
     )?;
     let target = admit_assignment_target(scope, selection)?;
     source_event("task");
-    let (accepted, contents) = crate::successor_capture::capture_facade_task(
+    let capture = |configuration, task, intent, target| match source {
+        Some(source) => source.capture(configuration, task, intent, target),
+        None => crate::successor_capture::capture_facade_task(configuration, task, intent, target),
+    };
+    let (accepted, contents) = capture(
         &member.agent_configuration,
         &request.task,
         request.execution_intent,
@@ -3088,18 +3143,19 @@ fn assign_specialist_task_in(
         source.verify_capture(&accepted, &contents)?;
     }
     let accepted_task_digest = accepted.digest()?;
-    let body = crate::successor_capture::assignment_body(
+    let ordinary_body = crate::successor_capture::assignment_body(
         request.member_ref,
         &request.task,
         &accepted,
         request.deadline_seconds,
     )?;
+    let body = synthesis.map_or(ordinary_body, |source| source.normalized_body().clone());
     let identity = intent_identity(
         scope,
-        "assign_specialist_task",
+        operation,
         Some(("orchestrated_session", scope_ref.as_str())),
         key,
-        ASSIGN_MANAGED_BODY_SCHEMA,
+        synthesis.map_or(ASSIGN_MANAGED_BODY_SCHEMA, |source| source.schema()),
         &body,
     )?;
     if let Some(receipt) = managed_replay(
@@ -3108,18 +3164,18 @@ fn assign_specialist_task_in(
         key,
         &identity.lookup,
         &identity.digest,
-        "assign_specialist_task",
+        operation,
     )? {
         caller.verify_replay(&store, &receipt)?;
         return accepted_boundary(
-            "assign_specialist_task",
+            operation,
             Some(replay_operation_ref(&receipt)),
             managed_assigned_observation(&broker, context.session_id, &receipt),
         );
     }
     // A replay answers before any new-admission fence (MDC:66-68), so the budget
     // and the revision fence decide only a new admission.
-    caller.require_budget(&store, "assign_specialist_task")?;
+    caller.require_budget(&store, operation)?;
     let operation_ref = Uuid::now_v7();
     let task_id = Uuid::now_v7();
     let now = now_ms()?;
@@ -3139,15 +3195,13 @@ fn assign_specialist_task_in(
     if let AssignmentAccounting::Group(origin) = caller {
         marker["controller_group_origin"] = origin.value();
     }
+    if matches!(caller, AssignmentAccounting::Synthesis(_)) {
+        marker["controller_synthesis_origin"] = json!({"schema":"dolgorae.controller-synthesis-origin/v1","operation_ref":operation_ref,"member_ref":request.member_ref});
+    }
     let marker_json = canonical_text(&marker)?;
     let internal_key = successor_internal_key(operation_ref);
     let preparation = store.transact(|transaction| {
-        require_broker_key_free(
-            transaction,
-            context.session_id,
-            key,
-            "assign_specialist_task",
-        )?;
+        require_broker_key_free(transaction, context.session_id, key, operation)?;
         engagement::intent_prepare(
             transaction,
             IntentAdmission {
@@ -3166,13 +3220,13 @@ fn assign_specialist_task_in(
         IntentPreparation::Accepted(receipt) => {
             caller.verify_replay(&store, &receipt)?;
             return accepted_boundary(
-                "assign_specialist_task",
+                operation,
                 Some(replay_operation_ref(&receipt)),
                 managed_assigned_observation(&broker, context.session_id, &receipt),
             );
         }
         IntentPreparation::Unresolved { operation_ref } => {
-            return Err(unresolved_refusal("assign_specialist_task", operation_ref));
+            return Err(unresolved_refusal(operation, operation_ref));
         }
     };
     let member_ref = request.member_ref.to_string();
@@ -3183,12 +3237,7 @@ fn assign_specialist_task_in(
         // transaction, so a close intent that committed after the pre-check
         // stops this admission at the durable boundary.
         require_session_still_active(transaction, context.session_id, context.source_run_id)?;
-        require_broker_key_free(
-            transaction,
-            context.session_id,
-            key,
-            "assign_specialist_task",
-        )?;
+        require_broker_key_free(transaction, context.session_id, key, operation)?;
         let current = engagement::scope_membership_revision(
             transaction,
             &scope.view.workspace_id,
@@ -3281,6 +3330,18 @@ fn assign_specialist_task_in(
             }
             return Err(error);
         }
+        if let Some(source) = synthesis {
+            source.retain(
+                transaction,
+                &crate::caller_scope::CallerAssignment {
+                    assignment_id: task_id,
+                    workspace_ref: &scope.view.workspace_id,
+                    aggregate_scope_kind: "orchestrated_session",
+                    aggregate_scope_ref: &scope_ref,
+                    member_ref: request.member_ref,
+                },
+            )?;
+        }
         // Assignment advances only the member workload revision.
         engagement::advance_member_workload_revision(
             transaction,
@@ -3327,14 +3388,14 @@ fn assign_specialist_task_in(
                 });
                 return Err(unresolved_effect(
                     &record.code,
-                    "assign_specialist_task",
+                    operation,
                     operation_ref,
                     &record.message,
                 ));
             }
             return Err(successor_error(
                 &error.code,
-                "assign_specialist_task",
+                operation,
                 Some(operation_ref),
                 "none",
                 "Rejected",
@@ -3348,7 +3409,7 @@ fn assign_specialist_task_in(
             });
             return Err(unresolved_effect(
                 &error.code,
-                "assign_specialist_task",
+                operation,
                 operation_ref,
                 &error.message,
             ));
@@ -3357,7 +3418,7 @@ fn assign_specialist_task_in(
     if queued_priority.is_some() {
         crate::scheduler::notify(scope.state_root, request.member_ref);
         return accepted_boundary(
-            "assign_specialist_task",
+            operation,
             Some(operation_ref),
             managed_assigned_observation(&broker, context.session_id, &receipt),
         );
@@ -3376,7 +3437,7 @@ fn assign_specialist_task_in(
     });
     match outcome {
         Ok(MemberDispatchOutcome::Accepted { .. }) => accepted_boundary(
-            "assign_specialist_task",
+            operation,
             Some(operation_ref),
             managed_assigned_observation(&broker, context.session_id, &receipt),
         ),
@@ -3385,7 +3446,7 @@ fn assign_specialist_task_in(
             // receipt stay byte-identical; only the dispatch refusal and the
             // accounting transition are written.
             let cancelled = accepted_boundary(
-                "assign_specialist_task",
+                operation,
                 Some(operation_ref),
                 store.transact(|transaction| {
                     if assignment_cancelled(
@@ -3412,14 +3473,14 @@ fn assign_specialist_task_in(
             )?;
             if cancelled {
                 return accepted_boundary(
-                    "assign_specialist_task",
+                    operation,
                     Some(operation_ref),
                     managed_assigned_observation(&broker, context.session_id, &receipt),
                 );
             }
             Err(successor_error(
                 &code,
-                "assign_specialist_task",
+                operation,
                 Some(operation_ref),
                 "accepted",
                 "RecoveryNeeded",
@@ -3428,7 +3489,7 @@ fn assign_specialist_task_in(
             ))
         }
         Ok(MemberDispatchOutcome::Uncertain { code, message }) => Err(uncertain_dispatch(
-            "assign_specialist_task",
+            operation,
             &code,
             Some(operation_ref),
             &message,
@@ -3436,11 +3497,7 @@ fn assign_specialist_task_in(
         Err(error) => {
             // An error escaping the dispatch port is uncertain too: the Turn may
             // have reached the Run, so the round stays counted and recovery owns it.
-            Err(accepted_error(
-                "assign_specialist_task",
-                Some(operation_ref),
-                error,
-            ))
+            Err(accepted_error(operation, Some(operation_ref), error))
         }
     }
 }
@@ -5644,12 +5701,14 @@ fn build_receipt(
 enum AssignmentAccounting<'a> {
     Native(&'a crate::caller_scope::TrustedCallerScope),
     Group(&'a research_group::GroupOrigin),
+    Synthesis(&'a research_merge::SynthesisSource),
 }
 impl AssignmentAccounting<'_> {
     fn require_budget(self, store: &EngagementStore, operation: &str) -> Result<(), MachineError> {
         match self {
             Self::Native(caller) => require_assignment_budget(store, caller, operation),
             Self::Group(origin) => origin.verify(store.connection()),
+            Self::Synthesis(_) => Ok(()),
         }
     }
     fn verify_replay(
@@ -5660,6 +5719,7 @@ impl AssignmentAccounting<'_> {
         match self {
             Self::Native(caller) => verify_replay_scope(store, receipt, caller),
             Self::Group(origin) => origin.verify_assignment(store.connection(), receipt),
+            Self::Synthesis(source) => source.verify_replay(store, receipt),
         }
     }
     fn replay_observation(
@@ -5682,6 +5742,7 @@ impl AssignmentAccounting<'_> {
         match self {
             Self::Native(caller) => crate::caller_scope::admit(connection, assignment, caller, now),
             Self::Group(origin) => origin.admit_assignment(connection, assignment),
+            Self::Synthesis(source) => source.retain(connection, assignment),
         }
     }
 }
@@ -6444,9 +6505,13 @@ fn assignment_replay(
     intent: &str,
     target: Option<&crate::review::ReviewTargetRequest>,
     expected: Option<&AcceptedTask>,
+    synthesis: Option<&research_merge::SynthesisSource>,
     deadline: u64,
     key: &str,
 ) -> Result<Option<OperationReceipt>, MachineError> {
+    if let Some(source) = synthesis {
+        return research_merge::replay_synthesis(scope, store, owner, member, key, source);
+    }
     let (operation, schema) = match owner {
         SettlementOwner::External { .. } => ("assign_external_specialist_task", ASSIGN_BODY_SCHEMA),
         SettlementOwner::Managed { .. } => ("assign_specialist_task", ASSIGN_MANAGED_BODY_SCHEMA),
@@ -7496,6 +7561,7 @@ pub(crate) fn retained_transport_response(
                     &expected.execution_intent,
                     None,
                     Some(&expected),
+                    None,
                     deadline,
                     key,
                 )?
@@ -22848,5 +22914,1359 @@ pub(crate) mod tests {
                 .is_err(),
             "old aggregate credential cannot read after rotation"
         );
+    }
+    fn task085_group_fixture(
+        managed: bool,
+        settle_second: bool,
+        large_output: bool,
+        dispatch: bool,
+        entry_count: usize,
+    ) -> (
+        Fixture,
+        DolgoraeHome,
+        crate::controller::CredentialCarrier,
+        Uuid,
+        FakePort,
+        Value,
+        crate::caller_scope::TrustedCallerScope,
+    ) {
+        let mut f = Fixture::new();
+        let home = DolgoraeHome::from_canonical_home(f.root.clone()).unwrap();
+        let state = home.workspace_root(&f.view.workspace_id);
+        fs::create_dir_all(state.parent().unwrap()).unwrap();
+        fs::set_permissions(state.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::rename(&f.state_root, &state).unwrap();
+        f.state_root = state;
+        f.initialize_writer_authority();
+        let path = f.root.join("merge-controller.json");
+        let credential = crate::controller::create_controller_credential(
+            &path,
+            ControllerKind::Automation,
+            "merge-test".into(),
+            Some("owner".into()),
+            None,
+        )
+        .unwrap();
+        let carrier = crate::controller::CredentialCarrier::open_path(&path).unwrap();
+        f.controller =
+            crate::controller::binding_from_credential(&credential.credential, 1, &carrier)
+                .unwrap();
+        f.set_up_namespace();
+        let aggregate = if managed {
+            f.managed_session()
+        } else {
+            f.open()
+        };
+        let installed = f.install();
+        let snapshot =
+            crate::provisioning::retained_snapshot(&f.state_root, &installed.provisioning_ref)
+                .unwrap();
+        let (_, configuration) = snapshot.admitted_configuration().unwrap();
+        let port = FakePort::new();
+        let caller = caller(16);
+        let mut entries = Vec::new();
+        let mut inputs = Vec::new();
+        for index in 0..entry_count {
+            let mut task = fixture_task();
+            task.expected_output = "structured_findings_v1".into();
+            task.brief = format!("Research exact source {index}");
+            let (accepted, _) = crate::successor_capture::capture_facade_task(
+                &configuration,
+                &task,
+                "read_only",
+                None,
+            )
+            .unwrap();
+            let input = json!({"schema":"dolgorae.group-task-input/v1","provisioning_ref":installed.provisioning_ref,"assignment":{"task_body":task,"accepted_task_identity":accepted,"deadline_seconds":600}});
+            let bytes = crate::operation::canonical(&input).unwrap();
+            let path = f
+                .view
+                .canonical_path
+                .to_path_buf()
+                .unwrap()
+                .join(format!("merge-input-{index}.json"));
+            fs::write(&path, &bytes).unwrap();
+            entries.push(json!({"entry_key":format!("entry-{index}"),"role_snapshot_digest":installed.role_snapshot_digest,"agent_configuration_digest":installed.agent_configuration_digest,"accepted_task_digest":accepted.digest().unwrap()}));
+            inputs.push(json!({"entry_key":format!("entry-{index}"),"absolute_file_path":path,"content":crate::delegation_identity::BytesRef::from_bytes(&bytes)}));
+        }
+        let kind = if managed {
+            "orchestrated_session"
+        } else {
+            "external_engagement"
+        };
+        let request = json!({"schema":"dolgorae.external-specialist-request/v5","operation":"assign_group","scope_kind":kind,"scope_ref":aggregate,"idempotency_key":"merge-sources","expected_revision":null,"manifest":{"schema":"dolgorae.group-assignment/v1","scope_kind":kind,"scope_ref":aggregate,"entries":entries},"inputs":inputs});
+        let context = f.managed_context(aggregate, "merge-sources");
+        let assigned =
+            research_group::with_dispatch_limit(if dispatch { usize::MAX } else { 0 }, || {
+                research_group::assign(
+                    &f.scope(),
+                    managed.then_some(&context),
+                    &caller,
+                    &port,
+                    &request,
+                )
+                .unwrap()
+            });
+        let coverage = research_group::collect(
+            &f.scope(),
+            managed.then_some(&context),
+            &port,
+            &json!({"scope_kind":kind,"scope_ref":aggregate,"group_ref":assigned["group_ref"]}),
+        )
+        .unwrap();
+        let rows = coverage["coverage"]["sources"].as_array().unwrap();
+        let mut published = std::collections::BTreeSet::new();
+        for (index, row) in rows.iter().enumerate() {
+            if !dispatch {
+                continue;
+            }
+            let member = Uuid::parse_str(row["worker_ref"].as_str().unwrap()).unwrap();
+            if published.insert(member) {
+                if managed {
+                    f.publish_member_manifest(aggregate, member);
+                } else {
+                    f.publish_external_member_manifest(aggregate, member);
+                }
+            }
+            if index == 0 || settle_second {
+                if large_output {
+                    let mut body: Value = serde_json::from_str(include_str!(
+                        "../docs/protocol/examples/v014-identity-findings.valid.json"
+                    ))
+                    .unwrap();
+                    let template = body["findings"][0].clone();
+                    body["findings"] = json!(
+                        (0..64)
+                            .map(|index| {
+                                let mut finding = template.clone();
+                                finding["finding_key"] = json!(format!("large-{index:02}"));
+                                finding["claim"] = json!("x".repeat(8192));
+                                finding["limitations"] = json!(vec!["l".repeat(4096); 32]);
+                                finding
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                    task085_publish_value(&f, managed, aggregate, row, &body);
+                } else {
+                    task085_publish_findings(&f, managed, aggregate, row);
+                }
+            }
+        }
+        for input in request["inputs"].as_array().unwrap() {
+            fs::remove_file(input["absolute_file_path"].as_str().unwrap()).unwrap();
+        }
+        let coverage = research_group::collect(
+            &f.scope(),
+            managed.then_some(&context),
+            &port,
+            &json!({"scope_kind":kind,"scope_ref":aggregate,"group_ref":assigned["group_ref"]}),
+        )
+        .unwrap();
+        let request = json!({"schema":"dolgorae.external-specialist-request/v5","operation":"merge_group_results","scope_kind":kind,"scope_ref":aggregate,"group_ref":assigned["group_ref"],"group_assignment_digest":assigned["manifest_digest"],"sources":coverage["coverage"]["sources"],"algorithm":"merge-exact-findings-v1","idempotency_key":"merge-key","expected_revision":null});
+        (f, home, carrier, aggregate, port, request, caller)
+    }
+    fn task085_publish_findings(f: &Fixture, managed: bool, aggregate: Uuid, row: &Value) {
+        let body: Value = serde_json::from_str(include_str!(
+            "../docs/protocol/examples/v014-identity-findings.valid.json"
+        ))
+        .unwrap();
+        task085_publish_value(f, managed, aggregate, row, &body);
+    }
+    fn task085_publish_value(
+        f: &Fixture,
+        managed: bool,
+        aggregate: Uuid,
+        row: &Value,
+        body: &Value,
+    ) {
+        let member = Uuid::parse_str(row["worker_ref"].as_str().unwrap()).unwrap();
+        let task = Uuid::parse_str(row["task_ref"].as_str().unwrap()).unwrap();
+        let mut store = EngagementStore::open(&f.database()).unwrap();
+        let accepted = if managed {
+            crate::successor_capture::retained_accepted_task(
+                &crate::orchestration::successor_task(store.connection(), aggregate, task)
+                    .unwrap()
+                    .unwrap()
+                    .accepted_request_json,
+            )
+            .unwrap()
+        } else {
+            store
+                .external_task_identity(aggregate, task)
+                .unwrap()
+                .unwrap()
+        };
+
+        let bytes = crate::operation::canonical(body).unwrap();
+        let result = crate::delegation_identity::CompleteResult {
+            schema: crate::delegation_identity::COMPLETE_RESULT_SCHEMA.into(),
+            source: crate::delegation_identity::ResultSource {
+                scope_kind: if managed {
+                    "orchestrated_session"
+                } else {
+                    "external_engagement"
+                }
+                .into(),
+                scope_ref: aggregate.to_string(),
+                worker_ref: member.to_string(),
+                task_ref: task.to_string(),
+                role_snapshot_digest: accepted.role_snapshot_digest.clone(),
+                agent_configuration_digest: accepted.agent_configuration_digest.clone(),
+                accepted_task_digest: accepted.digest().unwrap(),
+            },
+            terminal_outcome: "completed".into(),
+            final_response: Some(crate::delegation_identity::BytesRef::from_bytes(&bytes)),
+            structured_output_schema: (accepted.expected_output_schema == "structured_findings_v1")
+                .then(|| "structured_findings_v1".into()),
+            structured_output: (accepted.expected_output_schema == "structured_findings_v1")
+                .then(|| crate::delegation_identity::BytesRef::from_bytes(&bytes)),
+            changes: vec![],
+            attachments: vec![],
+            safe_failure_code: None,
+        };
+        let canonical = crate::operation::canonical(&json!(result)).unwrap();
+        let digest = crate::jcs::sha256_hex(&canonical);
+        let publication =
+            crate::result_component_artifact::Publication::prepare(&f.view, member, &result)
+                .unwrap();
+        store
+            .transact(|tx| {
+                crate::engagement::retain_checked_task_output(tx, task, &bytes, &bytes)?;
+                if managed {
+                    tx.execute(
+                        "UPDATE brokered_tasks SET state='running' WHERE task_id=?1",
+                        [task.to_string()],
+                    )
+                    .unwrap();
+                    crate::orchestration::retain_successor_task_result(tx, task, &canonical)?;
+                    assert!(crate::orchestration::settle_successor_task_result(
+                        tx,
+                        aggregate,
+                        task,
+                        "completed_not_delivered",
+                        None,
+                        Some(&digest),
+                        now_ms()?
+                    )?);
+                } else {
+                    tx.execute(
+                        "UPDATE tasks SET state='running' WHERE task_id=?1",
+                        [task.to_string()],
+                    )
+                    .unwrap();
+                    let artifact = crate::engagement::retain_task_result(
+                        tx, aggregate, task, &canonical, &digest,
+                    )?;
+                    crate::engagement::terminalize_external_task_in(
+                        tx,
+                        crate::engagement::TaskTerminal {
+                            engagement_id: aggregate,
+                            task_id: task,
+                            state: "completed_not_delivered",
+                            safe_error_code: None,
+                            result_sha256: Some(&digest),
+                            artifact_id: Some(artifact),
+                            diagnostic_json: None,
+                            now_ms: now_ms()?,
+                        },
+                    )?;
+                }
+                publication.retain(tx)?;
+                crate::caller_scope::accepted(tx, task)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    #[test]
+    fn task085_merge_uses_actual_sources_artifacts_and_frozen_key_recovery() {
+        for managed in [false, true] {
+            let (f, _home, carrier, aggregate, port, request, _caller) =
+                task085_group_fixture(managed, false, false, true, 2);
+            let context = f.managed_context(aggregate, "merge-key");
+            let before = port.dispatched.borrow().len();
+            let merged = research_merge::merge(
+                &f.scope(),
+                managed.then_some(&context),
+                &port,
+                &request,
+                false,
+            )
+            .unwrap();
+            assert!(crate::specialist_facade::validates(
+                &merged,
+                "merge_group_results_response"
+            ));
+            let merge = Uuid::parse_str(
+                merged["receipt"]["accepted_subjects"]["merge_ref"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let store = EngagementStore::open_read_only(&f.database()).unwrap();
+            let publication = research_merge::record(&store, merge).unwrap();
+            let artifact = Uuid::parse_str(publication["artifact_id"].as_str().unwrap()).unwrap();
+            let owner = Uuid::parse_str(publication["owner_run"].as_str().unwrap()).unwrap();
+            assert!(
+                crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &f.state_root)
+                    .load_manifest(owner)
+                    .is_ok()
+            );
+            let snapshot = crate::snapshot::RunSnapshot::load(&f.state_root, owner, 0).unwrap();
+            assert_eq!(
+                crate::artifact::metadata(&f.state_root, &snapshot, &artifact.to_string(), None)
+                    .unwrap_err()
+                    .code,
+                "CONTROLLER_REQUIRED"
+            );
+            let foreign_path = f.root.join("foreign-merge-controller.json");
+            crate::controller::create_controller_credential(
+                &foreign_path,
+                ControllerKind::Automation,
+                "foreign-merge-reader".into(),
+                None,
+                None,
+            )
+            .unwrap();
+            let foreign = crate::controller::CredentialCarrier::open_path(&foreign_path).unwrap();
+            assert!(
+                crate::artifact::metadata(
+                    &f.state_root,
+                    &snapshot,
+                    &artifact.to_string(),
+                    Some(&foreign)
+                )
+                .is_err()
+            );
+            let data = crate::artifact::chunk(
+                &f.state_root,
+                &snapshot,
+                &artifact.to_string(),
+                (0, 1_048_576),
+                Some(&carrier),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::delegation_identity::BytesRef::from_bytes(&data.data),
+                serde_json::from_value(merged["merged_identity"]["merged_output"].clone()).unwrap()
+            );
+            let bytes_before = research_merge::logical_bytes(&f.state_root, owner).unwrap();
+            let mut permuted = request.clone();
+            permuted["sources"].as_array_mut().unwrap().reverse();
+            assert_eq!(
+                research_merge::merge(
+                    &f.scope(),
+                    managed.then_some(&context),
+                    &port,
+                    &permuted,
+                    false
+                )
+                .unwrap(),
+                merged
+            );
+            let second = request["sources"][1].clone();
+            task085_publish_findings(&f, managed, aggregate, &second);
+            assert_eq!(
+                research_merge::merge(
+                    &f.scope(),
+                    managed.then_some(&context),
+                    &port,
+                    &request,
+                    false
+                )
+                .unwrap(),
+                merged,
+                "original key freezes its original unknown source"
+            );
+            assert_eq!(
+                research_merge::logical_bytes(&f.state_root, owner).unwrap(),
+                bytes_before
+            );
+            let mut stale = request.clone();
+            stale["idempotency_key"] = json!("new-key-old-snapshot");
+            assert_eq!(
+                research_merge::merge(
+                    &f.scope(),
+                    managed.then_some(&context),
+                    &port,
+                    &stale,
+                    false
+                )
+                .unwrap_err()
+                .code,
+                "REVISION_CONFLICT"
+            );
+            let mut conflict = request.clone();
+            conflict["sources"][0]["state"] = json!("failed");
+            conflict["sources"][0]["safe_failure_code"] = json!("CHANGED");
+            assert_eq!(
+                research_merge::merge(
+                    &f.scope(),
+                    managed.then_some(&context),
+                    &port,
+                    &conflict,
+                    false
+                )
+                .unwrap_err()
+                .code,
+                "IDEMPOTENCY_CONFLICT"
+            );
+            assert_eq!(
+                port.dispatched.borrow().len(),
+                before,
+                "merge never calls the execution port"
+            );
+        }
+    }
+    #[test]
+    fn task085_synthesis_is_one_ordinary_acceptance_with_original_public_bytes() {
+        for managed in [false, true] {
+            for public in [false, true] {
+                let (f, home, carrier, aggregate, port, merge_request, caller) =
+                    task085_group_fixture(managed, true, false, true, 2);
+                let context = f.managed_context(aggregate, "synthesis-key");
+                let merged = research_merge::merge(
+                    &f.scope(),
+                    managed.then_some(&context),
+                    &port,
+                    &merge_request,
+                    false,
+                )
+                .unwrap();
+                let member =
+                    Uuid::parse_str(merge_request["sources"][0]["worker_ref"].as_str().unwrap())
+                        .unwrap();
+                let configuration = preparation_configuration(
+                    &f.scope(),
+                    if managed {
+                        SettlementOwner::Managed {
+                            session_id: aggregate,
+                        }
+                    } else {
+                        SettlementOwner::External {
+                            engagement_id: aggregate,
+                        }
+                    },
+                    member,
+                )
+                .unwrap();
+                let mut task = fixture_task();
+                task.purpose = "research".into();
+                task.brief = "Synthesize the immutable findings.".into();
+                task.contexts.clear();
+                task.criteria.clear();
+                task.expected_output = "complete_result".into();
+                let (mut accepted, _) = crate::successor_capture::capture_facade_task(
+                    &configuration,
+                    &task,
+                    "read_only",
+                    None,
+                )
+                .unwrap();
+                let body = if public {
+                    let body = json!({"schema":"dolgorae.structured-task/v1","brief":task.brief,"context":[],"criteria":[],"constraints":["Preserve all source links.","Quoted \"constraint\"\nline"]});
+                    let mut body = body;
+                    body["context"] = json!([
+                        {"kind":"accepted_context","identity":"ctx-0","content":crate::delegation_identity::BytesRef::from_bytes(b"context body 0\n"),"media_type":"text/plain"},
+                        {"kind":"accepted_context","identity":"merged-data","content":merged["merged_identity"]["merged_output"],"media_type":"application/json"}
+                    ]);
+                    body["criteria"] = json!([{"criterion_id":"criterion-0","text":"Preserve original evidence.","context_ids":["ctx-0","merged-data"]}]);
+                    accepted.contexts = serde_json::from_value(body["context"].clone()).unwrap();
+                    accepted.task_body_schema = "dolgorae.structured-task/v1".into();
+                    accepted.task_body = crate::delegation_identity::BytesRef::from_bytes(
+                        &crate::operation::canonical(&body).unwrap(),
+                    );
+                    body
+                } else {
+                    json!(task)
+                };
+                let request = json!({"schema":"dolgorae.external-specialist-request/v5","operation":"assign_synthesis","scope_kind":merge_request["scope_kind"],"scope_ref":aggregate,"member_ref":member,"merged_findings_digest":merged["merged_digest"],"merged_input":merged["merged_identity"]["merged_output"],"assignment":{"task_body":body,"accepted_task_identity":accepted,"deadline_seconds":600},"idempotency_key":"synthesis-key","expected_revision":null});
+                let before = crate::caller_scope::rounds_used(
+                    EngagementStore::open_read_only(&f.database())
+                        .unwrap()
+                        .connection(),
+                    &caller,
+                )
+                .unwrap();
+                let call = || {
+                    if public {
+                        research_group::public_call(
+                            &home,
+                            &f.view,
+                            &carrier,
+                            managed.then_some(aggregate),
+                            merge_request["scope_kind"].as_str().unwrap(),
+                            aggregate,
+                            "assign_synthesis",
+                            Some("synthesis-key"),
+                            None,
+                            &request,
+                            &port,
+                        )
+                        .map(|value| value["response"].clone())
+                    } else {
+                        research_merge::assign(
+                            &f.scope(),
+                            managed.then_some(&context),
+                            Some(&caller),
+                            &port,
+                            &request,
+                            false,
+                        )
+                    }
+                };
+                let assigned = call().unwrap();
+                assert!(crate::specialist_facade::validates(
+                    &assigned,
+                    "assign_synthesis_response"
+                ));
+                assert_eq!(call().unwrap(), assigned);
+                let task_id =
+                    Uuid::parse_str(assigned["task"]["task_ref"].as_str().unwrap()).unwrap();
+                let store = EngagementStore::open_read_only(&f.database()).unwrap();
+                let (bytes, contexts, target) =
+                    engagement::accepted_task_content(store.connection(), task_id)
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(bytes, crate::operation::canonical(&body).unwrap());
+                let contents = crate::successor_capture::AcceptedTaskContents {
+                    task_body: bytes,
+                    contexts,
+                    target,
+                };
+                let rendered = research_merge::task_prompt(
+                    &f.state_root,
+                    task_id,
+                    contents.prompt(&accepted, "read_only", 600).unwrap(),
+                )
+                .unwrap();
+                assert!(rendered.contains("Immutable merged findings input"));
+                assert!(rendered.contains(merged["merged_digest"].as_str().unwrap()));
+                if public {
+                    assert!(rendered.contains("constraints"));
+                    assert!(rendered.contains("Preserve all source links."));
+                    assert!(rendered.contains("context body 0\n"));
+                    assert!(rendered.contains("Accepted context data ctx-0:"));
+                }
+                assert_eq!(
+                    crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+                    before + u64::from(!public)
+                );
+                assert_eq!(
+                    assigned["receipt"]["namespace"]["operation_kind"],
+                    "assign_synthesis"
+                );
+                assert_eq!(
+                    assigned["task"]["accepted_task_digest"],
+                    accepted.digest().unwrap()
+                );
+                assert_ne!(
+                    assigned["task"]["task_ref"],
+                    merge_request["sources"][0]["task_ref"]
+                );
+                assert_eq!(
+                    port.dispatched.borrow().len(),
+                    0,
+                    "explicit synthesis queues one ordinary task; merging never dispatches"
+                );
+                if public {
+                    let mut unavailable = request.clone();
+                    unavailable["idempotency_key"] = json!("unavailable-context");
+                    unavailable["assignment"]["task_body"]["context"][0]["content"] =
+                        json!(crate::delegation_identity::BytesRef::from_bytes(
+                            b"unretained different context"
+                        ));
+                    let mut identity = accepted.clone();
+                    identity.contexts = serde_json::from_value(
+                        unavailable["assignment"]["task_body"]["context"].clone(),
+                    )
+                    .unwrap();
+                    identity.task_body = crate::delegation_identity::BytesRef::from_bytes(
+                        &crate::operation::canonical(&unavailable["assignment"]["task_body"])
+                            .unwrap(),
+                    );
+                    unavailable["assignment"]["accepted_task_identity"] = json!(identity);
+                    assert_eq!(
+                        research_group::public_call(
+                            &home,
+                            &f.view,
+                            &carrier,
+                            managed.then_some(aggregate),
+                            merge_request["scope_kind"].as_str().unwrap(),
+                            aggregate,
+                            "assign_synthesis",
+                            Some("unavailable-context"),
+                            None,
+                            &unavailable,
+                            &port
+                        )
+                        .unwrap_err()
+                        .code,
+                        "COMPLETE_RESULT_UNAVAILABLE"
+                    );
+                    assert_eq!(store.connection().query_row("SELECT count(*) FROM delegation_operations WHERE operation_kind='assign_synthesis'",[],|row|row.get::<_,u64>(0)).unwrap(),1);
+                }
+                let retained = crate::scheduler::retained_assignment(
+                    store.connection(),
+                    if managed {
+                        crate::assignment_queue::Owner::Managed(aggregate)
+                    } else {
+                        crate::assignment_queue::Owner::External(aggregate)
+                    },
+                    task_id,
+                    member,
+                    &f.view.workspace_id,
+                    &f.state_root,
+                )
+                .unwrap();
+                assert_eq!(retained.accepted, accepted);
+                assert_eq!(
+                    retained.contents.task_body,
+                    crate::operation::canonical(&body).unwrap()
+                );
+                assert_eq!(
+                    research_merge::task_prompt(
+                        &f.state_root,
+                        task_id,
+                        retained
+                            .contents
+                            .prompt(&retained.accepted, "read_only", retained.deadline_seconds)
+                            .unwrap()
+                    )
+                    .unwrap(),
+                    rendered
+                );
+                let reopened = EngagementStore::open_read_only(&f.database()).unwrap();
+                assert_eq!(
+                    crate::scheduler::retained_assignment(
+                        reopened.connection(),
+                        if managed {
+                            crate::assignment_queue::Owner::Managed(aggregate)
+                        } else {
+                            crate::assignment_queue::Owner::External(aggregate)
+                        },
+                        task_id,
+                        member,
+                        &f.view.workspace_id,
+                        &f.state_root
+                    )
+                    .unwrap()
+                    .key,
+                    retained.key
+                );
+                let mut scheduler_store = EngagementStore::open(&f.database()).unwrap();
+                let owner = if managed {
+                    crate::assignment_queue::Owner::Managed(aggregate)
+                } else {
+                    crate::assignment_queue::Owner::External(aggregate)
+                };
+                let now = now_ms().unwrap();
+                // The fixture has no native process; supply its resident fact
+                // before exercising the production claim and Worker validators.
+                scheduler_store.connection().execute(
+                    if managed { "UPDATE brokered_members SET actor_residency='resident' WHERE run_id=?1" } else { "UPDATE members SET actor_residency='resident' WHERE specialist_run_id=?1" },
+                    [member.to_string()],
+                ).unwrap();
+                let permit = scheduler_store
+                    .transact(|tx| crate::scheduler::claim(tx, owner, member, now))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(permit.work, task_id);
+                scheduler_store
+                    .transact(|tx| {
+                        crate::scheduler::prepare_dispatch(tx, &permit, now)?;
+                        if managed {
+                            crate::orchestration::mark_successor_task_dispatching(
+                                tx, aggregate, task_id, now,
+                            )?;
+                        } else {
+                            crate::engagement::mark_external_task_dispatching_in(
+                                tx, aggregate, task_id, now,
+                            )?;
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                let key = research_merge::dispatch_key(
+                    scheduler_store.connection(),
+                    task_id,
+                    &retained.key,
+                )
+                .unwrap();
+                if managed {
+                    assert_eq!(key, format!("successor-task:{task_id}"));
+                    assert!(
+                        crate::worker::bind_managed_successor_dispatch(
+                            &f.state_root,
+                            aggregate,
+                            member,
+                            &key,
+                            false,
+                            &rendered
+                        )
+                        .unwrap()
+                    );
+                    assert!(
+                        crate::worker::bind_managed_successor_dispatch(
+                            &f.state_root,
+                            aggregate,
+                            member,
+                            &key,
+                            false,
+                            &format!("{rendered} changed")
+                        )
+                        .is_err()
+                    );
+                } else {
+                    assert_eq!(key, format!("synthesis-task:{task_id}"));
+                    assert!(
+                        crate::worker::bind_successor_dispatch(
+                            &scheduler_store,
+                            aggregate,
+                            member,
+                            &f.view.workspace_id,
+                            &key,
+                            false,
+                            &rendered
+                        )
+                        .unwrap()
+                    );
+                    assert!(
+                        crate::worker::bind_successor_dispatch(
+                            &scheduler_store,
+                            aggregate,
+                            member,
+                            &f.view.workspace_id,
+                            &key,
+                            false,
+                            &format!("{rendered} changed")
+                        )
+                        .is_err()
+                    );
+                }
+                task085_publish_value(
+                    &f,
+                    managed,
+                    aggregate,
+                    &json!({"worker_ref":member,"task_ref":task_id}),
+                    &json!({"synthesis":"An independently accepted result."}),
+                );
+                let collected = research_group::collect_group_task(
+                    &f.scope(),
+                    managed.then_some(&context),
+                    &port,
+                    if managed {
+                        SettlementOwner::Managed {
+                            session_id: aggregate,
+                        }
+                    } else {
+                        SettlementOwner::External {
+                            engagement_id: aggregate,
+                        }
+                    },
+                    member,
+                    task_id,
+                )
+                .unwrap();
+                assert!(collected.complete_result.is_some());
+                assert_ne!(
+                    collected.task.result_digest.as_deref(),
+                    merge_request["sources"][0]["result_digest"].as_str()
+                );
+                assert_eq!(
+                    call().unwrap()["receipt"],
+                    assigned["receipt"],
+                    "terminal synthesis still replays its original receipt"
+                );
+                if public {
+                    let replayed = research_group::public_call(
+                        &home,
+                        &f.view,
+                        &carrier,
+                        managed.then_some(aggregate),
+                        merge_request["scope_kind"].as_str().unwrap(),
+                        aggregate,
+                        "assign_synthesis",
+                        Some("synthesis-key"),
+                        None,
+                        &request,
+                        &port,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        replayed["results"][0]["identity"],
+                        collected.complete_result.unwrap()
+                    );
+                    let lookup = research_group::public_lookup(
+                        &f.state_root,
+                        &f.view.workspace_id,
+                        &carrier,
+                        merge_request["scope_kind"].as_str().unwrap(),
+                        aggregate,
+                        "assign_synthesis",
+                        "synthesis-key",
+                    )
+                    .unwrap();
+                    assert_eq!(lookup["current_outcome"], "completed");
+                    assert_eq!(lookup["result_ref"], replayed["results"][0]["result_id"]);
+                    assert_eq!(
+                        lookup["result_digest"],
+                        replayed["results"][0]["result_digest"]
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn task085_synthesis_capacity_refuses_before_acceptance_for_both_task_bodies_and_owners() {
+        for managed in [false, true] {
+            let (f, home, carrier, aggregate, port, merge_request, caller) =
+                task085_group_fixture(managed, false, true, true, 2);
+            let context = f.managed_context(aggregate, "capacity-synthesis");
+            let merged = research_merge::merge(
+                &f.scope(),
+                managed.then_some(&context),
+                &port,
+                &merge_request,
+                false,
+            )
+            .unwrap();
+            assert!(
+                merged["merged_identity"]["merged_output"]["byte_length"]
+                    .as_u64()
+                    .unwrap()
+                    > 8 * 1024 * 1024
+            );
+            let merge_id = Uuid::parse_str(
+                merged["receipt"]["accepted_subjects"]["merge_ref"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let store = EngagementStore::open_read_only(&f.database()).unwrap();
+            let publication = research_merge::record(&store, merge_id).unwrap();
+            let owner_run = Uuid::parse_str(publication["owner_run"].as_str().unwrap()).unwrap();
+            let snapshot = crate::snapshot::RunSnapshot::load(&f.state_root, owner_run, 0).unwrap();
+            let artifact = publication["artifact_id"].as_str().unwrap();
+            let metadata =
+                crate::artifact::metadata(&f.state_root, &snapshot, artifact, Some(&carrier))
+                    .unwrap();
+            let mut all = Vec::new();
+            while (all.len() as u64) < metadata.artifact.byte_length {
+                let chunk = crate::artifact::chunk(
+                    &f.state_root,
+                    &snapshot,
+                    artifact,
+                    (all.len() as u64, 1_048_576),
+                    Some(&carrier),
+                )
+                .unwrap();
+                assert!(!chunk.data.is_empty() && chunk.data.len() <= 1_048_576);
+                all.extend(chunk.data);
+            }
+            assert_eq!(
+                crate::delegation_identity::BytesRef::from_bytes(&all),
+                serde_json::from_value(merged["merged_identity"]["merged_output"].clone()).unwrap()
+            );
+            assert_eq!(all.len() as u64, metadata.artifact.byte_length);
+            let member =
+                Uuid::parse_str(merge_request["sources"][0]["worker_ref"].as_str().unwrap())
+                    .unwrap();
+            let own = if managed {
+                SettlementOwner::Managed {
+                    session_id: aggregate,
+                }
+            } else {
+                SettlementOwner::External {
+                    engagement_id: aggregate,
+                }
+            };
+            let configuration = preparation_configuration(&f.scope(), own, member).unwrap();
+            let store = EngagementStore::open_read_only(&f.database()).unwrap();
+            let before = crate::caller_scope::rounds_used(store.connection(), &caller).unwrap();
+            let intents:u64=store.connection().query_row("SELECT count(*) FROM delegation_operations WHERE operation_kind='assign_synthesis'",[],|row|row.get(0)).unwrap();
+            for public in [false, true] {
+                let mut task = fixture_task();
+                task.purpose = "research".into();
+                task.brief = "Complete synthesis without truncation.".into();
+                task.contexts.clear();
+                task.criteria.clear();
+                task.expected_output = "complete_result".into();
+                let (mut accepted, _) = crate::successor_capture::capture_facade_task(
+                    &configuration,
+                    &task,
+                    "read_only",
+                    None,
+                )
+                .unwrap();
+                let body = if public {
+                    let value = json!({"schema":"dolgorae.structured-task/v1","brief":task.brief,"context":[],"criteria":[],"constraints":["No omitted sources."]});
+                    let mut value = value;
+                    value["context"] = json!((0..64).map(|index| json!({"kind":"accepted_context","identity":format!("merged-{index}"),"content":merged["merged_identity"]["merged_output"],"media_type":"application/json"})).collect::<Vec<_>>());
+                    accepted.contexts = serde_json::from_value(value["context"].clone()).unwrap();
+                    accepted.task_body_schema = "dolgorae.structured-task/v1".into();
+                    accepted.task_body = crate::delegation_identity::BytesRef::from_bytes(
+                        &crate::operation::canonical(&value).unwrap(),
+                    );
+                    value
+                } else {
+                    json!(task)
+                };
+                let request = json!({"schema":"dolgorae.external-specialist-request/v5","operation":"assign_synthesis","scope_kind":merge_request["scope_kind"],"scope_ref":aggregate,"member_ref":member,"merged_findings_digest":merged["merged_digest"],"merged_input":merged["merged_identity"]["merged_output"],"assignment":{"task_body":body,"accepted_task_identity":accepted,"deadline_seconds":600},"idempotency_key":"capacity-synthesis","expected_revision":null});
+                let error = if public {
+                    research_group::public_call(
+                        &home,
+                        &f.view,
+                        &carrier,
+                        managed.then_some(aggregate),
+                        merge_request["scope_kind"].as_str().unwrap(),
+                        aggregate,
+                        "assign_synthesis",
+                        Some("capacity-synthesis"),
+                        None,
+                        &request,
+                        &port,
+                    )
+                } else {
+                    research_merge::assign(
+                        &f.scope(),
+                        managed.then_some(&context),
+                        Some(&caller),
+                        &port,
+                        &request,
+                        false,
+                    )
+                }
+                .unwrap_err();
+                assert_eq!(error.code, "ARTIFACT_CAPACITY_EXCEEDED");
+            }
+            assert_eq!(
+                crate::caller_scope::rounds_used(store.connection(), &caller).unwrap(),
+                before
+            );
+            assert_eq!(store.connection().query_row("SELECT count(*) FROM delegation_operations WHERE operation_kind='assign_synthesis'",[],|row|row.get::<_,u64>(0)).unwrap(),intents);
+            assert_eq!(store.connection().query_row("SELECT count(*) FROM result_content_refs WHERE owner_kind='synthesis_task'",[],|row|row.get::<_,u64>(0)).unwrap(),0);
+            assert_eq!(port.dispatched.borrow().len(), 0);
+        }
+    }
+    #[test]
+    fn task085_external_prefix_keys_remain_exact_across_ordinary_and_synthesis_operations() {
+        let (f, _home, _carrier, aggregate, port, merge_request, caller) =
+            task085_group_fixture(false, true, false, true, 2);
+        let merged = research_merge::merge(&f.scope(), None, &port, &merge_request, false).unwrap();
+        let member =
+            Uuid::parse_str(merge_request["sources"][0]["worker_ref"].as_str().unwrap()).unwrap();
+        let key = "synthesis-task:01900000-0000-7000-8000-000000000007";
+        let mut task = fixture_task();
+        task.contexts.clear();
+        task.criteria.clear();
+        task.expected_output = "complete_result".into();
+        let request = || AssignExternalSpecialistTask {
+            engagement_id: aggregate,
+            member_ref: member,
+            task: task.clone(),
+            execution_intent: "read_only",
+            target: None,
+            deadline_seconds: 600,
+            idempotency_key: key,
+            expected_revision: None,
+        };
+        let ordinary =
+            queue_external_specialist_task(&f.scope(), &caller, &port, request(), 1).unwrap();
+        assert_eq!(
+            queue_external_specialist_task(&f.scope(), &caller, &port, request(), 1).unwrap(),
+            ordinary
+        );
+        let configuration = preparation_configuration(
+            &f.scope(),
+            SettlementOwner::External {
+                engagement_id: aggregate,
+            },
+            member,
+        )
+        .unwrap();
+        let (accepted, _) =
+            crate::successor_capture::capture_facade_task(&configuration, &task, "read_only", None)
+                .unwrap();
+        let synthesis = json!({"schema":"dolgorae.external-specialist-request/v5","operation":"assign_synthesis","scope_kind":"external_engagement","scope_ref":aggregate,"member_ref":member,"merged_findings_digest":merged["merged_digest"],"merged_input":merged["merged_identity"]["merged_output"],"assignment":{"task_body":task,"accepted_task_identity":accepted,"deadline_seconds":600},"idempotency_key":key,"expected_revision":null});
+        let assigned =
+            research_merge::assign(&f.scope(), None, Some(&caller), &port, &synthesis, false)
+                .unwrap();
+        let synth = Uuid::parse_str(assigned["task"]["task_ref"].as_str().unwrap()).unwrap();
+        let normal = Uuid::parse_str(&ordinary.0.task_ref).unwrap();
+        assert_ne!(normal, synth);
+        let store = EngagementStore::open(&f.database()).unwrap();
+        assert_eq!(
+            store
+                .external_task_for_successor_key(&f.view.workspace_id, aggregate, key)
+                .unwrap(),
+            Some(normal)
+        );
+        assert!(
+            store
+                .accepted_assignment_body_digest(&f.view.workspace_id, aggregate, key)
+                .unwrap()
+                .is_some()
+        );
+        store
+            .connection()
+            .execute(
+                "UPDATE tasks SET state='dispatching' WHERE task_id=?1",
+                [normal.to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .external_task_for_dispatch(&f.view.workspace_id, aggregate, member, key)
+                .unwrap(),
+            Some(normal)
+        );
+        store
+            .connection()
+            .execute(
+                "UPDATE tasks SET state='queued' WHERE task_id=?1",
+                [normal.to_string()],
+            )
+            .unwrap();
+        store
+            .connection()
+            .execute(
+                "UPDATE tasks SET state='dispatching' WHERE task_id=?1",
+                [synth.to_string()],
+            )
+            .unwrap();
+        let dispatch = research_merge::dispatch_key(store.connection(), synth, key).unwrap();
+        assert_eq!(
+            store
+                .external_task_for_dispatch(&f.view.workspace_id, aggregate, member, &dispatch)
+                .unwrap(),
+            Some(synth)
+        );
+        assert_eq!(
+            store
+                .external_task_for_successor_key(&f.view.workspace_id, aggregate, key)
+                .unwrap(),
+            Some(normal)
+        );
+        assert_eq!(
+            research_merge::assign(&f.scope(), None, Some(&caller), &port, &synthesis, false)
+                .unwrap()["receipt"],
+            assigned["receipt"]
+        );
+    }
+    #[test]
+    fn task085_merge_capacity_and_absent_owner_preserve_sources_without_publication() {
+        for managed in [false, true] {
+            let (f, _home, _carrier, aggregate, port, mut request, _caller) =
+                task085_group_fixture(managed, false, false, true, 2);
+            let context = f.managed_context(aggregate, "merge-key");
+            let mut body: Value = serde_json::from_str(include_str!(
+                "../docs/protocol/examples/v014-identity-findings.valid.json"
+            ))
+            .unwrap();
+            let template = body["findings"][0].clone();
+            body["findings"] = json!(
+                (0..64)
+                    .map(|index| {
+                        let mut finding = template.clone();
+                        finding["claim"] = json!(format!("A distinct source claim {index}"));
+                        finding
+                    })
+                    .collect::<Vec<_>>()
+            );
+            task085_publish_value(&f, managed, aggregate, &request["sources"][1], &body);
+            let coverage =
+                research_group::collect(&f.scope(), managed.then_some(&context), &port, &request)
+                    .unwrap();
+            request["sources"] = coverage["coverage"]["sources"].clone();
+            assert_eq!(
+                research_merge::merge(
+                    &f.scope(),
+                    managed.then_some(&context),
+                    &port,
+                    &request,
+                    false
+                )
+                .unwrap_err()
+                .code,
+                "ARTIFACT_CAPACITY_EXCEEDED"
+            );
+            let after =
+                research_group::collect(&f.scope(), managed.then_some(&context), &port, &request)
+                    .unwrap();
+            assert_eq!(after["coverage"], coverage["coverage"]);
+            let store = EngagementStore::open_read_only(&f.database()).unwrap();
+            assert_eq!(store.connection().query_row("SELECT count(*) FROM delegation_operations WHERE operation_kind='merge_group_results'",[],|row|row.get::<_,u64>(0)).unwrap(),0);
+            assert!(
+                engagement::result_component_records(store.connection(), "merge-run:v1:")
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                engagement::result_component_records(store.connection(), "merge-artifact:v1:")
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        for managed in [false, true] {
+            let (f, _home, _carrier, aggregate, port, request, _caller) =
+                task085_group_fixture(managed, false, false, false, 2);
+            let context = f.managed_context(aggregate, "merge-key");
+            assert!(
+                request["sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|source| source["state"] == "missing"
+                        && source["worker_ref"].is_null()
+                        && source["task_ref"].is_null())
+            );
+            let merged = research_merge::merge(
+                &f.scope(),
+                managed.then_some(&context),
+                &port,
+                &request,
+                false,
+            );
+            if managed {
+                assert!(
+                    merged.is_ok(),
+                    "the genuine managed root owns an all-missing coverage artifact"
+                );
+            } else {
+                assert_eq!(merged.unwrap_err().code, "COMPLETE_RESULT_UNAVAILABLE");
+                let store = EngagementStore::open_read_only(&f.database()).unwrap();
+                assert!(
+                    engagement::result_component_records(store.connection(), "merge-run:v1:")
+                        .unwrap()
+                        .is_empty()
+                );
+                assert_eq!(store.connection().query_row("SELECT count(*) FROM delegation_operations WHERE operation_kind='merge_group_results'",[],|row|row.get::<_,u64>(0)).unwrap(),0);
+                assert_eq!(
+                    research_group::collect(&f.scope(), None, &port, &request).unwrap()["coverage"]
+                        ["sources"],
+                    request["sources"]
+                );
+            }
+            assert_eq!(port.dispatched.borrow().len(), 0);
+            assert_eq!(port.starts.borrow().len(), 0);
+        }
+    }
+    #[test]
+    fn task085_identity_only_expiry_keeps_real_ids_and_uses_another_eligible_run() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let (f, _home, carrier, aggregate, port, mut request, _caller) =
+            task085_group_fixture(false, false, false, true, 5);
+        let full = Uuid::parse_str(request["sources"][0]["worker_ref"].as_str().unwrap()).unwrap();
+        let eligible =
+            Uuid::parse_str(request["sources"][4]["worker_ref"].as_str().unwrap()).unwrap();
+        assert_ne!(full, eligible);
+        let directory = crate::run::run_root(&f.state_root, full).join("artifacts");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let captures = crate::group_quota::reserved_bytes(&f.state_root, full).unwrap();
+        let mut remaining = crate::artifact::MAX_RUN_ARTIFACT_BYTES
+            - crate::artifact::logical_artifact_bytes(&directory).unwrap();
+        // Secure sparse preparations exercise real filesystem quota accounting
+        // without allocating hundreds of MiB of disposable physical blocks.
+        while remaining > 0 {
+            let bytes = remaining.min(32 * 1024 * 1024);
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(directory.join(format!(".{}", Uuid::now_v7())))
+                .unwrap();
+            file.set_len(bytes).unwrap();
+            remaining -= bytes;
+        }
+        assert_eq!(
+            crate::artifact::logical_artifact_bytes(&directory).unwrap(),
+            crate::artifact::MAX_RUN_ARTIFACT_BYTES
+        );
+        let expired = crate::semantic::expire_queued_tasks(
+            &f.view,
+            &f.state_root,
+            crate::scheduler::Actor {
+                owner: crate::assignment_queue::Owner::External(aggregate),
+                run: full,
+            },
+            now_ms().unwrap() + 601_000,
+        )
+        .unwrap();
+        assert!(
+            expired.is_empty(),
+            "expiry returns residual queue expirations after publishing terminal identities"
+        );
+        let coverage = research_group::collect(&f.scope(), None, &port, &request).unwrap();
+        request["sources"] = coverage["coverage"]["sources"].clone();
+        let row = &request["sources"][1];
+        assert_eq!(row["state"], "expired");
+        assert!(row["result_digest"].is_string());
+        let complete = research_group::collect_group_task(
+            &f.scope(),
+            None,
+            &port,
+            SettlementOwner::External {
+                engagement_id: aggregate,
+            },
+            full,
+            Uuid::parse_str(row["task_ref"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let result: crate::delegation_identity::CompleteResult =
+            serde_json::from_value(complete.complete_result.unwrap()).unwrap();
+        let public =
+            crate::result_component_artifact::public_result(&f.state_root, &f.view, &result)
+                .unwrap();
+        assert!(public["result_id"].is_string());
+        assert!(public["source_manifest"].is_null());
+        let merged = research_merge::merge(&f.scope(), None, &port, &request, false).unwrap();
+        let store = EngagementStore::open_read_only(&f.database()).unwrap();
+        let merge = Uuid::parse_str(
+            merged["receipt"]["accepted_subjects"]["merge_ref"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let publication = research_merge::record(&store, merge).unwrap();
+        assert_eq!(publication["owner_run"], eligible.to_string());
+        let provenance = publication["source_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["source"]["task_ref"] == result.source.task_ref)
+            .unwrap();
+        assert_eq!(provenance["publication"]["result_id"], public["result_id"]);
+        assert!(provenance["publication"]["source_manifest"].is_null());
+        assert_eq!(provenance["body_free_identity"], json!(result));
+        assert_eq!(
+            provenance["publication"]["discovery_unavailable_reason"],
+            "artifact_capacity_exceeded"
+        );
+        assert_eq!(publication["identity"]["sources"], request["sources"]);
+        let snapshot = crate::snapshot::RunSnapshot::load(&f.state_root, eligible, 0).unwrap();
+        let artifact = publication["artifact_id"].as_str().unwrap();
+        let wrong_owner = crate::snapshot::RunSnapshot::load(&f.state_root, full, 0).unwrap();
+        assert_eq!(
+            crate::artifact::metadata(&f.state_root, &wrong_owner, artifact, Some(&carrier))
+                .unwrap_err()
+                .code,
+            "ARTIFACT_NOT_FOUND"
+        );
+
+        assert!(
+            crate::artifact::chunk(
+                &f.state_root,
+                &snapshot,
+                artifact,
+                (0, 1_048_576),
+                Some(&carrier)
+            )
+            .unwrap()
+            .eof
+        );
+        assert_eq!(
+            crate::group_quota::reserved_bytes(&f.state_root, full).unwrap(),
+            captures
+        );
+        assert_eq!(
+            crate::artifact::logical_artifact_bytes(&directory).unwrap(),
+            crate::artifact::MAX_RUN_ARTIFACT_BYTES
+        );
+        assert_eq!(
+            research_merge::logical_bytes(&f.state_root, full).unwrap(),
+            0
+        );
+        assert_eq!(port.dispatched.borrow().len(), 0);
+    }
+    #[test]
+    fn task085_merge_publication_fault_rolls_back_and_concurrent_replay_has_one_charge() {
+        for managed in [false, true] {
+            let (f, _home, _carrier, aggregate, _port, request, _caller) =
+                task085_group_fixture(managed, true, false, true, 2);
+            let store = EngagementStore::open(&f.database()).unwrap();
+            let old_content: u64 = store
+                .connection()
+                .query_row("SELECT count(*) FROM result_content", [], |row| row.get(0))
+                .unwrap();
+            store.connection().execute_batch("CREATE TRIGGER task085_merge_fault BEFORE INSERT ON result_content_refs WHEN NEW.owner_kind='research_merge' AND NEW.representation='merged_output' BEGIN SELECT RAISE(ABORT,'fixture publication fault'); END;").unwrap();
+            assert!(
+                research_merge::merge(&f.scope(), None, &FakePort::new(), &request, true).is_err()
+            );
+            assert_eq!(
+                store
+                    .connection()
+                    .query_row("SELECT count(*) FROM result_content", [], |row| row
+                        .get::<_, u64>(0))
+                    .unwrap(),
+                old_content
+            );
+            assert_eq!(store.connection().query_row("SELECT count(*) FROM delegation_operations WHERE operation_kind='merge_group_results'", [], |row|row.get::<_,u64>(0)).unwrap(), 0);
+            assert_eq!(store.connection().query_row("SELECT count(*) FROM result_content_refs WHERE owner_kind='research_merge'", [], |row|row.get::<_,u64>(0)).unwrap(), 0);
+            assert!(
+                engagement::result_component_records(store.connection(), "merge-run:v1:")
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                research_group::collect(
+                    &f.scope(),
+                    managed.then_some(&f.managed_context(aggregate, "inspect")),
+                    &FakePort::new(),
+                    &request
+                )
+                .unwrap()["coverage"]["sources"],
+                request["sources"]
+            );
+            store
+                .connection()
+                .execute_batch("DROP TRIGGER task085_merge_fault")
+                .unwrap();
+            drop(store);
+            let barrier = std::sync::Barrier::new(2);
+            let outputs = std::thread::scope(|threads| {
+                let handles: Vec<_> = (0..2)
+                    .map(|_| {
+                        threads.spawn(|| {
+                            barrier.wait();
+                            research_merge::merge(
+                                &f.scope(),
+                                None,
+                                &FakePort::new(),
+                                &request,
+                                true,
+                            )
+                            .unwrap()
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(outputs[0], outputs[1]);
+            let store = EngagementStore::open_read_only(&f.database()).unwrap();
+            let merge_id = Uuid::parse_str(
+                outputs[0]["receipt"]["accepted_subjects"]["merge_ref"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let publication = research_merge::record(&store, merge_id).unwrap();
+            let owner_run = Uuid::parse_str(publication["owner_run"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                research_merge::logical_bytes(&f.state_root, owner_run).unwrap(),
+                outputs[0]["merged_identity"]["merged_output"]["byte_length"]
+                    .as_u64()
+                    .unwrap()
+            );
+            assert_eq!(
+                engagement::result_component_records(store.connection(), "merge-run:v1:")
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
     }
 }

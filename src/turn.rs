@@ -188,6 +188,16 @@ pub enum TurnError {
     ArtifactQuotaExceeded,
 }
 
+/// Complete ordinary Turn text, shared with pre-acceptance synthesis rendering.
+pub(crate) fn validate_message_size(message: &str) -> Result<(), TurnError> {
+    if message.len() > 8 * 1024 * 1024 {
+        return Err(TurnError::InvalidInput(
+            "message exceeds the 8 MiB request bound",
+        ));
+    }
+    Ok(())
+}
+
 impl TurnError {
     pub(crate) fn diagnostic_kind(&self) -> &'static str {
         match self {
@@ -3889,12 +3899,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         request: &TurnRequest,
     ) -> Result<AcceptedUserInput, TurnError> {
         const MAX_INLINE_INPUT_BYTES: usize = 1024 * 1024;
-        const MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
-        if request.message.len() > MAX_INPUT_BYTES {
-            return Err(TurnError::InvalidInput(
-                "message exceeds the 8 MiB request bound",
-            ));
-        }
+        validate_message_size(&request.message)?;
         if request.images.len() > 64 {
             return Err(TurnError::InvalidInput("at most 64 images are accepted"));
         }

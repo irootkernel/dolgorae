@@ -6719,6 +6719,16 @@ fn validate_successor_origin(
             return Err(integrity("group origin carries invented native provenance"));
         }
         Ok(())
+    } else if let Some(origin) = marker.get("controller_synthesis_origin") {
+        crate::delegation_service::research_merge::validate_managed_origin(
+            connection, origin, member, session,
+        )?;
+        if !turn.is_empty() || !call.is_empty() {
+            return Err(integrity(
+                "synthesis origin carries invented native provenance",
+            ));
+        }
+        Ok(())
     } else {
         checked(turn, 256, "source_turn_id")?;
         checked(call, 256, "source_tool_call_id")

@@ -29,7 +29,7 @@ EPIC-009 is COMPLETE; EPIC-021 is ACTIVE and EPIC-022 remains PLANNED for v0.1.4
 execution order. TASK-067 is COMPLETE;
 TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
-TASK-084 is COMPLETE; TASK-085 through TASK-089 remain PLANNED.
+TASK-084 and TASK-085 are COMPLETE; TASK-086 through TASK-089 remain PLANNED.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -2847,7 +2847,7 @@ Handoff: Validated findings and complete group result manifests.
 
 ### TASK-085: Merge Findings and Support Explicit Synthesis
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-084.
 

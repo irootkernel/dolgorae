@@ -9925,7 +9925,7 @@ pub(crate) fn fixture_bind_checked_task(
         .ok_or_else(|| crate::direct_review_target::provenance_invalid(task))
 }
 
-fn bind_successor_dispatch(
+pub(crate) fn bind_successor_dispatch(
     store: &crate::engagement::EngagementStore,
     engagement_id: Uuid,
     run_id: Uuid,
@@ -9935,12 +9935,16 @@ fn bind_successor_dispatch(
     message: &str,
 ) -> Result<bool, MachineError> {
     let Some(task_ref) =
-        store.external_task_for_successor_key(workspace_id, engagement_id, idempotency_key)?
+        store.external_task_for_dispatch(workspace_id, engagement_id, run_id, idempotency_key)?
     else {
         return Ok(false);
     };
     let task = store.external_task(engagement_id, task_ref)?;
     let refused = || crate::direct_review_target::provenance_invalid(task.task_id);
+    let state_root = Path::new(store.connection().path().ok_or_else(refused)?)
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(refused)?;
     if task.specialist_run_id != run_id || task.state != "dispatching" {
         return Err(refused());
     }
@@ -9954,19 +9958,19 @@ fn bind_successor_dispatch(
     };
     // The retained task must still be the assignment the immutable intent
     // accepted: the frozen envelope names the canonical acceptance body.
-    let task_request: crate::task_request::SpecialistTaskRequest =
-        serde_json::from_slice(&task_body).map_err(|_| refused())?;
     let (execution_intent, deadline_seconds) = store
         .external_task_dispatch_facts(engagement_id, task.task_id)
         .map_err(|_| refused())?;
     let recorded = store
-        .accepted_assignment_body_digest(workspace_id, engagement_id, idempotency_key)
+        .assignment_body_digest_for_task(workspace_id, engagement_id, task_ref)
         .map_err(|_| refused())?
         .ok_or_else(refused)?;
-    if !crate::successor_capture::verify_accepted_assignment(
+    if !crate::delegation_service::research_merge::verify_bound_assignment(
+        store.connection(),
+        task_ref,
         task.specialist_run_id,
-        &task_request,
         &accepted,
+        &task_body,
         deadline_seconds,
         &recorded,
     )? {
@@ -9979,9 +9983,11 @@ fn bind_successor_dispatch(
     };
     // The Turn is rendered with the task's own execution intent and deadline,
     // exactly as the dispatch that sends it does.
-    let rendered = contents
-        .prompt(&accepted, &execution_intent, deadline_seconds)
-        .map_err(|_| refused())?;
+    let rendered = crate::delegation_service::research_merge::task_prompt(
+        state_root,
+        task_ref,
+        contents.prompt(&accepted, &execution_intent, deadline_seconds)?,
+    )?;
     if write || message != rendered {
         return Err(refused());
     }
@@ -10000,7 +10006,7 @@ const MANAGED_DISPATCH_KEY_PREFIX: &str = "successor-task:";
 /// it against the engagement acceptance. `Ok(false)` means the key
 /// names no accepted managed assignment; a key that names one and does not match
 /// it is a typed refusal.
-fn bind_managed_successor_dispatch(
+pub(crate) fn bind_managed_successor_dispatch(
     state_root: &Path,
     session_id: Uuid,
     run_id: Uuid,
@@ -10037,16 +10043,16 @@ fn bind_managed_successor_dispatch(
     else {
         return Err(refused());
     };
-    let task_request: crate::task_request::SpecialistTaskRequest =
-        serde_json::from_slice(&task_body).map_err(|_| refused())?;
     // The acceptance froze the canonical assignment body in its own column, so
     // the retained task, the accepted identity and this deadline must re-derive
     // exactly that digest.
     let recorded = format!("sha256:{}", facts.source_request_sha256);
-    if !crate::successor_capture::verify_accepted_assignment(
+    if !crate::delegation_service::research_merge::verify_bound_assignment(
+        store.connection(),
+        task_ref,
         run_id,
-        &task_request,
         &accepted,
+        &task_body,
         deadline_seconds,
         &recorded,
     )? {
@@ -10059,9 +10065,11 @@ fn bind_managed_successor_dispatch(
     };
     // The Turn is rendered from the preserved bytes by the same complete renderer
     // the acceptance used, with the intent the accepted identity carries.
-    let rendered = contents
-        .prompt(&accepted, &accepted.execution_intent, deadline_seconds)
-        .map_err(|_| refused())?;
+    let rendered = crate::delegation_service::research_merge::task_prompt(
+        state_root,
+        task_ref,
+        contents.prompt(&accepted, &accepted.execution_intent, deadline_seconds)?,
+    )?;
     if write || message != rendered {
         return Err(refused());
     }
@@ -27753,19 +27761,38 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
             .code,
             "REVIEW_CANDIDATE_PROVENANCE_INVALID"
         );
-        // A generation-4 member has no legacy receipt to fall back on, so an
-        // unaccepted key is refused before any Turn is submitted.
+        // An unrelated key is a nonbinding; manifest 4 refuses it below.
+        for unknown in [
+            "unaccepted-key",
+            "synthesis-task:not-a-uuid",
+            "synthesis-task:01900000-0000-7000-8000-000000000007",
+        ] {
+            assert!(
+                !bind_successor_dispatch(
+                    &read_only_store,
+                    read_only_member.engagement_id,
+                    read_only_member.manifest.run_id,
+                    &read_only_member.manifest.workspace_id,
+                    unknown,
+                    false,
+                    "an arbitrary prompt",
+                )
+                .unwrap(),
+                "{unknown}"
+            );
+        }
         assert!(
             !bind_successor_dispatch(
                 &read_only_store,
                 read_only_member.engagement_id,
-                read_only_member.manifest.run_id,
+                Uuid::now_v7(),
                 &read_only_member.manifest.workspace_id,
-                "unaccepted-key",
+                "successor-read-only",
                 false,
-                "an arbitrary prompt",
+                &read_only.prompt,
             )
-            .unwrap()
+            .unwrap(),
+            "another Run cannot adopt a known accepted key"
         );
         assert_eq!(
             successor_dispatch_decision(read_only_member.manifest.schema_version, false)

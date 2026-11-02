@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- Merge research findings deterministically with immutable source links, explicit conflicts and complete coverage.
+  Synthesis requires a separate task over that input, with its own accounting and result; generation 8 protects the new storage owners.
+
 - Add checked `structured_findings_v1` and durable research groups with bounded queues, any/all/k waits, complete coverage and immutable result artifacts;
   preserve per-Run capture quotas and original-key recovery through a generation-7 storage upgrade that blocks older writers.
 

@@ -4111,11 +4111,11 @@ content-addressed result-content store with explicit per-task provenance
 links. The ledger's write-once terminal resolution records remain Run-owned
 private state under each member Run's root.
 
-TASK-084 advances the current writer to base generation 7 so older writers
+TASK-084 introduced base generation 7 so older writers
 cannot bypass group capture quotas, reserved Run births, Controller group origins
 or result-component bindings. The atomic 6→7 fence preserves the six base tables,
 existing rows, namespace birth ID and orchestration extension 3. Read-only opens
-accept verified generation 6 and 7; writable opens complete the supported upgrade
+accept verified generations 6, 7 and 8; writable opens complete the supported upgrade
 before admitting new work. The [delegation runtime](../specs/dolgorae-v014-delegation-runtime.md#task-084-writer-fence-generation-7)
 owns the migration and refusal rules.
 
@@ -4252,3 +4252,25 @@ and migration do not gain qualified selection. Qualified stop refuses
 The normal Caller Primary collaboration fixture may prepare an unrecorded
 read-only candidate to supply its key. That fixture uses the main CLI for
 registry publication, server startup, policy installation and retirement.
+
+### Findings merge ownership
+
+The [internal storage contract](../protocol/research-merge-storage.md) describes
+publication, source proof and synthesis-input records.
+
+`research_merge` owns deterministic merging and immutable merged publications.
+It reads accepted group/task provenance from the existing Engagement owners and
+uses the checked findings validator. The complete output and its source snapshot
+commit with the original-key receipt; the owning Run's artifact lease covers the
+new logical artifact. Artifact reads reauthorize the current aggregate Controller
+and verify retained identity and content. Ordinary task acceptance owns synthesis
+rounds and results; its retained input binding supplies the exact merged data to
+dispatch and recovery. Public task capture preserves original structured bytes
+separately from the internal execution projection. Base generation 8 fences
+writers that do not recognize these quota and recovery owners.
+Artifact quota accounting reads merge charges through the delegation owner;
+the gateway reads retained merge records through Engagement storage. The
+scheduler uses that owner's original task binding, and `successor_capture`
+validates original public bodies with the checked host schema loader. Managed
+orchestration verifies group and synthesis origins through the delegation owner;
+execution still goes through the orchestration adapter trait.
