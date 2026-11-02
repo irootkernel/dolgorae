@@ -24,7 +24,69 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
+const GROUP_SCHEMA_KEY: &str = "research_group_schema_version";
+
+/// Internal immutable capture charges, scoped to their actual execution Run.
+pub(crate) fn group_capture_quota_records(
+    connection: &Connection,
+    run: Uuid,
+) -> Result<Vec<(String, String)>, MachineError> {
+    let prefix = format!("group-capture-quota:v1:{run}:");
+    let mut statement = connection
+        .prepare("SELECT key,value FROM metadata WHERE key GLOB ?1 ORDER BY key")
+        .map_err(internal)?;
+    statement
+        .query_map([format!("{prefix}*")], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)
+}
+
+/// Immutable publication metadata is owned by the Engagement database transaction.
+pub(crate) fn result_component_record(
+    connection: &Connection,
+    key: &str,
+) -> Result<Option<String>, MachineError> {
+    connection
+        .query_row("SELECT value FROM metadata WHERE key=?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(internal)
+}
+pub(crate) fn retain_result_component_record(
+    transaction: &Transaction<'_>,
+    key: &str,
+    value: &str,
+) -> Result<(), MachineError> {
+    if let Some(existing) = result_component_record(transaction, key)? {
+        if existing != value {
+            return Err(integrity("immutable result component binding changed"));
+        }
+        return Ok(());
+    }
+    transaction
+        .execute(
+            "INSERT INTO metadata(key,value) VALUES(?1,?2)",
+            params![key, value],
+        )
+        .map_err(internal)?;
+    Ok(())
+}
+pub(crate) fn result_component_records(
+    connection: &Connection,
+    prefix: &str,
+) -> Result<Vec<String>, MachineError> {
+    let mut query = connection
+        .prepare("SELECT value FROM metadata WHERE key GLOB ?1 ORDER BY key")
+        .map_err(internal)?;
+    query
+        .query_map([format!("{prefix}*")], |row| row.get(0))
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)
+}
 
 /// The exact accepted base tables of workspace Engagement database generation 6.
 ///
@@ -404,6 +466,8 @@ pub enum EngagementBarrier {
     AfterExternalCloseCommit,
     BeforeMigrationV6Commit,
     AfterMigrationV6Commit,
+    BeforeMigrationV7Commit,
+    AfterMigrationV7Commit,
 }
 
 pub trait EngagementFaultInjector: Send + Sync {
@@ -671,7 +735,7 @@ impl EngagementStore {
             return Ok(None);
         };
         match probe.schema_generation {
-            AdmittedGeneration::Six => {
+            AdmittedGeneration::Six | AdmittedGeneration::Seven => {
                 let birth_id = probe_birth_id(&probe)?;
                 drop(probe);
                 if record.is_some_and(|record| record != birth_id) {
@@ -682,6 +746,7 @@ impl EngagementStore {
                 // published while that admission is still held.
                 let mut connection =
                     crate::storage_observation::CheckedConnection::open(path, false)?;
+                migrate_v6_to_v7(&mut connection, &faults)?;
                 publish_birth_record(path, birth_id)?;
                 crate::storage_observation::initialize_content(&mut connection)?;
                 Ok(Some(Self { connection, faults }))
@@ -842,6 +907,7 @@ impl EngagementStore {
             .map_err(internal)?;
         let birth_id = fresh_birth_id();
         migrate_v5_to_v6(&mut connection, birth_id, &faults)?;
+        migrate_v6_to_v7(&mut connection, &faults)?;
         let birth_id = database_birth_id(&connection)?;
         crate::storage_observation::initialize_content(&mut connection)?;
         drop(connection);
@@ -883,6 +949,7 @@ impl EngagementStore {
             migrate_v4_to_v5(connection)?;
             let birth_id = fresh_birth_id();
             migrate_v5_to_v6(connection, birth_id, &faults)?;
+            migrate_v6_to_v7(connection, &faults)?;
             let birth_id = database_birth_id(connection)?;
             crate::storage_observation::initialize_content(connection)?;
             publish_birth_record(path, birth_id)?;
@@ -1418,6 +1485,31 @@ impl EngagementStore {
                     }
                 };
                 if outcome == RuntimeOutcome::Accepted
+                    && task.expected_output == crate::structured_findings::SCHEMA
+                {
+                    match value.as_ref().map_or_else(
+                        || {
+                            Err(MachineError::new(
+                                "FINDINGS_OUTPUT_INVALID",
+                                "Research output is unavailable",
+                                false,
+                                serde_json::json!({}),
+                            ))
+                        },
+                        crate::structured_findings::validate,
+                    ) {
+                        Ok(()) => TaskExecution {
+                            outcome,
+                            value,
+                            terminal_error: None,
+                        },
+                        Err(error) => TaskExecution {
+                            outcome: RuntimeOutcome::Rejected,
+                            value: None,
+                            terminal_error: Some(error),
+                        },
+                    }
+                } else if outcome == RuntimeOutcome::Accepted
                     && task.expected_output == STRUCTURED_REVIEW_OUTPUT
                 {
                     let checked = value
@@ -4896,8 +4988,10 @@ pub(crate) fn settle_external_hire_in(
 pub(crate) enum AdmittedGeneration {
     /// Base generation 1 through 5; the next writable open migrates in place.
     Legacy(i64),
-    /// Base generation 6, the current accepted shape.
+    /// Base generation 6, retained for read-only access and atomic upgrade.
     Six,
+    /// Current writer generation with group quota/origin publication fencing.
+    Seven,
 }
 
 /// One effect-free observation of an existing Engagement database.
@@ -5038,6 +5132,7 @@ impl GenerationProbe {
                     .map_err(|_| database_unavailable())?,
             ),
             Some("6") => AdmittedGeneration::Six,
+            Some("7") => AdmittedGeneration::Seven,
             _ => {
                 return Err(MachineError::new(
                     "ORCHESTRATION_SCHEMA_UNSUPPORTED",
@@ -5047,6 +5142,17 @@ impl GenerationProbe {
                 ));
             }
         };
+        match (schema_generation, read(GROUP_SCHEMA_KEY)?.as_deref()) {
+            (AdmittedGeneration::Seven, Some("1")) => {
+                let tables:i64=connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('delegation_operations','caller_scope_assignments','scope_membership_revisions','member_workload_revisions','member_release_operations','dispatch_indexes')",[],|row|row.get(0)).map_err(|_|database_unavailable())?;
+                if tables != 6 {
+                    return Err(unsupported_group_generation());
+                }
+            }
+            (AdmittedGeneration::Seven, _) => return Err(unsupported_group_generation()),
+            (_, None) => {}
+            _ => return Err(unsupported_group_generation()),
+        }
         // Validate the extension generation here; it is not retained.
         match read("orchestration_schema_version")? {
             // External-only workspaces never create the extension tables.
@@ -5208,7 +5314,10 @@ pub fn delegation_namespace(state_root: &Path) -> Result<DelegationNamespace, Ma
             None => DelegationNamespace::NotSetUp,
         });
     };
-    if probe.schema_generation != AdmittedGeneration::Six {
+    if !matches!(
+        probe.schema_generation,
+        AdmittedGeneration::Six | AdmittedGeneration::Seven
+    ) {
         // A legacy database can never be migrated while a birth record already
         // names a namespace: that is a recovery condition, not a fresh setup.
         return Ok(match file {
@@ -6859,7 +6968,7 @@ pub(crate) fn downgrade_to_legacy_for_test(
              DROP TABLE IF EXISTS scope_membership_revisions;
              DROP TABLE IF EXISTS caller_scope_assignments;
              DROP TABLE IF EXISTS delegation_operations;
-             DELETE FROM metadata WHERE key='namespace_birth_id';",
+             DELETE FROM metadata WHERE key IN ('namespace_birth_id','research_group_schema_version');",
         )
         .unwrap();
     connection
@@ -6934,7 +7043,7 @@ fn migrate_v5_to_v6(
             |row| row.get(0),
         )
         .map_err(internal)?;
-    if !["5", SCHEMA_VERSION.to_string().as_str()].contains(&observed.as_str()) {
+    if !["5", "6", "7"].contains(&observed.as_str()) {
         return Err(MachineError::new(
             "ORCHESTRATION_SCHEMA_UNSUPPORTED",
             "orchestration schema is not supported",
@@ -6977,7 +7086,7 @@ fn migrate_v5_to_v6(
         transaction
             .execute(
                 "UPDATE metadata SET value=?1 WHERE key='schema_version'",
-                [SCHEMA_VERSION.to_string()],
+                ["6"],
             )
             .map_err(internal)?;
     }
@@ -6990,7 +7099,67 @@ fn migrate_v5_to_v6(
         .map_err(internal)
 }
 
-/// Read the accepted birth id of a generation-6 database.
+fn unsupported_group_generation() -> MachineError {
+    MachineError::new(
+        "ORCHESTRATION_SCHEMA_UNSUPPORTED",
+        "the research group writer generation is unsupported or incomplete",
+        false,
+        serde_json::json!({"schema_version":7,"extension":"research_group_schema_version"}),
+    )
+}
+
+/// Generation 7 fences older writers without rewriting base-six rows or shapes.
+fn migrate_v6_to_v7(
+    connection: &mut Connection,
+    faults: &Arc<dyn EngagementFaultInjector>,
+) -> Result<(), MachineError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(internal)?;
+    let observed: String = transaction
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    let marker: Option<String> = transaction
+        .query_row(
+            "SELECT value FROM metadata WHERE key=?1",
+            [GROUP_SCHEMA_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    match (observed.as_str(), marker.as_deref()) {
+        ("7", Some("1")) => return Ok(()),
+        ("6", None) => {}
+        _ => return Err(unsupported_group_generation()),
+    }
+    database_birth_id(&transaction)?;
+    crate::storage_observation::count_migration();
+    transaction
+        .execute(
+            "INSERT INTO metadata(key,value) VALUES(?1,'1')",
+            [GROUP_SCHEMA_KEY],
+        )
+        .map_err(internal)?;
+    transaction
+        .execute(
+            "UPDATE metadata SET value=?1 WHERE key='schema_version'",
+            [SCHEMA_VERSION.to_string()],
+        )
+        .map_err(internal)?;
+    faults
+        .check(EngagementBarrier::BeforeMigrationV7Commit)
+        .map_err(internal)?;
+    crate::storage_observation::commit(transaction).map_err(internal)?;
+    faults
+        .check(EngagementBarrier::AfterMigrationV7Commit)
+        .map_err(internal)
+}
+
+/// Read the accepted birth id retained by generation-six and newer databases.
 fn database_birth_id(connection: &Connection) -> Result<Uuid, MachineError> {
     let value: Option<String> = connection
         .query_row(
@@ -7084,7 +7253,7 @@ fn migrate_v1_to_v2_inner(connection: &mut Connection) -> Result<(), MachineErro
                 "orchestration v1 migration violated a foreign key",
             ));
         }
-    } else if !["2", "3", "4", "5", "6"].contains(&locked_observed.as_str()) {
+    } else if !["2", "3", "4", "5", "6", "7"].contains(&locked_observed.as_str()) {
         return Err(MachineError::new(
             "ORCHESTRATION_SCHEMA_UNSUPPORTED",
             "orchestration schema is not supported",
@@ -7253,7 +7422,7 @@ fn migrate_v2_to_v3_inner(connection: &mut Connection) -> Result<(), MachineErro
                 "orchestration v2 migration violated a foreign key",
             ));
         }
-    } else if !["3", "4", "5", "6"].contains(&observed.as_str()) {
+    } else if !["3", "4", "5", "6", "7"].contains(&observed.as_str()) {
         return Err(MachineError::new(
             "ORCHESTRATION_SCHEMA_UNSUPPORTED",
             "orchestration schema is not supported",
@@ -7291,7 +7460,7 @@ fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), MachineError> {
              UPDATE metadata SET value='4' WHERE key='schema_version';",
             )
             .map_err(internal)?;
-    } else if !["4", "5", "6"].contains(&observed.as_str()) {
+    } else if !["4", "5", "6", "7"].contains(&observed.as_str()) {
         return Err(MachineError::new(
             "ORCHESTRATION_SCHEMA_UNSUPPORTED",
             "orchestration schema is not supported",
@@ -7313,7 +7482,7 @@ fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), MachineError> {
             |row| row.get(0),
         )
         .map_err(internal)?;
-    if !["4", "5", "6"].contains(&observed.as_str()) {
+    if !["4", "5", "6", "7"].contains(&observed.as_str()) {
         return Err(MachineError::new(
             "ORCHESTRATION_SCHEMA_UNSUPPORTED",
             "orchestration schema is not supported",
@@ -7323,7 +7492,7 @@ fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), MachineError> {
     }
     // Generation 6 already carries this step's objects. A fresh bootstrap is
     // born at generation 5 without them, so "5" still runs the step.
-    if observed == "6" {
+    if matches!(observed.as_str(), "6" | "7") {
         crate::storage_observation::commit(transaction).map_err(internal)?;
         return Ok(());
     }
@@ -8344,7 +8513,10 @@ mod tests {
                 legacy_database(&root, generation);
                 drop(EngagementStore::open_existing(&path).unwrap().unwrap());
             }
-            assert_eq!(observed_generation(&path).as_deref(), Some("6"));
+            assert_eq!(
+                observed_generation(&path).as_deref(),
+                Some(SCHEMA_VERSION.to_string().as_str())
+            );
             assert!(namespace_birth_path(&root.join("state")).exists());
             std::fs::remove_dir_all(root).unwrap();
         }
@@ -8634,7 +8806,10 @@ mod tests {
         migrate_v2_to_v3(&mut connection).unwrap();
         migrate_v3_to_v4(&mut connection).unwrap();
         migrate_v4_to_v5(&mut connection).unwrap();
-        assert_eq!(observed_generation(&path).as_deref(), Some("6"));
+        assert_eq!(
+            observed_generation(&path).as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str())
+        );
         drop(connection);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -8836,7 +9011,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_is_born_at_generation_six_with_its_birth_record() {
+    fn fresh_database_is_born_at_current_generation_with_its_birth_record() {
         let root = generation_root();
         let path = generation_database(&root);
         let store = EngagementStore::open(&path).unwrap();
@@ -9073,6 +9248,128 @@ mod tests {
     }
 
     #[test]
+    fn generation_seven_writer_fence_preserves_history_and_atomic_recovery() {
+        let root = generation_root();
+        let path = legacy_database(&root, 5);
+        let mut connection = Connection::open(&path).unwrap();
+        seed_legacy_rows(&connection, 5);
+        let historical = legacy_rows(&connection);
+        let birth = Uuid::now_v7();
+        let faults: Arc<dyn EngagementFaultInjector> = Arc::new(NoEngagementFaults);
+        migrate_v5_to_v6(&mut connection, birth, &faults).unwrap();
+        assert_eq!(
+            observed_generation(&path).as_deref(),
+            Some("6"),
+            "the historical migration remains exactly5->6"
+        );
+        publish_birth_record(&path, birth).unwrap();
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(connection);
+        let observer = EngagementStore::open_read_only(&path).unwrap();
+        assert_eq!(
+            observed_generation(&path).as_deref(),
+            Some("6"),
+            "R observation never upgrades"
+        );
+        assert_eq!(legacy_rows(observer.connection()), historical);
+        drop(observer);
+        let error = open_error(EngagementStore::open_with_faults(
+            &path,
+            Arc::new(FailAt(EngagementBarrier::BeforeMigrationV7Commit)),
+        ));
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(observed_generation(&path).as_deref(), Some("6"));
+        let connection = Connection::open(&path).unwrap();
+        let marker: Option<String> = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key=?1",
+                [GROUP_SCHEMA_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(marker.is_none(), "marker and version roll back together");
+        assert_eq!(legacy_rows(&connection), historical);
+        drop(connection);
+        let error = open_error(EngagementStore::open_with_faults(
+            &path,
+            Arc::new(FailAt(EngagementBarrier::AfterMigrationV7Commit)),
+        ));
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(observed_generation(&path).as_deref(), Some("7"));
+        let reopened = EngagementStore::open(&path).unwrap();
+        assert_eq!(database_birth_id(reopened.connection()).unwrap(), birth);
+        assert_eq!(
+            read_birth_record(&namespace_birth_path(&root.join("state"))).unwrap(),
+            Some(birth)
+        );
+        assert_eq!(legacy_rows(reopened.connection()), historical);
+        assert_eq!(
+            reopened
+                .connection()
+                .query_row(
+                    "SELECT value FROM metadata WHERE key=?1",
+                    [GROUP_SCHEMA_KEY],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "1"
+        );
+        drop(reopened);
+        assert_eq!(observed_generation(&path).as_deref(), Some("7"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn generation_seven_incomplete_or_unsupported_fences_fail_before_writes() {
+        for (version, marker) in [
+            ("7", None),
+            ("7", Some("2")),
+            ("6", Some("1")),
+            ("8", Some("1")),
+        ] {
+            let root = generation_root();
+            let path = generation_database(&root);
+            drop(EngagementStore::open(&path).unwrap());
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute(
+                    "UPDATE metadata SET value=?1 WHERE key='schema_version'",
+                    [version],
+                )
+                .unwrap();
+            connection
+                .execute("DELETE FROM metadata WHERE key=?1", [GROUP_SCHEMA_KEY])
+                .unwrap();
+            if let Some(marker) = marker {
+                connection
+                    .execute(
+                        "INSERT INTO metadata(key,value) VALUES(?1,?2)",
+                        params![GROUP_SCHEMA_KEY, marker],
+                    )
+                    .unwrap();
+            }
+            connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+            drop(connection);
+            let before = std::fs::read(&path).unwrap();
+            assert_eq!(
+                open_error(EngagementStore::open(&path)).code,
+                "ORCHESTRATION_SCHEMA_UNSUPPORTED"
+            );
+            assert_eq!(
+                open_error(EngagementStore::open_read_only(&path)).code,
+                "ORCHESTRATION_SCHEMA_UNSUPPORTED"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn interrupted_generation_six_migration_is_atomic() {
         // A failure before the commit leaves generation 5 complete and untouched.
         let root = generation_root();
@@ -9201,7 +9498,7 @@ mod tests {
 
     #[test]
     fn unsupported_generations_fail_closed_before_any_effect() {
-        for (generation, extension) in [("7", None), ("6", Some("4"))] {
+        for (generation, extension) in [("8", None), ("6", Some("4")), ("7", Some("4"))] {
             let root = generation_root();
             let path = generation_database(&root);
             // A real generation-6 database, then the requested mutation.
@@ -9214,6 +9511,11 @@ mod tests {
                     [generation],
                 )
                 .unwrap();
+            if generation == "6" {
+                connection
+                    .execute("DELETE FROM metadata WHERE key=?1", [GROUP_SCHEMA_KEY])
+                    .unwrap();
+            }
             if let Some(extension) = extension {
                 connection
                     .execute(

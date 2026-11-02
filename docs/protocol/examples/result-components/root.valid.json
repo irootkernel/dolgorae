@@ -1,0 +1,53 @@
+{
+  "schema": "dolgorae.result-component-manifest/v1",
+  "result_id": "019a0000-0000-7000-8000-000000000002",
+  "result_digest": "sha256:f0208ceb68c177bfb7fcc6c57aff89dc44493a68ed576bcb0bc2df80823fff0c",
+  "identity": {
+    "content": {
+      "byte_length": 798,
+      "sha256": "sha256:0cb00e9ccbfdd60a89380b2d76ffb2b1ec3b94c063688f564f21b16c6d43a345"
+    },
+    "chunks": [
+      {
+        "content": {
+          "byte_length": 798,
+          "sha256": "sha256:0cb00e9ccbfdd60a89380b2d76ffb2b1ec3b94c063688f564f21b16c6d43a345"
+        },
+        "media_type": "application/octet-stream",
+        "artifact": {
+          "artifact_id": "019a0000-0000-7000-8000-000000000004",
+          "kind": "ARTIFACT_KIND_FINAL_RESPONSE",
+          "visibility": "ARTIFACT_VISIBILITY_CONTROLLER_ONLY"
+        },
+        "artifact_owner": {
+          "workspace": {
+            "absolute_path": "/example/workspace",
+            "expected_workspace_id": "workspace:example"
+          },
+          "run_id": "019a0000-0000-7000-8000-000000000001"
+        }
+      }
+    ]
+  },
+  "component_pages": [
+    {
+      "content": {
+        "byte_length": 652,
+        "sha256": "sha256:87ac004493ccc21b5b749eb27db2892bd2e68d4be1f12d10b06a9bf3d867ac51"
+      },
+      "media_type": "application/json",
+      "artifact": {
+        "artifact_id": "019a0000-0000-7000-8000-000000000005",
+        "kind": "ARTIFACT_KIND_FINAL_RESPONSE",
+        "visibility": "ARTIFACT_VISIBILITY_CONTROLLER_ONLY"
+      },
+      "artifact_owner": {
+        "workspace": {
+          "absolute_path": "/example/workspace",
+          "expected_workspace_id": "workspace:example"
+        },
+        "run_id": "019a0000-0000-7000-8000-000000000001"
+      }
+    }
+  ]
+}

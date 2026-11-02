@@ -6700,6 +6700,31 @@ pub(crate) struct SuccessorSpawn<'a> {
     pub now_ms: i64,
 }
 
+/// A Controller group carries a typed accepted origin and no fabricated native
+/// Turn or tool-call identity. Native records retain their original checks.
+fn validate_successor_origin(
+    connection: &rusqlite::Connection,
+    payload: &str,
+    member: Uuid,
+    session: Uuid,
+    turn: &str,
+    call: &str,
+) -> Result<(), MachineError> {
+    let marker: Value = serde_json::from_str(payload).map_err(internal)?;
+    if let Some(origin) = marker.get("controller_group_origin") {
+        crate::delegation_service::research_group::validate_managed_origin(
+            connection, origin, member, session,
+        )?;
+        if !turn.is_empty() || !call.is_empty() {
+            return Err(integrity("group origin carries invented native provenance"));
+        }
+        Ok(())
+    } else {
+        checked(turn, 256, "source_turn_id")?;
+        checked(call, 256, "source_tool_call_id")
+    }
+}
+
 /// Write one successor spawn and its member in the acceptance transaction.
 ///
 /// The member is `provisioning`/`unstarted` until the Run service reports whether
@@ -6711,8 +6736,14 @@ pub(crate) fn admit_successor_spawn(
 ) -> Result<(), MachineError> {
     checked(spawn.internal_key, 256, "idempotency_key")?;
     checked(spawn.role_ref, 256, "role_ref")?;
-    checked(spawn.source_turn_id, 256, "source_turn_id")?;
-    checked(spawn.source_tool_call_id, 256, "source_tool_call_id")?;
+    validate_successor_origin(
+        transaction,
+        spawn.request_json,
+        spawn.member_run_id,
+        spawn.session_id,
+        spawn.source_turn_id,
+        spawn.source_tool_call_id,
+    )?;
     checked(spawn.requested_access, 64, "requested_access")?;
     digest(spawn.request_sha256, "request_sha256")?;
     digest(spawn.role_snapshot_sha256, "role_snapshot_sha256")?;
@@ -6964,8 +6995,14 @@ fn admit_successor_task_in_mode(
     priority: Option<u8>,
 ) -> Result<(), MachineError> {
     checked(task.internal_key, 256, "idempotency_key")?;
-    checked(task.source_turn_id, 256, "source_turn_id")?;
-    checked(task.source_tool_call_id, 256, "source_tool_call_id")?;
+    validate_successor_origin(
+        transaction,
+        task.request_json,
+        task.member_run_id,
+        task.session_id,
+        task.source_turn_id,
+        task.source_tool_call_id,
+    )?;
     digest(task.request_sha256, "request_sha256")?;
     digest(task.accepted_request_sha256, "accepted_request_sha256")?;
     if let Some(priority) = priority {
@@ -7180,6 +7217,35 @@ pub(crate) fn cancel_successor_before_dispatch(
         "specialist_task_controlled",
         &sha256_hex(format!("{task}\0cancelled").as_bytes()),
         now,
+    )
+}
+
+/// Expire one queued successor task with its retained complete result.
+pub(crate) fn expire_successor_task_with_result(
+    transaction: &Transaction<'_>,
+    session_id: Uuid,
+    task_id: Uuid,
+    digest: &str,
+    now_ms: i64,
+) -> Result<(), MachineError> {
+    let changed=transaction.execute("UPDATE brokered_tasks SET state='expired',safe_error_code='OPERATION_TIMEOUT',result_sha256=?3,updated_at_ms=?4 WHERE session_id=?1 AND task_id=?2 AND state='queued' AND target_turn_id IS NULL",params![session_id.to_string(),task_id.to_string(),digest,now_ms]).map_err(internal)?;
+    if changed != 1 {
+        return Err(session_conflict(
+            session_id,
+            "expiry no longer owns the queued task",
+        ));
+    }
+    crate::assignment_queue::remove(
+        transaction,
+        crate::assignment_queue::Owner::Managed(session_id),
+        task_id,
+    )?;
+    append_event(
+        transaction,
+        session_id,
+        "specialist_task_settled",
+        &sha256_hex(b"expired"),
+        now_ms,
     )
 }
 

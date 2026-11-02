@@ -223,6 +223,28 @@ fn source_module_dependencies_match_the_approved_graph() {
             ][..],
         ),
         (
+            "research_group",
+            &[
+                "assignment_queue",
+                "caller_scope",
+                "controller",
+                "delegation_identity",
+                "group_quota",
+                "jcs",
+                "operation",
+                "orchestration",
+                "paths",
+                "provisioning",
+                "result_component_artifact",
+                "run",
+                "specialist_facade",
+                "storage_observation",
+                "successor_capture",
+                "task_request",
+                "workspace",
+            ][..],
+        ),
+        (
             "specialist_stdio",
             &[
                 "consumer_bridge",
@@ -588,6 +610,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "storage_observation",
                 "task_request",
                 "workspace",
+                "structured_findings",
             ][..],
         ),
         (
@@ -716,6 +739,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "maintenance",
             &[
+                "result_component_artifact",
                 "audit",
                 "cli",
                 "conformance",
@@ -846,6 +870,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "caller_scope",
             &[
                 "delegation_identity",
+                "delegation_service", // Standalone Controller group accounting proof.
                 // `engagement` is test-only: the accounting fixture opens one
                 // generation-6 database through the real store.
                 "engagement",
@@ -855,6 +880,9 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "delegation_service",
             &[
+                "controller",
+                "result_component_artifact",
+                "specialist_facade",
                 "scheduler",
                 "worker", // Test-only production contract selection and dispatcher qualification.
                 // Native component qualification owns its test-only server group census.
@@ -1037,6 +1065,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "semantic",
             &[
+                "result_component_artifact",
                 "collaboration",
                 "scheduler",
                 "public_resolution",
@@ -1103,6 +1132,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "writer",
                 "ledger_generation",
                 "pool",
+                "structured_findings",
             ][..],
         ),
         (
@@ -1118,7 +1148,14 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "workspace",
             ][..],
         ),
-        ("task_request", &["machine", "review_output"][..]),
+        (
+            "task_request",
+            &["machine", "review_output", "structured_findings"][..],
+        ),
+        (
+            "structured_findings",
+            &["delegation_identity", "jcs", "machine"][..],
+        ),
         (
             "review_output",
             &["jcs", "machine", "specialist", "task_request"][..],
@@ -1248,6 +1285,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "profile",
                 "projection",
                 "providers",
+                // Quota regressions verify publication bytes through their owner.
+                "result_component_artifact",
                 "review",
                 "run",
                 "semantic",
@@ -1380,8 +1419,38 @@ fn source_module_dependencies_match_the_approved_graph() {
             ][..],
         ),
         (
+            "result_component_artifact",
+            &[
+                "artifact",
+                "controller",
+                "delegation_identity",
+                "delegation_service",
+                "engagement",
+                "machine",
+                "operation",
+                "orchestration",
+                "specialist",
+                "trusted_host",
+                "workspace",
+            ][..],
+        ),
+        (
+            "group_quota",
+            &[
+                "artifact",
+                "darwin",
+                "delegation_identity",
+                "engagement",
+                "jcs",
+                "machine",
+                "run",
+                "workspace",
+            ][..],
+        ),
+        (
             "artifact",
             &[
+                "result_component_artifact",
                 "audit",
                 "controller",
                 "darwin",
@@ -1394,6 +1463,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "orchestration",
                 "snapshot",
                 "workspace",
+                "group_quota",
             ][..],
         ),
         (
@@ -1445,6 +1515,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "gateway_v2",
             &[
+                "delegation_service",
                 "public_resolution",
                 "controller",
                 "darwin",
@@ -1479,6 +1550,15 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "interaction",
                 "interaction_payload",
                 "successor_interaction",
+            ][..],
+        ),
+        (
+            "gateway_groups",
+            &[
+                "semantic",
+                "delegation_service",
+                "delegation_identity",
+                "jcs",
             ][..],
         ),
         (

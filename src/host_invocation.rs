@@ -1093,6 +1093,11 @@ pub(crate) fn schema_matches(value: &Value, rule: &Value, base: &Value, depth: u
             // Unknown patterns fail closed rather than being ignored.
             let valid = if pattern == "^sha256:[0-9a-f]{64}$" {
                 crate::trusted_host::is_digest(string)
+            } else if pattern == "^/" {
+                // Explicit group input source paths use this selected pattern.
+                // Filesystem containment and no-follow checks remain with the
+                // group source reader after schema validation.
+                string.starts_with('/')
             } else if pattern == "^[0-9a-f]{64}$" {
                 string.len() == 64
                     && string

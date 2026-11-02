@@ -38,9 +38,9 @@ asymmetric with the writable start: a non-Git workspace can still be written
 by a started Run, but its changes cannot be captured as a delegated complete
 result.
 
-## Delegation namespace and Engagement database generation 6
+## Delegation namespace and Engagement database generations
 
-The workspace Engagement database moves from base generation 5 to 6
+TASK-076 moved the workspace Engagement database from base generation 5 to 6
 (RPC:466-524) in one transaction per database: `BEGIN IMMEDIATE`, a re-read of
 `schema_version` inside the transaction, the generation-6 DDL plus the
 `metadata` update and the `namespace_birth_id` row for `"5"`, a no-op for
@@ -52,8 +52,9 @@ database that already carries a generation-6 object is refused inside the
 transaction — there is no runtime schema comparator; the strict
 no-`IF NOT EXISTS` DDL is the comparator. A fresh database is created by
 the historical generation-5 bootstrap followed immediately by the same single
-5→6 transaction, from the same DDL source, so a new workspace is born at
-generation 6. `metadata.orchestration_schema_version` stays `3`; the
+5→6 transaction, from the same DDL source. This established the generation-6
+namespace; the current writer then applies the fence below.
+`metadata.orchestration_schema_version` stays `3`; the
 orchestration extension SQL is unchanged.
 
 Generation 6 adds six tables, each retained because a clause needs it:
@@ -82,11 +83,31 @@ no `-wal`/`-shm`/`-journal` sidecar exists; a one-sided sidecar pair is
 re-observed up to five times over 10 ms before it is reported, because SQLite
 creates and unlinks the pair in sequence at open; `-wal` without `-shm`, or
 `-shm` without `-wal`, is a typed `RECOVERY_REQUIRED`. A live WAL pair is
-observed read-only without touching the database. Generation 7 and extension 4
-are refused typed before any effect, with no sidecar, no maintenance lock, no
-mode change and no `sqlite_master` change. Only verified legacy shapes — the
-recorded birth schemas of generations 1-5 and a completed 6 — are admitted;
-everything else fails closed.
+observed read-only without touching the database. Unsupported base and extension
+generations are refused before any effect, with no sidecar, no maintenance lock,
+no mode change and no `sqlite_master` change. The generation-6 implementation
+refuses base generation 7 and extension 4. The current admission rules below
+extend the supported base generations without changing extension 3.
+
+### TASK-084 writer fence: generation 7
+
+Generation 7 protects research-group capture charges, reserved Run births,
+Controller group origins and result-component bindings from older writers that
+do not account for those records. A writable open upgrades a verified generation
+6 database in one `BEGIN IMMEDIATE` transaction. It rechecks the version, records
+the generation-7 extension marker and advances `metadata.schema_version` to `7`.
+The six generation-6 tables, existing rows, namespace birth ID and orchestration
+extension 3 retain their identities and bytes. No result or capture is backfilled.
+An interruption leaves either the complete generation-6 state or the committed
+generation-7 state; retry never repeats an accepted group operation.
+
+Fresh databases use the same historical bootstrap and 5→6 migration, followed by
+6→7 before writable use. Supported older databases retain their existing upgrade
+path through generation 6. Read-only opens accept verified generation 6 and 7
+without upgrading either; writable opens finish the upgrade before accepting
+new work. Unknown versions, incomplete markers and inconsistent shapes fail
+closed through the existing effect-free admission probe. Generation-6 writers
+refuse a generation-7 database before effects. There is no downgrade.
 
 The delegation namespace is explicit setup, never a side effect. Any
 creation of the engagement database is a namespace birth: the creating
@@ -472,6 +493,34 @@ explicit target and a manifest-4 Specialist admitted with read-only Review
 purpose and a qualified checked-review Profile. The initial Thread has the
 candidate tool enabled with read-only sandbox and approval never; a general
 Thread cannot be upgraded by an assignment.
+
+Terminal publication allocates UUIDv7 identities for the immutable result and
+its component artifact bindings in the complete-result transaction. Each
+binding names the actual execution Run and retained source without copying
+component bytes. Public collection limits inline bodies to 1 MiB. Larger
+components and results that require manifest discovery use Controller-only
+final-response artifact references.
+
+A `dolgorae.result-component-manifest/v1` JSON root artifact references the
+original identity as ordered binary artifact chunks and bounded
+`dolgorae.result-component-manifest-page/v1` component-reference pages. The
+[result component manifest schema](../protocol/dolgorae-result-component-manifest-v1.schema.json)
+defines the closed root and page shapes. Each artifact fits within 32 MiB and
+is charged to the actual Run's shared 256 MiB quota.
+
+Queued successor assignment expiry publishes its body-free `expired` complete
+result in the same transaction as the terminal task state. Artifact quota is
+locked before that transaction. If no artifact capacity remains, a bounded
+immutable identity binding retains the real result UUID and digest without
+publishing artifact references or charging fictitious artifact bytes. Collection
+still returns the terminal identity; artifact-manifest discovery is unavailable.
+Repeated expiry preserves the original binding. Observation never backfills
+results for historical terminal tasks.
+
+Artifact reads authenticate the current aggregate Controller, verify the
+complete source identity and bytes, and return at most 1 MiB. They leave
+publication and source state unchanged. Normal maintenance preserves bound
+source content.
 
 Each checked task owns a reader identified by its task reference, bound to the
 member, workspace/mode and retained target digest. Dispatch creates or opens
@@ -1085,6 +1134,47 @@ These scoped results cover individual-task paths. TASK-086 retains its broader
 receipt-mapping/handoff matrix; TASK-087 owns artifact requalification after
 cleanup. TASK-078's modern Run/pool work and TASK-079's activity/interaction
 routing retain their existing scope.
+
+## Research group admission and observation
+
+Research groups use the existing protected delegation namespace and its
+transactional immutable content store. Group acceptance binds the complete
+assignment manifest, installed provisioning references and captured input bytes
+to one original-key receipt before any member provisioning or task dispatch.
+Input captures are split into chunks of at most 8 MiB. Existing input, manifest,
+artifact and reserved-capacity limits remain in force; a group never enlarges a
+member's execution or result budgets.
+
+Each entry's input capture is charged to its selected execution member Run,
+using the artifact owner's existing logical-byte and deduplication rules.
+Several entries may select the same compatible Run; admission includes their
+combined charge and that Run's existing usage. Group size does not require an
+equal number of new Runs or live generations. When a new member is needed,
+the provider allocator reserves its real future Run identity before acceptance.
+The caller cannot select that identity, and a group ID is never a Run identity.
+The immutable captures, required member-birth reservations, quota reservations
+and group receipt commit atomically before provisioning or dispatch. Run birth
+consumes the same reservation and preserves its logical charge without copying
+the capture, double charging it or resetting its budget. Concurrent artifact
+publication and reuse share the owning quota serialization. Unknown effects
+retain their reservations and captures; failure alone permits no release or
+deletion. Only the explicit retention or cleanup owner may release a reservation
+after proving ownership and that its last consumer has finished.
+
+Per-entry provisioning and assignment retain their own authoritative receipts.
+Group observation derives progress from these receipts and the owning task
+records. Caller-supplied task IDs cannot establish membership. Failed,
+expired, interrupted-unknown and not-yet-provisioned entries remain visible.
+An accepted replay returns the original group identity without reopening input
+files or dispatching uncertain work. Waiting and collection are observations:
+neither starts a task, cancels a member nor advances a consumer cursor.
+
+Public groups authenticate the existing aggregate Controller. Their retained
+origin names the accepted group, entry and real member Run; it carries no
+native Turn/tool claim or Podway caller scope. Managed and external recovery
+check that origin, the current Controller, member configuration and original
+assignment receipt against the accepted group. Checked native facade groups retain
+their actual source-call checks and configured caller budget.
 
 ## Bounded consistent identity observation
 

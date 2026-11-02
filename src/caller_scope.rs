@@ -362,6 +362,14 @@ fn transition(connection: &Connection, task: Uuid, state: &str) -> Result<(), Ma
             params![task.to_string(), state],
         )
         .map_err(|_| integrity())?;
+    if changed == 0
+        && crate::delegation_service::research_group::verify_accounted_task(connection, task)?
+    {
+        // Standalone Controller groups have their own immutable accepted origin,
+        // not a Podway binding or a fictitious 1..32-round Action. The owning
+        // task record supplies current execution/disposition truth.
+        return Ok(());
+    }
     if changed != 1 {
         return Err(integrity());
     }

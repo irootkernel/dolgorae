@@ -1587,7 +1587,15 @@ pub(crate) fn semantic_presentation(public: &Value) -> Value {
     let operation = public["operation"].as_str().unwrap_or("lookup_operation");
     let class = crate::host_invocation::method_class(operation);
     let mut facts = serde_json::Map::new();
-    for key in ["receipt", "operation_ref", "wait_timed_out"] {
+    for key in [
+        "receipt",
+        "operation_ref",
+        "wait_timed_out",
+        "group_ref",
+        "manifest_digest",
+        "coverage",
+        "predicate_satisfied",
+    ] {
         if let Some(v) = public.get(key) {
             facts.insert(key.into(), v.clone());
         }
@@ -2137,6 +2145,10 @@ mod tests {
                 "receipt",
                 "operation_ref",
                 "wait_timed_out",
+                "group_ref",
+                "manifest_digest",
+                "coverage",
+                "predicate_satisfied",
             ] {
                 if let Some(expected) = public.get(field) {
                     assert_eq!(&presented["facts"][field], expected, "{operation}/{field}");
@@ -2166,7 +2178,7 @@ mod tests {
                 presented["semantic"]
             );
         }
-        assert_eq!(seen.len(), 20);
+        assert_eq!(seen.len(), 23);
         // Frozen candidate and the actual hire request consumer require these
         // exact authoritative next-step fields, including the installed state.
         let candidate = &corpus["cases"]

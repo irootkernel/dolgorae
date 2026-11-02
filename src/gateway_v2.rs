@@ -347,18 +347,36 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         .as_str()
         .map(|key| pb::OperationRef {
             caller_scope: Some(pb::CallerScope {
-                controller_kind: value["controller_kind"].as_i64().unwrap_or_default() as i32,
+                controller_kind: value["controller_kind"]
+                    .as_i64()
+                    .map(|k| k as i32)
+                    .or_else(|| {
+                        serde_json::from_value::<domain::ControllerKind>(
+                            value["controller_kind"].clone(),
+                        )
+                        .ok()
+                        .map(|kind| project::controller_kind(kind) as i32)
+                    })
+                    .unwrap_or_default(),
                 principal_ref: value["principal_ref"].as_str().unwrap_or_default().into(),
                 controller_generation: value["controller_generation"].as_u64().unwrap_or_default(),
                 workspace_id: value["workspace_id"].as_str().unwrap_or_default().into(),
-                aggregate: value["run_id"].as_str().map_or_else(
-                    || {
-                        Some(pb::caller_scope::Aggregate::ProvisioningScope(
-                            "run-start".into(),
-                        ))
-                    },
-                    |run_id| Some(pb::caller_scope::Aggregate::RunId(run_id.into())),
-                ),
+                aggregate: match (value["scope_kind"].as_str(), value["scope_ref"].as_str()) {
+                    (Some("external_engagement"), Some(id)) => {
+                        Some(pb::caller_scope::Aggregate::ExternalEngagementId(id.into()))
+                    }
+                    (Some("orchestrated_session"), Some(id)) => Some(
+                        pb::caller_scope::Aggregate::OrchestratedSessionId(id.into()),
+                    ),
+                    _ => value["run_id"].as_str().map_or_else(
+                        || {
+                            Some(pb::caller_scope::Aggregate::ProvisioningScope(
+                                "run-start".into(),
+                            ))
+                        },
+                        |run_id| Some(pb::caller_scope::Aggregate::RunId(run_id.into())),
+                    ),
+                },
             }),
             operation_kind: operation_kind as i32,
             idempotency_key: key.into(),
@@ -380,7 +398,9 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         method == "RunService.SubmitTurn" && error.details["public_v2_accepted"] == true;
     let accepted_resolve = method == "InteractionService.ResolveInteraction"
         && error.details["public_v2_accepted"] == true;
-    let accepted = accepted_start || accepted_submit || accepted_resolve;
+    let accepted_group =
+        method == "GroupService.AssignGroup" && error.details["public_v2_accepted"] == true;
+    let accepted = accepted_start || accepted_submit || accepted_resolve || accepted_group;
     let unknown = mutating
         && (!accepted || accepted_resolve)
         && matches!(
@@ -396,10 +416,17 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         dolgorae_error_code: wire_code.to_owned(),
         operation_kind: operation_kind as i32,
         run_id: run_id.clone(),
-        subjects: run_id.map(|run_id| pb::SubjectIdentities {
-            run_id: Some(run_id),
-            ..Default::default()
-        }),
+        subjects: if accepted_group {
+            Some(pb::SubjectIdentities {
+                group_id: error.details["group_ref"].as_str().map(str::to_owned),
+                ..Default::default()
+            })
+        } else {
+            run_id.map(|run_id| pb::SubjectIdentities {
+                run_id: Some(run_id),
+                ..Default::default()
+            })
+        },
         idempotency_key: operation
             .as_ref()
             .map(|operation| operation.idempotency_key.clone()),
@@ -418,7 +445,7 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         } else {
             pb::FailureClassification::Rejected
         } as i32,
-        action: if unknown || accepted_submit || accepted_resolve {
+        action: if unknown || accepted_submit || accepted_resolve || accepted_group {
             pb::RequiredClientAction::ReconcileOperation
         } else if recovery {
             pb::RequiredClientAction::RecoverRun
@@ -490,6 +517,10 @@ macro_rules! execute {
 fn enum_name<T>(value: Option<T>, field: &str) -> Result<T, MachineError> {
     value.ok_or_else(|| invalid(field, "unknown or unspecified selection"))
 }
+
+#[path = "gateway_groups.rs"]
+mod groups;
+
 fn admitted(
     value: &pb::AdmittedConfiguration,
 ) -> Result<crate::delegation_identity::AdmittedConfiguration, MachineError> {
@@ -810,6 +841,9 @@ fn start_inner(
 }
 
 const METHODS: &[&str] = &[
+    "GroupService.AssignGroup",
+    "GroupService.AwaitGroup",
+    "GroupService.CollectGroup",
     "InteractionService.ListPendingInteractions",
     "InteractionService.GetControllerInteraction",
     "InteractionService.ResolveInteraction",
@@ -1968,17 +2002,29 @@ impl pb::operation_service_server::OperationService for GatewayTransport {
                     Ok(pb::OperationKind::StartRun) => "start_run",
                     Ok(pb::OperationKind::SubmitTurn) => "submit_turn",
                     Ok(pb::OperationKind::ResolveInteraction) => "resolve_interaction",
+                    Ok(pb::OperationKind::AssignGroup) => "assign_group",
                     _ => {
                         return Err(invalid(
                             "operation_kind",
-                            "this public lookup supports Run startup, Submit and Resolve",
+                            "this public lookup supports Run startup, Submit, Resolve and group assignment",
                         ));
                     }
+                };
+                let group_scope = match (&scope.aggregate, kind) {
+                    (
+                        Some(pb::caller_scope::Aggregate::ExternalEngagementId(id)),
+                        "assign_group",
+                    ) => Some(("external_engagement", id.as_str())),
+                    (
+                        Some(pb::caller_scope::Aggregate::OrchestratedSessionId(id)),
+                        "assign_group",
+                    ) => Some(("orchestrated_session", id.as_str())),
+                    _ => None,
                 };
                 let expected = crate::operation::Namespace::delegation(
                     &binding.identity,
                     &scope.workspace_id,
-                    None,
+                    group_scope,
                     kind,
                     &original.idempotency_key,
                 )
@@ -1994,6 +2040,30 @@ impl pb::operation_service_server::OperationService for GatewayTransport {
                 }
                 let root = backend.home().workspace_root(&scope.workspace_id);
                 let value = match (&scope.aggregate, kind) {
+                    (
+                        Some(pb::caller_scope::Aggregate::ExternalEngagementId(id)),
+                        "assign_group",
+                    ) => crate::delegation_service::research_group::public_lookup(
+                        &root,
+                        &scope.workspace_id,
+                        &carrier,
+                        "external_engagement",
+                        uuid(id, "engagement_id")?,
+                        kind,
+                        &original.idempotency_key,
+                    )?,
+                    (
+                        Some(pb::caller_scope::Aggregate::OrchestratedSessionId(id)),
+                        "assign_group",
+                    ) => crate::delegation_service::research_group::public_lookup(
+                        &root,
+                        &scope.workspace_id,
+                        &carrier,
+                        "orchestrated_session",
+                        uuid(id, "session_id")?,
+                        kind,
+                        &original.idempotency_key,
+                    )?,
                     (Some(pb::caller_scope::Aggregate::ProvisioningScope(value)), "start_run")
                         if value == "run-start" =>
                     {
@@ -2935,6 +3005,50 @@ mod tests {
             detail(&error_status(&error, "RunService.GetRun"), "read-internal").effect,
             pb::EffectState::None as i32
         );
+    }
+
+    #[test]
+    fn group_projection_loss_retains_the_accepted_aggregate_operation() {
+        let aggregate = uuid::Uuid::now_v7().to_string();
+        let group = uuid::Uuid::now_v7().to_string();
+        for (kind, managed) in [
+            ("external_engagement", false),
+            ("orchestrated_session", true),
+        ] {
+            let error = MachineError::new(
+                "INTERNAL_ERROR",
+                "private-group-canary",
+                false,
+                serde_json::json!({"public_v2_operation":{"controller_kind":4,
+                    "principal_ref":"sha256:original-principal","controller_generation":2,
+                    "workspace_id":"a".repeat(64),"scope_kind":kind,"scope_ref":aggregate,
+                    "idempotency_key":"original-group-key"},"public_v2_accepted":true,"group_ref":group}),
+            );
+            let status = error_status(&error, "GroupService.AssignGroup");
+            let result = detail(&status, "group-projection-loss");
+            assert_eq!(result.effect, pb::EffectState::Accepted as i32);
+            assert_eq!(
+                result.action,
+                pb::RequiredClientAction::ReconcileOperation as i32
+            );
+            assert_eq!(
+                result.subjects.unwrap().group_id.as_deref(),
+                Some(group.as_str())
+            );
+            let operation = result.operation.unwrap();
+            assert_eq!(
+                operation.operation_kind,
+                pb::OperationKind::AssignGroup as i32
+            );
+            assert_eq!(operation.idempotency_key, "original-group-key");
+            let expected = if managed {
+                pb::caller_scope::Aggregate::OrchestratedSessionId(aggregate.clone())
+            } else {
+                pb::caller_scope::Aggregate::ExternalEngagementId(aggregate.clone())
+            };
+            assert_eq!(operation.caller_scope.unwrap().aggregate, Some(expected));
+            assert!(!format!("{status:?}").contains("private-group-canary"));
+        }
     }
 
     #[test]

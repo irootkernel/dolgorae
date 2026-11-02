@@ -25,11 +25,11 @@ integration. EPIC-018 is COMPLETE after successor requirements, checked contract
 and qualified H1 validation. EPIC-019 is COMPLETE.
 EPIC-023 is COMPLETE with Master's whole-Epic acceptance; TASK-090, TASK-091 and
 TASK-092 are COMPLETE. EPIC-020 and TASK-076 through TASK-079 are COMPLETE.
-EPIC-009 is COMPLETE; EPIC-021 and EPIC-022 remain PLANNED for v0.1.4, in that
+EPIC-009 is COMPLETE; EPIC-021 is ACTIVE and EPIC-022 remains PLANNED for v0.1.4, in that
 execution order. TASK-067 is COMPLETE;
 TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
-TASK-084 through TASK-089 remain PLANNED.
+TASK-084 is COMPLETE; TASK-085 through TASK-089 remain PLANNED.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -2822,7 +2822,7 @@ mailboxes without Primary message relay.
 
 ## EPIC-021: Research Groups, Findings, and Contract Cleanup
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
 
@@ -2835,7 +2835,7 @@ membership, ordering and status.
 
 ### TASK-084: Validate Findings and Operate Research Groups
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-027 and EPIC-009.
 

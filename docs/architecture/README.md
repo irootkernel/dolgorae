@@ -565,6 +565,17 @@ artifact quota API without gaining database or retention authority. Orchestratio
 also uses the artifact quota lease through preparation and publication; artifact
 observation resolves normalized references through the orchestration store.
 Artifact quota checks reuse workspace secure-file/directory validation.
+Research-group admission charges captured input to each selected execution
+member Run under the same logical-byte and deduplication rules. Existing Run
+usage and all entries selecting that Run share its quota serialization. For a
+new member, the provider allocator reserves the real future Run identity and
+quota before group acceptance, without provisioning or publishing a live Run.
+The Engagement transaction owner commits those reservations, immutable input
+captures and the group receipt together. Birth consumes the original reservation;
+the artifact owner continues counting the same charge after the Run exists.
+Recovery retains uncertain reservations and never substitutes another Run.
+Retention and cleanup retain their existing explicit ownership and last-consumer
+requirements. A group-wide byte ceiling cannot replace per-Run accounting.
 Maintenance opens the engagement-owned result schema through its owner and uses
 storage observation for retained content; the storage helper uses Run paths,
 canonical hashes and Darwin file identity for its checked private references.
@@ -4099,6 +4110,27 @@ acceptance rows; complete-result and dispatch-index bytes reuse the
 content-addressed result-content store with explicit per-task provenance
 links. The ledger's write-once terminal resolution records remain Run-owned
 private state under each member Run's root.
+
+TASK-084 advances the current writer to base generation 7 so older writers
+cannot bypass group capture quotas, reserved Run births, Controller group origins
+or result-component bindings. The atomic 6→7 fence preserves the six base tables,
+existing rows, namespace birth ID and orchestration extension 3. Read-only opens
+accept verified generation 6 and 7; writable opens complete the supported upgrade
+before admitting new work. The [delegation runtime](../specs/dolgorae-v014-delegation-runtime.md#task-084-writer-fence-generation-7)
+owns the migration and refusal rules.
+
+`result_component_artifact` binds each terminal complete result to result and
+artifact UUIDv7 identities allocated by the provider for publication.
+The publication transaction stores their immutable bindings in Engagement
+metadata. Retained task outputs, change sides and the original Run Turn remain
+the byte authorities.
+The module generates bounded discovery manifests from the bindings and reads
+components through the existing source readers. Artifact metadata and chunk
+reads apply current aggregate Controller authorization to these exact bindings;
+ordinary Run artifacts keep their existing authority. The execution Run's
+quota lease covers logical component, identity and manifest artifact bytes
+alongside capture charges and existing artifacts. Maintenance preserves bound
+result identities as retained consumers.
 
 The native app-server sender fragments a large outgoing text message into bounded masked frames. Shared senders serialize the complete message, so another text message cannot enter between its continuation frames. Control frames retain their framing and close behavior. Native successor completion derives its success flag from the authenticated pending tool family and preserves the full frozen failure body; the legacy Primary projection keeps its own semantics.
 

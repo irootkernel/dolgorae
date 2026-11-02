@@ -16,6 +16,9 @@ pub(crate) const PUBLIC_LIMIT: usize = 16 * 1024 * 1024;
 pub(crate) const FRAME_LIMIT: usize = PUBLIC_LIMIT + 65_536;
 pub(crate) const MANAGED_TOOL: &str = "dolgorae_specialists";
 pub(crate) const EXTERNAL: &[&str] = &[
+    "assign_group",
+    "await_group",
+    "collect_group",
     "validate_provisioning",
     "install_provisioning",
     "open_external_engagement",
@@ -31,6 +34,9 @@ pub(crate) const EXTERNAL: &[&str] = &[
     "lookup_operation",
 ];
 pub(crate) const MANAGED: &[&str] = &[
+    "assign_group",
+    "await_group",
+    "collect_group",
     "validate_provisioning",
     "install_provisioning",
     "lookup_operation",
@@ -326,14 +332,21 @@ pub(crate) fn external_with_port(
                 };
                 match lookup {
                     crate::engagement::IntentLookup::Accepted(receipt) => {
-                        service::retained_transport_response(
-                            &scope,
-                            &receipt,
-                            request,
-                            &crate::caller_scope::TrustedCallerScope::from_port(
-                                &crate::trusted_host::ConfiguredCallerPort(&owner),
-                            )?,
-                        )?
+                        if operation == "assign_group" {
+                            // Group replay resumes only undispatched original-key
+                            // children from its retained capture, including a
+                            // crash immediately after the group receipt commit.
+                            dispatch(home, &owner, &scope, None, port, request, None)?
+                        } else {
+                            service::retained_transport_response(
+                                &scope,
+                                &receipt,
+                                request,
+                                &crate::caller_scope::TrustedCallerScope::from_port(
+                                    &crate::trusted_host::ConfiguredCallerPort(&owner),
+                                )?,
+                            )?
+                        }
                     }
                     crate::engagement::IntentLookup::NotAccepted {
                         operation_ref,
@@ -557,6 +570,15 @@ pub(crate) fn dispatch(
     )?;
     let key = request["idempotency_key"].as_str().unwrap_or("");
     match operation {
+        "assign_group" => {
+            return service::research_group::assign(scope, managed, &caller, port, request);
+        }
+        "collect_group" => {
+            return service::research_group::collect(scope, managed, port, request);
+        }
+        "await_group" => {
+            return service::research_group::await_group(scope, managed, port, request);
+        }
         "validate_provisioning" => {
             let expected = typed(&request["sources"])?;
             result["candidate"] = serde_json::to_value(
@@ -1161,7 +1183,7 @@ mod tests {
                 assert!(!validates(&extra, &definition));
             }
         }
-        assert_eq!(selected, 20);
+        assert_eq!(selected, 23);
     }
     #[test]
     fn external_actual_scope_and_typed_references_precede_delivery_markers() {

@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/result-component-manifest/v1",
+  "title": "Dolgorae complete-result artifact discovery manifest version 1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/root"
+    },
+    {
+      "$ref": "#/$defs/page"
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "content_ref": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "object",
+          "properties": {
+            "byte_length": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 33554432
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "byte_length",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        "media_type": {
+          "type": "string",
+          "enum": [
+            "text/plain; charset=utf-8",
+            "application/json",
+            "application/octet-stream"
+          ]
+        },
+        "artifact": {
+          "type": "object",
+          "properties": {
+            "artifact_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "kind": {
+              "const": "ARTIFACT_KIND_FINAL_RESPONSE"
+            },
+            "visibility": {
+              "const": "ARTIFACT_VISIBILITY_CONTROLLER_ONLY"
+            }
+          },
+          "required": [
+            "artifact_id",
+            "kind",
+            "visibility"
+          ],
+          "additionalProperties": false
+        },
+        "artifact_owner": {
+          "type": "object",
+          "properties": {
+            "workspace": {
+              "type": "object",
+              "properties": {
+                "absolute_path": {
+                  "type": "string",
+                  "pattern": "^/"
+                },
+                "expected_workspace_id": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "absolute_path",
+                "expected_workspace_id"
+              ],
+              "additionalProperties": false
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            }
+          },
+          "required": [
+            "workspace",
+            "run_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "content",
+        "media_type",
+        "artifact",
+        "artifact_owner"
+      ],
+      "additionalProperties": false
+    },
+    "root": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "dolgorae.result-component-manifest/v1"
+        },
+        "result_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "result_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "identity": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "object",
+              "properties": {
+                "byte_length": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 268435456
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "byte_length",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            "chunks": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "$ref": "#/$defs/content_ref"
+              }
+            }
+          },
+          "required": [
+            "content",
+            "chunks"
+          ],
+          "additionalProperties": false
+        },
+        "component_pages": {
+          "type": "array",
+          "maxItems": 157,
+          "items": {
+            "$ref": "#/$defs/content_ref"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "result_id",
+        "result_digest",
+        "identity",
+        "component_pages"
+      ],
+      "additionalProperties": false
+    },
+    "page": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "dolgorae.result-component-manifest-page/v1"
+        },
+        "result_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "page_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 156
+        },
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "properties": {
+              "selector": {
+                "type": "string",
+                "pattern": "^(final_response|structured_output|change:[0-9]+:(before|after))$"
+              },
+              "content_ref": {
+                "$ref": "#/$defs/content_ref"
+              }
+            },
+            "required": [
+              "selector",
+              "content_ref"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "result_id",
+        "page_index",
+        "components"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

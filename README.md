@@ -200,9 +200,13 @@ Public v2 starts from explicit captured provisioning: workspace, Controller,
 Profile, Markdown Role/configuration, requested access, lane, assurance and key.
 It projects modern Runs directly and retains their original identities during
 replay and lifecycle operations. Negotiate its exact supported method subset;
-activity, interaction and group delivery retain their roadmap owners. Public-v1
-listing returns accepted legacy Runs in mixed workspaces, and its workspace
-Writer status remains readable when a modern Run holds the slot.
+activity and interaction delivery retain their roadmap owners. Its group service
+accepts immutable research assignments, waits for any/all/k terminal tasks and
+collects complete coverage under the aggregate Controller. Sources are captured
+before acknowledgement; recovery uses the original operation key and retained
+bytes. The checked managed and external facades expose the same group owner.
+Public-v1 listing returns accepted legacy Runs in mixed workspaces, and its
+workspace Writer status remains readable when a modern Run holds the slot.
 
 Fixed read-only successor members share a compatible Profile Server, with native
 subagents disabled in its immutable launch. They cannot acquire Write. Dedicated

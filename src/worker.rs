@@ -20979,6 +20979,95 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
         serde_json::json!({"result":{"thread":{"id":"thread-1","parentThreadId":null,"turns":[turn]}}})
     }
 
+    /// One immutable task bundle charges its own artifact identities separately
+    /// from the original Run terminal artifact, including after competing publishers.
+    fn single_result_component_charge(
+        scene: &crate::semantic::successor_review_tests::Scene,
+        task_ref: Uuid,
+    ) -> (u64, serde_json::Value) {
+        let run = scene.manifest().run_id;
+        let store = crate::engagement::EngagementStore::open_read_only(
+            &crate::engagement::EngagementStore::workspace_database_path(scene.state_root()),
+        )
+        .unwrap();
+        let records = crate::engagement::result_component_records(
+            store.connection(),
+            "result-component-bundle:v1:",
+        )
+        .unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "the winning terminal publishes one result bundle"
+        );
+        let bundle: serde_json::Value = serde_json::from_str(&records[0]).unwrap();
+        let result = scene.result(task_ref);
+        assert_eq!(bundle["result"], result);
+        assert_eq!(bundle["run_id"], run.to_string());
+        assert_eq!(bundle["result"]["source"]["task_ref"], task_ref.to_string());
+        assert_eq!(
+            crate::engagement::result_component_records(
+                store.connection(),
+                &format!("result-component-run:v1:{run}:")
+            )
+            .unwrap(),
+            vec![task_ref.to_string()]
+        );
+        let expected_components = ["final_response", "structured_output"]
+            .iter()
+            .filter(|field| result[**field].is_object())
+            .count()
+            + result["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|change| {
+                    ["before", "after"]
+                        .iter()
+                        .filter(|side| change[**side].is_object())
+                        .count()
+                })
+                .sum::<usize>();
+        let components = bundle["components"].as_array().unwrap();
+        assert_eq!(components.len(), expected_components);
+        let mut ids = std::collections::BTreeSet::new();
+        for id in components
+            .iter()
+            .map(|component| &component["artifact_id"])
+            .chain(std::iter::once(&bundle["manifest_id"]))
+            .chain(bundle["identity_ids"].as_array().unwrap())
+            .chain(bundle["page_ids"].as_array().unwrap())
+        {
+            let id = Uuid::parse_str(id.as_str().unwrap()).unwrap();
+            assert_eq!(id.get_version_num(), 7);
+            assert!(
+                ids.insert(id),
+                "each component/discovery artifact has one distinct identity"
+            );
+        }
+        assert_eq!(
+            crate::engagement::result_component_records(
+                store.connection(),
+                "result-component-id:v1:"
+            )
+            .unwrap(),
+            vec![task_ref.to_string(); ids.len()],
+            "losing publishers leave no additional artifact bindings"
+        );
+        if let Some(crate::turn::FinalResponse::Artifact { artifact_id, .. }) =
+            scene.recorded_terminal("turn-1").final_response
+        {
+            assert!(
+                !ids.contains(&artifact_id),
+                "the original terminal artifact and component artifacts have independent identities"
+            );
+        }
+        (
+            crate::result_component_artifact::logical_bytes(scene.state_root(), run).unwrap(),
+            bundle,
+        )
+    }
+
     fn assert_converged_journal(
         fixture: &ReviewDispatchFixture,
         reconciliations: usize,
@@ -22979,9 +23068,28 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
             assert_eq!(scene.stability_facts().0, before.0 + 1);
             let artifacts =
                 crate::run::run_root(scene.state_root(), scene.manifest().run_id).join("artifacts");
+            let (component_charge, bundle) = single_result_component_charge(&scene, task.task_ref);
+            let expected_bytes = text.len() as u64 + component_charge;
             assert_eq!(
                 crate::artifact::logical_artifact_bytes(&artifacts).unwrap(),
-                text.len() as u64
+                expected_bytes
+            );
+            let stable = scene.stability_facts();
+            crate::semantic::converge_successor_history(
+                scene.state_root(),
+                &execution,
+                &history,
+                false,
+            )
+            .unwrap();
+            assert_eq!(scene.stability_facts(), stable);
+            assert_eq!(
+                single_result_component_charge(&scene, task.task_ref),
+                (component_charge, bundle)
+            );
+            assert_eq!(
+                crate::artifact::logical_artifact_bytes(&artifacts).unwrap(),
+                expected_bytes
             );
             assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
             assert_converged_journal(&fixture, 1, 1);
@@ -23578,6 +23686,8 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
                     }
                 );
                 let result = scene.result(task.task_ref);
+                let (component_charge, bundle) =
+                    single_result_component_charge(&scene, task.task_ref);
                 if large {
                     assert!(result["structured_output_schema"].is_null());
                     assert_eq!(result["safe_failure_code"], "FINDINGS_OUTPUT_INVALID");
@@ -23587,7 +23697,7 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
                                 .join("artifacts")
                         )
                         .unwrap(),
-                        text.len() as u64
+                        text.len() as u64 + component_charge
                     );
                 } else {
                     assert_eq!(result["structured_output_schema"], "structured_review_v4");
@@ -23596,6 +23706,10 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
                 let stable = scene.stability_facts();
                 scene.settle(task.task_ref).unwrap();
                 assert_eq!(scene.result(task.task_ref), result);
+                assert_eq!(
+                    single_result_component_charge(&scene, task.task_ref),
+                    (component_charge, bundle)
+                );
                 assert_eq!(scene.stability_facts(), stable);
                 assert_eq!(
                     fixture

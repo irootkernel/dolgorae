@@ -753,3 +753,83 @@ while the database snapshot is actually pinned. Scoped mutation controls need
 separate immutable sources and targets; their artifacts must never enter an
 ordinary verification target. These offline checks do not replace native,
 consumer or complete-candidate qualification.
+
+## Research group admission and recovery
+
+`delegation_service::research_group` owns the group lifecycle shared by checked
+managed/external facades and public-v2 GroupService. Public admission verifies
+the actual aggregate Controller and retains its own origin; it supplies no
+native Turn/tool provenance or Podway caller scope. Native facade assignments
+keep their configured caller accounting and limits.
+
+Generation 7 fences writers that do not account for group captures and result
+component bindings. Preserve the historical 5-to-6 migration's literal target;
+the separate 6-to-7 transaction changes only the writer generation and extension
+marker. Read-only admission accepts retained generation 6 without upgrading it.
+The six base tables, namespace birth and orchestration extension 3 remain intact.
+
+Validate all ordered JCS inputs against installed provisioning before accepting
+the group. The acceptance transaction links chunked captures, actual member Run
+allocations, any required future Run births, quota reservations and the group
+receipt. Keep the `GroupQuotaPlan` locks through that commit and release them
+before starting a member. Artifact publication and group reservation share
+the Run quota lock. A failure or unknown effect retains the reservation.
+
+Group recovery reads retained chunks and uses deterministic original child
+keys to admit undispatched children. Accepted, refused and unresolved children
+remain with their existing owner. Never reopen a selected input
+file or turn an unknown child into a replacement dispatch. Managed and external
+recovery validate the retained Controller-group origin separately from native source
+provenance. Complete results retain exact content identities and their
+publication-time artifact bindings; collection creates no new result identity.
+
+Queued successor expiry prepares its body-free complete result before taking
+the SQLite write transaction. Acquire the real Run's quota lease first, then
+commit publication, terminal state and accounting together. Test both owners at
+normal capacity and the exact 256 MiB boundary, including rollback and repeated
+expiry. At capacity, retain the real result identity without artifact references;
+never repair historical expiry from collection.
+
+Run the focused `research_group`, `group_quota` and `structured_findings`
+Rust filters before the complete repository gate. The accountless native
+50-task harness is a separate opt-in measurement of actual queueing, member
+reuse, server bounds and durable recovery; fixture assertions alone do not
+establish that measurement.
+
+The immutable H1 package pins its Makefile and example validator. Run the added
+manifest and offline harness checks separately:
+
+```sh
+.venv/bin/python -B tools/validators/validate_result_component_manifest.py
+.venv/bin/python -B tests/e2e/test_native_research_group.py
+```
+
+With explicit native runtime authorization, build the instrumented driver in a
+task-owned external `CARGO_TARGET_DIR` and copy it and the ordinary product binary
+to separate frozen paths before starting workers:
+
+```sh
+cargo rustc --locked --example native_research_group -- --cfg test --cfg dolgorae_native_acceptance
+DOLGORAE_RUN_NATIVE_RESEARCH_GROUP=1 .venv/bin/python -B tests/e2e/run_native_research_group.py --driver /absolute/frozen-driver --binary /absolute/frozen-dolgorae --codex /absolute/pinned-codex --pool-limit 1
+```
+
+Run a separate campaign with `--pool-limit 4`. The runner checks the native pin,
+uses an isolated home and accountless loopback responses, preserves original
+unknown coverage before official cleanup reconciliation, and retains failed
+roots. The driver records its selected Profile binding and proves the initial
+durable queues before starting the gateway-owned control-plane runtime. Its
+startup scan then recovers the work committed before those wake hints had a
+receiver. The driver holds normal Responses after the first POST so one pinned
+SQLite read can prove executing and queued tasks together. Profile process
+measurement uses the actual `ready` lifecycle.
+Keep frozen executables until owner-service cleanup and process absence
+are verified. This instrumented source campaign leaves TASK-087's packaged H3
+qualification due.
+
+If the original cleanup reconciliation failed, a separately authorized
+`--recover-original-task ROOT MEMBER TASK` driver call attempts only that recorded
+fault target's original history recovery. It verifies the fixture, accepted
+group, current Controller and unchanged Turn, records one exclusive attempt,
+and writes a separate result. It never resubmits work or overwrites the failed
+cleanup record. A successful terminal result allows ordinary owner cleanup to
+continue while retaining both records; an existing attempt prevents blind retry.

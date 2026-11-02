@@ -519,6 +519,12 @@ A group has an immutable accepted assignment manifest and bounded tasks.
 assign_group, await_group(any/all/k) and collect_group recover by identity and
 include terminal failure and unknown states. Waiting does not cancel execution.
 The scheduler keeps one target Turn; larger groups may queue on bounded members.
+Input captures and any future member births are reserved against the actual
+execution member Run and commit with the group receipt before runtime effects.
+Public Controller groups retain their own accepted origin; they do not invent
+native source calls or a Podway caller scope. Checked native facade groups
+retain their configured caller budget. The mandatory 50-task measurement must
+exercise actual admission, scheduling, collection and original-key recovery.
 
 merge_group_results publishes dolgorae.merged-findings/v1 and makes no model
 call. It groups exact finding keys, removes

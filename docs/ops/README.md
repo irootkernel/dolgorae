@@ -850,3 +850,30 @@ Historical decisions without a public operation identity remain unresolved.
 Observer summaries and push events never carry the request or answer body.
 Machine interaction/detail output and event streams select v6 when they carry
 new v2 content; retained v1 history remains readable without rewriting it.
+
+### Research groups
+
+The current writer upgrades Engagement database generation 6 to 7 atomically
+before accepting work. Read-only access keeps generation 6 unchanged. Retain the
+workspace's accepted namespace and use a current reader for recovery; older
+generation-6 writers refuse generation 7. Downgrade is unsupported.
+
+Select the aggregate's Controller and an immutable ordered group manifest with
+1..64 entries. Supply exactly one workspace-contained regular JCS
+`dolgorae.group-task-input/v1` file per entry, with its complete byte identity.
+Each document names installed provisioning and the rich accepted assignment.
+Symlinks, changed sources and identity mismatches are refused before acceptance.
+
+Retain the accepted group identity and original operation key. Public-v2
+GroupService and checked managed/external facades share retained captures;
+accepted replay still works after the source files are removed. Public
+OperationService lookup recovers the accepted receipt under the same Controller,
+workspace and aggregate. Unknown member effects require the existing owner
+recovery path. Failure alone permits no capture or quota cleanup.
+
+Use any/all/k waits to observe terminal progress. A timeout leaves execution
+active. Collect bounded pages until the next cursor is absent; preserve every
+failed, expired, unknown and missing source with its original identities.
+Read complete result component references under their recorded owner. Group
+completion does not synthesize findings, adjudicate conflicts or create a
+single Podway Action receipt.

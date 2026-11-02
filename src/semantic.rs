@@ -1586,12 +1586,22 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
                 let store = EngagementStore::open_read_only(
                     &EngagementStore::workspace_database_path(request.state_root),
                 )?;
-                store.authorize_external_owner(
-                    &request.view.workspace_id,
-                    engagement_id,
-                    "run.reconcile",
+                if !crate::delegation_service::research_group::authorize_external_recovery(
+                    request.state_root,
+                    request.view,
                     self.carrier,
-                )?;
+                    engagement_id,
+                    request.member_ref,
+                    request.task_ref,
+                    &manifest,
+                )? {
+                    store.authorize_external_owner(
+                        &request.view.workspace_id,
+                        engagement_id,
+                        "run.reconcile",
+                        self.carrier,
+                    )?;
+                }
                 self.carrier
             }
             SettlementOwner::Managed { session_id } => {
@@ -17012,7 +17022,7 @@ fn settle_successor_task_from_turn(
         // The retained change content would exceed the Run's aggregate. The
         // attempt rolled back whole, so this publishes the typed unavailable
         // result instead, with no orphan content rows.
-        Err(error) if error.code == "COMPLETE_RESULT_UNAVAILABLE" && !retained.is_empty() => {
+        Err(error) if error.code == "COMPLETE_RESULT_UNAVAILABLE" => {
             settle_terminal_task(
                 &mut store,
                 &request,
@@ -17565,6 +17575,34 @@ fn settle_complete_result(
                 Err(error) => return Err(error),
             }
         }
+        (bytes, "completed")
+            if accepted.expected_output_schema == crate::structured_findings::SCHEMA =>
+        {
+            match bytes
+                .ok_or_else(|| {
+                    MachineError::new(
+                        "FINDINGS_OUTPUT_INVALID",
+                        "Research output is unavailable",
+                        false,
+                        serde_json::json!({}),
+                    )
+                })
+                .and_then(|bytes| crate::structured_findings::parse(bytes))
+            {
+                Ok(canonical) => {
+                    let reference = crate::delegation_identity::BytesRef::from_bytes(&canonical);
+                    checked_payload = Some(canonical);
+                    (
+                        Some(accepted.expected_output_schema.clone()),
+                        Some(reference),
+                    )
+                }
+                Err(_) => {
+                    findings_invalid = true;
+                    (None, None)
+                }
+            }
+        }
         (Some(bytes), "completed") if accepted.expected_output_schema == "structured_review_v3" => {
             let text = std::str::from_utf8(bytes).ok();
             match crate::specialist::parse_reviewer_output_v3(text, task) {
@@ -17759,6 +17797,42 @@ fn settle_terminal_task(
         }
         CompleteSettlement::Unavailable => None,
     };
+    let publication = complete
+        .as_ref()
+        .map(|result| {
+            crate::result_component_artifact::Publication::prepare(
+                request.view,
+                request.member_ref,
+                result,
+            )
+        })
+        .transpose()?;
+    let artifact_directory = request
+        .state_root
+        .join("runs")
+        .join(request.member_ref.to_string())
+        .join("artifacts");
+    let quota_lease = if let Some(publication) = &publication {
+        match crate::workspace::create_directory(&artifact_directory, 0o700) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(internal("the member artifact directory is unavailable")),
+        }
+        let lease = crate::artifact::ArtifactQuotaLease::acquire_for_run(
+            &artifact_directory,
+            request.member_ref,
+        )?;
+        let used = crate::artifact::logical_artifact_bytes(&artifact_directory)?;
+        if used
+            .checked_add(publication.logical_bytes()?)
+            .is_none_or(|total| total > crate::artifact::MAX_RUN_ARTIFACT_BYTES)
+        {
+            return Err(crate::successor_capture::unavailable_change());
+        }
+        Some(lease)
+    } else {
+        None
+    };
     // The terminal row always carries its published bytes: the complete result,
     // or the typed-unavailable condition. A partial change set is never one.
     let (digest, canonical, _complete_result) = match complete {
@@ -17934,6 +18008,10 @@ fn settle_terminal_task(
                     &request.member_ref.to_string(),
                 )?;
             }
+        }
+        if let Some(publication) = &publication {
+            publication.retain(transaction)?;
+            quota_lease.as_ref().ok_or_else(|| internal("the component quota lease is missing"))?.verify_for(&artifact_directory)?;
         }
         if let Some(reader) = &checked_reader {
             reader.check_acceptance()?;
@@ -19399,6 +19477,196 @@ impl ActorExecutionIdentity {
     }
 }
 
+#[cfg(test)]
+thread_local! {static EXPIRY_PUBLICATION_FAIL:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};}
+#[cfg(test)]
+pub(crate) fn fail_next_queued_expiry_publication() {
+    EXPIRY_PUBLICATION_FAIL.with(|f| f.set(true));
+}
+
+/// Prepare quota outside SQLite, then atomically publish body-free expiry
+/// identities with their terminal transition. Reads never repair old results.
+pub(crate) fn expire_queued_tasks(
+    view: &WorkspaceView,
+    state_root: &Path,
+    actor: crate::scheduler::Actor,
+    now: i64,
+) -> Result<Vec<Uuid>, MachineError> {
+    use crate::scheduler;
+    let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
+    let candidates = scheduler::candidates(store.connection(), actor.owner, actor.run)?;
+    let expired = candidates
+        .iter()
+        .filter(|c| c.kind == "assignment" && c.deadline_ms <= now)
+        .collect::<Vec<_>>();
+    if expired.is_empty() {
+        return store.transact(|tx| scheduler::expire_queued(tx, actor, now));
+    }
+    let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(actor.run)?;
+    if manifest.schema_version != 4 {
+        return store.transact(|tx| scheduler::expire_queued(tx, actor, now));
+    }
+    if manifest.workspace_id != view.workspace_id
+        || manifest.canonical_workspace != view.canonical_path
+        || manifest.workspace_mode != view.mode
+        || manifest.aggregate_binding.as_ref().is_none_or(|binding| {
+            binding.aggregate_id != actor.owner.scope().1
+                || binding.member_kind != crate::run::AggregateMemberKind::Specialist
+                || binding.aggregate_kind
+                    != match actor.owner {
+                        crate::assignment_queue::Owner::External(_) => {
+                            AggregateKind::ExternalSpecialistEngagement
+                        }
+                        crate::assignment_queue::Owner::Managed(_) => {
+                            AggregateKind::OrchestratedSession
+                        }
+                    }
+        })
+    {
+        return Err(scheduler::error("expiry_workspace_changed"));
+    }
+    let mut prepared = std::collections::BTreeMap::new();
+    for candidate in expired {
+        let retained = scheduler::retained_assignment(
+            store.connection(),
+            actor.owner,
+            candidate.id,
+            actor.run,
+            &view.workspace_id,
+            state_root,
+        )?;
+        let accepted = retained.accepted;
+        let result = crate::delegation_identity::CompleteResult {
+            schema: crate::delegation_identity::COMPLETE_RESULT_SCHEMA.into(),
+            source: crate::delegation_identity::ResultSource {
+                scope_kind: actor.owner.scope().0.into(),
+                scope_ref: actor.owner.scope().1.to_string(),
+                worker_ref: actor.run.to_string(),
+                task_ref: candidate.id.to_string(),
+                role_snapshot_digest: accepted.role_snapshot_digest.clone(),
+                agent_configuration_digest: accepted.agent_configuration_digest.clone(),
+                accepted_task_digest: accepted.digest()?,
+            },
+            terminal_outcome: "expired".into(),
+            safe_failure_code: Some("OPERATION_TIMEOUT".into()),
+            final_response: None,
+            structured_output_schema: None,
+            structured_output: None,
+            changes: Vec::new(),
+            attachments: Vec::new(),
+        };
+        result.digest()?;
+        let publication =
+            crate::result_component_artifact::Publication::prepare(view, actor.run, &result)?;
+        let bytes = crate::operation::canonical(
+            &serde_json::to_value(&result)
+                .map_err(|_| scheduler::error("expiry_identity_invalid"))?,
+        )
+        .map_err(|_| scheduler::error("expiry_identity_invalid"))?;
+        let digest = crate::jcs::sha256_hex(&bytes);
+        prepared.insert(candidate.id, (accepted, publication, bytes, digest));
+    }
+    let directory = run_root(state_root, actor.run).join("artifacts");
+    match crate::workspace::create_directory(&directory, 0o700) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(scheduler::error("expiry_artifact_directory_unavailable")),
+    }
+    let _quota = crate::artifact::ArtifactQuotaLease::acquire_for_run(&directory, actor.run)?;
+    let mut available = crate::artifact::MAX_RUN_ARTIFACT_BYTES
+        .saturating_sub(crate::artifact::logical_artifact_bytes(&directory)?);
+    store.transact(|tx| {
+        let current = scheduler::candidates(tx, actor.owner, actor.run)?
+            .into_iter()
+            .filter(|c| c.kind == "assignment" && c.deadline_ms <= now)
+            .collect::<Vec<_>>();
+        if current.iter().any(|c| !prepared.contains_key(&c.id)) {
+            return Err(scheduler::error("expiry_candidates_changed"));
+        }
+        for candidate in current {
+            let (accepted, publication, bytes, digest) = prepared
+                .get(&candidate.id)
+                .ok_or_else(|| scheduler::error("expiry_capture_missing"))?;
+            let fresh = scheduler::retained_assignment(
+                tx,
+                actor.owner,
+                candidate.id,
+                actor.run,
+                &view.workspace_id,
+                state_root,
+            )?;
+            if &fresh.accepted != accepted || fresh.deadline_ms > now {
+                return Err(scheduler::error("expiry_acceptance_changed"));
+            }
+            let size = publication.logical_bytes()?;
+            if size <= available {
+                publication.retain(tx)?;
+                available -= size;
+            } else {
+                publication.retain_identity_only(tx)?;
+            }
+            #[cfg(test)]
+            if EXPIRY_PUBLICATION_FAIL.with(|f| f.replace(false)) {
+                return Err(scheduler::error("fixture_expiry_publication_failure"));
+            }
+            match actor.owner {
+                crate::assignment_queue::Owner::External(engagement_id) => {
+                    let artifact = crate::engagement::retain_task_result(
+                        tx,
+                        engagement_id,
+                        candidate.id,
+                        bytes,
+                        digest,
+                    )?;
+                    if crate::engagement::terminalize_external_task_in(
+                        tx,
+                        crate::engagement::TaskTerminal {
+                            engagement_id,
+                            task_id: candidate.id,
+                            state: "expired",
+                            safe_error_code: Some("OPERATION_TIMEOUT"),
+                            result_sha256: Some(digest),
+                            artifact_id: Some(artifact),
+                            diagnostic_json: None,
+                            now_ms: now,
+                        },
+                    )?
+                    .is_none()
+                    {
+                        return Err(scheduler::error("expiry_task_changed"));
+                    }
+                }
+                crate::assignment_queue::Owner::Managed(session) => {
+                    crate::orchestration::retain_successor_task_result(tx, candidate.id, bytes)?;
+                    crate::orchestration::expire_successor_task_with_result(
+                        tx,
+                        session,
+                        candidate.id,
+                        digest,
+                        now,
+                    )?;
+                }
+            }
+            crate::caller_scope::proved_nondispatch(tx, candidate.id)?;
+            crate::engagement::advance_member_workload_revision(
+                tx,
+                &view.workspace_id,
+                actor.owner.scope().0,
+                &actor.owner.scope().1.to_string(),
+                &actor.run.to_string(),
+            )?;
+            scheduler::event(
+                tx,
+                actor.owner,
+                "scheduler_queued_work_expired",
+                &candidate.id.to_string(),
+                now,
+            )?;
+        }
+        scheduler::expire_queued(tx, actor, now)
+    })
+}
+
 /// Execute one reconstructable scheduling visit. This is an operational
 /// dispatch of already accepted work, never a second admission or model loop.
 pub(crate) fn schedule_actor(
@@ -19447,6 +19715,7 @@ pub(crate) fn schedule_actor(
     let snapshot = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
     let mut store = EngagementStore::open(&EngagementStore::workspace_database_path(state_root))?;
     let now = scheduler::now_ms()?;
+    let expired = expire_queued_tasks(view, state_root, actor, now)?;
     let (idle_since, policy, expired_sources) = store.transact(|tx| {
         scheduler::install(tx)?;
         let policy = scheduler::policy(tx, actor.owner)?;
@@ -19458,7 +19727,7 @@ pub(crate) fn schedule_actor(
             now,
         )?;
         scheduler::reconcile_claim(tx, actor, &snapshot, now, state_root)?;
-        let mut expired_sources = scheduler::expire_queued(tx, actor, now)?;
+        let mut expired_sources = expired;
         if let Some(source) = scheduler::reconcile_consultation_dispatch(tx, actor, now)? {
             expired_sources.push(source);
         }
@@ -20385,7 +20654,7 @@ pub(crate) fn native_scheduler_activation_fixture(
     // Exercise the original deadline counterexample using fixture time. No
     // persisted deadline changes and no activation or dispatch are retried.
     for _ in 0..2 {
-        store.transact(|tx| scheduler::expire_queued(tx, actor, retained.deadline_ms))?;
+        expire_queued_tasks(view, state_root, actor, retained.deadline_ms)?;
     }
     schedule_actor(view, state_root, actor)?;
     let released = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0)?;
@@ -33649,6 +33918,76 @@ pub(crate) mod successor_review_tests {
         }
     }
 
+    #[test]
+    fn research_findings_publish_only_validated_bytes_for_both_owners() {
+        let valid = include_str!("../docs/protocol/examples/v014-identity-findings.valid.json");
+        for managed in [false, true] {
+            for (key, payload, succeeds) in [
+                ("research-valid", valid, true),
+                ("research-invalid", "not JSON", false),
+                (
+                    "research-duplicate",
+                    r#"{"schema":"wrong","schema":"structured_findings_v1","findings":[],"covered_questions":[],"limitations":[]}"#,
+                    false,
+                ),
+            ] {
+                let scene = Scene::new(managed);
+                let mut task = crate::delegation_service::fixture_task();
+                task.expected_output = crate::structured_findings::SCHEMA.to_owned();
+                let accepted = match &scene.member {
+                    Member::External(member) => {
+                        member.accept_checked_task(key, task, "workspace", None)
+                    }
+                    Member::Managed(member) => {
+                        member.0.accept_checked_task(key, task, "workspace", None)
+                    }
+                };
+                assert!(accepted.prompt.contains("structured_findings_v1"));
+                scene.mark_running(accepted.task_ref, "turn-1");
+                scene.publish("turn-1", payload);
+                scene.settle(accepted.task_ref).unwrap();
+                let result = scene.result(accepted.task_ref);
+                if succeeds {
+                    assert_eq!(result["terminal_outcome"], "completed");
+                    assert_eq!(
+                        result["structured_output_schema"],
+                        crate::structured_findings::SCHEMA
+                    );
+                    let canonical = crate::structured_findings::parse(payload.as_bytes()).unwrap();
+                    assert_eq!(
+                        result["structured_output"],
+                        serde_json::to_value(crate::delegation_identity::BytesRef::from_bytes(
+                            &canonical
+                        ))
+                        .unwrap()
+                    );
+                    assert_eq!(
+                        service::original_delegation_response(
+                            scene.state_root(),
+                            &serde_json::from_value(result.clone()).unwrap(),
+                            true
+                        )
+                        .unwrap()
+                        .unwrap(),
+                        canonical
+                    );
+                } else {
+                    assert_eq!(result["terminal_outcome"], "failed");
+                    assert_eq!(result["safe_failure_code"], "FINDINGS_OUTPUT_INVALID");
+                    for field in [
+                        "final_response",
+                        "structured_output",
+                        "structured_output_schema",
+                    ] {
+                        assert!(result[field].is_null());
+                    }
+                }
+                scene.settle(accepted.task_ref).unwrap();
+                assert_eq!(scene.result(accepted.task_ref), result);
+            }
+        }
+    }
+
     enum Member {
         External(Box<SuccessorMember>),
         Managed(
@@ -37942,9 +38281,13 @@ mod managed_write_tests {
                 &scene.member.state_root,
             )
             .unwrap();
-            store
-                .transact(|tx| crate::scheduler::expire_queued(tx, actor, retained.deadline_ms))
-                .unwrap();
+            expire_queued_tasks(
+                &scene.member.view,
+                &scene.member.state_root,
+                actor,
+                retained.deadline_ms,
+            )
+            .unwrap();
             assert!(
                 reconcile_scheduler_writer(
                     &scene.member.view,
@@ -37973,7 +38316,7 @@ mod managed_write_tests {
                 .unwrap()
                 .unwrap()
                 .state,
-                "failed"
+                "expired"
             );
             assert!(worker.calls.lock().unwrap().is_empty());
         }

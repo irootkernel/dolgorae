@@ -138,6 +138,11 @@ impl SpecialistTaskRequest {
                     crate::review_output::output_contract()
                 }
             )
+        } else if self.expected_output == crate::structured_findings::SCHEMA {
+            format!(
+                "\n\nReturn exactly one JSON object matching this complete output schema:\n{}\nPreserve pinned evidence references, covered questions and limitations. Do not return Markdown fences or prose outside JSON. Claims are research findings, not semantic acceptance.",
+                crate::structured_findings::output_contract()
+            )
         } else {
             String::new()
         };

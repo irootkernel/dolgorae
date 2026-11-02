@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- Add checked `structured_findings_v1` and durable research groups with bounded queues, any/all/k waits, complete coverage and immutable result artifacts;
+  preserve per-Run capture quotas and original-key recovery through a generation-7 storage upgrade that blocks older writers.
+
 - Enable durable Specialist collaboration in Caller-workspace Sessions with bounded assignment queues, compatible reuse, activation guards, and source-owned immutable result reads.
   Restart-safe collection and bounded blocking waits preserve execution authority.
 - Select qualified Profile server bindings with `--confirm-server-key` for start

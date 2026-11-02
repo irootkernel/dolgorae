@@ -6336,7 +6336,7 @@ remains authoritative for Dolgorae.
 - [v0.1.4 Observation, Wait and Result Storage Runtime](dolgorae-v014-observation-runtime.md) owns TASK-075 component reuse, bounded waits and explicit result retention.
 - [v0.1.4 Delegation Runtime](dolgorae-v014-delegation-runtime.md) owns TASK-076
   runtime choices the frozen H1 specs leave open: delegation capture and
-  identity with admitted direct-target manifests and task-scoped checked v4 reviews, the delegation namespace and Engagement store generation 6, keyed
+  identity with admitted direct-target manifests and task-scoped checked v4 reviews, the delegation namespace and Engagement store generations 6/7, keyed
   intents and lookup, complete results with the changes producer, round
   accounting, managed successor services and both member release owners.
 

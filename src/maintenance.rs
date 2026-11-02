@@ -2527,6 +2527,11 @@ pub(crate) fn content_delivered(
     connection: &rusqlite::Connection,
     r: &crate::storage_observation::ContentReference,
 ) -> Result<bool, MachineError> {
+    if r.owner_kind == "external_artifact"
+        && crate::result_component_artifact::protects_external_artifact(connection, &r.owner_id)?
+    {
+        return Ok(false);
+    }
     let sql = match r.owner_kind.as_str() {
         "brokered_publication" => {
             "SELECT EXISTS(SELECT 1 FROM brokered_tasks t JOIN brokered_result_publications p ON p.task_id=t.task_id JOIN brokered_delivery_receipts d ON d.task_id=t.task_id WHERE t.task_id=?1 AND t.state='delivered' AND p.state='published')

@@ -17,6 +17,7 @@ use crate::operation::{BytesRef, ENVELOPE_SCHEMA, Envelope, Namespace};
 use crate::provisioning::{ProvisioningCandidate, ProvisioningSources, RetainedSnapshot};
 use crate::run::{AgentConfigurationSnapshot, AggregateBinding, AggregateMemberKind};
 use crate::workspace::WorkspaceView;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -41,6 +42,9 @@ const SPAWN_BODY_SCHEMA: &str = "https://dolgorae.local/schema/external-speciali
 ///
 /// The trusted transport authenticates the Controller binding; every successor
 /// namespace is derived from it, never from caller-supplied identity text.
+#[path = "research_group.rs"]
+pub(crate) mod research_group;
+
 pub struct DelegationScope<'a> {
     pub view: &'a WorkspaceView,
     pub state_root: &'a Path,
@@ -900,7 +904,7 @@ pub fn hire_external_specialist(
 ) -> Result<MemberAdmissionView, MachineError> {
     boundary(
         "hire_external_specialist",
-        hire_external_specialist_in(scope, port, request),
+        hire_external_specialist_in(scope, port, request, None),
     )
 }
 
@@ -908,6 +912,7 @@ fn hire_external_specialist_in(
     scope: &DelegationScope<'_>,
     port: &dyn RunSettlementPort,
     request: HireExternalSpecialist<'_>,
+    group: Option<&research_group::GroupOrigin>,
 ) -> Result<MemberAdmissionView, MachineError> {
     let key = checked_key(request.idempotency_key)?;
     engagement::require_delegation_namespace(scope.state_root)?;
@@ -968,7 +973,7 @@ fn hire_external_specialist_in(
     }
     require_current_member_runtime(snapshot.profile_binding(), "hire_external_specialist")?;
     let operation_ref = Uuid::now_v7();
-    let specialist_run_id = Uuid::now_v7();
+    let specialist_run_id = group.map_or_else(Uuid::now_v7, research_group::GroupOrigin::member);
     let now = now_ms()?;
     let configuration_json = canonical_text(&configuration)?;
     let configuration_sha256 = crate::run::agent_configuration_digest(&configuration)
@@ -1008,6 +1013,9 @@ fn hire_external_specialist_in(
         }
     };
     let admission = match store.transact(|transaction| {
+        if let Some(origin) = group {
+            origin.consume_birth(transaction)?;
+        }
         accept_hire(
             transaction,
             HireAcceptance {
@@ -1236,7 +1244,14 @@ pub(crate) fn assign_external_with_source(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_external_specialist_task",
-        assign_external_specialist_task_in(scope, caller, port, request, Some(source), Some(1)),
+        assign_external_specialist_task_in(
+            scope,
+            AssignmentAccounting::Native(caller),
+            port,
+            request,
+            Some(source),
+            Some(1),
+        ),
     )
 }
 
@@ -1250,7 +1265,15 @@ pub(crate) fn assign_managed_with_source(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_specialist_task",
-        assign_specialist_task_in(scope, context, caller, port, request, Some(source), Some(1)),
+        assign_specialist_task_in(
+            scope,
+            context,
+            AssignmentAccounting::Native(caller),
+            port,
+            request,
+            Some(source),
+            Some(1),
+        ),
     )
 }
 
@@ -1334,7 +1357,14 @@ pub fn assign_external_specialist_task(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_external_specialist_task",
-        assign_external_specialist_task_in(scope, caller, port, request, None, None),
+        assign_external_specialist_task_in(
+            scope,
+            AssignmentAccounting::Native(caller),
+            port,
+            request,
+            None,
+            None,
+        ),
     )
 }
 
@@ -1351,13 +1381,20 @@ pub(crate) fn queue_external_specialist_task(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_external_specialist_task",
-        assign_external_specialist_task_in(scope, caller, port, request, None, Some(priority)),
+        assign_external_specialist_task_in(
+            scope,
+            AssignmentAccounting::Native(caller),
+            port,
+            request,
+            None,
+            Some(priority),
+        ),
     )
 }
 
 fn assign_external_specialist_task_in(
     scope: &DelegationScope<'_>,
-    caller: &crate::caller_scope::TrustedCallerScope,
+    caller: AssignmentAccounting<'_>,
     port: &dyn RunSettlementPort,
     request: AssignExternalSpecialistTask<'_>,
     source: Option<&dyn AssignmentSource>,
@@ -1398,7 +1435,7 @@ fn assign_external_specialist_task_in(
         request.deadline_seconds,
         key,
     )? {
-        verify_replay_scope(&store, &receipt, caller)?;
+        caller.verify_replay(&store, &receipt)?;
         return accepted_boundary(
             "assign_external_specialist_task",
             Some(replay_operation_ref(&receipt)),
@@ -1471,7 +1508,7 @@ fn assign_external_specialist_task_in(
         &identity.digest,
         "assign_external_specialist_task",
     )? {
-        verify_replay_scope(&store, &receipt, caller)?;
+        caller.verify_replay(&store, &receipt)?;
         return accepted_boundary(
             "assign_external_specialist_task",
             Some(replay_operation_ref(&receipt)),
@@ -1501,7 +1538,7 @@ fn assign_external_specialist_task_in(
             return accepted_boundary(
                 "assign_external_specialist_task",
                 Some(replay_operation_ref(&receipt)),
-                replay_observation(&store, &receipt, caller),
+                caller.replay_observation(&store, &receipt),
             );
         }
         IntentPreparation::Unresolved { operation_ref } => {
@@ -1895,7 +1932,20 @@ pub(crate) fn retained_managed_recovery(
         )
         .map_err(|_| refused())?;
     checked_key(&key).map_err(|_| refused())?;
-    checked_provenance(&source_turn, &source_call).map_err(|_| refused())?;
+    let marker: Value = serde_json::from_str(&facts.request_json).map_err(|_| refused())?;
+    if marker["controller_group_origin"].is_object() {
+        if !source_turn.is_empty() || !source_call.is_empty() {
+            return Err(refused());
+        }
+        research_group::validate_managed_origin(
+            &transaction,
+            &marker["controller_group_origin"],
+            member_ref,
+            session_id,
+        )?;
+    } else {
+        checked_provenance(&source_turn, &source_call).map_err(|_| refused())?;
+    }
     if source_run != session.root_run_id.to_string()
         || internal_key != format!("successor:{operation}")
     {
@@ -1925,7 +1975,6 @@ pub(crate) fn retained_managed_recovery(
         return Err(refused());
     }
     let accepted = crate::successor_capture::retained_accepted_task(&facts.accepted_request_json)?;
-    let marker: Value = serde_json::from_str(&facts.request_json).map_err(|_| refused())?;
     let deadline = marker["deadline_seconds"]
         .as_u64()
         .filter(|n| (1..=MAX_ASSIGN_DEADLINE_SECONDS).contains(n))
@@ -2472,7 +2521,7 @@ pub fn spawn_specialist(
 ) -> Result<MemberAdmissionView, MachineError> {
     boundary(
         "spawn_specialist",
-        spawn_specialist_in(scope, caller, port, request),
+        spawn_specialist_in(scope, caller, port, request, None),
     )
 }
 
@@ -2481,9 +2530,18 @@ fn spawn_specialist_in(
     caller: &ManagedCallContext<'_>,
     port: &dyn RunSettlementPort,
     request: SpawnSpecialist<'_>,
+    group: Option<&research_group::GroupOrigin>,
 ) -> Result<MemberAdmissionView, MachineError> {
     let key = checked_key(caller.idempotency_key)?;
-    checked_provenance(caller.source_turn_id, caller.source_tool_call_id)?;
+    if let Some(origin) = group {
+        origin.verify(open_store(scope)?.connection())?;
+    }
+    if !caller.source_turn_id.is_empty()
+        || !caller.source_tool_call_id.is_empty()
+        || group.is_none()
+    {
+        checked_provenance(caller.source_turn_id, caller.source_tool_call_id)?;
+    }
     engagement::require_delegation_namespace(scope.state_root)?;
     // The writable extension opener validates the orchestration generation
     // before this call writes anything (RPC:508-517).
@@ -2542,7 +2600,7 @@ fn spawn_specialist_in(
     }
     require_current_member_runtime(snapshot.profile_binding(), "spawn_specialist")?;
     let operation_ref = Uuid::now_v7();
-    let member_run_id = Uuid::now_v7();
+    let member_run_id = group.map_or_else(Uuid::now_v7, research_group::GroupOrigin::member);
     let now = now_ms()?;
     let configuration_json = canonical_text(&configuration)?;
     let configuration_sha256 = crate::run::agent_configuration_digest(&configuration)
@@ -2603,13 +2661,19 @@ fn spawn_specialist_in(
             &crate::operation::canonical(&body)
                 .map_err(|_| MachineError::invalid_argument("request_body", "unrepresentable"))?,
         );
-        let marker = successor_spawn_payload(&SuccessorSpawnMarker {
+        let mut marker = successor_spawn_payload(&SuccessorSpawnMarker {
             operation_ref,
             provisioning_ref: request.provisioning_ref,
             role_ref: request.role_ref,
             agent_configuration_digest: request.agent_configuration_digest,
             requested_access: snapshot.admitted.requested_access.as_str(),
         });
+        if let Some(origin) = group {
+            marker["group_birth_reservation"] = origin.value();
+            if caller.source_turn_id.is_empty() && caller.source_tool_call_id.is_empty() {
+                marker["controller_group_origin"] = origin.value();
+            }
+        }
         let marker_json = canonical_text(&marker)?;
         let controller_binding_json = canonical_text(&credential.binding)?;
         Ok((
@@ -2659,6 +2723,9 @@ fn spawn_specialist_in(
                 "REVISION_CONFLICT",
                 "the session membership revision moved",
             ));
+        }
+        if let Some(origin) = group {
+            origin.consume_birth(transaction)?;
         }
         crate::orchestration::admit_successor_spawn(
             transaction,
@@ -2869,7 +2936,15 @@ pub fn assign_specialist_task(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_specialist_task",
-        assign_specialist_task_in(scope, context, caller, port, request, None, None),
+        assign_specialist_task_in(
+            scope,
+            context,
+            AssignmentAccounting::Native(caller),
+            port,
+            request,
+            None,
+            None,
+        ),
     )
 }
 
@@ -2886,21 +2961,34 @@ pub(crate) fn queue_specialist_task(
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     boundary(
         "assign_specialist_task",
-        assign_specialist_task_in(scope, context, caller, port, request, None, Some(priority)),
+        assign_specialist_task_in(
+            scope,
+            context,
+            AssignmentAccounting::Native(caller),
+            port,
+            request,
+            None,
+            Some(priority),
+        ),
     )
 }
 
 fn assign_specialist_task_in(
     scope: &DelegationScope<'_>,
     context: &ManagedCallContext<'_>,
-    caller: &crate::caller_scope::TrustedCallerScope,
+    caller: AssignmentAccounting<'_>,
     port: &dyn RunSettlementPort,
     request: AssignSpecialistTask<'_>,
     source: Option<&dyn AssignmentSource>,
     queued_priority: Option<u8>,
 ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
     let key = checked_key(context.idempotency_key)?;
-    checked_provenance(context.source_turn_id, context.source_tool_call_id)?;
+    match caller {
+        AssignmentAccounting::Native(_) => {
+            checked_provenance(context.source_turn_id, context.source_tool_call_id)?
+        }
+        AssignmentAccounting::Group(origin) => origin.verify(open_store(scope)?.connection())?,
+    }
     if !(1..=MAX_ASSIGN_DEADLINE_SECONDS).contains(&request.deadline_seconds) {
         return Err(MachineError::invalid_argument(
             "deadline_seconds",
@@ -2932,7 +3020,7 @@ fn assign_specialist_task_in(
         request.deadline_seconds,
         key,
     )? {
-        verify_replay_scope(&store, &receipt, caller)?;
+        caller.verify_replay(&store, &receipt)?;
         return accepted_boundary(
             "assign_specialist_task",
             Some(replay_operation_ref(&receipt)),
@@ -3022,7 +3110,7 @@ fn assign_specialist_task_in(
         &identity.digest,
         "assign_specialist_task",
     )? {
-        verify_replay_scope(&store, &receipt, caller)?;
+        caller.verify_replay(&store, &receipt)?;
         return accepted_boundary(
             "assign_specialist_task",
             Some(replay_operation_ref(&receipt)),
@@ -3031,7 +3119,7 @@ fn assign_specialist_task_in(
     }
     // A replay answers before any new-admission fence (MDC:66-68), so the budget
     // and the revision fence decide only a new admission.
-    require_assignment_budget(&store, caller, "assign_specialist_task")?;
+    caller.require_budget(&store, "assign_specialist_task")?;
     let operation_ref = Uuid::now_v7();
     let task_id = Uuid::now_v7();
     let now = now_ms()?;
@@ -3041,13 +3129,16 @@ fn assign_specialist_task_in(
     );
     let accepted_json = canonical_text(&accepted)?;
     let accepted_sha256 = sha256_hex(accepted_json.as_bytes());
-    let marker = successor_task_payload(&SuccessorTaskMarker {
+    let mut marker = successor_task_payload(&SuccessorTaskMarker {
         operation_ref,
         member_ref: request.member_ref,
         accepted_task_digest: &accepted_task_digest,
         execution_intent: request.execution_intent,
         deadline_seconds: request.deadline_seconds,
     });
+    if let AssignmentAccounting::Group(origin) = caller {
+        marker["controller_group_origin"] = origin.value();
+    }
     let marker_json = canonical_text(&marker)?;
     let internal_key = successor_internal_key(operation_ref);
     let preparation = store.transact(|transaction| {
@@ -3073,7 +3164,7 @@ fn assign_specialist_task_in(
     let operation_ref = match preparation {
         IntentPreparation::Created => operation_ref,
         IntentPreparation::Accepted(receipt) => {
-            verify_replay_scope(&store, &receipt, caller)?;
+            caller.verify_replay(&store, &receipt)?;
             return accepted_boundary(
                 "assign_specialist_task",
                 Some(replay_operation_ref(&receipt)),
@@ -3167,7 +3258,7 @@ fn assign_specialist_task_in(
             contents.target.as_deref(),
             now,
         )?;
-        if let Err(error) = crate::caller_scope::admit(
+        if let Err(error) = caller.admit(
             transaction,
             &crate::caller_scope::CallerAssignment {
                 assignment_id: task_id,
@@ -3176,7 +3267,6 @@ fn assign_specialist_task_in(
                 aggregate_scope_ref: &scope_ref,
                 member_ref: request.member_ref,
             },
-            caller,
             now,
         ) {
             if definitive_managed_refusal(&error.code) {
@@ -4626,7 +4716,7 @@ fn verify_result_source(
     operation_kind: &str,
 ) -> Result<(), MachineError> {
     let expected_outcome = match task_state {
-        "completed_not_delivered" | "completed" => "completed",
+        "completed_not_delivered" | "completed" | "delivered" => "completed",
         "failed" => "failed",
         "cancelled" => "cancelled",
         "expired" => "expired",
@@ -4672,7 +4762,7 @@ fn complete_result_unavailable(operation_kind: &str) -> MachineError {
 }
 
 /// The committed complete result of one task, validated against its digest.
-fn complete_result_of(
+pub(crate) fn complete_result_of(
     store: &EngagementStore,
     owner: SettlementOwner,
     member_ref: Uuid,
@@ -5549,9 +5639,56 @@ fn build_receipt(
     Ok(receipt)
 }
 
+/// Native Podway accounting and standalone group authority are disjoint.
+#[derive(Clone, Copy)]
+enum AssignmentAccounting<'a> {
+    Native(&'a crate::caller_scope::TrustedCallerScope),
+    Group(&'a research_group::GroupOrigin),
+}
+impl AssignmentAccounting<'_> {
+    fn require_budget(self, store: &EngagementStore, operation: &str) -> Result<(), MachineError> {
+        match self {
+            Self::Native(caller) => require_assignment_budget(store, caller, operation),
+            Self::Group(origin) => origin.verify(store.connection()),
+        }
+    }
+    fn verify_replay(
+        self,
+        store: &EngagementStore,
+        receipt: &OperationReceipt,
+    ) -> Result<(), MachineError> {
+        match self {
+            Self::Native(caller) => verify_replay_scope(store, receipt, caller),
+            Self::Group(origin) => origin.verify_assignment(store.connection(), receipt),
+        }
+    }
+    fn replay_observation(
+        self,
+        store: &EngagementStore,
+        receipt: &OperationReceipt,
+    ) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+        if let Self::Native(caller) = self {
+            return replay_observation(store, receipt, caller);
+        }
+        self.verify_replay(store, receipt)?;
+        assigned_observation(store, receipt)
+    }
+    fn admit(
+        self,
+        connection: &Connection,
+        assignment: &crate::caller_scope::CallerAssignment<'_>,
+        now: i64,
+    ) -> Result<(), MachineError> {
+        match self {
+            Self::Native(caller) => crate::caller_scope::admit(connection, assignment, caller, now),
+            Self::Group(origin) => origin.admit_assignment(connection, assignment),
+        }
+    }
+}
+
 /// One assignment acceptance inside its own transaction.
 struct AssignAcceptance<'a> {
-    caller: &'a crate::caller_scope::TrustedCallerScope,
+    caller: AssignmentAccounting<'a>,
     engagement_id: Uuid,
     member_ref: Uuid,
     task_id: Uuid,
@@ -5715,7 +5852,7 @@ pub(crate) fn seed_retained_checked_assignment(
             expected_revision: None, now_ms: now })?;
         match owner {
             SettlementOwner::External { engagement_id } => {
-                accept_assign(tx, AssignAcceptance { caller: &caller, engagement_id, member_ref: member,
+                accept_assign(tx, AssignAcceptance { caller: AssignmentAccounting::Native(&caller), engagement_id, member_ref: member,
                     task_id: task_ref, namespace: &identity.namespace, accepted_input_digest: &identity.digest,
                     expected_revision: None, objective_sha256: &digest,
                     external_request_json: &json!({"provisioning_ref":null,"accepted_task_digest":digest,"deadline_seconds":600}),
@@ -5834,7 +5971,7 @@ fn accept_assign_in_mode(
         request.accepted_contents.target.as_deref(),
         request.now_ms,
     )?;
-    if let Err(error) = crate::caller_scope::admit(
+    if let Err(error) = request.caller.admit(
         transaction,
         &crate::caller_scope::CallerAssignment {
             assignment_id: request.task_id,
@@ -5843,7 +5980,6 @@ fn accept_assign_in_mode(
             aggregate_scope_ref: &scope_ref,
             member_ref: request.member_ref,
         },
-        request.caller,
         request.now_ms,
     ) {
         if definitive_accounting_refusal(&error.code) {
@@ -9904,6 +10040,43 @@ pub(crate) mod tests {
                 .unwrap();
         }
 
+        fn publish_external_member_manifest(
+            &self,
+            engagement: Uuid,
+            member: Uuid,
+        ) -> crate::run::RunManifest {
+            let candidate = self.install();
+            let snapshot = crate::provisioning::retained_snapshot(
+                &self.state_root,
+                &candidate.provisioning_ref,
+            )
+            .unwrap();
+            let connection = rusqlite::Connection::open(self.database()).unwrap();
+            let operation:String=connection.query_row("SELECT hire_operation_id FROM members WHERE engagement_id=?1 AND specialist_run_id=?2",rusqlite::params![engagement.to_string(),member.to_string()],|row|row.get(0)).unwrap();
+            let mut manifest = member_manifest(
+                &self.view,
+                &self.controller,
+                member,
+                engagement,
+                Uuid::parse_str(&operation).unwrap(),
+                &snapshot,
+            );
+            manifest.parent_ref.as_mut().unwrap().namespace =
+                "dolgorae.external-specialist-engagement.v1".into();
+            manifest.aggregate_binding.as_mut().unwrap().aggregate_kind =
+                crate::domain::AggregateKind::ExternalSpecialistEngagement;
+            fs::create_dir_all(self.state_root.join("runs")).unwrap();
+            fs::set_permissions(
+                self.state_root.join("runs"),
+                fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &self.state_root)
+                .publish(&manifest)
+                .unwrap();
+            manifest
+        }
+
         /// Seed one legacy Broker spawn row for the same Session and key.
         fn seed_legacy_broker_key(&self, session_id: Uuid, key: &str) -> Uuid {
             let operation_id = Uuid::now_v7();
@@ -10484,7 +10657,7 @@ pub(crate) mod tests {
         let original_receipt = store.transact(|tx| {
             engagement::intent_prepare(tx,IntentAdmission {operation_ref:task_operation,namespace:&task_identity.lookup,
                 mutation_envelope_json:&task_identity.json,mutation_envelope_digest:&task_identity.digest, trusted_invocation: task_identity.trusted_invocation.as_ref(),expected_revision:None,now_ms:now})?;
-            accept_assign(tx,AssignAcceptance {caller:&caller,engagement_id:engagement,member_ref:member,task_id:task_ref,
+            accept_assign(tx,AssignAcceptance {caller:AssignmentAccounting::Native(&caller),engagement_id:engagement,member_ref:member,task_id:task_ref,
                 namespace:&task_identity.namespace,accepted_input_digest:&task_identity.digest,expected_revision:None,
                 objective_sha256:&task_digest,external_request_json:&json!({"provisioning_ref":null,"accepted_task_digest":task_digest,"deadline_seconds":600}),
                 request_json:&canonical_text(&task)?,accepted_contents:&contents,request_sha256:&task_identity.digest,
@@ -18928,7 +19101,7 @@ pub(crate) mod tests {
 
     #[test]
     fn scheduler_expires_original_assignment_deadlines_once_without_dispatch() {
-        for managed in [false, true] {
+        for (managed, full_quota) in [(false, false), (true, false), (false, true), (true, true)] {
             let fixture = Fixture::new();
             let port = FakePort::new();
             let (scope, member, owner) = if managed {
@@ -18982,7 +19155,35 @@ pub(crate) mod tests {
                 .unwrap();
             let later = receipts[1].accepted_subjects.task_ref.as_ref().unwrap();
             let actor = crate::scheduler::Actor { owner, run: member };
-            let mut store = EngagementStore::open(&fixture.database()).unwrap();
+            if managed {
+                fixture.publish_member_manifest(scope, member);
+            } else {
+                fixture.publish_external_member_manifest(scope, member);
+            }
+            let directory = fixture
+                .state_root
+                .join("runs")
+                .join(member.to_string())
+                .join("artifacts");
+            fs::create_dir_all(&directory).unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+            if full_quota {
+                use std::os::unix::fs::OpenOptionsExt;
+                for _ in 0..8 {
+                    let file = fs::OpenOptions::new()
+                        .create_new(true)
+                        .write(true)
+                        .mode(0o600)
+                        .open(directory.join(format!("{}.bin", Uuid::now_v7())))
+                        .unwrap();
+                    file.set_len(32 * 1024 * 1024).unwrap();
+                }
+                assert_eq!(
+                    crate::artifact::logical_artifact_bytes(&directory).unwrap(),
+                    crate::artifact::MAX_RUN_ARTIFACT_BYTES
+                );
+            }
+            let store = EngagementStore::open(&fixture.database()).unwrap();
             let deadline: i64 = store
                 .connection()
                 .query_row(
@@ -18991,20 +19192,73 @@ pub(crate) mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            store
-                .transact(|tx| crate::scheduler::expire_queued(tx, actor, deadline - 1))
-                .unwrap();
+            crate::semantic::expire_queued_tasks(
+                &fixture.view,
+                &fixture.state_root,
+                actor,
+                deadline - 1,
+            )
+            .unwrap();
             assert_eq!(
                 crate::scheduler::candidates(store.connection(), owner, member)
                     .unwrap()
                     .len(),
                 2
             );
-            for _ in 0..2 {
-                store
-                    .transact(|tx| crate::scheduler::expire_queued(tx, actor, deadline))
-                    .unwrap();
-            }
+            crate::semantic::fail_next_queued_expiry_publication();
+            assert!(
+                crate::semantic::expire_queued_tasks(
+                    &fixture.view,
+                    &fixture.state_root,
+                    actor,
+                    deadline
+                )
+                .is_err()
+            );
+            assert_eq!(
+                crate::scheduler::candidates(store.connection(), owner, member)
+                    .unwrap()
+                    .len(),
+                2,
+                "failed publication rolls back the terminal transition"
+            );
+            assert!(
+                crate::engagement::result_component_records(
+                    store.connection(),
+                    "result-component-"
+                )
+                .unwrap()
+                .is_empty(),
+                "binding rollback leaves no result or artifact identities"
+            );
+            crate::semantic::expire_queued_tasks(
+                &fixture.view,
+                &fixture.state_root,
+                actor,
+                deadline,
+            )
+            .unwrap();
+            let records = crate::engagement::result_component_records(
+                store.connection(),
+                "result-component-",
+            )
+            .unwrap();
+            crate::semantic::expire_queued_tasks(
+                &fixture.view,
+                &fixture.state_root,
+                actor,
+                deadline,
+            )
+            .unwrap();
+            assert_eq!(
+                crate::engagement::result_component_records(
+                    store.connection(),
+                    "result-component-"
+                )
+                .unwrap(),
+                records,
+                "expiry replay preserves every original result/artifact identity"
+            );
             let query = if managed {
                 "SELECT state,safe_error_code,target_turn_id FROM brokered_tasks WHERE task_id=?1"
             } else {
@@ -19016,14 +19270,61 @@ pub(crate) mod tests {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?))
                 })
                 .unwrap();
-            assert_eq!(
-                state,
-                (
-                    if managed { "failed" } else { "expired" }.into(),
-                    "OPERATION_TIMEOUT".into(),
-                    None
+            assert_eq!(state, ("expired".into(), "OPERATION_TIMEOUT".into(), None));
+            let (_, _, identity) = complete_result_of(
+                &store,
+                if managed {
+                    SettlementOwner::Managed { session_id: scope }
+                } else {
+                    SettlementOwner::External {
+                        engagement_id: scope,
+                    }
+                },
+                member,
+                task,
+                &crate::scheduler::retained_assignment(
+                    store.connection(),
+                    owner,
+                    task,
+                    member,
+                    &fixture.view.workspace_id,
+                    &fixture.state_root,
                 )
+                .unwrap()
+                .accepted
+                .digest()
+                .unwrap(),
+                "expired",
+                "collect_group",
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(identity.terminal_outcome, "expired");
+            let public = crate::result_component_artifact::public_result(
+                &fixture.state_root,
+                &fixture.view,
+                &identity,
+            )
+            .unwrap();
+            assert_eq!(
+                Uuid::parse_str(public["result_id"].as_str().unwrap())
+                    .unwrap()
+                    .get_version_num(),
+                7
             );
+            assert_eq!(public["identity"]["safe_failure_code"], "OPERATION_TIMEOUT");
+            assert_eq!(public["final_response"], Value::Null);
+            assert_eq!(public["source_manifest"].is_null(), full_quota);
+            if full_quota {
+                assert_eq!(
+                    public["discovery_unavailable_reason"],
+                    "artifact_capacity_exceeded"
+                );
+                assert_eq!(
+                    crate::artifact::logical_artifact_bytes(&directory).unwrap(),
+                    crate::artifact::MAX_RUN_ARTIFACT_BYTES
+                );
+            }
             assert_eq!(store.connection().query_row("SELECT accounting_state FROM caller_scope_assignments WHERE assignment_id=?1",[task.to_string()],|r|r.get::<_,String>(0)).unwrap(),"proved_nondispatch");
             assert_eq!(
                 store
@@ -21797,6 +22098,755 @@ pub(crate) mod tests {
             )
             .unwrap(),
             0
+        );
+    }
+    #[test]
+    fn research_group_public_managed_origin_replay_and_observation_require_real_controller() {
+        let mut f = Fixture::new();
+        let home = DolgoraeHome::from_canonical_home(f.root.clone()).unwrap();
+        let state = home.workspace_root(&f.view.workspace_id);
+        fs::create_dir_all(state.parent().unwrap()).unwrap();
+        fs::set_permissions(state.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::rename(&f.state_root, &state).unwrap();
+        f.state_root = state;
+        f.initialize_writer_authority();
+        let credential_path = f.root.join("group-controller.json");
+        let created = crate::controller::create_controller_credential(
+            &credential_path,
+            ControllerKind::Automation,
+            "group-test".into(),
+            Some("owner".into()),
+            None,
+        )
+        .unwrap();
+        let carrier = crate::controller::CredentialCarrier::open_path(&credential_path).unwrap();
+        f.controller =
+            crate::controller::binding_from_credential(&created.credential, 1, &carrier).unwrap();
+        let session = f.managed_session();
+        let installed = f.install();
+        let snapshot =
+            crate::provisioning::retained_snapshot(&f.state_root, &installed.provisioning_ref)
+                .unwrap();
+        let (_, configuration) = snapshot.admitted_configuration().unwrap();
+        let root = f.view.canonical_path.to_path_buf().unwrap();
+        let mut entries = Vec::new();
+        let mut inputs = Vec::new();
+        for index in 0..2 {
+            let mut task = fixture_task();
+            task.brief = format!("Research managed question {index}");
+            let (accepted, _) = crate::successor_capture::capture_facade_task(
+                &configuration,
+                &task,
+                "read_only",
+                None,
+            )
+            .unwrap();
+            let body = json!({"schema":"dolgorae.group-task-input/v1","provisioning_ref":installed.provisioning_ref,"assignment":{"task_body":task,"accepted_task_identity":accepted,"deadline_seconds":30}});
+            let bytes = crate::operation::canonical(&body).unwrap();
+            let path = root.join(format!("managed-input-{index}.json"));
+            fs::write(&path, &bytes).unwrap();
+            entries.push(json!({"entry_key":format!("entry-{index}"),"role_snapshot_digest":installed.role_snapshot_digest,"agent_configuration_digest":installed.agent_configuration_digest,"accepted_task_digest":accepted.digest().unwrap()}));
+            inputs.push(json!({"entry_key":format!("entry-{index}"),"absolute_file_path":path,"content":crate::delegation_identity::BytesRef::from_bytes(&bytes)}));
+        }
+        let request = json!({"schema":"dolgorae.external-specialist-request/v5","operation":"assign_group","scope_kind":"orchestrated_session","scope_ref":session,"idempotency_key":"public-group","expected_revision":null,"manifest":{"schema":"dolgorae.group-assignment/v1","scope_kind":"orchestrated_session","scope_ref":session,"entries":entries},"inputs":inputs});
+        let port = FakePort::new();
+        let assigned = research_group::public_call(
+            &home,
+            &f.view,
+            &carrier,
+            Some(session),
+            "orchestrated_session",
+            session,
+            "assign_group",
+            Some("public-group"),
+            None,
+            &request,
+            &port,
+        )
+        .unwrap();
+        assert_eq!(assigned["exact_replay"], false);
+        assert_eq!(port.starts.borrow().len(), 1);
+        assert_eq!(
+            f.assignment_rows(),
+            0,
+            "standalone group creates no Podway caller scope or round"
+        );
+        let group = assigned["response"]["group_ref"].as_str().unwrap();
+        let lookup = research_group::public_lookup(
+            &f.state_root,
+            &f.view.workspace_id,
+            &carrier,
+            "orchestrated_session",
+            session,
+            "assign_group",
+            "public-group",
+        )
+        .unwrap();
+        assert_eq!(lookup["state"], "accepted");
+        let store = EngagementStore::open_read_only(&f.database()).unwrap();
+        let tasks:Vec<(String,String,String,String)>=store.connection().prepare("SELECT task_id,target_run_id,source_turn_id,source_tool_call_id FROM brokered_tasks ORDER BY task_id").unwrap().query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert!(
+            tasks
+                .iter()
+                .all(|(_, _, turn, call)| turn.is_empty() && call.is_empty()),
+            "public origin records actual absence of native calls"
+        );
+        drop(store);
+        for (task, member, _, _) in &tasks {
+            retained_managed_recovery(
+                &f.scope(),
+                session,
+                Uuid::parse_str(member).unwrap(),
+                Uuid::parse_str(task).unwrap(),
+            )
+            .unwrap();
+        }
+        for index in 0..2 {
+            fs::remove_file(root.join(format!("managed-input-{index}.json"))).unwrap();
+        }
+        let replay = research_group::public_call(
+            &home,
+            &f.view,
+            &carrier,
+            Some(session),
+            "orchestrated_session",
+            session,
+            "assign_group",
+            Some("public-group"),
+            None,
+            &request,
+            &port,
+        )
+        .unwrap();
+        assert_eq!(replay["exact_replay"], true);
+        assert_eq!(
+            replay["response"]["receipt"],
+            assigned["response"]["receipt"]
+        );
+        assert_eq!(port.starts.borrow().len(), 1);
+        let mut read = json!({"operation":"collect_group","scope_kind":"orchestrated_session","scope_ref":session,"group_ref":group,"cursor":null,"limit":1});
+        let page = research_group::public_call(
+            &home,
+            &f.view,
+            &carrier,
+            Some(session),
+            "orchestrated_session",
+            session,
+            "collect_group",
+            None,
+            None,
+            &read,
+            &port,
+        )
+        .unwrap();
+        assert_eq!(
+            page["response"]["coverage"]["sources"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        read["cursor"] = page["response"]["coverage"]["next_cursor"].clone();
+        let last = research_group::public_call(
+            &home,
+            &f.view,
+            &carrier,
+            Some(session),
+            "orchestrated_session",
+            session,
+            "collect_group",
+            None,
+            None,
+            &read,
+            &port,
+        )
+        .unwrap();
+        assert!(last["response"]["coverage"]["next_cursor"].is_null());
+        let wait = json!({"operation":"await_group","scope_kind":"orchestrated_session","scope_ref":session,"group_ref":group,"predicate":{"kind":"k","k":2},"timeout_ms":0});
+        let waited = research_group::public_call(
+            &home,
+            &f.view,
+            &carrier,
+            Some(session),
+            "orchestrated_session",
+            session,
+            "await_group",
+            None,
+            None,
+            &wait,
+            &port,
+        )
+        .unwrap();
+        assert_eq!(waited["response"]["predicate_satisfied"], false);
+        assert_eq!(waited["response"]["wait_timed_out"], true);
+        assert_eq!(
+            port.dispatched.borrow().len(),
+            0,
+            "all R methods preserve queued work"
+        );
+        let other_path = f.root.join("foreign-controller.json");
+        crate::controller::create_controller_credential(
+            &other_path,
+            ControllerKind::Automation,
+            "foreign".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        let foreign = crate::controller::CredentialCarrier::open_path(&other_path).unwrap();
+        assert!(
+            research_group::public_lookup(
+                &f.state_root,
+                &f.view.workspace_id,
+                &foreign,
+                "orchestrated_session",
+                session,
+                "assign_group",
+                "public-group"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn research_group_external_recovery_checks_retained_origin_and_current_controller() {
+        let mut f = Fixture::new();
+        let home = DolgoraeHome::from_canonical_home(f.root.clone()).unwrap();
+        let state = home.workspace_root(&f.view.workspace_id);
+        fs::create_dir_all(state.parent().unwrap()).unwrap();
+        fs::set_permissions(state.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::rename(&f.state_root, &state).unwrap();
+        f.state_root = state;
+        f.initialize_writer_authority();
+        let credential = f.root.join("recovery-controller.json");
+        let created = crate::controller::create_controller_credential(
+            &credential,
+            ControllerKind::Automation,
+            "recovery-owner".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        let carrier = crate::controller::CredentialCarrier::open_path(&credential).unwrap();
+        f.controller =
+            crate::controller::binding_from_credential(&created.credential, 1, &carrier).unwrap();
+        f.set_up_namespace();
+        let engagement = f.open();
+        let installed = f.install();
+        let snapshot =
+            crate::provisioning::retained_snapshot(&f.state_root, &installed.provisioning_ref)
+                .unwrap();
+        let (_, configuration) = snapshot.admitted_configuration().unwrap();
+        let task = fixture_task();
+        let (accepted, _) =
+            crate::successor_capture::capture_facade_task(&configuration, &task, "read_only", None)
+                .unwrap();
+        let input = json!({"schema":"dolgorae.group-task-input/v1","provisioning_ref":installed.provisioning_ref,"assignment":{"task_body":task,"accepted_task_identity":accepted,"deadline_seconds":30}});
+        let bytes = crate::operation::canonical(&input).unwrap();
+        let path = f
+            .view
+            .canonical_path
+            .to_path_buf()
+            .unwrap()
+            .join("recovery-input.json");
+        fs::write(&path, &bytes).unwrap();
+        let request = json!({"schema":"dolgorae.external-specialist-request/v5","operation":"assign_group","scope_kind":"external_engagement","scope_ref":engagement,"idempotency_key":"recover-group","expected_revision":null,"manifest":{"schema":"dolgorae.group-assignment/v1","scope_kind":"external_engagement","scope_ref":engagement,"entries":[{"entry_key":"entry","role_snapshot_digest":installed.role_snapshot_digest,"agent_configuration_digest":installed.agent_configuration_digest,"accepted_task_digest":accepted.digest().unwrap()}]},"inputs":[{"entry_key":"entry","absolute_file_path":path,"content":crate::delegation_identity::BytesRef::from_bytes(&bytes)}]});
+        let port = FakePort::new();
+        research_group::public_call(
+            &home,
+            &f.view,
+            &carrier,
+            None,
+            "external_engagement",
+            engagement,
+            "assign_group",
+            Some("recover-group"),
+            None,
+            &request,
+            &port,
+        )
+        .unwrap();
+        let store = EngagementStore::open_read_only(&f.database()).unwrap();
+        let (task, member): (String, String) = store
+            .connection()
+            .query_row("SELECT task_id,specialist_run_id FROM tasks", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        let task = Uuid::parse_str(&task).unwrap();
+        let member = Uuid::parse_str(&member).unwrap();
+        let manifest = f.publish_external_member_manifest(engagement, member);
+        let authorize = |carrier, task, manifest| {
+            research_group::authorize_external_recovery(
+                &f.state_root,
+                &f.view,
+                carrier,
+                engagement,
+                member,
+                task,
+                manifest,
+            )
+        };
+        assert!(authorize(&carrier, task, &manifest).unwrap());
+        // The native owner guard remains strict; this accepted group is not a
+        // native Turn/tool invocation and must use its own retained proof.
+        assert!(
+            store
+                .authorize_external_owner(
+                    &f.view.workspace_id,
+                    engagement,
+                    "run.reconcile",
+                    &carrier
+                )
+                .is_err()
+        );
+        assert!(!authorize(&carrier, Uuid::now_v7(), &manifest).unwrap());
+        let other = f.root.join("foreign-recovery-controller.json");
+        crate::controller::create_controller_credential(
+            &other,
+            ControllerKind::Automation,
+            "foreign".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        let foreign = crate::controller::CredentialCarrier::open_path(&other).unwrap();
+        assert!(authorize(&foreign, task, &manifest).is_err());
+        let mut changed = manifest.clone();
+        changed.agent_configuration.model = "foreign".into();
+        assert!(authorize(&carrier, task, &changed).is_err());
+        // Exercise the actual production port: successful origin authorization
+        // reaches the independent native-ledger fence, not the legacy guard.
+        let actual = crate::semantic::SemanticRunSettlementPort { carrier: &carrier };
+        let error = actual
+            .reconcile_member_task(MemberTaskSettlement {
+                view: &f.view,
+                state_root: &f.state_root,
+                owner: SettlementOwner::External {
+                    engagement_id: engagement,
+                },
+                member_ref: member,
+                task_ref: task,
+                execution_intent: "read_only",
+            })
+            .unwrap_err();
+        assert!(!error.message.contains("external provenance"), "{error:?}");
+        let mut writer = EngagementStore::open(&f.database()).unwrap();
+        let origin = crate::storage_observation::read_content(
+            store.connection(),
+            "controller_group_task",
+            &task.to_string(),
+            "origin",
+        )
+        .unwrap()
+        .unwrap();
+        writer.transact(|tx|{tx.execute("DELETE FROM result_content_refs WHERE owner_kind='controller_group_task' AND owner_id=?1 AND representation='origin'",[task.to_string()]).unwrap();Ok(())}).unwrap();
+        assert!(!authorize(&carrier, task, &manifest).unwrap());
+        let missing = actual
+            .reconcile_member_task(MemberTaskSettlement {
+                view: &f.view,
+                state_root: &f.state_root,
+                owner: SettlementOwner::External {
+                    engagement_id: engagement,
+                },
+                member_ref: member,
+                task_ref: task,
+                execution_intent: "read_only",
+            })
+            .unwrap_err();
+        assert_eq!(
+            missing.details["invariant"], "external provenance is missing",
+            "missing group proof must not relax native provenance"
+        );
+        let mut invalid: Value = serde_json::from_slice(&origin).unwrap();
+        invalid["member_ref"] = json!(Uuid::now_v7());
+        writer
+            .transact(|tx| {
+                crate::storage_observation::put_content(
+                    tx,
+                    "controller_group_task",
+                    &task.to_string(),
+                    "origin",
+                    &crate::operation::canonical(&invalid).unwrap(),
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        assert!(
+            authorize(&carrier, task, &manifest).is_err(),
+            "foreign group origin cannot authorize native history"
+        );
+        writer.transact(|tx|{tx.execute("DELETE FROM result_content_refs WHERE owner_kind='controller_group_task' AND owner_id=?1 AND representation='origin'",[task.to_string()]).unwrap();crate::storage_observation::put_content(tx,"controller_group_task",&task.to_string(),"origin",&origin).map(|_|())}).unwrap();
+        writer.transact(|tx|{tx.execute("UPDATE delegation_operations SET accepted_subjects_json='{}' WHERE operation_kind='assign_external_specialist_task'",[]).unwrap();Ok(())}).unwrap();
+        assert!(
+            authorize(&carrier, task, &manifest).is_err(),
+            "original assignment receipt cannot be substituted"
+        );
+        assert!(port.dispatched.borrow().is_empty());
+    }
+
+    #[test]
+    fn research_group_capture_replay_and_failure_coverage_are_durable() {
+        let f = Fixture::new();
+        f.set_up_namespace();
+        let installed = f.install();
+        let engagement = f.open();
+        let port = FakePort::new();
+        let caller = crate::caller_scope::fixture(4);
+        let snapshot =
+            crate::provisioning::retained_snapshot(&f.state_root, &installed.provisioning_ref)
+                .unwrap();
+        let (_, configuration) = snapshot.admitted_configuration().unwrap();
+        let root = f.view.canonical_path.to_path_buf().unwrap();
+        let mut entries = Vec::new();
+        let mut inputs = Vec::new();
+        for n in 0..2 {
+            let mut task = fixture_task();
+            task.brief = format!("Research question {n}");
+            let (accepted, _) = crate::successor_capture::capture_facade_task(
+                &configuration,
+                &task,
+                "read_only",
+                None,
+            )
+            .unwrap();
+            let input = json!({"schema":"dolgorae.group-task-input/v1", "provisioning_ref":installed.provisioning_ref, "assignment":{"task_body":task,"accepted_task_identity":accepted,"deadline_seconds":30}});
+            assert!(
+                crate::specialist_facade::validates(&input, "group_task_input"),
+                "group input schema: {input}"
+            );
+            let bytes = crate::operation::canonical(&input).unwrap();
+            let path = root.join(format!("input-{n}.json"));
+            fs::write(&path, &bytes).unwrap();
+            entries.push(json!({"entry_key":format!("entry-{n}"),"role_snapshot_digest":installed.role_snapshot_digest,"agent_configuration_digest":installed.agent_configuration_digest,"accepted_task_digest":accepted.digest().unwrap()}));
+            inputs.push(json!({"entry_key":format!("entry-{n}"),"absolute_file_path":path,"content":{"byte_length":bytes.len(),"sha256":format!("sha256:{}",crate::jcs::sha256_hex(&bytes))}}));
+        }
+        let request = json!({"schema":"dolgorae.external-specialist-request/v5","operation":"assign_group","scope_kind":"external_engagement","scope_ref":engagement,"idempotency_key":"research-group","expected_revision":null,"manifest":{"schema":"dolgorae.group-assignment/v1","scope_kind":"external_engagement","scope_ref":engagement,"entries":entries},"inputs":inputs});
+        assert!(
+            crate::specialist_facade::validates(&request, "assign_group_request"),
+            "group request schema: {request}"
+        );
+        let mut stale = request.clone();
+        stale["idempotency_key"] = json!("stale-group");
+        stale["expected_revision"] = json!(999);
+        assert_eq!(
+            research_group::assign(&f.scope(), None, &caller, &port, &stale)
+                .unwrap_err()
+                .code,
+            "REVISION_CONFLICT"
+        );
+        assert!(
+            port.starts.borrow().is_empty(),
+            "revision fence precedes all member effects"
+        );
+        let assigned = research_group::with_dispatch_limit(0, || {
+            research_group::assign(&f.scope(), None, &caller, &port, &request)
+        })
+        .unwrap();
+        assert!(
+            port.starts.borrow().is_empty(),
+            "receipt commit is durable before the first member effect"
+        );
+        assert_eq!(f.task_count(), 0);
+        for n in 0..2 {
+            fs::remove_file(root.join(format!("input-{n}.json"))).unwrap();
+        }
+        assert_eq!(
+            research_group::with_dispatch_limit(1, || research_group::assign(
+                &f.scope(),
+                None,
+                &caller,
+                &port,
+                &request
+            ))
+            .unwrap(),
+            assigned
+        );
+        assert_eq!(
+            f.task_count(),
+            1,
+            "restart after receipt loss resumes the first captured child without its source file"
+        );
+        assert_eq!(
+            research_group::assign(&f.scope(), None, &caller, &port, &request).unwrap(),
+            assigned
+        );
+        assert_eq!(
+            port.starts.borrow().len(),
+            1,
+            "compatible group entries share the provider-reserved execution Run"
+        );
+        assert_eq!(
+            port.dispatched.borrow().len(),
+            0,
+            "group admission queues both entries for the existing bounded scheduler"
+        );
+        assert_eq!(f.task_count(), 2);
+        let stored = EngagementStore::open_read_only(&f.database()).unwrap();
+        let queued: i64 = stored
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE state='queued'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            queued, 2,
+            "both entries retain actual accepted task identities in the queue"
+        );
+        drop(stored);
+        assert!(
+            crate::specialist_facade::validates(&assigned, "assign_group_response"),
+            "{assigned}"
+        );
+        assert_eq!(
+            research_group::assign(&f.scope(), None, &caller, &port, &request).unwrap(),
+            assigned
+        );
+        let collect = json!({"scope_kind":"external_engagement","scope_ref":engagement,"group_ref":assigned["group_ref"]});
+        let coverage = research_group::collect(&f.scope(), None, &port, &collect).unwrap();
+        assert_eq!(coverage["coverage"]["sources"].as_array().unwrap().len(), 2);
+        assert!(
+            coverage["coverage"]["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["worker_ref"].is_string() && row["task_ref"].is_string()),
+            "authoritative coverage links both actual accepted assignments: {coverage}"
+        );
+        assert_eq!(
+            port.dispatched.borrow().len(),
+            0,
+            "replay and collection dispatch no additional work"
+        );
+        assert!(
+            crate::specialist_facade::validates(&coverage, "collect_group_response"),
+            "{coverage}"
+        );
+        let mut changed = request.clone();
+        changed["manifest"]["entries"][0]["accepted_task_digest"] =
+            json!(format!("sha256:{}", "0".repeat(64)));
+        assert_eq!(
+            research_group::assign(&f.scope(), None, &caller, &port, &changed)
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+        let mut wait = collect;
+        wait["predicate"] = json!({"kind":"k","k":0});
+        wait["timeout_seconds"] = json!(0);
+        assert_eq!(
+            research_group::await_group(&f.scope(), None, &port, &wait)
+                .unwrap_err()
+                .code,
+            "GROUP_MANIFEST_INVALID"
+        );
+    }
+    #[test]
+    fn result_component_artifact_authorizes_current_owner_and_reads_exact_chunks() {
+        let mut fixture = Fixture::new();
+        fixture.initialize_writer_authority();
+        let credential_path = fixture.root.join("component-controller.json");
+        let created = crate::controller::create_controller_credential(
+            &credential_path,
+            ControllerKind::Automation,
+            "component-test".into(),
+            Some("owner".into()),
+            None,
+        )
+        .unwrap();
+        let carrier = crate::controller::CredentialCarrier::open_path(&credential_path).unwrap();
+        fixture.controller =
+            crate::controller::binding_from_credential(&created.credential, 1, &carrier).unwrap();
+        let session = fixture.managed_session();
+        let port = FakePort::new();
+        let caller = caller(4);
+        let member = Uuid::parse_str(
+            &fixture
+                .spawn_member(session, "component-spawn", &port)
+                .member
+                .member_ref,
+        )
+        .unwrap();
+        let (observation, _) = fixture
+            .assign(
+                session,
+                "component-task",
+                &caller,
+                &port,
+                managed_assign(member, "Read the original result.\n", "read_only", None),
+            )
+            .unwrap();
+        let task = Uuid::parse_str(&observation.task_ref).unwrap();
+        fixture.publish_member_manifest(session, member);
+        let child_credential_path = fixture.root.join("private-child-controller.json");
+        let child_created = crate::controller::create_controller_credential(
+            &child_credential_path,
+            ControllerKind::Automation,
+            "private-child".into(),
+            Some("child".into()),
+            None,
+        )
+        .unwrap();
+        let child_carrier =
+            crate::controller::CredentialCarrier::open_path(&child_credential_path).unwrap();
+        let child_binding = crate::controller::binding_from_credential(
+            &child_created.credential,
+            1,
+            &child_carrier,
+        )
+        .unwrap();
+        let child_binding_path =
+            crate::run::run_root(&fixture.state_root, member).join("controller.json");
+        fs::write(
+            &child_binding_path,
+            serde_json::to_vec(&child_binding).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&child_binding_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let bytes = (0..1_100_003)
+            .map(|index| b'a' + (index % 26) as u8)
+            .collect::<Vec<_>>();
+        fixture.settle_managed_task(
+            session,
+            member,
+            task,
+            "completed",
+            Some(std::str::from_utf8(&bytes).unwrap()),
+        );
+        let mut store = EngagementStore::open(&fixture.database()).unwrap();
+        let result: crate::delegation_identity::CompleteResult = serde_json::from_slice(
+            &crate::orchestration::successor_task_result(store.connection(), task)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let publication =
+            crate::result_component_artifact::Publication::prepare(&fixture.view, member, &result)
+                .unwrap();
+        store
+            .transact(|tx| {
+                publication.retain(tx)?;
+                crate::engagement::retain_checked_task_output(tx, task, b"{}", &bytes)
+            })
+            .unwrap();
+        let public = crate::result_component_artifact::public_result(
+            &fixture.state_root,
+            &fixture.view,
+            &result,
+        )
+        .unwrap();
+        let artifact = public["final_response"]["artifact"]["artifact_id"]
+            .as_str()
+            .unwrap();
+        let snapshot = crate::snapshot::RunSnapshot::load(&fixture.state_root, member, 0).unwrap();
+        let before = fixture.database_bytes();
+        assert_eq!(
+            crate::artifact::metadata(&fixture.state_root, &snapshot, artifact, None)
+                .unwrap_err()
+                .code,
+            "CONTROLLER_REQUIRED"
+        );
+        let metadata =
+            crate::artifact::metadata(&fixture.state_root, &snapshot, artifact, Some(&carrier))
+                .unwrap();
+        assert_eq!(metadata.artifact.byte_length, bytes.len() as u64);
+        assert_eq!(metadata.artifact.sha256, crate::jcs::sha256_hex(&bytes));
+        let first = crate::artifact::chunk(
+            &fixture.state_root,
+            &snapshot,
+            artifact,
+            (0, 1_048_576),
+            Some(&carrier),
+        )
+        .unwrap();
+        let last = crate::artifact::chunk(
+            &fixture.state_root,
+            &snapshot,
+            artifact,
+            (1_048_576, 1_048_576),
+            Some(&carrier),
+        )
+        .unwrap();
+        assert!(!first.eof);
+        assert!(last.eof);
+        assert_eq!([first.data, last.data].concat(), bytes);
+        assert!(
+            crate::artifact::chunk(
+                &fixture.state_root,
+                &snapshot,
+                artifact,
+                (0, 1_048_577),
+                Some(&carrier)
+            )
+            .is_err()
+        );
+        assert!(
+            crate::result_component_artifact::read_bound(
+                &fixture.state_root,
+                Uuid::now_v7(),
+                Uuid::parse_str(artifact).unwrap(),
+                Some(&carrier)
+            )
+            .is_err()
+        );
+        assert!(
+            crate::result_component_artifact::read_bound(
+                &fixture.state_root,
+                member,
+                Uuid::now_v7(),
+                Some(&carrier)
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            fixture.database_bytes(),
+            before,
+            "ArtifactGet/ReadChunk leave publication and source bytes unchanged"
+        );
+
+        let digest = crate::jcs::sha256_hex(&bytes);
+        store
+            .connection()
+            .execute(
+                "UPDATE result_content SET bytes=?1 WHERE sha256=?2",
+                rusqlite::params![b"corrupt source".as_slice(), &digest],
+            )
+            .unwrap();
+        assert!(
+            crate::artifact::metadata(&fixture.state_root, &snapshot, artifact, Some(&carrier))
+                .is_err(),
+            "content tampering never serves a chunk"
+        );
+        store
+            .connection()
+            .execute(
+                "UPDATE result_content SET bytes=?1 WHERE sha256=?2",
+                rusqlite::params![&bytes, &digest],
+            )
+            .unwrap();
+        store.connection().execute("UPDATE result_content_refs SET retired_operation=?1 WHERE owner_kind='accepted_task' AND owner_id=?2 AND representation='final_response'",rusqlite::params![Uuid::now_v7().to_string(),task.to_string()]).unwrap();
+        assert_eq!(
+            crate::artifact::metadata(&fixture.state_root, &snapshot, artifact, Some(&carrier))
+                .unwrap_err()
+                .code,
+            "RESULT_CONTENT_UNAVAILABLE"
+        );
+        store.connection().execute("UPDATE result_content_refs SET retired_operation=NULL WHERE owner_kind='accepted_task' AND owner_id=?1 AND representation='final_response'",[task.to_string()]).unwrap();
+        let mut rotated = fixture.controller.clone();
+        rotated.identity.generation += 1;
+        rotated.capability_sha256 = "a".repeat(64);
+        let current = crate::run::run_root(&fixture.state_root, session).join("controller.json");
+        fs::write(&current, serde_json::to_vec(&rotated).unwrap()).unwrap();
+        fs::set_permissions(&current, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            crate::artifact::metadata(&fixture.state_root, &snapshot, artifact, Some(&carrier))
+                .is_err(),
+            "old aggregate credential cannot read after rotation"
         );
     }
 }

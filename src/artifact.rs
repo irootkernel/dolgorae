@@ -561,6 +561,17 @@ pub fn metadata(
 ) -> Result<ArtifactMetadata, MachineError> {
     let _content_pin = crate::orchestration::OrchestrationStore::result_reader_pin(state_root)?;
     let id = identity(id, "artifact_id")?;
+    if let Some((reference, _)) = crate::result_component_artifact::read_bound(
+        state_root,
+        snapshot.manifest.run_id,
+        id,
+        carrier,
+    )? {
+        return Ok(ArtifactMetadata {
+            artifact: reference,
+            maximum_chunk_size: MAX_CHUNK_BYTES,
+        });
+    }
     let reference = artifact_reference(
         state_root,
         &ledger(state_root, snapshot)?,
@@ -586,6 +597,31 @@ pub fn chunk(
     let _content_pin = crate::orchestration::OrchestrationStore::result_reader_pin(state_root)?;
     let id = identity(id, "artifact_id")?;
     let run_id = snapshot.manifest.run_id;
+    if let Some((reference, bytes)) =
+        crate::result_component_artifact::read_bound(state_root, run_id, id, carrier)?
+    {
+        let (offset, length) = range;
+        if length == 0 || length > MAX_CHUNK_BYTES || offset > reference.byte_length {
+            return Err(MachineError::invalid_argument(
+                "range",
+                "artifact range exceeds its bounded length",
+            ));
+        }
+        let end = offset
+            .saturating_add(u64::from(length))
+            .min(reference.byte_length);
+        let data = bytes[offset as usize..end as usize].to_vec();
+        return Ok(ArtifactChunk {
+            artifact_id: id.to_string(),
+            offset,
+            length: data.len() as u32,
+            data,
+            eof: end == reference.byte_length,
+            total_byte_length: reference.byte_length,
+            sha256: reference.sha256.clone(),
+            metadata: reference,
+        });
+    }
     let reference = artifact_reference(state_root, &ledger(state_root, snapshot)?, run_id, id)?;
     authorize_artifact(state_root, snapshot, id, &reference, carrier)?;
     let (offset, _) = range;
@@ -690,10 +726,120 @@ fn read_artifact_range(
 }
 
 /// Serializes the logical per-Run quota check with artifact publication.
-pub struct ArtifactQuotaLease(std::fs::File);
+pub struct ArtifactQuotaLease {
+    file: std::fs::File,
+    _reservation: Option<RunQuotaSerializationLease>,
+}
+
+/// A protected allocator-Run lock usable before birth without creating a Run.
+pub(crate) struct RunQuotaSerializationLease {
+    state_root: std::path::PathBuf,
+    run_id: Uuid,
+    directory: std::path::PathBuf,
+    file: std::fs::File,
+}
+impl RunQuotaSerializationLease {
+    pub(crate) fn acquire(state_root: &Path, run_id: Uuid) -> Result<Self, MachineError> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        if run_id.get_version_num() != 7 {
+            return Err(quota_integrity(
+                "quota reservation requires an allocator Run identity",
+            ));
+        }
+        let system = crate::darwin::DarwinSystem;
+        crate::workspace::verify_secure_directory(state_root, system.current_uid())?;
+        let directory = state_root.join("artifact-quota");
+        match crate::workspace::create_directory(&directory, 0o700) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(quota_integrity("quota serialization directory unavailable")),
+        }
+        crate::workspace::verify_secure_directory(&directory, system.current_uid())?;
+        let path = directory.join(format!("{run_id}.lock"));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|_| quota_integrity("quota serialization lock unavailable"))?;
+        let started = std::time::Instant::now();
+        loop {
+            verify_quota_lock(&directory, &path, &file)?;
+            match system.lock_exclusive_nonblocking(&file) {
+                Ok(()) => break,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    if started.elapsed() >= std::time::Duration::from_secs(5) {
+                        return Err(MachineError::new(
+                            "RUN_BUSY",
+                            "Run quota reservation has another owner",
+                            true,
+                            json!({"run_id":run_id,"owner_kind":"attachment"}),
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => {
+                    return Err(quota_integrity(
+                        "quota serialization lock acquisition failed",
+                    ));
+                }
+            }
+        }
+        let lease = Self {
+            state_root: state_root.to_owned(),
+            run_id,
+            directory,
+            file,
+        };
+        lease.verify(state_root, run_id)?;
+        Ok(lease)
+    }
+    pub(crate) fn verify(&self, state_root: &Path, run_id: Uuid) -> Result<(), MachineError> {
+        if self.state_root != state_root || self.run_id != run_id {
+            return Err(quota_integrity("quota serialization owner differs"));
+        }
+        crate::workspace::verify_secure_directory(
+            state_root,
+            crate::darwin::DarwinSystem.current_uid(),
+        )?;
+        verify_quota_lock(
+            &self.directory,
+            &self.directory.join(format!("{run_id}.lock")),
+            &self.file,
+        )
+    }
+}
+impl Drop for RunQuotaSerializationLease {
+    fn drop(&mut self) {
+        let _ = crate::darwin::DarwinSystem.unlock(&self.file);
+    }
+}
+
+fn run_quota_namespace(directory: &Path) -> Option<(&Path, Uuid)> {
+    let run = directory.parent()?;
+    let id = Uuid::parse_str(run.file_name()?.to_str()?).ok()?;
+    let runs = run
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "runs"))?;
+    Some((runs.parent()?, id))
+}
+
 impl ArtifactQuotaLease {
     pub(crate) fn verify_for(&self, directory: &Path) -> Result<(), MachineError> {
-        verify_quota_lock(directory, &directory.join(".quota.lock"), &self.0)
+        if let Some(reservation) = &self._reservation {
+            let (state, run) = run_quota_namespace(directory)
+                .ok_or_else(|| quota_integrity("quota Run namespace changed"))?;
+            reservation.verify(state, run)?;
+        }
+        verify_quota_lock(directory, &directory.join(".quota.lock"), &self.file)
     }
     pub(crate) fn acquire_for_run(directory: &Path, run_id: Uuid) -> Result<Self, MachineError> {
         Self::acquire(directory).map_err(|mut error| {
@@ -705,6 +851,24 @@ impl ArtifactQuotaLease {
         })
     }
     pub fn acquire(directory: &Path) -> Result<Self, MachineError> {
+        let reservation = run_quota_namespace(directory)
+            .map(|(state, run)| RunQuotaSerializationLease::acquire(state, run))
+            .transpose()?;
+        Self::acquire_physical(directory, reservation)
+    }
+    pub(crate) fn acquire_under_reservation(
+        directory: &Path,
+        reservation: &RunQuotaSerializationLease,
+    ) -> Result<Self, MachineError> {
+        let (state, run) = run_quota_namespace(directory)
+            .ok_or_else(|| quota_integrity("quota reservation has no Run namespace"))?;
+        reservation.verify(state, run)?;
+        Self::acquire_physical(directory, None)
+    }
+    fn acquire_physical(
+        directory: &Path,
+        reservation: Option<RunQuotaSerializationLease>,
+    ) -> Result<Self, MachineError> {
         use std::os::unix::fs::OpenOptionsExt as _;
         let system = crate::darwin::DarwinSystem;
         crate::workspace::verify_secure_directory(directory, system.current_uid())?;
@@ -750,7 +914,12 @@ impl ArtifactQuotaLease {
                 Err(_) => return Err(quota_integrity("artifact quota lock acquisition failed")),
             }
         }
-        Ok(Self(file))
+        let lease = Self {
+            file,
+            _reservation: reservation,
+        };
+        lease.verify_for(directory)?;
+        Ok(lease)
     }
 }
 fn verify_quota_lock(
@@ -783,7 +952,7 @@ fn verify_quota_lock(
 }
 impl Drop for ArtifactQuotaLease {
     fn drop(&mut self) {
-        let _ = crate::darwin::DarwinSystem.unlock(&self.0);
+        let _ = crate::darwin::DarwinSystem.unlock(&self.file);
     }
 }
 fn quota_integrity(reason: &str) -> MachineError {
@@ -805,6 +974,7 @@ pub fn logical_artifact_bytes(directory: &Path) -> Result<u64, MachineError> {
     let uid = crate::darwin::DarwinSystem.current_uid();
     crate::workspace::verify_secure_directory(directory, uid)?;
     let mut normalized = BTreeMap::new();
+    let mut capture_bytes = 0_u64;
     if let Some(run_root) = directory.parent()
         && let Some(run_id) = run_root
             .file_name()
@@ -825,11 +995,16 @@ pub fn logical_artifact_bytes(directory: &Path) -> Result<u64, MachineError> {
             }
             Ok(_) => {
                 normalized = crate::orchestration::OrchestrationStore::open_observer(state_root)?
-                    .logical_result_artifacts(run_id)?
+                    .logical_result_artifacts(run_id)?;
+                capture_bytes = crate::group_quota::reserved_bytes(state_root, run_id)?
+                    .checked_add(crate::result_component_artifact::logical_bytes(
+                        state_root, run_id,
+                    )?)
+                    .ok_or_else(|| quota_integrity("artifact logical byte sum overflow"))?;
             }
         }
     }
-    let mut total = 0_u64;
+    let mut total = capture_bytes;
     for reference in normalized.values() {
         if !reference.retired {
             total = total
