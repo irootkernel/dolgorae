@@ -25,7 +25,7 @@ integration. EPIC-018 is COMPLETE after successor requirements, checked contract
 and qualified H1 validation. EPIC-019 is COMPLETE.
 EPIC-023 is COMPLETE with Master's whole-Epic acceptance; TASK-090, TASK-091 and
 TASK-092 are COMPLETE. EPIC-020 and TASK-076 through TASK-079 are COMPLETE.
-EPIC-009 is ACTIVE; EPIC-021 and EPIC-022 remain PLANNED for v0.1.4, in that
+EPIC-009 is COMPLETE; EPIC-021 and EPIC-022 remain PLANNED for v0.1.4, in that
 execution order. TASK-067 is COMPLETE;
 TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
@@ -2703,9 +2703,11 @@ Epic acceptance: Delegation identity, MCP access, modern public operation, pool 
 
 ## EPIC-009: Brokered Specialist Collaboration
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+Canonical Outcomes: [SPEC-012](../specs/README.md#brokered-specialist-collaboration),
+[collaboration architecture](../architecture/README.md#collaboration-plane), and
+[ADR-027](../architecture-decision-records/README.md#adr-027-use-durable-virtual-actor-mailboxes-for-brokered-specialist-collaboration).
 
 Goal: Add durable bounded Specialist-to-Specialist collaboration to one active
 Brokered Hierarchy without making the Primary Agent a message relay.
