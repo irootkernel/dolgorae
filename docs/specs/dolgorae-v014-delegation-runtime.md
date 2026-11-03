@@ -299,8 +299,20 @@ receipt stays readable after a close intent (MDC:134, MDC:186-200).
 | `assign_*_task` | derived from the task row: `pending`, `running`, `completed`, `failed`, `cancelled`, `expired`, else `unknown` |
 
 `result_ref` and `result_digest` are populated for task kinds from the
-settled task; `install`/`open` carry none. `adapter_id` and `adapter_version`
-stay provider-owned and are never derived here (MDC:594-597).
+settled CompleteResult. Ordinary task lookup returns a reference to its exact
+canonical JSON bytes. The digest uses the `dolgorae.complete-result/v1` domain and differs from the
+content hash. Lookup joins the original receipt, accepted task, member, scope
+and terminal outcome in one read snapshot. It uses retained publication identity
+and content-reference metadata after body retirement, without reopening task
+inputs or performing recovery. Historical live result identities may be
+validated from their retained result JSON. A historical ordinary result without
+separately retained publication identity stays protected from retirement, so
+maintenance cannot erase its last lookup identity. Planning and eligibility
+checks remain read-only and mint no artifact identities. If a historical retired
+identity cannot be recovered, or retained identity and task facts disagree, lookup
+returns a typed recovery error. A typed-unavailable publication supplies no
+CompleteResult reference. `install`/`open` carry none. `adapter_id` and
+`adapter_version` stay provider-owned and are never derived here (MDC:594-597).
 
 Replay recomputes the identity from the presented inputs and compares it with
 the retained envelope; lookup is the source-independent recovery path.
@@ -752,7 +764,15 @@ Explicit member recovery has a private local administrative entry:
 with inherited `--operator-fd` and `--controller-fd`. It requires current Operator
 authority, the protected exact owner/workspace/scope and current Controller before
 effect. It calls the original external or managed reconciliation service and
-semantic port. Managed recovery reads the original accepted assignment's key,
+semantic port. Successor external native recovery verifies the accepted open,
+original assignment receipt, member configuration and execution intent, then
+joins the retained trusted invocation to the task's caller accounting. A native
+group child instead joins its exact accepted group entry and parent native
+invocation, because internal child acceptance has no separate native call.
+Missing or foreign proof refuses before native-history effects. Controller
+groups keep their distinct retained-origin authorization; successor native work
+never acquires legacy external provenance or a Controller-group origin.
+Managed recovery reads the original accepted assignment's key,
 Root, Turn and tool-call provenance; missing or inconsistent provenance is a
 closed refusal. The semantic port reauthenticates the actual owner. For managed recovery,
 it obtains the member's Broker-held carrier internally. No carrier is returned to the administrator or

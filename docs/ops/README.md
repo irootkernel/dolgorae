@@ -559,6 +559,16 @@ For managed calls, select a managed owner for the existing Root/session and run 
 `dolgorae_specialist_consumer` alongside the orchestration tool. Accepted
 `dolgorae_specialists` registrations retain their full public response path. Their native Worker supplies Root, Thread, Turn, tool call and generation; model scope strings must match that Root. Existing Thread tool sets are retained on reconnect; legacy Threads are not replaced. The original orchestration tool retains its behavior.
 
+Ordinary task lookup exposes the settled CompleteResult byte reference and its
+domain digest even after result-body retirement when publication identity is
+retained. A missing historical identity is a recovery error; lookup does not
+restore content or run history reconciliation. Historical ordinary results
+without retained publication identity remain protected from retirement.
+
+Explicit native member recovery uses the original accepted task and caller proof. Group-child recovery also
+checks its accepted native parent; a Controller-group proof cannot substitute
+for it.
+
 After response loss, retain the native session/call and public operation key. `host-lookup` observes the original K namespace, performs a fresh R observation or reads the original S owner. A repeated ambiguous K or S call cannot start a replacement effect. Missing or inconsistent protected state requires explicit recovery. Active delegation-identity observation still requires the consistent disposition boundary; a pending-interaction placeholder cannot prove idle. Durable released identities use the existing terminal proof. Full native and consumer qualification remains required before product support is accepted.
 
 ## Planned v0.1.4 artifact and evidence handoffs

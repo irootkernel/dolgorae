@@ -6732,11 +6732,11 @@ fn checked_invocation_context(
     Ok(())
 }
 
-fn verify_retained_invocation(
+fn retained_invocation_context(
     connection: &Connection,
     operation_ref: &str,
     envelope: &str,
-) -> Result<(), MachineError> {
+) -> Result<Option<crate::delegation_identity::TrustedInvocationContext>, MachineError> {
     let context_json: Option<String> = connection
         .query_row(
             "SELECT trusted_invocation_json FROM delegation_operations WHERE operation_ref=?1",
@@ -6754,7 +6754,31 @@ fn verify_retained_invocation(
                 .map_err(|_| intent_corrupt("invalid retained invocation context"))
         })
         .transpose()?;
-    checked_invocation_context(envelope, context.as_ref())
+    checked_invocation_context(envelope, context.as_ref())?;
+    Ok(context)
+}
+
+fn verify_retained_invocation(
+    connection: &Connection,
+    operation_ref: &str,
+    envelope: &str,
+) -> Result<(), MachineError> {
+    retained_invocation_context(connection, operation_ref, envelope).map(|_| ())
+}
+
+pub(crate) fn accepted_native_context(
+    connection: &Connection,
+    receipt: &crate::delegation_identity::OperationReceipt,
+) -> Result<Option<crate::delegation_identity::TrustedInvocationContext>, MachineError> {
+    let envelope: String = connection.query_row(
+        "SELECT mutation_envelope_json FROM delegation_operations WHERE operation_ref=?1 AND state='accepted'",
+        [&receipt.operation_ref], |row|row.get(0),
+    ).map_err(internal)?;
+    match intent_lookup(connection, &receipt.namespace)? {
+        IntentLookup::Accepted(retained) if *retained == *receipt => {}
+        _ => return Err(intent_corrupt("native recovery acceptance differs")),
+    }
+    retained_invocation_context(connection, &receipt.operation_ref, &envelope)
 }
 
 /// Require one retained mutation envelope to be the closed envelope over this
@@ -8310,7 +8334,7 @@ pub(crate) fn accepted_external_owner_on(
     Ok((workspace, binding))
 }
 
-pub(crate) fn external_task_identity_on(
+pub(crate) fn external_task_identity_metadata_on(
     connection: &Connection,
     engagement_id: Uuid,
     task_id: Uuid,
@@ -8341,21 +8365,30 @@ pub(crate) fn external_task_identity_on(
         .map_err(internal)?;
     let (objective, external) =
         recorded.ok_or_else(|| integrity("the retained task is missing"))?;
-    if let Some(external) = external {
-        let external: serde_json::Value = serde_json::from_str(&external)
-            .map_err(|_| integrity("the retained task reference is invalid"))?;
-        if let Some(accepted_digest) = external
-            .get("accepted_task_digest")
-            .and_then(serde_json::Value::as_str)
-        {
-            let digest = accepted.digest()?;
-            if accepted_digest != digest || objective != digest {
-                return Err(integrity(
-                    "the retained task identity differs from the accepted one",
-                ));
-            }
-        }
+    let digest = accepted.digest()?;
+    let external: serde_json::Value = serde_json::from_str(
+        external
+            .as_deref()
+            .ok_or_else(|| integrity("the retained task reference is missing"))?,
+    )
+    .map_err(|_| integrity("the retained task reference is invalid"))?;
+    if external["accepted_task_digest"] != digest || objective != digest {
+        return Err(integrity(
+            "the retained task identity differs from the accepted one",
+        ));
     }
+    Ok(Some(accepted))
+}
+
+pub(crate) fn external_task_identity_on(
+    connection: &Connection,
+    engagement_id: Uuid,
+    task_id: Uuid,
+) -> Result<Option<crate::delegation_identity::AcceptedTask>, MachineError> {
+    let Some(accepted) = external_task_identity_metadata_on(connection, engagement_id, task_id)?
+    else {
+        return Ok(None);
+    };
     // The retained bytes are the acceptance's own evidence: every reference
     // must still resolve to the byte it names.
     let (task_body, contexts, target) = accepted_task_content(connection, task_id)?

@@ -929,6 +929,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "instructions",
                 "jcs",
                 "machine",
+                "maintenance", // Test-only: original ordinary lookup is a retirement last consumer.
                 "operation",
                 // `orchestration` carries the managed Broker services: the
                 // session authority, the Broker execution rows and their reads

@@ -235,6 +235,19 @@ persisted request JCS against that receipt's digest before inspecting schema or
 expected-output discriminators. Missing, ambiguous, or mismatched authority
 fails closed as engagement integrity corruption.
 
+Original-key ordinary task lookup joins the accepted receipt and task with the
+retained CompleteResult publication identity and content-reference metadata.
+Content retirement preserves this metadata; a missing historical identity is a
+typed recovery condition. Historical ordinary lookup remains a last consumer of
+result bytes when no separate publication identity is retained. Retirement
+planning preserves that source without materializing replacement artifacts. Lookup performs no
+settlement or native-history read.
+Explicit successor external native recovery authenticates the accepted open,
+assignment and native caller linkage before the existing history owner runs.
+Internal native group children use their accepted parent invocation and exact
+entry/accounting link. Legacy external and Controller-group proofs remain
+separate authorization paths.
+
 The following provisioning and isolated-output structure is the legacy
 Engagement contract. New successor hires bind explicit Markdown Role and
 caller-workspace access; successful provisioning establishes the selected

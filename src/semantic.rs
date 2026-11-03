@@ -1594,6 +1594,10 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
                     request.member_ref,
                     request.task_ref,
                     &manifest,
+                )? && !crate::delegation_service::authorize_successor_native_recovery(
+                    &request,
+                    self.carrier,
+                    &manifest,
                 )? {
                     store.authorize_external_owner(
                         &request.view.workspace_id,

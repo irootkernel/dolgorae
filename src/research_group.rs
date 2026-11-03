@@ -308,6 +308,69 @@ pub(crate) fn authorize_external_recovery(
     Ok(true)
 }
 
+/// An internal native child inherits only its accepted parent's invocation.
+pub(super) fn native_recovery_parent(
+    store: &EngagementStore,
+    receipt: &OperationReceipt,
+    accepted: &AcceptedTask,
+    caller: &crate::delegation_identity::CallerScope,
+) -> Result<OperationReceipt, MachineError> {
+    let parts = receipt
+        .namespace
+        .idempotency_key
+        .split(':')
+        .collect::<Vec<_>>();
+    let ["group", group, index, "assign"] = parts.as_slice() else {
+        return Err(retained_source_invalid());
+    };
+    let group = Uuid::parse_str(group).map_err(|_| retained_source_invalid())?;
+    let index = index
+        .parse::<usize>()
+        .map_err(|_| retained_source_invalid())?;
+    if receipt.namespace.idempotency_key != format!("group:{group}:{index}:assign") {
+        return Err(retained_source_invalid());
+    }
+    let document = read_document(store, &group.to_string())?;
+    let entry = document["manifest"]["entries"]
+        .get(index)
+        .ok_or_else(retained_source_invalid)?;
+    let allocation = document["allocations"]
+        .get(index)
+        .ok_or_else(retained_source_invalid)?;
+    if document["mode"] != "native"
+        || document["caller_scope"] != json!(caller)
+        || document["manifest"]["scope_kind"].as_str() != receipt.namespace.scope_kind.as_deref()
+        || document["manifest"]["scope_ref"].as_str() != receipt.namespace.scope_ref.as_deref()
+        || allocation["member_ref"].as_str() != receipt.accepted_subjects.member_ref.as_deref()
+        || entry["accepted_task_digest"] != accepted.digest()?
+        || entry["role_snapshot_digest"] != accepted.role_snapshot_digest
+        || entry["agent_configuration_digest"] != accepted.agent_configuration_digest
+    {
+        return Err(retained_source_invalid());
+    }
+    let parents: Vec<String> = store.connection().prepare(
+        "SELECT receipt_json FROM delegation_operations WHERE operation_kind='assign_group' AND state='accepted' AND json_extract(accepted_subjects_json,'$.group_ref')=?1 LIMIT 2"
+    ).map_err(|_|retained_source_invalid())?.query_map([group.to_string()],|r|r.get(0)).map_err(|_|retained_source_invalid())?.collect::<Result<_,_>>().map_err(|_|retained_source_invalid())?;
+    let [parent] = parents.as_slice() else {
+        return Err(retained_source_invalid());
+    };
+    let parent: OperationReceipt =
+        serde_json::from_str(parent).map_err(|_| retained_source_invalid())?;
+    if parent.namespace.workspace_ref != receipt.namespace.workspace_ref
+        || parent.namespace.scope_kind != receipt.namespace.scope_kind
+        || parent.namespace.scope_ref != receipt.namespace.scope_ref
+        || parent.namespace.controller_principal != receipt.namespace.controller_principal
+        || parent.namespace.controller_generation != receipt.namespace.controller_generation
+        || parent.accepted_subjects.group_ref.as_deref() != Some(group.to_string().as_str())
+    {
+        return Err(retained_source_invalid());
+    }
+    if engagement::accepted_native_context(store.connection(), &parent)?.is_none() {
+        return Err(retained_source_invalid());
+    }
+    Ok(parent)
+}
+
 fn invalid() -> MachineError {
     MachineError::new(
         "GROUP_MANIFEST_INVALID",

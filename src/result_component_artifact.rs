@@ -270,6 +270,56 @@ impl Publication {
         }
         Ok(())
     }
+    /// Publication identity survives content retirement; this does not read bodies.
+    pub(crate) fn retained_lookup_identity(
+        connection: &Connection,
+        view: &WorkspaceView,
+        run: Uuid,
+        task: Uuid,
+        body_free: &CompleteResult,
+    ) -> Result<Option<CompleteResult>, MachineError> {
+        if let Some(publication) = load(connection, &task.to_string())? {
+            if publication.run_id != run
+                || publication.workspace_id != view.workspace_id
+                || publication.workspace_path
+                    != view
+                        .canonical_path
+                        .to_path_buf()?
+                        .to_str()
+                        .ok_or_else(integrity)?
+            {
+                return Err(integrity());
+            }
+            return Ok(Some(publication.result));
+        }
+        let Some(raw) = crate::engagement::result_component_record(
+            connection,
+            &format!("{IDENTITY_PREFIX}{task}"),
+        )?
+        else {
+            return Ok(None);
+        };
+        let record: IdentityPublication = serde_json::from_str(&raw).map_err(|_| integrity())?;
+        if record.schema != "dolgorae.result-component-identity/v1"
+            || record.result_id.get_version_num() != 7
+            || record.workspace_id != view.workspace_id
+            || record.workspace_path
+                != view
+                    .canonical_path
+                    .to_path_buf()?
+                    .to_str()
+                    .ok_or_else(integrity)?
+            || record.run_id != run
+            || body_free.terminal_outcome != "expired"
+            || body_free.source.task_ref != task.to_string()
+            || body_free.source.worker_ref != run.to_string()
+            || body_free.digest()? != record.result_digest
+        {
+            return Err(integrity());
+        }
+        Ok(Some(body_free.clone()))
+    }
+
     pub(crate) fn logical_bytes(&self) -> Result<u64, MachineError> {
         let mut total = manifest(self)?.len() as u64;
         total = total
@@ -768,7 +818,7 @@ pub(crate) fn read_bound(
         bytes,
     )))
 }
-/// A published binding remains a last consumer of its complete-result identity.
+/// Ordinary lookup identity and published bindings remain last consumers.
 pub(crate) fn protects_external_artifact(
     connection: &Connection,
     artifact: &str,
@@ -781,8 +831,31 @@ pub(crate) fn protects_external_artifact(
         )
         .optional()
         .map_err(|_| integrity())?;
-    task.map(|task| load(connection, &task).map(|p| p.is_some()))
-        .unwrap_or(Ok(false))
+    let Some(task) = task else {
+        return Ok(false);
+    };
+    if load(connection, &task)?.is_some() {
+        return Ok(true);
+    }
+    // A historical ordinary result can be the last retained lookup identity.
+    // Retirement eligibility observes this proof; it never backfills artifacts.
+    let ordinary: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE task_id=?1 AND CASE WHEN json_valid(request_json) THEN json_extract(request_json,'$.schema') END='dolgorae.accepted-task/v1')",
+        [&task], |row| row.get(0),
+    ).map_err(|_| integrity())?;
+    if ordinary {
+        return Ok(true);
+    }
+    let namespace: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='delegation_operations')", [], |row| row.get(0),
+    ).map_err(|_|integrity())?;
+    if !namespace {
+        return Ok(false);
+    }
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM delegation_operations WHERE operation_kind='assign_external_specialist_task' AND state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref')=?1)",
+        [&task], |row|row.get(0),
+    ).map_err(|_|integrity())
 }
 use rusqlite::OptionalExtension;
 

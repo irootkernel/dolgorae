@@ -64,6 +64,9 @@ development commits.
 
 ### Fixed
 
+- Return retained settled-result references and domain digests from ordinary task
+  lookup, and authenticate successor native tasks and group children for original-task recovery.
+
 - Retire caller Writer generations through a retained release owner and verified
   original-Thread Reader succession, preserving accepted work and recovery guards.
 - Enforce state-based member release proofs and retained release operations from

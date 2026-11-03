@@ -1869,6 +1869,174 @@ pub fn reconcile_external_member_task(
     })
 }
 
+/// Reauthenticate successor native work before the existing history owner runs.
+/// A Controller group without native accounting keeps its distinct origin path.
+pub(crate) fn authorize_successor_native_recovery(
+    request: &MemberTaskSettlement<'_>,
+    carrier: &crate::controller::CredentialCarrier,
+    manifest: &crate::run::RunManifest,
+) -> Result<bool, MachineError> {
+    let SettlementOwner::External {
+        engagement_id: engagement,
+    } = request.owner
+    else {
+        return Ok(false);
+    };
+    let (state_root, view, member, task, intent) = (
+        request.state_root,
+        request.view,
+        request.member_ref,
+        request.task_ref,
+        request.execution_intent,
+    );
+    let refused = || {
+        successor_error(
+            "RECOVERY_REQUIRED",
+            "reconcile_member_task",
+            None,
+            "none",
+            "RecoveryNeeded",
+            "restore_state",
+            "original native recovery provenance is unavailable",
+        )
+    };
+    let store =
+        EngagementStore::open_read_only(&EngagementStore::workspace_database_path(state_root))?;
+    let _snapshot = store
+        .connection()
+        .unchecked_transaction()
+        .map_err(|_| refused())?;
+    let connection = store.connection();
+    let counted: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM caller_scope_assignments WHERE assignment_id=?1)",
+            [task.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(|_| refused())?;
+    if !counted {
+        return Ok(false);
+    }
+    // Legacy external opens can also accept successor Tasks and caller accounting.
+    // Only an accepted successor open selects this provenance validator; the
+    // semantic caller retains strict legacy authorization for the other path.
+    let successor_open: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM delegation_operations WHERE operation_kind='open_external_engagement' AND state='accepted' AND json_extract(accepted_subjects_json,'$.engagement_ref')=?1)",
+            [engagement.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(|_| refused())?;
+    if !successor_open {
+        return Ok(false);
+    }
+    let (workspace, binding) = store.accepted_external_owner(engagement)?;
+    if workspace != view.workspace_id
+        || binding != manifest.controller
+        || manifest.schema_version != 4
+        || manifest.workspace_id != view.workspace_id
+        || manifest.workspace_mode != view.mode
+        || manifest.run_id != member
+        || manifest.canonical_workspace != view.canonical_path
+    {
+        return Err(refused());
+    }
+    crate::controller::authorize_controller(member, "run.reconcile", &binding, carrier)?;
+    let configuration = store.external_member_configuration(engagement, member)?.0;
+    if configuration != manifest.agent_configuration {
+        return Err(refused());
+    }
+    store.validate_external_member_binding(
+        engagement,
+        member,
+        manifest.aggregate_binding.as_ref().ok_or_else(refused)?,
+    )?;
+    let (run,execution): (String,String) = connection.query_row(
+        "SELECT specialist_run_id,execution_intent FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+        rusqlite::params![engagement.to_string(),task.to_string()],|r|Ok((r.get(0)?,r.get(1)?)),
+    ).map_err(|_|refused())?;
+    let accepted = store
+        .external_task_identity(engagement, task)?
+        .ok_or_else(refused)?;
+    if run != member.to_string()
+        || execution != intent
+        || execution != accepted.execution_intent
+        || configuration
+            .admitted_configuration
+            .as_ref()
+            .ok_or_else(refused)?
+            .digest()?
+            != accepted.agent_configuration_digest
+        || manifest
+            .instructions
+            .delegation()
+            .ok_or_else(refused)?
+            .role_snapshot_digest
+            != accepted.role_snapshot_digest
+    {
+        return Err(refused());
+    }
+    let rows: Vec<String> = connection.prepare(
+        "SELECT receipt_json FROM delegation_operations WHERE state='accepted' AND operation_kind='assign_external_specialist_task' AND workspace_ref=?1 AND scope_kind='external_engagement' AND scope_ref=?2 AND json_extract(accepted_subjects_json,'$.task_ref')=?3 LIMIT 2"
+    ).map_err(|_|refused())?.query_map(rusqlite::params![view.workspace_id,engagement.to_string(),task.to_string()],|r|r.get(0)).map_err(|_|refused())?.collect::<Result<_,_>>().map_err(|_|refused())?;
+    let [text] = rows.as_slice() else {
+        return Err(refused());
+    };
+    let receipt: OperationReceipt = serde_json::from_str(text).map_err(|_| refused())?;
+    if receipt.accepted_subjects.member_ref.as_deref() != Some(member.to_string().as_str())
+        || receipt.accepted_subjects.run_ref.as_deref() != Some(member.to_string().as_str())
+        || receipt.namespace.workspace_ref != view.workspace_id
+        || receipt.namespace.scope_ref.as_deref() != Some(engagement.to_string().as_str())
+        || receipt.namespace.scope_kind.as_deref() != Some("external_engagement")
+    {
+        return Err(refused());
+    }
+    let expected = Namespace::delegation(
+        &binding.identity,
+        &view.workspace_id,
+        Some(("external_engagement", &engagement.to_string())),
+        "assign_external_specialist_task",
+        &receipt.namespace.idempotency_key,
+    )
+    .map_err(|_| refused())?;
+    if receipt.namespace != LookupNamespace::from(&expected) {
+        return Err(refused());
+    }
+    let body_digest = store
+        .assignment_body_digest_for_task(&view.workspace_id, engagement, task)?
+        .ok_or_else(refused)?;
+    let (body, _, _) = engagement::accepted_task_content(connection, task)?.ok_or_else(refused)?;
+    let body: crate::task_request::SpecialistTaskRequest =
+        serde_json::from_slice(&body).map_err(|_| refused())?;
+    let (_, deadline) = store.external_task_dispatch_facts(engagement, task)?;
+    if !crate::successor_capture::verify_accepted_assignment(
+        member,
+        &body,
+        &accepted,
+        deadline,
+        &body_digest,
+    )? {
+        return Err(refused());
+    }
+    let native = engagement::accepted_native_context(connection, &receipt)?;
+    let caller: crate::delegation_identity::CallerScope = connection.query_row(
+        "SELECT binding_ref,podway_workspace_ref,podway_session_ref,podway_attempt_ref,delegated_placement_ref,max_rounds,workspace_ref,aggregate_scope_kind,aggregate_scope_ref,member_ref,accounting_state FROM caller_scope_assignments WHERE assignment_id=?1",
+        [task.to_string()],|r| {
+            let caller = crate::delegation_identity::CallerScope {binding_ref:r.get(0)?,podway_workspace_ref:r.get(1)?,podway_session_ref:r.get(2)?,podway_attempt_ref:r.get(3)?,delegated_placement_ref:r.get(4)?,max_rounds:r.get(5)?};
+            let matches = r.get::<_,String>(6)?==view.workspace_id && r.get::<_,String>(7)?=="external_engagement"
+                && r.get::<_,String>(8)?==engagement.to_string() && r.get::<_,String>(9)?==member.to_string()
+                && matches!(r.get::<_,String>(10)?.as_str(),"counted_unresolved"|"counted_accepted"|"proved_nondispatch");
+            if !matches { return Err(rusqlite::Error::InvalidQuery); }
+            Ok(caller)
+        },
+    ).map_err(|_|refused())?;
+    caller.validate().map_err(|_| refused())?;
+    if native.is_none() {
+        research_group::native_recovery_parent(&store, &receipt, &accepted, &caller)?;
+    }
+    Ok(true)
+}
+
 /// Original accepted managed-call provenance for local administrative recovery.
 /// This value is never supplied by a model or returned over a public transport.
 pub(crate) struct RetainedManagedRecovery {
@@ -5555,20 +5723,27 @@ fn lookup_operation_in(
     let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
         scope.state_root,
     ))?;
+    let _snapshot = store
+        .connection()
+        .unchecked_transaction()
+        .map_err(|_| complete_result_unavailable("lookup_accepted"))?;
     let observed = managed_lookup(&store, &lookup, operation_kind, aggregate_scope, key)?;
     match observed {
-        IntentLookup::Accepted(receipt) => Ok(json!({
-            "schema": LOOKUP_SCHEMA,
-            "namespace": lookup,
-            "state": "accepted",
-            "operation_ref": receipt.operation_ref,
-            "accepted_input_digest": receipt.accepted_input_digest,
-            "receipt": receipt,
-            "accepted_subjects": receipt.accepted_subjects,
-            "current_outcome": current_outcome(&store, operation_kind, &receipt)?,
-            "result_ref": null,
-            "result_digest": null,
-        })),
+        IntentLookup::Accepted(receipt) => {
+            let result = ordinary_lookup_result(scope, &store, &receipt)?;
+            Ok(json!({
+                "schema": LOOKUP_SCHEMA,
+                "namespace": lookup,
+                "state": "accepted",
+                "operation_ref": receipt.operation_ref,
+                "accepted_input_digest": receipt.accepted_input_digest,
+                "receipt": receipt,
+                "accepted_subjects": receipt.accepted_subjects,
+                "current_outcome": current_outcome(&store, operation_kind, &receipt)?,
+                "result_ref": result.as_ref().map(|(reference, _)| reference),
+                "result_digest": result.as_ref().map(|(_, digest)| digest),
+            }))
+        }
         IntentLookup::NotAccepted {
             operation_ref,
             input_digest,
@@ -6712,21 +6887,28 @@ fn managed_lookup(
     idempotency_key: &str,
 ) -> Result<IntentLookup, MachineError> {
     let Some(session_id) = managed_scope_session(operation_kind, aggregate_scope) else {
-        return store.intent_lookup(lookup);
+        return if store.connection().is_autocommit() {
+            store.intent_lookup(lookup)
+        } else {
+            engagement::intent_lookup(store.connection(), lookup)
+        };
     };
-    let transaction = store.connection().unchecked_transaction().map_err(|_| {
-        MachineError::new(
-            "INTERNAL_ERROR",
-            "the engagement read transaction is unavailable",
-            false,
-            json!({"invariant": "managed_lookup"}),
+    let transaction = if store.connection().is_autocommit() {
+        Some(
+            store
+                .connection()
+                .unchecked_transaction()
+                .map_err(|_| accounting_unreadable())?,
         )
-    })?;
-    let observed = engagement::intent_lookup(&transaction, lookup)?;
+    } else {
+        None
+    };
+    let connection = transaction.as_ref().map_or(store.connection(), |tx| tx);
+    let observed = engagement::intent_lookup(connection, lookup)?;
     let observed = match &observed {
         IntentLookup::Accepted(_) | IntentLookup::Unresolved { .. } => observed,
         _ => {
-            require_broker_key_free(&transaction, session_id, idempotency_key, operation_kind)?;
+            require_broker_key_free(connection, session_id, idempotency_key, operation_kind)?;
             observed
         }
     };
@@ -6833,6 +7015,216 @@ fn opened_engagement(
     })
 }
 
+/// Read only the original ordinary task's settled identity and byte reference.
+fn ordinary_lookup_result(
+    scope: &DelegationScope<'_>,
+    store: &EngagementStore,
+    receipt: &OperationReceipt,
+) -> Result<Option<(crate::delegation_identity::BytesRef, String)>, MachineError> {
+    use rusqlite::OptionalExtension as _;
+    let refused = || complete_result_unavailable("lookup_accepted");
+    let external = match receipt.namespace.operation_kind.as_str() {
+        "assign_external_specialist_task" => true,
+        "assign_specialist_task" => false,
+        _ => return Ok(None),
+    };
+    let task = receipt
+        .accepted_subjects
+        .task_ref
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(refused)?;
+    let member = receipt
+        .accepted_subjects
+        .member_ref
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(refused)?;
+    if receipt.accepted_subjects.run_ref.as_deref() != Some(member.to_string().as_str()) {
+        return Err(refused());
+    }
+    let aggregate = receipt
+        .namespace
+        .scope_ref
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(refused)?;
+    let connection = store.connection();
+    let (owner, state, accepted, content, recorded) = if external {
+        if receipt.namespace.scope_kind.as_deref() != Some("external_engagement") {
+            return Err(refused());
+        }
+        let (run, state, digest, artifact): (String, String, Option<String>, Option<String>) = connection.query_row(
+            "SELECT specialist_run_id,state,result_sha256,artifact_id FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+            rusqlite::params![aggregate.to_string(),task.to_string()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+        ).map_err(|_| refused())?;
+        if run != member.to_string() {
+            return Err(refused());
+        }
+        let accepted = engagement::external_task_identity_metadata_on(connection, aggregate, task)?
+            .ok_or_else(refused)?;
+        let content = if let Some(artifact) = artifact {
+            let linked: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM artifacts WHERE artifact_id=?1 AND engagement_id=?2 AND task_id=?3 AND specialist_run_id=?4 AND result_sha256=?5)",
+                rusqlite::params![artifact,aggregate.to_string(),task.to_string(),member.to_string(),digest], |r|r.get(0),
+            ).map_err(|_|refused())?;
+            if !linked {
+                return Err(refused());
+            }
+            crate::storage_observation::content_reference(
+                connection,
+                "external_artifact",
+                &artifact,
+                "json",
+            )?
+        } else {
+            None
+        };
+        (
+            SettlementOwner::External {
+                engagement_id: aggregate,
+            },
+            state,
+            accepted,
+            content,
+            digest,
+        )
+    } else {
+        if receipt.namespace.scope_kind.as_deref() != Some("orchestrated_session") {
+            return Err(refused());
+        }
+        let facts = crate::orchestration::successor_task(connection, aggregate, task)?
+            .ok_or_else(refused)?;
+        if facts.member_ref != member.to_string() {
+            return Err(refused());
+        }
+        let recorded: Option<String> = connection
+            .query_row(
+                "SELECT accepted_request_sha256 FROM brokered_task_acceptances WHERE task_id=?1",
+                [task.to_string()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|_| refused())?;
+        if recorded.as_deref() != Some(sha256_hex(facts.accepted_request_json.as_bytes()).as_str())
+        {
+            return Err(refused());
+        }
+        let accepted =
+            crate::successor_capture::retained_accepted_task(&facts.accepted_request_json)?;
+        let marker: Value = serde_json::from_str(&facts.request_json).map_err(|_| refused())?;
+        if marker["operation_ref"] != receipt.operation_ref
+            || marker["member_ref"] != member.to_string()
+            || marker["accepted_task_digest"] != accepted.digest()?
+            || marker["execution_intent"] != accepted.execution_intent
+        {
+            return Err(refused());
+        }
+        let content = crate::storage_observation::content_reference(
+            connection,
+            "successor_task_result",
+            &task.to_string(),
+            "complete_result",
+        )?;
+        (
+            SettlementOwner::Managed {
+                session_id: aggregate,
+            },
+            facts.state,
+            accepted,
+            content,
+            facts.result_sha256,
+        )
+    };
+    if !matches!(
+        state.as_str(),
+        "completed_not_delivered" | "completed" | "delivered" | "failed" | "cancelled" | "expired"
+    ) {
+        if content.is_some() || recorded.is_some() {
+            return Err(refused());
+        }
+        return Ok(None);
+    }
+    let body_free = crate::delegation_identity::CompleteResult {
+        schema: crate::delegation_identity::COMPLETE_RESULT_SCHEMA.into(),
+        source: crate::delegation_identity::ResultSource {
+            scope_kind: owner.scope_kind().into(),
+            scope_ref: aggregate.to_string(),
+            worker_ref: member.to_string(),
+            task_ref: task.to_string(),
+            role_snapshot_digest: accepted.role_snapshot_digest.clone(),
+            agent_configuration_digest: accepted.agent_configuration_digest.clone(),
+            accepted_task_digest: accepted.digest()?,
+        },
+        terminal_outcome: "expired".into(),
+        safe_failure_code: Some("OPERATION_TIMEOUT".into()),
+        final_response: None,
+        structured_output_schema: None,
+        structured_output: None,
+        changes: Vec::new(),
+        attachments: Vec::new(),
+    };
+    let identity = crate::result_component_artifact::Publication::retained_lookup_identity(
+        connection, scope.view, member, task, &body_free,
+    )?;
+    let (content, recorded) = match (content, recorded) {
+        (None, None) if identity.is_none() => return Ok(None),
+        (Some(content), Some(recorded)) => (content, recorded),
+        _ => return Err(refused()),
+    };
+    if content.sha256 != recorded {
+        return Err(refused());
+    }
+    let result = match identity {
+        Some(result) => result,
+        None => {
+            let bytes = crate::storage_observation::read_content(
+                connection,
+                &content.owner_kind,
+                &content.owner_id,
+                &content.representation,
+            )?
+            .ok_or_else(refused)?;
+            let parsed = crate::jcs::parse(std::str::from_utf8(&bytes).map_err(|_| refused())?)
+                .map_err(|_| refused())?;
+            let canonical = crate::jcs::canonicalize(&parsed).map_err(|_| refused())?;
+            let value: Value = serde_json::from_slice(&canonical).map_err(|_| refused())?;
+            if value["schema"] == "dolgorae.complete-result-unavailable/v1" {
+                if value
+                    != json!({"schema":"dolgorae.complete-result-unavailable/v1","task_ref":task,"reason":"complete_result_unavailable"})
+                {
+                    return Err(refused());
+                }
+                return Ok(None);
+            }
+            serde_json::from_value(value).map_err(|_| refused())?
+        }
+    };
+    verify_result_source(
+        &result,
+        owner,
+        member,
+        task,
+        &accepted.digest()?,
+        &state,
+        "lookup_accepted",
+    )?;
+    if result.source.role_snapshot_digest != accepted.role_snapshot_digest
+        || result.source.agent_configuration_digest != accepted.agent_configuration_digest
+    {
+        return Err(refused());
+    }
+    let bytes = crate::operation::canonical(&serde_json::to_value(&result).map_err(|_| refused())?)
+        .map_err(|_| refused())?;
+    let reference = crate::delegation_identity::BytesRef::from_bytes(&bytes);
+    if reference.sha256 != format!("sha256:{}", content.sha256)
+        || reference.byte_length != content.byte_length
+    {
+        return Err(refused());
+    }
+    Ok(Some((reference, result.digest()?)))
+}
+
 /// The closed `lookup_accepted.current_outcome` derivation.
 fn current_outcome(
     store: &EngagementStore,
@@ -6860,8 +7252,15 @@ fn current_outcome(
                 .ok_or_else(|| {
                     MachineError::invalid_argument("receipt", "invalid engagement scope")
                 })?;
-            let snapshot = store.external_task(engagement_id, task_id)?;
-            Ok(match snapshot.state.as_str() {
+            let state: String = store
+                .connection()
+                .query_row(
+                    "SELECT state FROM tasks WHERE engagement_id=?1 AND task_id=?2",
+                    rusqlite::params![engagement_id.to_string(), task_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(|_| complete_result_unavailable("lookup_accepted"))?;
+            Ok(match state.as_str() {
                 "accepted" | "queued" | "claimed" => "pending",
                 "dispatching" | "running" => "running",
                 "completed_not_delivered" | "delivered" => "completed",
@@ -24267,6 +24666,823 @@ pub(crate) mod tests {
                     .len(),
                 1
             );
+        }
+    }
+    fn task076_mutate_frozen(connection: &Connection, trigger: &str, mutation: impl FnOnce()) {
+        let original: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [trigger],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(matches!(
+            trigger,
+            "assignment_identity_fixed" | "delegation_receipt_frozen"
+        ));
+        connection
+            .execute_batch(&format!("DROP TRIGGER {trigger}"))
+            .unwrap();
+        mutation();
+        connection.execute_batch(&original).unwrap();
+        let restored: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [trigger],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(original, restored);
+    }
+
+    fn task076_assignment(
+        external: bool,
+    ) -> (
+        Fixture,
+        SettlementOwner,
+        Uuid,
+        Uuid,
+        OperationReceipt,
+        FakePort,
+    ) {
+        let f = Fixture::new();
+        f.set_up_namespace();
+        f.initialize_writer_authority();
+        let port = FakePort::new();
+        let caller = caller(8);
+        let (owner, member, observation, receipt) = if external {
+            let engagement = f.open();
+            let candidate = f.install();
+            let member = f.hire_member(engagement, &candidate, "task076-hire");
+            let (observation, receipt) = assign_external_specialist_task(
+                &f.scope(),
+                &caller,
+                &port,
+                AssignExternalSpecialistTask {
+                    engagement_id: engagement,
+                    member_ref: member,
+                    task: fixture_task(),
+                    execution_intent: "read_only",
+                    target: None,
+                    deadline_seconds: 60,
+                    idempotency_key: "task076-original",
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+            (
+                SettlementOwner::External {
+                    engagement_id: engagement,
+                },
+                member,
+                observation,
+                receipt,
+            )
+        } else {
+            let session = f.managed_session();
+            let member = Uuid::parse_str(
+                &f.spawn_member(session, "task076-spawn", &port)
+                    .member
+                    .member_ref,
+            )
+            .unwrap();
+            let (observation, receipt) = f
+                .assign(
+                    session,
+                    "task076-original",
+                    &caller,
+                    &port,
+                    managed_assign(member, "Retain the exact result.\n", "read_only", None),
+                )
+                .unwrap();
+            (
+                SettlementOwner::Managed {
+                    session_id: session,
+                },
+                member,
+                observation,
+                receipt,
+            )
+        };
+        let task = Uuid::parse_str(&observation.task_ref).unwrap();
+        (f, owner, member, task, receipt, port)
+    }
+
+    fn task076_publish(
+        f: &Fixture,
+        owner: SettlementOwner,
+        member: Uuid,
+        task: Uuid,
+        expired: bool,
+    ) -> crate::delegation_identity::CompleteResult {
+        let mut store = EngagementStore::open(&f.database()).unwrap();
+        let accepted = match owner {
+            SettlementOwner::External { engagement_id } => {
+                engagement::external_task_identity_metadata_on(
+                    store.connection(),
+                    engagement_id,
+                    task,
+                )
+                .unwrap()
+                .unwrap()
+            }
+            SettlementOwner::Managed { session_id } => {
+                crate::successor_capture::retained_accepted_task(
+                    &crate::orchestration::successor_task(store.connection(), session_id, task)
+                        .unwrap()
+                        .unwrap()
+                        .accepted_request_json,
+                )
+                .unwrap()
+            }
+        };
+        let result = crate::delegation_identity::CompleteResult {
+            schema: crate::delegation_identity::COMPLETE_RESULT_SCHEMA.into(),
+            source: crate::delegation_identity::ResultSource {
+                scope_kind: owner.scope_kind().into(),
+                scope_ref: owner.scope_ref().to_string(),
+                worker_ref: member.to_string(),
+                task_ref: task.to_string(),
+                role_snapshot_digest: accepted.role_snapshot_digest.clone(),
+                agent_configuration_digest: accepted.agent_configuration_digest.clone(),
+                accepted_task_digest: accepted.digest().unwrap(),
+            },
+            terminal_outcome: if expired { "expired" } else { "completed" }.into(),
+            safe_failure_code: expired.then(|| "OPERATION_TIMEOUT".into()),
+            final_response: (!expired).then(|| {
+                crate::delegation_identity::BytesRef::from_bytes(b"Retained exact response.\n")
+            }),
+            structured_output_schema: None,
+            structured_output: None,
+            changes: Vec::new(),
+            attachments: Vec::new(),
+        };
+        let bytes = crate::operation::canonical(&serde_json::to_value(&result).unwrap()).unwrap();
+        let hash = sha256_hex(&bytes);
+        store
+            .transact(|tx| {
+                let state = if expired {
+                    "expired"
+                } else {
+                    "completed_not_delivered"
+                };
+                match owner {
+                    SettlementOwner::External { engagement_id } => {
+                        let artifact =
+                            engagement::retain_task_result(tx, engagement_id, task, &bytes, &hash)?;
+                        assert!(
+                            engagement::terminalize_external_task_in(
+                                tx,
+                                engagement::TaskTerminal {
+                                    engagement_id,
+                                    task_id: task,
+                                    state,
+                                    safe_error_code: result.safe_failure_code.as_deref(),
+                                    result_sha256: Some(&hash),
+                                    artifact_id: Some(artifact),
+                                    diagnostic_json: None,
+                                    now_ms: now_ms()?
+                                }
+                            )?
+                            .is_some()
+                        );
+                    }
+                    SettlementOwner::Managed { session_id } => {
+                        crate::orchestration::retain_successor_task_result(tx, task, &bytes)?;
+                        assert!(crate::orchestration::settle_successor_task_result(
+                            tx,
+                            session_id,
+                            task,
+                            state,
+                            result.safe_failure_code.as_deref(),
+                            Some(&hash),
+                            now_ms()?
+                        )?);
+                    }
+                }
+                crate::caller_scope::accepted(tx, task)
+            })
+            .unwrap();
+        result
+    }
+
+    #[test]
+    fn task076_lookup_metadata_survives_retirement_and_refuses_corruption_in_both_scopes() {
+        for external in [true, false] {
+            let (f, owner, member, task, receipt, port) = task076_assignment(external);
+            let operation = receipt.namespace.operation_kind.as_str();
+            let aggregate = owner.scope_ref().to_string();
+            let observe = || {
+                lookup_operation(
+                    &f.scope(),
+                    operation,
+                    Some((owner.scope_kind(), &aggregate)),
+                    "task076-original",
+                )
+            };
+            assert!(observe().unwrap()["result_ref"].is_null());
+            let reader = EngagementStore::open_read_only(&f.database()).unwrap();
+            for field in ["member", "task", "scope"] {
+                let mut foreign = receipt.clone();
+                match field {
+                    "member" => {
+                        foreign.accepted_subjects.member_ref = Some(Uuid::now_v7().to_string())
+                    }
+                    "task" => foreign.accepted_subjects.task_ref = Some(Uuid::now_v7().to_string()),
+                    _ => foreign.namespace.scope_ref = Some(Uuid::now_v7().to_string()),
+                }
+                let before = f.database_bytes();
+                assert!(ordinary_lookup_result(&f.scope(), &reader, &foreign).is_err());
+                assert_eq!(f.database_bytes(), before);
+            }
+            drop(reader);
+            let result = task076_publish(&f, owner, member, task, false);
+            let expected =
+                crate::operation::canonical(&serde_json::to_value(&result).unwrap()).unwrap();
+            let historical = observe().unwrap();
+            assert_eq!(
+                historical["result_ref"],
+                json!(crate::delegation_identity::BytesRef::from_bytes(&expected))
+            );
+            assert_eq!(historical["result_digest"], result.digest().unwrap());
+            assert_ne!(
+                historical["result_digest"],
+                historical["result_ref"]["sha256"]
+            );
+            assert_eq!(historical["receipt"], json!(receipt));
+            let publication =
+                crate::result_component_artifact::Publication::prepare(&f.view, member, &result)
+                    .unwrap();
+            let mut writer = EngagementStore::open(&f.database()).unwrap();
+            writer.transact(|tx| publication.retain(tx)).unwrap();
+            let reference = ordinary_lookup_result(&f.scope(), &writer, &receipt)
+                .unwrap()
+                .unwrap()
+                .0;
+            writer.connection().execute("UPDATE result_content_refs SET retired_operation=?1 WHERE (sha256=?2) OR (owner_kind='accepted_task' AND owner_id=?3)",rusqlite::params![Uuid::now_v7().to_string(),reference.sha256.strip_prefix("sha256:").unwrap(),task.to_string()]).unwrap();
+            writer.connection().execute("DELETE FROM result_content WHERE sha256 IN (SELECT sha256 FROM result_content_refs WHERE retired_operation IS NOT NULL)",[]).unwrap();
+            let before = f.database_bytes();
+            let calls = port.calls();
+            assert_eq!(
+                observe().unwrap(),
+                historical,
+                "retirement must preserve exact metadata"
+            );
+            assert_eq!(f.database_bytes(), before);
+            assert_eq!(port.calls(), calls);
+            writer
+                .connection()
+                .execute(
+                    "UPDATE result_content_refs SET byte_length=byte_length+1 WHERE sha256=?1",
+                    [reference.sha256.strip_prefix("sha256:").unwrap()],
+                )
+                .unwrap();
+            let before = f.database_bytes();
+            assert!(observe().is_err());
+            assert_eq!(f.database_bytes(), before);
+            writer
+                .connection()
+                .execute(
+                    "UPDATE result_content_refs SET byte_length=byte_length-1 WHERE sha256=?1",
+                    [reference.sha256.strip_prefix("sha256:").unwrap()],
+                )
+                .unwrap();
+            let key = format!("result-component-bundle:v1:{task}");
+            let record = engagement::result_component_record(writer.connection(), &key)
+                .unwrap()
+                .unwrap();
+            writer.connection().execute("UPDATE metadata SET value=json_set(value,'$.result.source.task_ref',?2) WHERE key=?1",rusqlite::params![key,Uuid::now_v7().to_string()]).unwrap();
+            assert!(observe().is_err());
+            writer
+                .connection()
+                .execute(
+                    "UPDATE metadata SET value=?2 WHERE key=?1",
+                    rusqlite::params![key, record],
+                )
+                .unwrap();
+            writer
+                .connection()
+                .execute("DELETE FROM metadata WHERE key=?1", [key])
+                .unwrap();
+            let before = f.database_bytes();
+            assert!(
+                observe().is_err(),
+                "irretrievable historical identity must refuse"
+            );
+            assert_eq!(f.database_bytes(), before);
+        }
+    }
+
+    #[test]
+    fn task076_lookup_expiry_identity_only_survives_retired_body() {
+        for external in [true, false] {
+            let (f, owner, member, task, receipt, _) = task076_assignment(external);
+            let result = task076_publish(&f, owner, member, task, true);
+            let publication =
+                crate::result_component_artifact::Publication::prepare(&f.view, member, &result)
+                    .unwrap();
+            let mut store = EngagementStore::open(&f.database()).unwrap();
+            store
+                .transact(|tx| publication.retain_identity_only(tx))
+                .unwrap();
+            let expected = ordinary_lookup_result(&f.scope(), &store, &receipt)
+                .unwrap()
+                .unwrap();
+            store
+                .connection()
+                .execute(
+                    "UPDATE result_content_refs SET retired_operation=?1 WHERE sha256=?2",
+                    rusqlite::params![
+                        Uuid::now_v7().to_string(),
+                        expected.0.sha256.strip_prefix("sha256:").unwrap()
+                    ],
+                )
+                .unwrap();
+            store
+                .connection()
+                .execute(
+                    "DELETE FROM result_content WHERE sha256=?1",
+                    [expected.0.sha256.strip_prefix("sha256:").unwrap()],
+                )
+                .unwrap();
+            let before = f.database_bytes();
+            assert_eq!(
+                ordinary_lookup_result(&f.scope(), &store, &receipt).unwrap(),
+                Some(expected)
+            );
+            assert_eq!(f.database_bytes(), before);
+            store
+                .connection()
+                .execute(
+                    "UPDATE metadata SET value=json_set(value,'$.run_id',?2) WHERE key=?1",
+                    rusqlite::params![
+                        format!("result-component-identity:v1:{task}"),
+                        Uuid::now_v7().to_string()
+                    ],
+                )
+                .unwrap();
+            assert!(ordinary_lookup_result(&f.scope(), &store, &receipt).is_err());
+        }
+    }
+
+    #[test]
+    fn task076_lookup_unavailable_publication_never_becomes_a_complete_result() {
+        for external in [true, false] {
+            let (f, owner, member, task, receipt, _) = task076_assignment(external);
+            let marker = json!({"schema":"dolgorae.complete-result-unavailable/v1","reason":"complete_result_unavailable","task_ref":task});
+            let bytes = crate::operation::canonical(&marker).unwrap();
+            let digest = sha256_hex(&bytes);
+            let mut writer = EngagementStore::open(&f.database()).unwrap();
+            writer
+                .transact(|tx| {
+                    match owner {
+                        SettlementOwner::External { engagement_id } => {
+                            let artifact = engagement::retain_task_result(
+                                tx,
+                                engagement_id,
+                                task,
+                                &bytes,
+                                &digest,
+                            )?;
+                            assert!(
+                                engagement::terminalize_external_task_in(
+                                    tx,
+                                    engagement::TaskTerminal {
+                                        engagement_id,
+                                        task_id: task,
+                                        state: "failed",
+                                        safe_error_code: Some("COMPLETE_RESULT_UNAVAILABLE"),
+                                        result_sha256: Some(&digest),
+                                        artifact_id: Some(artifact),
+                                        diagnostic_json: None,
+                                        now_ms: now_ms()?
+                                    }
+                                )?
+                                .is_some()
+                            );
+                        }
+                        SettlementOwner::Managed { session_id } => {
+                            crate::orchestration::retain_successor_task_result(tx, task, &bytes)?;
+                            assert!(crate::orchestration::settle_successor_task_result(
+                                tx,
+                                session_id,
+                                task,
+                                "failed",
+                                Some("COMPLETE_RESULT_UNAVAILABLE"),
+                                Some(&digest),
+                                now_ms()?
+                            )?);
+                        }
+                    }
+                    crate::caller_scope::accepted(tx, task)
+                })
+                .unwrap();
+            let before = f.database_bytes();
+            let observed = lookup_operation(
+                &f.scope(),
+                &receipt.namespace.operation_kind,
+                Some((owner.scope_kind(), &owner.scope_ref().to_string())),
+                "task076-original",
+            )
+            .unwrap();
+            assert_eq!(observed["current_outcome"], "failed");
+            assert!(observed["result_ref"].is_null());
+            assert!(observed["result_digest"].is_null());
+            assert_eq!(observed["receipt"], json!(receipt));
+            assert_eq!(f.database_bytes(), before);
+            let _ = member;
+        }
+    }
+
+    #[test]
+    fn task076_historical_live_lookup_identity_remains_protected_from_retirement() {
+        let (f, owner, member, task, receipt, _) = task076_assignment(true);
+        let SettlementOwner::External { engagement_id } = owner else {
+            unreachable!();
+        };
+        let result = task076_publish(&f, owner, member, task, false);
+        let mut store = EngagementStore::open(&f.database()).unwrap();
+        let (delivered, _) = store
+            .collect_external_results(engagement_id, 0, 10)
+            .unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].state, "delivered");
+        let artifact = delivered[0].result_artifact_ref.unwrap();
+        let reference = crate::storage_observation::content_reference(
+            store.connection(),
+            "external_artifact",
+            &artifact.to_string(),
+            "json",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            engagement::result_component_record(
+                store.connection(),
+                &format!("result-component-bundle:v1:{task}")
+            )
+            .unwrap()
+            .is_none()
+        );
+        let before = f.database_bytes();
+        assert!(
+            !crate::maintenance::content_delivered(store.connection(), &reference).unwrap(),
+            "delivered ordinary bytes remain the last immutable lookup source"
+        );
+        assert_eq!(
+            ordinary_lookup_result(&f.scope(), &store, &receipt)
+                .unwrap()
+                .unwrap()
+                .1,
+            result.digest().unwrap()
+        );
+        assert_eq!(
+            f.database_bytes(),
+            before,
+            "eligibility and lookup must not install or repair metadata"
+        );
+        assert!(
+            crate::storage_observation::read_content(
+                store.connection(),
+                "external_artifact",
+                &artifact.to_string(),
+                "json"
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            crate::storage_observation::content_reference(
+                store.connection(),
+                "external_artifact",
+                &artifact.to_string(),
+                "json"
+            )
+            .unwrap()
+            .unwrap()
+            .retired_operation
+            .is_none()
+        );
+        let _ = member;
+    }
+
+    fn task076_invocation(
+        f: &Fixture,
+        engagement: Uuid,
+        operation: &str,
+        key: &str,
+    ) -> crate::caller_scope::TrustedInvocation {
+        struct Native(
+            crate::delegation_identity::TrustedInvocationContext,
+            LookupNamespace,
+        );
+        impl crate::caller_scope::sealed::Sealed for Native {}
+        impl crate::caller_scope::TrustedInvocationPort for Native {
+            fn invocation(
+                &self,
+            ) -> Result<
+                (
+                    crate::delegation_identity::TrustedInvocationContext,
+                    LookupNamespace,
+                ),
+                MachineError,
+            > {
+                Ok((self.0.clone(), self.1.clone()))
+            }
+        }
+        let ns = Namespace::delegation(
+            &f.controller.identity,
+            &f.view.workspace_id,
+            Some(("external_engagement", &engagement.to_string())),
+            operation,
+            key,
+        )
+        .unwrap();
+        crate::caller_scope::TrustedInvocation::from_port(&Native(
+            crate::delegation_identity::TrustedInvocationContext {
+                schema: "dolgorae.trusted-invocation-context/v1".into(),
+                invocation_ref: Uuid::now_v7(),
+                host_route: "codex-0.160.0".into(),
+                state_generation: 1,
+                accepted_public_input_digest: format!(
+                    "sha256:{}",
+                    sha256_hex(b"fixture original public call")
+                ),
+                native_event_digest: format!(
+                    "sha256:{}",
+                    sha256_hex(b"fixture original native event")
+                ),
+                server_binding: "dolgorae".into(),
+                tool_binding: "external_specialist".into(),
+            },
+            (&ns).into(),
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn task076_successor_native_recovery_authenticates_original_ordinary_and_group_child() {
+        for group in [false, true] {
+            let mut f = Fixture::new();
+            let credential = f.root.join("task076-controller.json");
+            let created = crate::controller::create_controller_credential(
+                &credential,
+                ControllerKind::Automation,
+                "original-owner".into(),
+                None,
+                None,
+            )
+            .unwrap();
+            let carrier = crate::controller::CredentialCarrier::open_path(&credential).unwrap();
+            f.controller =
+                crate::controller::binding_from_credential(&created.credential, 1, &carrier)
+                    .unwrap();
+            f.set_up_namespace();
+            f.initialize_writer_authority();
+            let engagement = f.open();
+            let candidate = f.install();
+            let caller = caller(8);
+            let port = FakePort::new();
+            let invocation = task076_invocation(
+                &f,
+                engagement,
+                if group {
+                    "assign_group"
+                } else {
+                    "assign_external_specialist_task"
+                },
+                "task076-native",
+            );
+            let scope = DelegationScope {
+                trusted_invocation: Some(&invocation),
+                ..f.scope()
+            };
+            let (member, task) = if group {
+                let snapshot = crate::provisioning::retained_snapshot(
+                    &f.state_root,
+                    &candidate.provisioning_ref,
+                )
+                .unwrap();
+                let (_, configuration) = snapshot.admitted_configuration().unwrap();
+                let body = fixture_task();
+                let (accepted, _) = crate::successor_capture::capture_facade_task(
+                    &configuration,
+                    &body,
+                    "read_only",
+                    None,
+                )
+                .unwrap();
+                let input = json!({"schema":"dolgorae.group-task-input/v1","provisioning_ref":candidate.provisioning_ref,"assignment":{"task_body":body,"accepted_task_identity":accepted,"deadline_seconds":30}});
+                let bytes = crate::operation::canonical(&input).unwrap();
+                let path = f
+                    .view
+                    .canonical_path
+                    .to_path_buf()
+                    .unwrap()
+                    .join("task076-group.json");
+                fs::write(&path, &bytes).unwrap();
+                let request = json!({"schema":"dolgorae.external-specialist-request/v5","operation":"assign_group","scope_kind":"external_engagement","scope_ref":engagement,"idempotency_key":"task076-native","expected_revision":null,"manifest":{"schema":"dolgorae.group-assignment/v1","scope_kind":"external_engagement","scope_ref":engagement,"entries":[{"entry_key":"original","role_snapshot_digest":candidate.role_snapshot_digest,"agent_configuration_digest":candidate.agent_configuration_digest,"accepted_task_digest":accepted.digest().unwrap()}]},"inputs":[{"entry_key":"original","absolute_file_path":path,"content":crate::delegation_identity::BytesRef::from_bytes(&bytes)}]});
+                research_group::assign(&scope, None, &caller, &port, &request).unwrap();
+                let store = EngagementStore::open_read_only(&f.database()).unwrap();
+                let (m, t): (String, String) = store
+                    .connection()
+                    .query_row("SELECT specialist_run_id,task_id FROM tasks", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .unwrap();
+                (Uuid::parse_str(&m).unwrap(), Uuid::parse_str(&t).unwrap())
+            } else {
+                let member = f.hire_member(engagement, &candidate, "task076-native-hire");
+                let (observation, _) = assign_external_specialist_task(
+                    &scope,
+                    &caller,
+                    &port,
+                    AssignExternalSpecialistTask {
+                        engagement_id: engagement,
+                        member_ref: member,
+                        task: fixture_task(),
+                        execution_intent: "read_only",
+                        target: None,
+                        deadline_seconds: 60,
+                        idempotency_key: "task076-native",
+                        expected_revision: None,
+                    },
+                )
+                .unwrap();
+                (member, Uuid::parse_str(&observation.task_ref).unwrap())
+            };
+            let manifest = f.publish_external_member_manifest(engagement, member);
+            assert!(
+                !research_group::authorize_external_recovery(
+                    &f.state_root,
+                    &f.view,
+                    &carrier,
+                    engagement,
+                    member,
+                    task,
+                    &manifest
+                )
+                .unwrap(),
+                "native work must not acquire Controller-group origin"
+            );
+            let reader = EngagementStore::open_read_only(&f.database()).unwrap();
+            assert!(
+                reader
+                    .authorize_external_owner(
+                        &f.view.workspace_id,
+                        engagement,
+                        "run.reconcile",
+                        &carrier
+                    )
+                    .is_err(),
+                "successor recovery must not invent legacy provenance"
+            );
+            drop(reader);
+            let authorize = |carrier, task, intent, manifest| {
+                authorize_successor_native_recovery(
+                    &MemberTaskSettlement {
+                        state_root: &f.state_root,
+                        view: &f.view,
+                        owner: SettlementOwner::External {
+                            engagement_id: engagement,
+                        },
+                        member_ref: member,
+                        task_ref: task,
+                        execution_intent: intent,
+                    },
+                    carrier,
+                    manifest,
+                )
+            };
+            assert!(
+                authorize(&carrier, task, "read_only", &manifest).unwrap(),
+                "genuine native branch {group}"
+            );
+            let expected =
+                crate::semantic::successor_reconciliation_executions(&f.state_root, member)
+                    .err()
+                    .expect("fixture deliberately lacks native ledger authority");
+            let actual = crate::semantic::SemanticRunSettlementPort { carrier: &carrier };
+            let before = f.database_bytes();
+            let dispatched = port.dispatched.borrow().len();
+            let error = actual
+                .reconcile_member_task(MemberTaskSettlement {
+                    view: &f.view,
+                    state_root: &f.state_root,
+                    owner: SettlementOwner::External {
+                        engagement_id: engagement,
+                    },
+                    member_ref: member,
+                    task_ref: task,
+                    execution_intent: "read_only",
+                })
+                .unwrap_err();
+            assert_eq!(
+                error, expected,
+                "accepted native proof must reach the independent existing history fence"
+            );
+            assert_eq!(f.database_bytes(), before);
+            assert_eq!(port.dispatched.borrow().len(), dispatched);
+            assert!(authorize(&carrier, task, "canonical_workspace_write", &manifest).is_err());
+            assert!(!authorize(&carrier, Uuid::now_v7(), "read_only", &manifest).unwrap());
+            let mut changed = manifest.clone();
+            changed.agent_configuration.model = "foreign".into();
+            assert!(authorize(&carrier, task, "read_only", &changed).is_err());
+            let foreign_path = f.root.join("task076-foreign.json");
+            crate::controller::create_controller_credential(
+                &foreign_path,
+                ControllerKind::Automation,
+                "foreign".into(),
+                None,
+                None,
+            )
+            .unwrap();
+            let foreign = crate::controller::CredentialCarrier::open_path(&foreign_path).unwrap();
+            assert!(authorize(&foreign, task, "read_only", &manifest).is_err());
+            let writer = EngagementStore::open(&f.database()).unwrap();
+            task076_mutate_frozen(writer.connection(), "assignment_identity_fixed", || {
+                writer
+                    .connection()
+                    .execute(
+                        "UPDATE caller_scope_assignments SET member_ref=?2 WHERE assignment_id=?1",
+                        rusqlite::params![task.to_string(), Uuid::now_v7().to_string()],
+                    )
+                    .unwrap();
+            });
+            assert!(authorize(&carrier, task, "read_only", &manifest).is_err());
+            task076_mutate_frozen(writer.connection(), "assignment_identity_fixed", || {
+                writer
+                    .connection()
+                    .execute(
+                        "UPDATE caller_scope_assignments SET member_ref=?2 WHERE assignment_id=?1",
+                        rusqlite::params![task.to_string(), member.to_string()],
+                    )
+                    .unwrap();
+            });
+            let (operation,original_receipt): (String,String)=writer.connection().query_row("SELECT operation_ref,receipt_json FROM delegation_operations WHERE operation_kind='assign_external_specialist_task' AND json_extract(accepted_subjects_json,'$.task_ref')=?1",[task.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+            task076_mutate_frozen(writer.connection(), "delegation_receipt_frozen", || {
+                writer
+                    .connection()
+                    .execute(
+                        "UPDATE delegation_operations SET receipt_json='{}' WHERE operation_ref=?1",
+                        [&operation],
+                    )
+                    .unwrap();
+            });
+            assert!(authorize(&carrier, task, "read_only", &manifest).is_err());
+            task076_mutate_frozen(writer.connection(), "delegation_receipt_frozen", || {
+                writer
+                    .connection()
+                    .execute(
+                        "UPDATE delegation_operations SET receipt_json=?2 WHERE operation_ref=?1",
+                        rusqlite::params![operation, original_receipt],
+                    )
+                    .unwrap();
+            });
+            let open_receipt: String=writer.connection().query_row("SELECT receipt_json FROM delegation_operations WHERE operation_kind='open_external_engagement'",[],|r|r.get(0)).unwrap();
+            task076_mutate_frozen(writer.connection(), "delegation_receipt_frozen", || {
+                writer.connection().execute("UPDATE delegation_operations SET receipt_json='{}' WHERE operation_kind='open_external_engagement'",[]).unwrap();
+            });
+            assert!(authorize(&carrier, task, "read_only", &manifest).is_err());
+            task076_mutate_frozen(writer.connection(), "delegation_receipt_frozen", || {
+                writer.connection().execute("UPDATE delegation_operations SET receipt_json=?1 WHERE operation_kind='open_external_engagement'",[open_receipt]).unwrap();
+            });
+            assert!(authorize(&carrier, task, "read_only", &manifest).unwrap());
+            writer.connection().execute_batch(
+                "CREATE TEMP TABLE task076_missing_open AS SELECT * FROM delegation_operations WHERE operation_kind='open_external_engagement'",
+            ).unwrap();
+            writer.connection().execute(
+                "DELETE FROM delegation_operations WHERE operation_kind='open_external_engagement'",
+                [],
+            ).unwrap();
+            let before = f.database_bytes();
+            assert!(!authorize(&carrier, task, "read_only", &manifest).unwrap());
+            let error = actual
+                .reconcile_member_task(MemberTaskSettlement {
+                    view: &f.view,
+                    state_root: &f.state_root,
+                    owner: SettlementOwner::External {
+                        engagement_id: engagement,
+                    },
+                    member_ref: member,
+                    task_ref: task,
+                    execution_intent: "read_only",
+                })
+                .unwrap_err();
+            assert_eq!(error.code, "INTERNAL_ERROR");
+            assert_eq!(error.details["invariant"], "external provenance is missing");
+            assert_eq!(f.database_bytes(), before);
+            assert_eq!(port.dispatched.borrow().len(), dispatched);
+            writer
+                .connection()
+                .execute_batch("INSERT INTO delegation_operations SELECT * FROM task076_missing_open; DROP TABLE task076_missing_open")
+                .unwrap();
+            assert!(authorize(&carrier, task, "read_only", &manifest).unwrap());
+            writer.connection().execute("UPDATE delegation_operations SET trusted_invocation_json=NULL WHERE idempotency_key='task076-native' AND trusted_invocation_json IS NOT NULL",[]).unwrap();
+            let before = f.database_bytes();
+            assert!(authorize(&carrier, task, "read_only", &manifest).is_err());
+            assert_eq!(f.database_bytes(), before);
+            assert_eq!(port.dispatched.borrow().len(), dispatched);
         }
     }
 }
