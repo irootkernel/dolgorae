@@ -64,8 +64,14 @@ development commits.
 
 ### Fixed
 
+- Authenticate native findings merge and original-key lookup through both owners,
+  retaining original provenance without interrupting an active Primary.
+
 - Authenticate native research-group assignment, original-key lookup and fresh waits/collection through external hosts
   and managed Workers, preserving the original protected invocation identity on replay.
+
+- Preserve original synthesis lookup authorization, execution state and settled
+  result metadata, and verify native synthesis provenance for explicit original-task recovery.
 
 - Return retained settled-result references and domain digests from ordinary task
   lookup, and authenticate successor native tasks and group children for original-task recovery.

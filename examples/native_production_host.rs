@@ -47,6 +47,10 @@ fn main() {
         let root = std::path::Path::new(&args[2]);
         let output = match args[1].to_str().unwrap() {
             "--prepare" => driver::prepare(root),
+            "--task085-prepare" => driver::task085_prepare(root),
+            "--task085-control-plane" => driver::task085_control_plane(root),
+            "--task085-run-managed" => driver::task085_run_managed(root),
+            "--task085-observe" => driver::task085_observe(root),
             "--assign" => driver::assign(root),
             "--observe" => driver::observe(root),
             "--cleanup" => driver::cleanup(root),

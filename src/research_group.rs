@@ -769,11 +769,16 @@ fn normalized(request: &Value) -> Value {
     json!({"manifest":request["manifest"],"inputs":request["inputs"].as_array().unwrap_or(&Vec::new()).iter().map(|s|json!({"entry_key":s["entry_key"],"content":s["content"]})).collect::<Vec<_>>()})
 }
 pub(super) fn read_document(store: &EngagementStore, group: &str) -> Result<Value, MachineError> {
-    let bytes =
-        crate::storage_observation::read_content(store.connection(), KIND, group, "manifest")?
-            .ok_or_else(retained_source_invalid)?;
+    read_document_on(store.connection(), group)
+}
+pub(super) fn read_document_on(
+    connection: &rusqlite::Connection,
+    group: &str,
+) -> Result<Value, MachineError> {
+    let bytes = crate::storage_observation::read_content(connection, KIND, group, "manifest")?
+        .ok_or_else(retained_source_invalid)?;
     let document: Value = serde_json::from_slice(&bytes).map_err(|_| retained_source_invalid())?;
-    let (receipt_json,envelope_json):(String,String)=store.connection().query_row(
+    let (receipt_json,envelope_json):(String,String)=connection.query_row(
         "SELECT receipt_json,mutation_envelope_json FROM delegation_operations WHERE operation_kind='assign_group' AND state='accepted' AND json_extract(accepted_subjects_json,'$.group_ref')=?1",
         [group],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|_|retained_source_invalid())?;
     let receipt: OperationReceipt =
@@ -806,7 +811,7 @@ pub(super) fn read_document(store: &EngagementStore, group: &str) -> Result<Valu
         || envelope.request_schema != schema
         || crate::operation::envelope_digest(&envelope).map_err(|_| retained_source_invalid())?
             != receipt.accepted_input_digest
-        || !matches!(engagement::intent_lookup(store.connection(), &receipt.namespace)?, IntentLookup::Accepted(ref original) if original.as_ref() == &receipt)
+        || !matches!(engagement::intent_lookup(connection, &receipt.namespace)?, IntentLookup::Accepted(ref original) if original.as_ref() == &receipt)
         || document["digest"] != digest(&document["manifest"])?
         || document["normalized"]["manifest"] != document["manifest"]
         || envelope.request_body.byte_length != expected.byte_length
@@ -1731,6 +1736,10 @@ pub(crate) fn public_lookup(
     let lookup: LookupNamespace = (&namespace).into();
     let store =
         EngagementStore::open_read_only(&EngagementStore::workspace_database_path(state_root))?;
+    let _snapshot = store
+        .connection()
+        .unchecked_transaction()
+        .map_err(|_| retained_source_invalid())?;
     match engagement::intent_lookup(store.connection(), &lookup)? {
         IntentLookup::Accepted(receipt) => {
             if operation == "merge_group_results" {

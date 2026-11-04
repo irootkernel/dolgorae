@@ -47,6 +47,17 @@ fn main() {
             );
             return;
         }
+        if args.len() == 5 && args[1] == "--with-merge" {
+            println!(
+                "{}",
+                driver::campaign_with_merge(
+                    std::path::Path::new(&args[2]),
+                    std::path::Path::new(&args[3]),
+                    args[4].to_str().unwrap().parse().unwrap()
+                )
+            );
+            return;
+        }
         assert_eq!(args.len(), 4);
         println!(
             "{}",

@@ -2492,7 +2492,10 @@ fn all_content_references(
             )
             || !match owner_kind.as_str() {
                 "research_merge" => {
-                    matches!(representation.as_str(), "publication" | "merged_output")
+                    matches!(
+                        representation.as_str(),
+                        "publication" | "merged_output" | "invocation"
+                    )
                 }
                 "synthesis_task" => representation == "input",
                 _ => matches!(representation.as_str(), "json" | "raw"),
@@ -3181,6 +3184,36 @@ mod content_tests {
     use super::*;
     use crate::controller::{CredentialCarrier, OperatorStore};
     const WORKSPACE_ID: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    #[test]
+    fn task085_merge_invocation_preserves_4096_4097_inventory_bound() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE result_content_refs(owner_kind TEXT,owner_id TEXT,representation TEXT,sha256 TEXT,byte_length INTEGER,retired_operation TEXT)").unwrap();
+        let owner = Uuid::now_v7().to_string();
+        for representation in ["publication", "merged_output", "invocation"] {
+            connection
+                .execute(
+                    "INSERT INTO result_content_refs VALUES('research_merge',?1,?2,?3,1,NULL)",
+                    rusqlite::params![owner, representation, "a".repeat(64)],
+                )
+                .unwrap();
+        }
+        for _ in 3..4096 {
+            connection.execute("INSERT INTO result_content_refs VALUES('research_merge',?1,'invocation',?2,1,NULL)",rusqlite::params![Uuid::now_v7().to_string(),"a".repeat(64)]).unwrap();
+        }
+        let references = all_content_references(&connection).unwrap();
+        assert_eq!(references.len(), 4096);
+        for reference in references
+            .iter()
+            .filter(|reference| reference.owner_id == owner)
+        {
+            assert!(!content_delivered(&connection, reference).unwrap());
+        }
+        connection.execute("INSERT INTO result_content_refs VALUES('research_merge',?1,'invocation',?2,1,NULL)",rusqlite::params![Uuid::now_v7().to_string(),"a".repeat(64)]).unwrap();
+        assert_eq!(
+            all_content_references(&connection).unwrap_err().code,
+            "STORAGE_CAPACITY_EXCEEDED"
+        );
+    }
     #[test]
     fn shared_admission_reuses_history_and_detects_owner_publications() {
         let fixture = ContentFixture::new();

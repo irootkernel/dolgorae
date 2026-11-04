@@ -190,9 +190,11 @@ fn dispatch_in(
             let scoped = ns.scope_kind.as_deref().zip(ns.scope_ref.as_deref());
             if !match ns.operation_kind.as_str() {
                 "install_provisioning" => scoped.is_none(),
-                "spawn_specialist" | "assign_specialist_task" | "assign_group" => {
-                    scoped == Some(("orchestrated_session", root_ref.as_str()))
-                }
+                "spawn_specialist"
+                | "assign_specialist_task"
+                | "assign_group"
+                | "merge_group_results"
+                | "assign_synthesis" => scoped == Some(("orchestrated_session", root_ref.as_str())),
                 _ => false,
             } {
                 return Err(refusal());

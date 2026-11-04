@@ -4285,6 +4285,15 @@ rounds and results; its retained input binding supplies the exact merged data to
 dispatch and recovery. Public task capture preserves original structured bytes
 separately from the internal execution projection. Base generation 8 fences
 writers that do not recognize these quota and recovery owners.
+The Engagement owner also retains the sequence cutoff for internal merge marker `2`
+and persistent acceptance guards. The first new merge installs them inside its
+existing IMMEDIATE transaction under normal shared database admission. The Root
+Ledger, native Thread and Profile/server remain live; no exclusive workspace
+maintenance lease is acquired. `research_merge` verifies compact managed-call or
+Controller origin against that boundary, while external context stays with the
+existing protected operation owner. Lookup shares one transaction-scoped view of
+the receipt, publication and provenance. The content store and workspace lease
+owners keep their existing interfaces and lifecycle responsibilities.
 Artifact quota accounting reads merge charges through the delegation owner;
 the gateway reads retained merge records through Engagement storage. The
 scheduler uses that owner's original task binding, and `successor_capture`

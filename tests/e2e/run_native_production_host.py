@@ -26,7 +26,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from run_native_host_invocation_fixture import host_environment, native_session, run_host
+from run_native_host_invocation_fixture import ProbeFailure, host_environment, native_session, run_host
 from run_native_workspace_policy_fixture import code_call, code_results, terminal_output
 
 OPT_IN = "DOLGORAE_RUN_NATIVE_PRODUCTION_HOST"
@@ -352,6 +352,15 @@ def proxy(root: Path) -> None:
                     response=cut_before_mirror(backend,frame,raw,binary,owner,environment,root)
                     backend.close();backend=Backend(binary,owner,environment,root);backend.replay_handshake()
                 else: response=backend.exchange(raw)
+                if row=="TASK085" and args.get("operation")=="merge_group_results":
+                    # Discard the first product reply before forwarding anything
+                    # to the native host, then recover this exact protected call.
+                    committed=response
+                    old_pid=backend.process.pid
+                    backend.close();backend=Backend(binary,owner,environment,root);backend.replay_handshake()
+                    response=backend.exchange(raw)
+                    require(response==committed,"task085_original_protected_replay_changed")
+                    private(root / "task085-backend-reply-loss.json",encoded({"original_native_call":call_id,"old_backend":old_pid,"new_backend":backend.process.pid,"original_reply":committed,"recovered_reply":response,"loss":"product reply discarded before native return"}))
                 if row=="backendrestart" and args.get("operation"):
                     old_pid=backend.process.pid
                     backend.close();backend=Backend(binary,owner,environment,root);backend.replay_handshake()
@@ -463,7 +472,8 @@ class Responses:
                     with fixture.lock:
                         require(time.monotonic() <= float((root / "deadline").read_text()), "row_deadline_exceeded")
                         fixture.posts += 1
-                        require(fixture.posts <= 8, "combined_host_executor_count_token_budget_exceeded")
+                        limit = 12 if json.loads((root / "input.json").read_text())["scenario"] == "TASK085" else 8
+                        require(fixture.posts <= limit, "combined_host_executor_count_token_budget_exceeded")
                         data = json.loads(body)
                         require(PRIVATE.encode() not in body, "private_capability_in_next_http")
                         private(root / f"http-{fixture.posts}.json", body)
@@ -825,18 +835,21 @@ graph:
     private(root / "connection.json", encoded(connection))
 
 
-def qualify(args, host: str, row: str) -> dict:
+def qualify(args, host: str, row: str, *, task085: bool = False, managed: bool = False) -> dict:
     require(os.environ.get(OPT_IN) == "1", "explicit_production_host_opt_in_required")
     executable = getattr(args, host).resolve(strict=True)
     version, digest, route = PINS[host]
     require(hashlib.sha256(executable.read_bytes()).hexdigest() == digest, "selected_native_image_changed")
-    root = Path(tempfile.mkdtemp(prefix=f"t077-host-{host}-{ROWS.index(row):02d}-", dir=args.scratch)).resolve()
+    if task085:
+        require(hashlib.sha256(args.codex.resolve(strict=True).read_bytes()).hexdigest()==PINS["codex"][1],"task085_executor_codex_pin_changed")
+    prefix = f"task085-{host}-managed-" if task085 and managed else f"task085-{host}-protected-" if task085 else f"t077-host-{host}-{ROWS.index(row):02d}-"
+    root = Path(tempfile.mkdtemp(prefix=prefix, dir=args.scratch)).resolve()
     root.chmod(0o700)
     for name in ("home", "codex", "claude", "tmp", "config", "cache", "workspace", "profile"):
         (root / name).mkdir(mode=0o700)
     private(root / "fixture-owned", b"native-production-host/v1\n")
     private(root / "delivery-count", b"0")
-    deadline = time.monotonic()+90
+    deadline = time.monotonic()+(180 if task085 else 90)
     private(root / "deadline", str(deadline).encode())
     environment = host_environment(root)
     environment[OPT_IN] = "1"
@@ -846,23 +859,32 @@ def qualify(args, host: str, row: str) -> dict:
     binary_version = subprocess.run([str(binary), "version", "--json"], env=environment, capture_output=True, timeout=5)
     require(binary_version.returncode == 0, "product_version_failed")
     product_version = json.loads(binary_version.stdout)["version"].removeprefix("v")
-    config = {"host":host, "host_identity":{"path":str(executable),"version":"0.164.0" if host == "codex" else "2.1.310", "sha256":digest},
+    if task085:
+        import native_task085
+        selected_trace = native_task085.trace(managed)
+    else:
+        selected_trace = trace(row)
+    config = {"host":host,"task085_managed":managed, "host_identity":{"path":str(executable),"version":"0.164.0" if host == "codex" else "2.1.310", "sha256":digest},
               "route":route,"scenario":row,"binary":str(args.driver.resolve(strict=True)),"reference_binary":str(binary),"codex":str(args.codex.resolve(strict=True)),
               "executor_model":args.executor_model,"host_model":getattr(args,host+"_model"),"adapter_version":product_version,
-              "trace_sha256":hashlib.sha256(encoded(trace(row))).hexdigest()}
+              "trace_sha256":hashlib.sha256(encoded(selected_trace)).hexdigest()}
     private(root / "input.json", encoded(config))
-    fixture = Responses(root,host)
+    fixture = native_task085.Responses(root,host) if task085 else Responses(root,host)
     passed = False
     observations = None
     original_failure = None
+    control_process = None
     try:
         private(root / "profile/config.toml", (f'model = {json.dumps(args.executor_model)}\nmodel_reasoning_effort = "low"\n'
                 'model_provider = "production_executor"\ncli_auth_credentials_store = "file"\n'
                 '[features]\nplugins = false\n[model_providers.production_executor]\nname = "Numeric loopback executor"\n'
                 f'base_url = "{fixture.base_url}/executor/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n').encode())
-        prepared = run_phase(args.driver, "--prepare", root, environment, deadline)
+        if task085:
+            control_process = native_task085.start_control_plane(root, args.driver, environment)
+            fixture.control_process = control_process
+        prepared = run_phase(args.driver, "--task085-prepare" if task085 else "--prepare", root, environment, deadline)
         require(prepared["dolgorae_version"] == product_version,"fixture_and_reference_product_versions_differ")
-        if prepared["requires_result"]:
+        if not task085 and prepared["requires_result"]:
             if row in CONNECTED:
                 podway_fixture(root,args.podway.resolve(strict=True),args.podway_sha256,prepared["candidate"],environment,deadline)
             run_phase(args.driver,"--assign",root,environment,deadline)
@@ -874,6 +896,11 @@ def qualify(args, host: str, row: str) -> dict:
                 require(len(complete.get("changes",[])) == 20000,"actual_twenty_thousand_change_producer_missing")
             private(root / "settled.json",encoded({"engagement_revision":observed.get("engagement_revision")}))
             private(root / "producer-observation.json", encoded({"result_bytes":len(encoded(complete)),"change_count":len(complete.get("changes",[])),"result_digest":observed["task"].get("result_digest")}))
+        if task085 and managed:
+            run_phase(args.driver,"--task085-run-managed",root,environment,deadline)
+            observations={"host":host,"row":"TASK085-managed",**fixture.finish(),"owned_fixture":str(root)}
+            passed=True
+            return observations
         script=Path(__file__).resolve()
         hook_command=shlex.join([sys.executable,str(script),"--hook",str(root)])
         hooks={"hooks":{"PreToolUse":[{"matcher":"^mcp__dolgorae__.*$","hooks":[{"type":"command","command":hook_command,"timeout":10}]}]}}
@@ -899,6 +926,10 @@ def qualify(args, host: str, row: str) -> dict:
         output=run_host(argv,root,environment,"initial",deadline,crash_marker=root / "host-loss-ready" if crash else None,
                         require_claude_journal=crash and host=="claude")
         session=native_session(output,host)
+        if task085:
+            observations={"host":host,"row":"TASK085-protected",**fixture.finish(),"native_session":session,"owned_fixture":str(root)}
+            passed=True
+            return observations
         if row=="reconnect":
             resume=([str(executable),"--no-daemon","--dangerously-bypass-hook-trust","-a","never","exec","resume","--skip-git-repo-check","--json",session,"Continue the original bounded evidence inspection."] if host=="codex" else argv[:-1]+["--resume",session,"Continue the original bounded evidence inspection."])
             resumed=run_host(resume,root,environment,"resumed",deadline)
@@ -949,23 +980,38 @@ def qualify(args, host: str, row: str) -> dict:
     finally:
         cleanup_deadline=time.monotonic()+30
         cleanup_error = None
+        control_error = None
         close_error = None
         try:
             cleanup=run_phase(args.driver,"--cleanup",root,environment,cleanup_deadline)
             require(cleanup.get("cleanup_complete") is True,"owned_product_cleanup_incomplete")
-            if observations is not None: observations["cleanup_complete"]=True
         except Exception as error:
             cleanup_error=error
+        if control_process is not None:
+            try:
+                native_task085.stop_control_plane(control_process, cleanup_deadline)
+            except Exception as error:
+                control_error=error
+        if task085:
+            try:
+                from orphan_cleanup import cleanup_removed_root
+                orphan_deadline = time.monotonic()+30
+                cleanup_removed_root(binary,root,allow_existing_root=True)
+                native_task085.verify_process_absence(binary,root,environment,orphan_deadline)
+                if observations is not None: observations["owned_process_absence_verified"]=True
+            except Exception as error:
+                cleanup_error=RuntimeError(f"{cleanup_error}; orphan cleanup: {error}") if cleanup_error else error
+        if cleanup_error or control_error:
             passed=False
-            if observations is not None: observations["cleanup_complete"]=False
+        if observations is not None: observations["cleanup_complete"]=not (cleanup_error or control_error)
         try:
             fixture.close()
         except Exception as error:
             close_error=error
             passed=False
-        private(root / "row-result.json",encoded({"passed":passed,"observations":observations,"original_failure":original_failure,"cleanup_failure":str(cleanup_error) if cleanup_error else None,"loopback_close_failure":str(close_error) if close_error else None,"loopback_failure":fixture.failure,"retained_private_fixture":str(root)}))
-        if original_failure is None and (cleanup_error or close_error):
-            raise cleanup_error or close_error
+        private(root / "row-result.json",encoded({"passed":passed,"observations":observations,"original_failure":original_failure,"cleanup_failure":str(cleanup_error) if cleanup_error else None,"control_plane_stop_failure":str(control_error) if control_error else None,"loopback_close_failure":str(close_error) if close_error else None,"loopback_failure":fixture.failure,"retained_private_fixture":str(root)}))
+        if original_failure is None and (cleanup_error or control_error or close_error):
+            raise cleanup_error or control_error or close_error
 
 
 def main() -> int:
@@ -976,6 +1022,7 @@ def main() -> int:
         return 0
     parser=argparse.ArgumentParser()
     parser.add_argument("--trace-only",action="store_true")
+    parser.add_argument("--task085",action="store_true",help="only three bounded native merge/synthesis cases; no Podway")
     parser.add_argument("--binary",type=Path)
     parser.add_argument("--driver",type=Path)
     parser.add_argument("--codex",type=Path)
@@ -987,12 +1034,25 @@ def main() -> int:
     parser.add_argument("--executor-model")
     parser.add_argument("--scratch",type=Path)
     args=parser.parse_args()
+    if args.trace_only and args.task085:
+        import native_task085
+        print(json.dumps({"schema":"dolgorae.task085-native-traces/v1","executed":False,"cases":[{"host":selected,**native_task085.trace(managed)} for selected,managed in (("codex",False),("claude",False),("codex",True))]},sort_keys=True))
+        return 0
     if args.trace_only:
         print(json.dumps({"schema":"dolgorae.production-host-traces/v1","executed":False,"rows":[{"host":host,**trace(row)} for host in PINS for row in ROWS]},sort_keys=True))
         return 0
     require(os.environ.get(OPT_IN)=="1","explicit_production_host_opt_in_required")
-    require(all(getattr(args,key) for key in ("binary","driver","codex","claude","podway","codex_model","claude_model","executor_model","scratch")),"exact_selected_inputs_required")
+    keys=("binary","driver","codex","claude","codex_model","claude_model","executor_model","scratch")
+    require(all(getattr(args,key) for key in keys) and (args.task085 or args.podway),"exact_selected_inputs_required")
     args.scratch=args.scratch.resolve(strict=True)
+    if args.task085:
+        results=[]
+        for selected,managed in (("codex",False),("claude",False),("codex",True)):
+            try: results.append(qualify(args,selected,"TASK085",task085=True,managed=managed))
+            except (OSError,ValueError,RuntimeError,subprocess.SubprocessError,ProbeFailure) as error:
+                results.append({"host":selected,"managed":managed,"passed":False,"failure":str(error)})
+        print(json.dumps({"schema":"dolgorae.task085-native/v1","passed":all(r["passed"] for r in results),"cases":results},sort_keys=True))
+        return 0 if all(r["passed"] for r in results) else 1
     results=[]
     # Serial keep-going: a failed row never supplies another row's evidence.
     for host in PINS:

@@ -906,7 +906,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "delegation_service",
             &[
                 "controller",
-                // Test-only: real native group binding and managed Worker authority.
+                // Test-only: native group/merge/synthesis binding and managed Worker authority.
                 "host_invocation",
                 "managed_specialist",
                 "primary_tool",

@@ -10630,9 +10630,10 @@ fn perform(
                         ),
                     )?;
                     store
-                        .external_task_for_successor_key(
+                        .external_task_for_dispatch(
                             &identity.workspace_id,
                             engagement_id,
+                            identity.run_id,
                             &request.idempotency_key,
                         )?
                         .ok_or_else(accepted_assignment_not_found)?

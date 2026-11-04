@@ -830,6 +830,16 @@ cargo rustc --locked --example native_research_group -- --cfg test --cfg dolgora
 DOLGORAE_RUN_NATIVE_RESEARCH_GROUP=1 .venv/bin/python -B tests/e2e/run_native_research_group.py --driver /absolute/frozen-driver --binary /absolute/frozen-dolgorae --codex /absolute/pinned-codex --pool-limit 1
 ```
 
+For the findings-merge extension, add `--with-merge` to that runner command.
+It keeps the same fifty-task, at-most-fifty-POST and existing time/resource
+bounds, then merges the complete retained coverage through the Controller public
+path. It reads the real output artifact, replays the original merge key and
+looks up its original receipt before cleanup. These reads and the merge add no
+model Turn. The report records this extension separately from the original group
+measurements. Protected external carrier and active managed Root behavior also
+require their focused Rust cases and separately authorized native observations;
+this Controller campaign alone does not qualify those paths.
+
 Run a separate campaign with `--pool-limit 4`. The runner checks the native pin,
 uses an isolated home and accountless loopback responses, preserves original
 unknown coverage before official cleanup reconciliation, and retains failed
@@ -876,3 +886,43 @@ historical generation-7 tests before the complete gate. Preserve failed receipts
 and bind final focused evidence to the final candidate. Accountless fixture
 checks establish these code paths; native runtime and consumer qualification
 remain separate authorities.
+
+The default integrated-native offline suite also runs the loss-witness guards in
+`test_native_task085.py`. These checks start no native runtime.
+
+The production-host harness also has a separate `--task085` mode. It leaves the
+original eighteen scenarios and their budgets unchanged. Its three isolated
+cases are protected Codex, protected Claude, and a real managed Codex Primary.
+Each prepares one native findings Task, merges through the selected native tool,
+reads the original key, then explicitly assigns and collects one native synthesis
+Task. No Podway acceptance operation is part of this mode. The managed case
+withholds the first merge value in the native code wrapper after the real Worker
+call completes, then reads the caller-known original namespace and replays that
+key. This is a discarded wrapper return, not a physical Worker crash. The Root
+Worker, Thread and Profile identities must remain unchanged throughout.
+The harness checks that merge preserves the accepted Task count and source Turn.
+Explicit synthesis must add exactly one Task with its own Turn. Managed calls
+must stay in the original Primary Turn.
+Each case keeps a real fixture Control Plane and Gateway alive for Task dispatch.
+Its owned process counts toward the existing sixteen-process bound. The parent
+joins it during the same thirty-second owner cleanup, including preparation
+failures; a failed shutdown prevents qualification. Cleanup releases successor
+members through their owner before Root Close and Profile retirement. Even a
+Closed member needs release verification. Logical cleanup and physical process
+absence must both pass; a physical cleanup cannot clear a failed release.
+After orphan cleanup, the public process inventory must have no candidates.
+A healthy owned process also prevents passage; absence of orphans alone is
+insufficient. This observation shares the existing orphan-cleanup deadline.
+Protected Codex calls use the selected runtime's advertised Code Mode surface.
+One bounded metadata-only call identifies the deferred MCP tool; each returned
+value must match the actual correlated MCP reply. This discovery stays within
+the existing HTTP limits and uses the selected release's pinned companion.
+
+Each case permits at most twelve loopback POSTs, eight semantic tool calls,
+thirty-two backend deliveries, four MiB per HTTP input, a 180-second scenario
+plus thirty seconds for owner cleanup and thirty seconds for verified orphan
+cleanup. Execution requires explicit runtime authorization, frozen matching
+driver/product images and the existing
+Codex/Claude pins. Use `run_native_production_host.py --task085` with the existing
+binary, driver, native executable, model and scratch arguments; Podway arguments
+are unnecessary for this mode. The original fifty-task campaign is separate.

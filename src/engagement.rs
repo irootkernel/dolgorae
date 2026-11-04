@@ -26,6 +26,198 @@ use uuid::Uuid;
 
 const SCHEMA_VERSION: i64 = 8;
 const MERGE_SCHEMA_KEY: &str = "research_merge_schema_version";
+const MERGE_CUTOFF_KEY: &str = "research_merge_origin_cutoff";
+const MERGE_ORIGIN_GUARDS: &[(&str, &str)] = &[
+    (
+        "merge_origin_boundary_update",
+        "CREATE TRIGGER merge_origin_boundary_update BEFORE UPDATE ON metadata WHEN OLD.key IN ('research_merge_schema_version','research_merge_origin_cutoff') OR NEW.key IN ('research_merge_schema_version','research_merge_origin_cutoff') BEGIN SELECT RAISE(ABORT,'merge boundary is immutable'); END",
+    ),
+    (
+        "merge_origin_boundary_insert",
+        "CREATE TRIGGER merge_origin_boundary_insert BEFORE INSERT ON metadata WHEN NEW.key IN ('research_merge_schema_version','research_merge_origin_cutoff') AND EXISTS(SELECT 1 FROM metadata WHERE key=NEW.key) BEGIN SELECT RAISE(ABORT,'merge boundary is immutable'); END",
+    ),
+    (
+        "merge_origin_boundary_delete",
+        "CREATE TRIGGER merge_origin_boundary_delete BEFORE DELETE ON metadata WHEN OLD.key IN ('research_merge_schema_version','research_merge_origin_cutoff') BEGIN SELECT RAISE(ABORT,'merge boundary is immutable'); END",
+    ),
+    (
+        "merge_origin_sequence_fixed",
+        "CREATE TRIGGER merge_origin_sequence_fixed BEFORE UPDATE OF sequence ON delegation_operations WHEN OLD.operation_kind='merge_group_results' AND NEW.sequence IS NOT OLD.sequence BEGIN SELECT RAISE(ABORT,'merge sequence is immutable'); END",
+    ),
+];
+
+fn merge_origin_acceptance_guard(name: &str, event: &str, sequence: &str) -> String {
+    let transition = if event == "AFTER UPDATE OF state" {
+        " AND NEW.state='accepted' AND OLD.state IN ('prepared','unresolved')"
+    } else {
+        ""
+    };
+    format!("CREATE TRIGGER {name} {event} ON delegation_operations
+WHEN NEW.operation_kind='merge_group_results'{transition} AND NOT COALESCE(
+  {sequence} > CAST((SELECT json_extract(value,'$.sequence') FROM metadata WHERE key='research_merge_origin_cutoff') AS INTEGER)
+  AND (NEW.state<>'accepted' OR EXISTS(
+    SELECT 1 FROM result_content_refs r JOIN result_content c ON c.sha256=r.sha256
+    WHERE r.owner_kind='research_merge' AND r.representation='invocation'
+      AND r.owner_id=json_extract(NEW.accepted_subjects_json,'$.merge_ref')
+      AND r.retired_operation IS NULL AND length(c.bytes)=r.byte_length
+      AND CASE WHEN json_valid(CAST(c.bytes AS TEXT)) THEN
+        json_extract(CAST(c.bytes AS TEXT),'$.schema')='dolgorae.research-merge-invocation/v1'
+        AND json_extract(CAST(c.bytes AS TEXT),'$.operation_ref')=NEW.operation_ref
+        AND json_extract(CAST(c.bytes AS TEXT),'$.accepted_input_digest')=NEW.mutation_envelope_digest
+        AND json_extract(CAST(c.bytes AS TEXT),'$.origin') IN ('controller','external_native','managed_native')
+        AND json_type(CAST(c.bytes AS TEXT),'$.managed_call') IS NOT NULL
+      ELSE 0 END)),0)
+BEGIN SELECT RAISE(ABORT,'merge invocation proof required'); END")
+}
+
+fn merge_origin_guards() -> Vec<(String, String)> {
+    let mut guards = MERGE_ORIGIN_GUARDS
+        .iter()
+        .map(|(name, sql)| ((*name).to_owned(), (*sql).to_owned()))
+        .collect::<Vec<_>>();
+    guards.push((
+        "merge_origin_insert".into(),
+        merge_origin_acceptance_guard("merge_origin_insert", "AFTER INSERT", "NEW.sequence"),
+    ));
+    guards.push((
+        "merge_origin_accept".into(),
+        merge_origin_acceptance_guard(
+            "merge_origin_accept",
+            "AFTER UPDATE OF state",
+            "OLD.sequence",
+        ),
+    ));
+    guards
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergeOriginCutoff {
+    schema: String,
+    namespace_birth_id: String,
+    sequence: String,
+}
+
+/// Read the fixed boundary in the caller's existing snapshot; never upgrade it.
+pub(crate) fn merge_origin_cutoff(connection: &Connection) -> Result<Option<i64>, MachineError> {
+    let marker: Option<String> = result_component_record(connection, MERGE_SCHEMA_KEY)?;
+    let cutoff = result_component_record(connection, MERGE_CUTOFF_KEY)?;
+    let guards = merge_origin_guards();
+    let mut observed = Vec::new();
+    for (name, _) in &guards {
+        let sql: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        observed.push(sql);
+    }
+    match marker.as_deref() {
+        Some("1") => {
+            let content: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='result_content_refs')",
+                [], |row| row.get(0),
+            ).map_err(internal)?;
+            let invocation = content && connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM result_content_refs WHERE owner_kind='research_merge' AND representation='invocation')",
+                [], |row| row.get::<_, bool>(0),
+            ).map_err(internal)?;
+            if cutoff.is_some() || observed.iter().any(Option::is_some) || invocation {
+                return Err(unsupported_merge_generation());
+            }
+            Ok(None)
+        }
+        Some("2") => {
+            let text = cutoff.ok_or_else(unsupported_merge_generation)?;
+            let cutoff: MergeOriginCutoff =
+                serde_json::from_str(&text).map_err(|_| unsupported_merge_generation())?;
+            let sequence: i64 = cutoff
+                .sequence
+                .parse()
+                .map_err(|_| unsupported_merge_generation())?;
+            if cutoff.schema != "dolgorae.research-merge-origin-cutoff/v1"
+                || sequence < 0
+                || sequence.to_string() != cutoff.sequence
+                || cutoff.namespace_birth_id != database_birth_id(connection)?.to_string()
+                || guards
+                    .iter()
+                    .zip(observed)
+                    .any(|((_, expected), actual)| actual.as_deref() != Some(expected.as_str()))
+            {
+                return Err(unsupported_merge_generation());
+            }
+            let highwater: i64 = connection.query_row(
+                "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='delegation_operations'),0)",
+                [], |row| row.get(0),
+            ).map_err(internal)?;
+            let maximum: i64 = connection
+                .query_row(
+                    "SELECT COALESCE(MAX(sequence),0) FROM delegation_operations",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(internal)?;
+            if highwater < sequence || highwater < maximum {
+                return Err(unsupported_merge_generation());
+            }
+            Ok(Some(sequence))
+        }
+        _ => Err(unsupported_merge_generation()),
+    }
+}
+
+/// Called only by new merge admission inside its normal IMMEDIATE transaction.
+pub(crate) fn establish_merge_origin_cutoff(tx: &Transaction<'_>) -> Result<i64, MachineError> {
+    if let Some(cutoff) = merge_origin_cutoff(tx)? {
+        return Ok(cutoff);
+    }
+    let incomplete: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM delegation_operations WHERE operation_kind='merge_group_results' AND state IN ('prepared','unresolved'))",
+        [], |row| row.get(0),
+    ).map_err(internal)?;
+    if incomplete {
+        return Err(intent_corrupt(
+            "incomplete historical merge requires original recovery",
+        ));
+    }
+    let highwater: i64 = tx.query_row(
+        "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='delegation_operations'),0)",
+        [], |row| row.get(0),
+    ).map_err(internal)?;
+    let maximum: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(sequence),0) FROM delegation_operations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    if highwater < maximum || highwater < 0 {
+        return Err(unsupported_merge_generation());
+    }
+    let cutoff = MergeOriginCutoff {
+        schema: "dolgorae.research-merge-origin-cutoff/v1".into(),
+        namespace_birth_id: database_birth_id(tx)?.to_string(),
+        sequence: highwater.to_string(),
+    };
+    retain_result_component_record(
+        tx,
+        MERGE_CUTOFF_KEY,
+        &canonical_string(&serde_json::to_value(cutoff).map_err(internal)?)?,
+    )?;
+    tx.execute(
+        "UPDATE metadata SET value='2' WHERE key=?1 AND value='1'",
+        [MERGE_SCHEMA_KEY],
+    )
+    .map_err(internal)?;
+    for (_, sql) in merge_origin_guards() {
+        tx.execute_batch(&sql).map_err(internal)?;
+    }
+    Ok(highwater)
+}
+
 const GROUP_SCHEMA_KEY: &str = "research_group_schema_version";
 
 /// Internal immutable capture charges, scoped to their actual execution Run.
@@ -3828,44 +4020,6 @@ impl EngagementStore {
         &self.connection
     }
 
-    /// The accepted successor assignment one assign key retained.
-    ///
-    /// A generation-4 member has no legacy `operations` receipt; its key maps to
-    /// the accepted task through the shared intent store instead.
-    pub(crate) fn external_task_for_successor_key(
-        &self,
-        workspace_ref: &str,
-        engagement_id: Uuid,
-        idempotency_key: &str,
-    ) -> Result<Option<Uuid>, MachineError> {
-        let receipt: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT receipt_json FROM delegation_operations
-                  WHERE workspace_ref=?1 AND scope_kind='external_engagement' AND scope_ref=?2
-                    AND operation_kind='assign_external_specialist_task'
-                    AND idempotency_key=?3 AND state='accepted'",
-                params![workspace_ref, engagement_id.to_string(), idempotency_key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(internal)?;
-        let Some(receipt) = receipt else {
-            return Ok(None);
-        };
-        let receipt: OperationReceipt = serde_json::from_str(&receipt)
-            .map_err(|_| integrity("the retained receipt is invalid"))?;
-        receipt
-            .accepted_subjects
-            .task_ref
-            .as_deref()
-            .map(|task| {
-                Uuid::parse_str(task)
-                    .map_err(|_| integrity("the retained task reference is invalid"))
-            })
-            .transpose()
-    }
-
     /// The execution intent and retained deadline one member dispatch renders
     /// with.
     pub(crate) fn external_task_dispatch_facts(
@@ -5142,6 +5296,7 @@ impl GenerationProbe {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(internal)?;
+        connection.execute_batch("BEGIN").map_err(internal)?;
         // A database with no schema objects was created but never bootstrapped:
         // `Connection::open` creates the file before the bootstrap commits, so a
         // crash there must stay reachable. Creating openers bootstrap it; readers
@@ -5212,7 +5367,9 @@ impl GenerationProbe {
             _ => return Err(unsupported_group_generation()),
         }
         match (schema_generation, read(MERGE_SCHEMA_KEY)?.as_deref()) {
-            (AdmittedGeneration::Eight, Some("1")) => {}
+            (AdmittedGeneration::Eight, Some("1" | "2")) => {
+                merge_origin_cutoff(&connection)?;
+            }
             (AdmittedGeneration::Eight, _) => return Err(unsupported_merge_generation()),
             (_, None) => {}
             _ => return Err(unsupported_merge_generation()),
@@ -7281,7 +7438,10 @@ fn migrate_v7_to_v8(
         read(GROUP_SCHEMA_KEY)?.as_deref(),
         read(MERGE_SCHEMA_KEY)?.as_deref(),
     ) {
-        ("8", Some("1"), Some("1")) => return Ok(()),
+        ("8", Some("1"), Some("1" | "2")) => {
+            merge_origin_cutoff(&tx)?;
+            return Ok(());
+        }
         ("7", Some("1"), None) => {}
         _ => return Err(unsupported_merge_generation()),
     }

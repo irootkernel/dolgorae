@@ -24,6 +24,13 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "native_task085.rs"]
+mod task085;
+pub use task085::{
+    control_plane as task085_control_plane, observe as task085_observe, prepare as task085_prepare,
+    run_managed as task085_run_managed,
+};
+
 fn private(path: &Path, value: &Value) {
     fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -166,10 +173,14 @@ pub fn prepare(root: &Path) -> Value {
         .unwrap();
     create_controller_credential(
         &host_root(root).join("external-controller"),
-        ControllerKind::Automation,
+        if config["task085_managed"] == true {
+            ControllerKind::InteractiveClient
+        } else {
+            ControllerKind::Automation
+        },
         "native-host-fixture".into(),
         None,
-        None,
+        (config["task085_managed"] == true).then(|| "task085".to_owned()),
     )
     .unwrap();
     OperatorStore::new(home.operator_root())
@@ -182,12 +193,15 @@ pub fn prepare(root: &Path) -> Value {
     });
     fs::create_dir_all(&journal).unwrap();
     fs::set_permissions(&journal, fs::Permissions::from_mode(0o700)).unwrap();
-    let request = json!({"route":config["route"],"executable":config["host_identity"],"owner":{"kind":"external"},"controller_generation":1,
+    let mut request = json!({"route":config["route"],"executable":config["host_identity"],"owner":{"kind":"external"},"controller_generation":1,
         "controller_file":host_root(root).join("external-controller"),"native_host_root":host_root(root).join(if config["host"]=="codex" {"sessions"}else{"projects"}),
         "allowed_scopes":[{"kind":"workspace","reference":view.workspace_id},{"kind":"external_engagement","reference":null}],
         "tools":["specialist_native","specialist_consumer"],
         "caller_scope":{"binding_ref":"local-specialist","podway_workspace_ref":"native-workspace","podway_session_ref":"native-session","podway_attempt_ref":"native-attempt","delegated_placement_ref":"work","max_rounds":3},
         "adapter_id":"dolgorae.external/1","adapter_version":env!("CARGO_PKG_VERSION")});
+    if config["scenario"] == "TASK085" {
+        request["caller_scope"]["max_rounds"] = json!(16);
+    }
     private(&host_root(root).join("draft.json"), &request);
     if !connected(&config) {
         setup(
@@ -213,7 +227,7 @@ pub fn prepare(root: &Path) -> Value {
         || connected(&config)
         || matches!(
             config["scenario"].as_str(),
-            Some("exposurecanary" | "reconnect" | "Sloss/duplicate")
+            Some("exposurecanary" | "reconnect" | "Sloss/duplicate" | "TASK085")
         )
     {
         GlobalProfileStore::new(&home)
@@ -231,10 +245,13 @@ pub fn prepare(root: &Path) -> Value {
                 },
             )
             .unwrap();
-        let binding = ResolvedGlobalProfile::resolve(&home, "host-fixture")
-            .unwrap()
-            .prepare_qualified(&home)
-            .unwrap();
+        let profile = ResolvedGlobalProfile::resolve(&home, "host-fixture").unwrap();
+        let binding = if config["scenario"] == "TASK085" {
+            profile.prepare_specialist(&home, false)
+        } else {
+            profile.prepare_qualified(&home)
+        }
+        .unwrap();
         assert!(binding.caller_workspace_supported());
         binding.record_qualified(&home).unwrap();
         private(&root.join("qualified-binding.json"), &json!(binding));
@@ -522,7 +539,19 @@ pub fn observe(root: &Path) -> Value {
 }
 
 pub fn cleanup(root: &Path) -> Value {
-    input(root);
+    let config = input(root);
+    let managed = config["scenario"] == "TASK085" && config["task085_managed"] == true;
+    let releases = if managed {
+        match task085::cleanup_members(root) {
+            Ok(releases) => releases,
+            Err(error) => {
+                return json!({"cleanup_complete":false,"owned_root":root,
+                "failures":[{"operation":"managed_member_release","code":error.code,"message":error.message,"details":error.details}]});
+            }
+        }
+    } else {
+        Vec::new()
+    };
     let home = DolgoraeHome::system().unwrap();
     let mut bindings = BTreeMap::new();
     let mut complete = true;
@@ -532,7 +561,8 @@ pub fn cleanup(root: &Path) -> Value {
             let state = entry.path();
             let store = RunStore::new(SystemWorkspacePlatform, &state);
             if let Ok(runs) = fs::read_dir(state.join("runs")) {
-                for run in runs.flatten() {
+                let runs: Vec<_> = runs.flatten().collect();
+                for run in runs {
                     let Some(id) = run
                         .file_name()
                         .to_str()
@@ -571,10 +601,12 @@ pub fn cleanup(root: &Path) -> Value {
             }
         }
     }
-    if let Ok(bytes) = fs::read(root.join("qualified-binding.json")) {
-        let binding: crate::global_runtime::GlobalProfileBinding =
-            serde_json::from_slice(&bytes).unwrap();
-        bindings.insert(binding.server_key.clone(), binding);
+    for name in ["qualified-binding.json", "task085-primary-binding.json"] {
+        if let Ok(bytes) = fs::read(root.join(name)) {
+            let binding: crate::global_runtime::GlobalProfileBinding =
+                serde_json::from_slice(&bytes).unwrap();
+            bindings.insert(binding.server_key.clone(), binding);
+        }
     }
     for binding in bindings.values() {
         if let Err(error) = crate::profile::retire_qualified_global_server(
@@ -585,5 +617,9 @@ pub fn cleanup(root: &Path) -> Value {
             failures.push(json!({"operation":"retire_profile","code":error.code,"message":error.message,"details":error.details}));
         }
     }
-    json!({"cleanup_complete":complete,"owned_root":root,"failures":failures})
+    let mut result = json!({"cleanup_complete":complete,"owned_root":root,"failures":failures});
+    if managed {
+        result["managed_releases"] = json!(releases);
+    }
+    result
 }

@@ -320,6 +320,8 @@ def collaboration_cleanup_timeout_preserves_first_failure() -> None:
 
 
 def main() -> int:
+    from test_native_task085 import run_offline
+    run_offline()
     checked = validator(probe.PROTOCOL, "dolgorae-collaboration-tool-v1.schema.json")
     for name, field, value in (("collaboration-read-request.invalid-limit.json", "limit", 1),
                                ("collaboration-submit.invalid-source-injection.json", "source_run_id", None)):

@@ -937,8 +937,17 @@ syntax ceiling does not enlarge the
 ordinary 8 MiB complete Turn input bound: the service checks the fully rendered
 task and merged data before acceptance and refuses excess input without
 truncation. After reply loss, look up the original `AssignSynthesis` key before
-submitting another task. Merge and synthesis success do not adjudicate claims or
-establish a Podway group-as-one-Action receipt.
+submitting another task. The original-key lookup authenticates the current
+aggregate owner and reports the original Task's pending, running, unknown or
+terminal outcome. Settled CompleteResult metadata survives task/result body
+retirement; lookup does not render retired merged data or invoke recovery.
+Explicit native synthesis recovery uses that Task's own `assign_synthesis`
+receipt, immutable merge input and original native caller proof through the
+existing administrative member-recovery entry. Missing or inconsistent proof
+refuses recovery; an ordinary assignment, group child or Controller origin cannot
+substitute.
+Merge and synthesis success do not adjudicate claims or establish a Podway
+group-as-one-Action receipt.
 
 Writer generation 8 protects merged-artifact quota and synthesis recovery
 bindings. Open an older verified workspace through the supported writable

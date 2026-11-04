@@ -179,16 +179,296 @@ fn identity(
         crate::delegation_identity::domain_digest("dolgorae.merged-findings/v1", &identity)?;
     Ok((identity, digest))
 }
+fn invocation(
+    scope: &DelegationScope<'_>,
+    context: Option<&ManagedCallContext<'_>>,
+    controller: bool,
+    intent: &IntentIdentity,
+    operation: Uuid,
+) -> Result<Value, MachineError> {
+    let (origin, call) = if controller {
+        if context.is_some() || scope.trusted_invocation.is_some() {
+            return Err(retained_source_invalid());
+        }
+        ("controller", Value::Null)
+    } else if let Some(call) = context {
+        if scope.trusted_invocation.is_some()
+            || intent.lookup.scope_kind.as_deref() != Some("orchestrated_session")
+            || intent.lookup.scope_ref.as_deref() != Some(call.session_id.to_string().as_str())
+            || call.session_id != call.source_run_id
+            || call.idempotency_key != intent.lookup.idempotency_key
+        {
+            return Err(retained_source_invalid());
+        }
+        checked_provenance(call.source_turn_id, call.source_tool_call_id)?;
+        (
+            "managed_native",
+            json!({"session_id":call.session_id,"source_run_id":call.source_run_id,"source_turn_id":call.source_turn_id,"source_tool_call_id":call.source_tool_call_id,"idempotency_key":call.idempotency_key}),
+        )
+    } else {
+        if scope.trusted_invocation.is_none()
+            || intent.lookup.scope_kind.as_deref() != Some("external_engagement")
+        {
+            return Err(retained_source_invalid());
+        }
+        ("external_native", Value::Null)
+    };
+    Ok(
+        json!({"schema":"dolgorae.research-merge-invocation/v1","operation_ref":operation,"accepted_input_digest":intent.digest,"origin":origin,"managed_call":call}),
+    )
+}
+
+/// The boundary and accepted row, not the current caller, determine provenance.
+fn invocation_origin(
+    connection: &rusqlite::Connection,
+    receipt: &OperationReceipt,
+) -> Result<String, MachineError> {
+    let cutoff = engagement::merge_origin_cutoff(connection)?;
+    let sequence: i64 = connection.query_row(
+        "SELECT sequence FROM delegation_operations WHERE operation_ref=?1 AND state='accepted'",
+        [&receipt.operation_ref], |row| row.get(0),
+    ).map_err(|_| retained_source_invalid())?;
+    if sequence <= 0 {
+        return Err(retained_source_invalid());
+    }
+    let merge = receipt
+        .accepted_subjects
+        .merge_ref
+        .as_deref()
+        .ok_or_else(retained_source_invalid)?;
+    let reference =
+        crate::storage_observation::content_reference(connection, KIND, merge, "invocation")?;
+    let native = engagement::accepted_native_context(connection, receipt)?;
+    if cutoff.is_none_or(|cutoff| sequence <= cutoff) {
+        if reference.is_some() || native.is_some() {
+            return Err(retained_source_invalid());
+        }
+        return Ok("controller".into());
+    }
+    let bytes = crate::storage_observation::read_content(connection, KIND, merge, "invocation")?
+        .ok_or_else(retained_source_invalid)?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| retained_source_invalid())?;
+    if !exact_fields(
+        &value,
+        &[
+            "schema",
+            "operation_ref",
+            "accepted_input_digest",
+            "origin",
+            "managed_call",
+        ],
+    ) || bytes != encode(&value)?
+        || value["schema"] != "dolgorae.research-merge-invocation/v1"
+        || value["operation_ref"] != receipt.operation_ref
+        || value["accepted_input_digest"] != receipt.accepted_input_digest
+    {
+        return Err(retained_source_invalid());
+    }
+    let origin = value["origin"]
+        .as_str()
+        .ok_or_else(retained_source_invalid)?;
+    let call = &value["managed_call"];
+    match origin {
+        "controller" if call.is_null() && native.is_none() => {}
+        "external_native"
+            if call.is_null()
+                && native.is_some()
+                && receipt.namespace.scope_kind.as_deref() == Some("external_engagement") => {}
+        "managed_native"
+            if native.is_none()
+                && receipt.namespace.scope_kind.as_deref() == Some("orchestrated_session") =>
+        {
+            if !exact_fields(
+                call,
+                &[
+                    "session_id",
+                    "source_run_id",
+                    "source_turn_id",
+                    "source_tool_call_id",
+                    "idempotency_key",
+                ],
+            ) || call["session_id"].as_str() != receipt.namespace.scope_ref.as_deref()
+                || call["source_run_id"] != call["session_id"]
+                || call["idempotency_key"] != receipt.namespace.idempotency_key
+            {
+                return Err(retained_source_invalid());
+            }
+            let id = call["session_id"]
+                .as_str()
+                .ok_or_else(retained_source_invalid)?;
+            if Uuid::parse_str(id)
+                .ok()
+                .is_none_or(|parsed| parsed.get_version_num() != 7 || parsed.to_string() != id)
+            {
+                return Err(retained_source_invalid());
+            }
+            checked_provenance(
+                call["source_turn_id"]
+                    .as_str()
+                    .ok_or_else(retained_source_invalid)?,
+                call["source_tool_call_id"]
+                    .as_str()
+                    .ok_or_else(retained_source_invalid)?,
+            )
+            .map_err(|_| retained_source_invalid())?;
+        }
+        _ => return Err(retained_source_invalid()),
+    }
+    Ok(origin.into())
+}
+
+pub(super) fn lookup_result_on(
+    connection: &rusqlite::Connection,
+    receipt: &OperationReceipt,
+) -> Result<(ContentBytesRef, String), MachineError> {
+    let merge = receipt
+        .accepted_subjects
+        .merge_ref
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(retained_source_invalid)?;
+    let record = record_on(connection, merge)?;
+    if receipt.namespace.scope_kind.as_deref() != record["scope_kind"].as_str()
+        || receipt.namespace.scope_ref.as_deref() != record["scope_ref"].as_str()
+    {
+        return Err(retained_source_invalid());
+    }
+    let bytes = output_on(connection, &record)?;
+    Ok((
+        ContentBytesRef::from_bytes(&bytes),
+        record["digest"]
+            .as_str()
+            .ok_or_else(retained_source_invalid)?
+            .into(),
+    ))
+}
+
+fn replay_on(
+    connection: &rusqlite::Connection,
+    scope: &DelegationScope<'_>,
+    intent: &IntentIdentity,
+    expected_origin: &str,
+) -> Result<Option<Value>, MachineError> {
+    let Some(receipt) = replay_outcome(
+        engagement::intent_lookup(connection, &intent.lookup)?,
+        &intent.digest,
+        "merge_group_results",
+    )?
+    else {
+        return Ok(None);
+    };
+    if invocation_origin(connection, &receipt)? != expected_origin
+        || engagement::accepted_native_context(connection, &receipt)?.as_ref()
+            != scope.trusted_invocation.map(|proof| proof.context())
+    {
+        return Err(retained_source_invalid());
+    }
+    let merge = receipt
+        .accepted_subjects
+        .merge_ref
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(retained_source_invalid)?;
+    let record = record_on(connection, merge)?;
+    output_on(connection, &record)?;
+    Ok(Some(response(&record, &receipt)))
+}
+
+pub(super) fn native_lookup(
+    scope: &DelegationScope<'_>,
+    request: &Value,
+) -> Result<IntentLookup, MachineError> {
+    let own = research_group::owner(request)?;
+    transport_owner(scope, own, None, "lookup_operation")?;
+    let proof = scope
+        .trusted_invocation
+        .ok_or_else(retained_source_invalid)?;
+    let normalized = normalized(request)?;
+    let intent = merge_intent(scope, own, request, &normalized)?;
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let snapshot = store
+        .connection()
+        .unchecked_transaction()
+        .map_err(|_| retained_source_invalid())?;
+    let (workspace, owner) = store.external_owner_binding(own.scope_ref())?;
+    if workspace != scope.view.workspace_id || owner != *scope.controller {
+        return Err(owner_refusal_for("lookup_operation"));
+    }
+    engagement::merge_origin_cutoff(&snapshot)?;
+    let observed = engagement::intent_lookup(&snapshot, &intent.lookup)?;
+    match &observed {
+        IntentLookup::Accepted(_) => {
+            replay_on(&snapshot, scope, &intent, "external_native")?
+                .ok_or_else(retained_source_invalid)?;
+        }
+        IntentLookup::Unresolved { operation_ref, .. }
+        | IntentLookup::NotAccepted { operation_ref, .. } => {
+            let text: Option<String> = snapshot.query_row(
+                "SELECT trusted_invocation_json FROM delegation_operations WHERE operation_ref=?1",
+                [operation_ref.to_string()], |row| row.get(0),
+            ).map_err(|_| retained_source_invalid())?;
+            let context: crate::delegation_identity::TrustedInvocationContext =
+                serde_json::from_str(&text.ok_or_else(retained_source_invalid)?)
+                    .map_err(|_| retained_source_invalid())?;
+            if &context != proof.context() {
+                return Err(retained_source_invalid());
+            }
+        }
+        IntentLookup::Absent { .. } => {}
+    }
+    Ok(observed)
+}
+
+fn normalized(request: &Value) -> Result<Value, MachineError> {
+    if request["algorithm"] != ALGORITHM {
+        return Err(invalid());
+    }
+    let sources = sorted_sources(&request["sources"])?;
+    Ok(
+        json!({"group_ref":request["group_ref"],"group_assignment_digest":request["group_assignment_digest"],"sources":sources,"algorithm":ALGORITHM}),
+    )
+}
+fn merge_intent(
+    scope: &DelegationScope<'_>,
+    own: SettlementOwner,
+    request: &Value,
+    normalized: &Value,
+) -> Result<IntentIdentity, MachineError> {
+    intent_identity(
+        scope,
+        "merge_group_results",
+        Some((own.scope_kind(), &own.scope_ref().to_string())),
+        checked_key(request["idempotency_key"].as_str().ok_or_else(invalid)?)?,
+        "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/merge_group_results_normalized_body",
+        normalized,
+    )
+}
 pub(crate) fn record(store: &EngagementStore, merge: Uuid) -> Result<Value, MachineError> {
+    let snapshot = if store.connection().is_autocommit() {
+        Some(
+            store
+                .connection()
+                .unchecked_transaction()
+                .map_err(|_| retained_source_invalid())?,
+        )
+    } else {
+        None
+    };
+    record_on(snapshot.as_ref().map_or(store.connection(), |tx| tx), merge)
+}
+fn record_on(connection: &rusqlite::Connection, merge: Uuid) -> Result<Value, MachineError> {
     let bytes = crate::storage_observation::read_content(
-        store.connection(),
+        connection,
         KIND,
         &merge.to_string(),
         "publication",
     )?
     .ok_or_else(retained_source_invalid)?;
     let record: Value = serde_json::from_slice(&bytes).map_err(|_| retained_source_invalid())?;
-    if record["schema"] != "dolgorae.research-merge-publication/v1"
+    if bytes != encode(&record)?
+        || record["schema"] != "dolgorae.research-merge-publication/v1"
         || record["merge_ref"] != merge.to_string()
         || !exact_fields(
             &record,
@@ -218,7 +498,7 @@ pub(crate) fn record(store: &EngagementStore, merge: Uuid) -> Result<Value, Mach
     {
         return Err(retained_source_invalid());
     }
-    let row:(String,String)=store.connection().query_row("SELECT receipt_json,mutation_envelope_json FROM delegation_operations WHERE operation_kind='merge_group_results' AND state='accepted' AND json_extract(accepted_subjects_json,'$.merge_ref')=?1",[merge.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|_|retained_source_invalid())?;
+    let row:(String,String)=connection.query_row("SELECT receipt_json,mutation_envelope_json FROM delegation_operations WHERE operation_kind='merge_group_results' AND state='accepted' AND json_extract(accepted_subjects_json,'$.merge_ref')=?1",[merge.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|_|retained_source_invalid())?;
     let receipt: OperationReceipt =
         serde_json::from_str(&row.0).map_err(|_| retained_source_invalid())?;
     receipt.verify_digest()?;
@@ -238,17 +518,63 @@ pub(crate) fn record(store: &EngagementStore, merge: Uuid) -> Result<Value, Mach
     {
         return Err(retained_source_invalid());
     }
+    if receipt.namespace.operation_kind != "merge_group_results"
+        || receipt.accepted_subjects.merge_ref.as_deref() != Some(merge.to_string().as_str())
+        || LookupNamespace::from(&envelope.namespace) != receipt.namespace
+        || envelope.request_schema
+            != "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/merge_group_results_normalized_body"
+        || crate::operation::envelope_digest(&envelope).map_err(|_| retained_source_invalid())?
+            != receipt.accepted_input_digest
+        || !matches!(engagement::intent_lookup(connection, &receipt.namespace)?, IntentLookup::Accepted(ref original) if original.as_ref() == &receipt)
+    {
+        return Err(retained_source_invalid());
+    }
+    invocation_origin(connection, &receipt)?;
+    if engagement::result_component_record(
+        connection,
+        &format!(
+            "merge-artifact:v1:{}",
+            record["artifact_id"]
+                .as_str()
+                .ok_or_else(retained_source_invalid)?
+        ),
+    )?
+    .as_deref()
+        != Some(merge.to_string().as_str())
+        || engagement::result_component_record(
+            connection,
+            &format!(
+                "merge-run:v1:{}:{merge}",
+                record["owner_run"]
+                    .as_str()
+                    .ok_or_else(retained_source_invalid)?
+            ),
+        )?
+        .as_deref()
+            != Some(
+                identity["merged_output"]["byte_length"]
+                    .as_u64()
+                    .ok_or_else(retained_source_invalid)?
+                    .to_string()
+                    .as_str(),
+            )
+    {
+        return Err(retained_source_invalid());
+    }
     let sources = sorted_sources(&identity["sources"])?;
     if identity["sources"] != json!(sources) {
         return Err(retained_source_invalid());
     }
-    let original = research_group::read_document(
-        store,
+    let original = research_group::read_document_on(
+        connection,
         record["group_ref"]
             .as_str()
             .ok_or_else(retained_source_invalid)?,
     )?;
-    if original["digest"] != identity["group_assignment_digest"] {
+    if original["digest"] != identity["group_assignment_digest"]
+        || original["manifest"]["scope_kind"] != record["scope_kind"]
+        || original["manifest"]["scope_ref"] != record["scope_ref"]
+    {
         return Err(retained_source_invalid());
     }
     let references = record["source_results"]
@@ -268,7 +594,7 @@ pub(crate) fn record(store: &EngagementStore, merge: Uuid) -> Result<Value, Mach
             .filter(|source| !source["result_digest"].is_null()),
     ) {
         let (result, publication) = crate::result_component_artifact::retained_source_identity(
-            store.connection(),
+            connection,
             source["task_ref"]
                 .as_str()
                 .ok_or_else(retained_source_invalid)?,
@@ -298,8 +624,11 @@ pub(crate) fn record(store: &EngagementStore, merge: Uuid) -> Result<Value, Mach
     Ok(record)
 }
 fn output(store: &EngagementStore, record: &Value) -> Result<Vec<u8>, MachineError> {
+    output_on(store.connection(), record)
+}
+fn output_on(connection: &rusqlite::Connection, record: &Value) -> Result<Vec<u8>, MachineError> {
     let bytes = crate::storage_observation::read_content(
-        store.connection(),
+        connection,
         KIND,
         record["merge_ref"]
             .as_str()
@@ -422,37 +751,29 @@ fn merge_in(
 ) -> Result<Value, MachineError> {
     let own = research_group::owner(request)?;
     research_group::authorize_owner(scope, own, context, controller, "merge_group_results")?;
-    if request["algorithm"] != ALGORITHM {
-        return Err(invalid());
-    }
+    let normalized = normalized(request)?;
     let sources = sorted_sources(&request["sources"])?;
-    let normalized = json!({"group_ref":request["group_ref"],"group_assignment_digest":request["group_assignment_digest"],"sources":sources,"algorithm":ALGORITHM});
     let scope_ref = own.scope_ref().to_string();
-    let intent = intent_identity(
-        scope,
-        "merge_group_results",
-        Some((own.scope_kind(), &scope_ref)),
-        checked_key(request["idempotency_key"].as_str().ok_or_else(invalid)?)?,
-        "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/merge_group_results_normalized_body",
-        &normalized,
-    )?;
-    let mut store = open_store(scope)?;
-    if let Some(receipt) = replay(
-        &store,
-        &intent.lookup,
-        &intent.digest,
-        "merge_group_results",
-    )? {
-        let merge = Uuid::parse_str(
-            receipt
-                .accepted_subjects
-                .merge_ref
-                .as_deref()
-                .ok_or_else(retained_source_invalid)?,
-        )
-        .map_err(|_| retained_source_invalid())?;
-        return Ok(response(&record(&store, merge)?, &receipt));
+    let intent = merge_intent(scope, own, request, &normalized)?;
+    let operation = Uuid::now_v7();
+    let origin = invocation(scope, context, controller, &intent, operation)?;
+    let expected_origin = origin["origin"]
+        .as_str()
+        .ok_or_else(retained_source_invalid)?;
+    {
+        let observer = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+            scope.state_root,
+        ))?;
+        let snapshot = observer
+            .connection()
+            .unchecked_transaction()
+            .map_err(|_| retained_source_invalid())?;
+        engagement::merge_origin_cutoff(&snapshot)?;
+        if let Some(response) = replay_on(&snapshot, scope, &intent, expected_origin)? {
+            return Ok(response);
+        }
     }
+    let mut store = open_store(scope)?;
     let admission = (|| -> Result<Value, MachineError> {
         let coverage = research_group::collect_in(
             scope,
@@ -524,34 +845,32 @@ fn merge_in(
         let (identity, digest) = identity(&request["group_assignment_digest"], &sources, &merged)?;
         let (owner_run, directory, quota) =
             publication_owner(scope, own, &sources, merged.len() as u64)?;
-        if let Some(receipt) = replay(
-            &store,
-            &intent.lookup,
-            &intent.digest,
-            "merge_group_results",
-        )? {
-            let merge = Uuid::parse_str(
-                receipt
-                    .accepted_subjects
-                    .merge_ref
-                    .as_deref()
-                    .ok_or_else(retained_source_invalid)?,
-            )
-            .map_err(|_| retained_source_invalid())?;
-            return Ok(response(&record(&store, merge)?, &receipt));
-        }
         let merge = Uuid::now_v7();
         let artifact = Uuid::now_v7();
-        let operation = Uuid::now_v7();
         let now = now_ms()?;
         let publication = json!({"schema":"dolgorae.research-merge-publication/v1","merge_ref":merge,"artifact_id":artifact,"owner_run":owner_run,"workspace_id":scope.view.workspace_id,"workspace_path":scope.view.canonical_path.to_path_buf()?,"scope_kind":own.scope_kind(),"scope_ref":scope_ref,"group_ref":request["group_ref"],"identity":identity,"digest":digest,"normalized":normalized,"source_results":provenance});
         let receipt = store.transact(|tx| {
+            if let Some(response) = replay_on(tx, scope, &intent, expected_origin)? {
+                return serde_json::from_value(response["receipt"].clone())
+                    .map_err(|_| retained_source_invalid());
+            }
             let revision = engagement::scope_membership_revision(
                 tx,
                 &scope.view.workspace_id,
                 own.scope_kind(),
                 &scope_ref,
             )?;
+            if request["expected_revision"]
+                .as_u64()
+                .is_some_and(|expected| expected != revision)
+            {
+                return Err(assignment_refusal(
+                    "REVISION_CONFLICT",
+                    "the merge membership revision moved",
+                ));
+            }
+            research_group::require_active_group_owner(tx, scope, own)?;
+            engagement::establish_merge_origin_cutoff(tx)?;
             let preparation = engagement::intent_prepare(
                 tx,
                 IntentAdmission {
@@ -571,16 +890,7 @@ fn merge_in(
                 }
                 IntentPreparation::Created => {}
             }
-            if request["expected_revision"]
-                .as_u64()
-                .is_some_and(|expected| expected != revision)
-            {
-                return Err(assignment_refusal(
-                    "REVISION_CONFLICT",
-                    "the merge membership revision moved",
-                ));
-            }
-            research_group::require_active_group_owner(tx, scope, own)?;
+
             crate::storage_observation::put_content(
                 tx,
                 KIND,
@@ -594,6 +904,13 @@ fn merge_in(
                 &merge.to_string(),
                 "merged_output",
                 &merged,
+            )?;
+            crate::storage_observation::put_content(
+                tx,
+                KIND,
+                &merge.to_string(),
+                "invocation",
+                &encode(&origin)?,
             )?;
             engagement::retain_result_component_record(
                 tx,
@@ -618,6 +935,7 @@ fn merge_in(
                 revision,
             )?;
             engagement::intent_accept(tx, operation, &receipt, now)?;
+            lookup_result_on(tx, &receipt)?;
             quota.verify_for(&directory)?;
             Ok(receipt)
         })?;
@@ -629,26 +947,23 @@ fn merge_in(
                 .ok_or_else(retained_source_invalid)?,
         )
         .map_err(|_| retained_source_invalid())?;
-        Ok(response(&record(&store, winning)?, &receipt))
+        let snapshot = store
+            .connection()
+            .unchecked_transaction()
+            .map_err(|_| retained_source_invalid())?;
+        let record = record_on(&snapshot, winning)?;
+        output_on(&snapshot, &record)?;
+        Ok(response(&record, &receipt))
     })();
     match admission {
         Ok(response) => Ok(response),
         Err(error) => {
-            if let Some(receipt) = replay(
-                &store,
-                &intent.lookup,
-                &intent.digest,
-                "merge_group_results",
-            )? {
-                let merge = Uuid::parse_str(
-                    receipt
-                        .accepted_subjects
-                        .merge_ref
-                        .as_deref()
-                        .ok_or_else(retained_source_invalid)?,
-                )
+            let snapshot = store
+                .connection()
+                .unchecked_transaction()
                 .map_err(|_| retained_source_invalid())?;
-                return Ok(response(&record(&store, merge)?, &receipt));
+            if let Some(response) = replay_on(&snapshot, scope, &intent, expected_origin)? {
+                return Ok(response);
             }
             Err(error)
         }
@@ -662,6 +977,10 @@ pub(crate) fn public_merged(
     let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
         scope.state_root,
     ))?;
+    let _snapshot = store
+        .connection()
+        .unchecked_transaction()
+        .map_err(|_| retained_source_invalid())?;
     let record = record(&store, merge)?;
     if record["workspace_id"] != scope.view.workspace_id
         || record["scope_kind"]
@@ -703,6 +1022,10 @@ pub(crate) fn read_artifact(
         return Ok(None);
     };
     let merge = Uuid::parse_str(&merge).map_err(|_| retained_source_invalid())?;
+    let _snapshot = store
+        .connection()
+        .unchecked_transaction()
+        .map_err(|_| retained_source_invalid())?;
     let record = record(&store, merge)?;
     if record["artifact_id"] != id.to_string() || record["owner_run"] != run.to_string() {
         return Err(MachineError::new(
@@ -1028,6 +1351,102 @@ pub(crate) fn task_binding(
     })
     .transpose()
 }
+/// Authenticate the retained synthesis input without rendering or recapturing it.
+pub(super) fn verify_task_receipt(
+    store: &EngagementStore,
+    receipt: &OperationReceipt,
+    accepted: &AcceptedTask,
+) -> Result<Value, MachineError> {
+    let binding = verify_receipt_binding(store.connection(), receipt, accepted)?;
+    let merge = binding["merge_ref"]
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(retained_source_invalid)?;
+    let publication = record(store, merge)?;
+    if publication["workspace_id"] != binding["workspace_id"]
+        || publication["scope_kind"] != binding["scope_kind"]
+        || publication["scope_ref"] != binding["scope_ref"]
+        || publication["digest"] != binding["merged_findings_digest"]
+        || publication["identity"]["merged_output"] != binding["merged_input"]
+    {
+        return Err(retained_source_invalid());
+    }
+    Ok(binding)
+}
+
+fn verify_receipt_binding(
+    connection: &Connection,
+    receipt: &OperationReceipt,
+    accepted: &AcceptedTask,
+) -> Result<Value, MachineError> {
+    let task = receipt
+        .accepted_subjects
+        .task_ref
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(retained_source_invalid)?;
+    let binding = task_binding(connection, task)?.ok_or_else(retained_source_invalid)?;
+    let normalized = &binding["normalized"];
+    let member = binding["member_ref"]
+        .as_str()
+        .ok_or_else(retained_source_invalid)?;
+    if receipt.namespace.operation_kind != "assign_synthesis"
+        || binding["workspace_id"] != receipt.namespace.workspace_ref
+        || binding["scope_kind"].as_str() != receipt.namespace.scope_kind.as_deref()
+        || binding["scope_ref"].as_str() != receipt.namespace.scope_ref.as_deref()
+        || receipt.accepted_subjects.member_ref.as_deref() != Some(member)
+        || receipt.accepted_subjects.run_ref.as_deref() != Some(member)
+        || normalized["assignment"]["accepted_task_identity"] != json!(accepted)
+        || ContentBytesRef::from_bytes(&encode(&normalized["assignment"]["task_body"])?)
+            != accepted.task_body
+    {
+        return Err(retained_source_invalid());
+    }
+    let envelope: String = connection.query_row(
+        "SELECT mutation_envelope_json FROM delegation_operations WHERE operation_ref=?1 AND state='accepted'",
+        [&receipt.operation_ref], |row| row.get(0),
+    ).map_err(|_| retained_source_invalid())?;
+    let envelope: Envelope =
+        serde_json::from_str(&envelope).map_err(|_| retained_source_invalid())?;
+    let input = ContentBytesRef::from_bytes(&encode(normalized)?);
+    if envelope.request_schema != binding["request_schema"]
+        || envelope.request_body.sha256 != input.sha256
+        || envelope.request_body.byte_length != input.byte_length
+        || envelope.namespace.operation_kind != "assign_synthesis"
+    {
+        return Err(retained_source_invalid());
+    }
+    match engagement::intent_lookup(connection, &receipt.namespace)? {
+        IntentLookup::Accepted(original) if *original == *receipt => {}
+        _ => return Err(retained_source_invalid()),
+    }
+    let accounting: Option<(String,String,String,String,String)> = connection.query_row(
+        "SELECT workspace_ref,aggregate_scope_kind,aggregate_scope_ref,member_ref,accounting_state FROM caller_scope_assignments WHERE assignment_id=?1",
+        [task.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional().map_err(|_| retained_source_invalid())?;
+    if binding["controller"] == accounting.is_some() {
+        return Err(retained_source_invalid());
+    }
+    if let Some((workspace, kind, scope, original_member, state)) = accounting
+        && (binding["workspace_id"] != workspace
+            || binding["scope_kind"] != kind
+            || binding["scope_ref"] != scope
+            || member != original_member
+            || !matches!(
+                state.as_str(),
+                "counted_unresolved" | "counted_accepted" | "proved_nondispatch"
+            ))
+    {
+        return Err(retained_source_invalid());
+    }
+    if binding["controller"] == true
+        && engagement::accepted_native_context(connection, receipt)?.is_some()
+    {
+        return Err(retained_source_invalid());
+    }
+    Ok(binding)
+}
+
 pub(crate) fn task_prompt(
     state_root: &Path,
     task: Uuid,
@@ -1062,8 +1481,21 @@ pub(crate) fn verify_accounted_task(
     if binding["controller"] != true {
         return Ok(false);
     }
-    let operation:Option<String>=connection.query_row("SELECT operation_ref FROM delegation_operations WHERE operation_kind='assign_synthesis' AND state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref')=?1",[task.to_string()],|row|row.get(0)).optional().map_err(|_|retained_source_invalid())?;
-    Ok(operation.is_some())
+    let rows = connection.prepare(
+        "SELECT receipt_json FROM delegation_operations WHERE operation_kind='assign_synthesis' AND state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref')=?1 LIMIT 2",
+    ).map_err(|_| retained_source_invalid())?.query_map([task.to_string()], |row| row.get::<_,String>(0))
+        .map_err(|_| retained_source_invalid())?.collect::<Result<Vec<_>,_>>().map_err(|_| retained_source_invalid())?;
+    let [text] = rows.as_slice() else {
+        return Err(retained_source_invalid());
+    };
+    let receipt: OperationReceipt =
+        serde_json::from_str(text).map_err(|_| retained_source_invalid())?;
+    let accepted: AcceptedTask = serde_json::from_value(
+        binding["normalized"]["assignment"]["accepted_task_identity"].clone(),
+    )
+    .map_err(|_| retained_source_invalid())?;
+    verify_receipt_binding(connection, &receipt, &accepted)?;
+    Ok(true)
 }
 fn find_merge(
     scope: &DelegationScope<'_>,

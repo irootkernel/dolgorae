@@ -255,7 +255,7 @@ def owned_process_sample(driver_pid: int, home: Path, driver: Path, codex: Path)
             "live_profile_servers": live_servers, "generations": generations}
 
 
-def campaign(driver: Path, binary: Path, codex: Path, pool_limit: int, max_rss: int) -> dict:
+def campaign(driver: Path, binary: Path, codex: Path, pool_limit: int, max_rss: int, with_merge: bool = False) -> dict:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit native research-group opt-in required")
     if pool_limit not in {1, 4} or max_rss <= 0:
@@ -289,7 +289,8 @@ def campaign(driver: Path, binary: Path, codex: Path, pool_limit: int, max_rss: 
                      "codex":executable_identity(codex),"configured_pool_k":pool_limit}).encode())
         with open(root / "driver.stdout", "xb", opener=lambda p, f: os.open(p, f, 0o600)) as stdout, \
                 open(root / "driver.stderr", "xb", opener=lambda p, f: os.open(p, f, 0o600)) as stderr:
-            process = subprocess.Popen([str(driver), str(root), str(codex), str(pool_limit)], cwd=root,
+            command = [str(driver)] + (["--with-merge"] if with_merge else []) + [str(root), str(codex), str(pool_limit)]
+            process = subprocess.Popen(command, cwd=root,
                                        env=environment, stdout=stdout, stderr=stderr)
             deadline = time.monotonic() + MAX_SECONDS
             while process.poll() is None:
@@ -368,11 +369,12 @@ def main() -> int:
     parser.add_argument("--binary", type=Path, required=True, help="same frozen product candidate; official orphan owner")
     parser.add_argument("--codex", type=Path, required=True)
     parser.add_argument("--pool-limit", type=int, choices=(1, 4), required=True)
+    parser.add_argument("--with-merge", action="store_true", help="also verify Controller merge, original-key replay and artifact bytes")
     parser.add_argument("--max-owned-rss-bytes", type=int, default=DEFAULT_MAX_RSS)
     args = parser.parse_args()
     try:
         print(json.dumps(campaign(args.driver.resolve(), args.binary.resolve(), args.codex.resolve(),
-                                  args.pool_limit, args.max_owned_rss_bytes)))
+                                  args.pool_limit, args.max_owned_rss_bytes, args.with_merge)))
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(json.dumps({"schema":"dolgorae.native-research-group-campaign/v1","passed":False,"failure":str(error)}))

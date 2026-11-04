@@ -108,7 +108,9 @@ pub fn method_class(operation: &str) -> Result<MethodClass, MachineError> {
         | "assign_external_specialist_task"
         | "spawn_specialist"
         | "assign_specialist_task"
-        | "assign_group" => Ok(MethodClass::Keyed),
+        | "assign_group"
+        | "assign_synthesis"
+        | "merge_group_results" => Ok(MethodClass::Keyed),
         "validate_provisioning"
         | "get_external_engagement"
         | "await_external_specialist_task"
@@ -453,6 +455,8 @@ impl HostStore {
                     | "hire_external_specialist"
                     | "assign_external_specialist_task"
                     | "assign_group"
+                    | "assign_synthesis"
+                    | "merge_group_results"
             ) {
                 return Err(refusal());
             }
@@ -818,6 +822,34 @@ impl HostStore {
                 &self.caller_scope()?,
                 &record.request,
             )?
+        } else if keyed.namespace.operation_kind == "merge_group_results" {
+            let proof = binding.trusted_keyed()?;
+            crate::delegation_service::lookup_native_merge(
+                &crate::delegation_service::DelegationScope {
+                    view: &self.owner.view,
+                    state_root: &self.owner.state_root,
+                    controller: &self.owner.controller,
+                    trusted_invocation: Some(&proof),
+                },
+                &record.request,
+            )?
+        } else if keyed.namespace.operation_kind == "assign_synthesis" {
+            crate::delegation_service::lookup_operation(
+                &crate::delegation_service::DelegationScope {
+                    view: &self.owner.view,
+                    state_root: &self.owner.state_root,
+                    controller: &self.owner.controller,
+                    trusted_invocation: None,
+                },
+                "assign_synthesis",
+                keyed
+                    .namespace
+                    .scope_kind
+                    .as_deref()
+                    .zip(keyed.namespace.scope_ref.as_deref()),
+                &keyed.namespace.idempotency_key,
+            )?;
+            store.intent_lookup_bound(&keyed.namespace, &record.context)?
         } else {
             store.intent_lookup_bound(&keyed.namespace, &record.context)?
         };
@@ -1768,7 +1800,7 @@ pub(crate) mod tests {
                 );
             }
         }
-        assert_eq!(supported, 23);
+        assert_eq!(supported, 25);
         let duplicate = r#"{"schema":"dolgorae.external-specialist-request/v5","operation":"open_external_engagement","operation":"open_external_engagement","workspace_ref":"workspace","idempotency_key":"key","expected_revision":null}"#;
         assert!(parse_public_request(duplicate).is_err());
         let mut fractional = request("hire_external_specialist");
@@ -2014,6 +2046,10 @@ pub(crate) mod tests {
                             | "await_group"
                             | "collect_group"
                     )
+                    && !(matches!(
+                        operation.as_str(),
+                        "assign_synthesis" | "merge_group_results"
+                    ) && value["scope_kind"] == "external_engagement")
                 {
                     assert!(store.bind_native(event(&operation), value).is_err());
                     continue;
@@ -2057,7 +2093,10 @@ pub(crate) mod tests {
                         count[0] += 1;
                         assert_eq!(first, Delivery::Dispatch);
                         assert_eq!(second, Delivery::Reconcile);
-                        if operation == "assign_group" {
+                        if matches!(
+                            operation.as_str(),
+                            "assign_group" | "merge_group_results" | "assign_synthesis"
+                        ) {
                             // This grammar-only corpus has no retained aggregate
                             // owner. Group reconciliation must refuse it even
                             // for an unused key; real owner paths are separate.
@@ -2081,14 +2120,14 @@ pub(crate) mod tests {
                     }
                 }
             }
-            assert_eq!(count, [5, 8, 3]);
+            assert_eq!(count, [7, 8, 3]);
             assert_eq!(
                 store
                     .connection
                     .query_row("SELECT COUNT(*) FROM native_calls", [], |row| row
                         .get::<_, u64>(0))
                     .unwrap(),
-                16
+                18
             );
             let product = crate::engagement::EngagementStore::open_read_only(
                 &crate::engagement::EngagementStore::workspace_database_path(

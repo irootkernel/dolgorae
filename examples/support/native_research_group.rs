@@ -493,6 +493,12 @@ fn queue_observation(state: &Path, engagement: Uuid, sources: &Value) -> Value {
 }
 
 pub fn campaign(root: &Path, codex: &Path, k: u32) -> Value {
+    campaign_in(root, codex, k, false)
+}
+pub fn campaign_with_merge(root: &Path, codex: &Path, k: u32) -> Value {
+    campaign_in(root, codex, k, true)
+}
+fn campaign_in(root: &Path, codex: &Path, k: u32, with_merge: bool) -> Value {
     verify_root(root);
     assert!([1, 4].contains(&k));
     let SemanticResult::Workspace(view) = CoreSemanticService
@@ -628,7 +634,7 @@ pub fn campaign(root: &Path, codex: &Path, k: u32) -> Value {
         envelope["scope_kind"] = json!("external_engagement");
         envelope["scope_ref"] = json!(engagement);
         envelope["operation"] = json!(operation);
-        if operation == "assign_group" {
+        if matches!(operation, "assign_group" | "merge_group_results") {
             envelope["idempotency_key"] = json!(key);
             envelope["expected_revision"] = Value::Null;
         }
@@ -852,13 +858,66 @@ pub fn campaign(root: &Path, codex: &Path, k: u32) -> Value {
     assert_eq!(replay["response"]["group_ref"], group);
     assert_eq!(replay["exact_replay"], true);
     assert_eq!(collect()["coverage"]["sources"], json!(rows));
+    let merge_observation = if with_merge {
+        let request = json!({"group_ref":group,"group_assignment_digest":last["coverage"]["group_assignment_digest"],"sources":rows,"algorithm":"merge-exact-findings-v1"});
+        let merged = call("merge_group_results", Some("native-50-merge"), &request);
+        let original = &merged["response"];
+        assert_eq!(original["merged_identity"]["sources"], json!(rows));
+        assert_eq!(
+            call("merge_group_results", Some("native-50-merge"), &request)["response"],
+            *original
+        );
+        let lookup = service::research_group::public_lookup(
+            &state,
+            &view.workspace_id,
+            &carrier,
+            "external_engagement",
+            engagement,
+            "merge_group_results",
+            "native-50-merge",
+        )
+        .unwrap();
+        assert_eq!(lookup["receipt"], original["receipt"]);
+        let merge = Uuid::parse_str(
+            original["receipt"]["accepted_subjects"]["merge_ref"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let db = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(&state))
+            .unwrap();
+        let publication = service::research_merge::record(&db, merge).unwrap();
+        let run = Uuid::parse_str(publication["owner_run"].as_str().unwrap()).unwrap();
+        let snapshot = crate::snapshot::RunSnapshot::load(&state, run, 0).unwrap();
+        let chunk = crate::artifact::chunk(
+            &state,
+            &snapshot,
+            publication["artifact_id"].as_str().unwrap(),
+            (0, 1_048_576),
+            Some(&carrier),
+        )
+        .unwrap();
+        assert!(chunk.eof);
+        assert_eq!(
+            json!(crate::delegation_identity::BytesRef::from_bytes(
+                &chunk.data
+            )),
+            original["merged_identity"]["merged_output"]
+        );
+        assert_eq!(collect()["coverage"]["sources"], json!(rows));
+        let observation = json!({"schema":"dolgorae.native-research-merge/v1","origin":"controller","merged":original,"lookup":lookup,"artifact_bytes_verified":true,"source_coverage_unchanged":true});
+        private(&root.join("native-merge-result.json"), &observation);
+        observation
+    } else {
+        Value::Null
+    };
     private(
         &root.join("native-group-result.json"),
-        &json!({"schema":"dolgorae.native-research-group/v1","tasks":50,"configured_pool_k":k,"actual_member_runs":members.len(),"server_generations":bindings.len(),"initial_queue":initial_queue,"busy_queue":busy_queue,"states":counts,"input_bytes":input_bytes,"original_key_replay":true,"unknown_not_replayed":true,"coverage":last,"pool_bounds_checked":true}),
+        &json!({"schema":"dolgorae.native-research-group/v1","tasks":50,"configured_pool_k":k,"actual_member_runs":members.len(),"server_generations":bindings.len(),"initial_queue":initial_queue,"busy_queue":busy_queue,"states":counts,"input_bytes":input_bytes,"original_key_replay":true,"unknown_not_replayed":true,"coverage":last,"pool_bounds_checked":true,"merge":merge_observation}),
     );
     async_runtime.block_on(control.shutdown(tokio::time::Instant::now() + Duration::from_secs(5)));
     drop(gateway);
     async_runtime.shutdown_timeout(Duration::from_secs(1));
     cleanup(root);
-    json!({"schema":"dolgorae.native-research-group/v1","passed":true,"tasks":50,"configured_pool_k":k,"actual_member_runs":members.len(),"server_generations":bindings.len(),"states":counts,"initial_queue":initial_queue,"busy_queue":busy_queue,"input_bytes":input_bytes,"cleanup_verified":true,"real_accounts_used":false})
+    json!({"schema":"dolgorae.native-research-group/v1","passed":true,"tasks":50,"configured_pool_k":k,"actual_member_runs":members.len(),"server_generations":bindings.len(),"states":counts,"initial_queue":initial_queue,"busy_queue":busy_queue,"input_bytes":input_bytes,"cleanup_verified":true,"real_accounts_used":false,"merge":merge_observation})
 }

@@ -156,6 +156,24 @@ existing rows, namespace birth and extension markers. A historical generation
 carrying a later merge marker still fails admission; fixtures representing old
 databases must remove that marker with the other later-generation metadata.
 
+The first new merge upgrades the internal merge marker to `2` within its normal
+`IMMEDIATE` acceptance transaction. It retains a fixed
+`research_merge_origin_cutoff` bound to the database namespace birth and the
+operation AUTOINCREMENT high-water. An accepted original-key replay or read
+never upgrades state. The live Primary retains its shared workspace lease and
+Profile connection; this metadata/trigger transition requires no exclusive
+workspace lease, process stop or physical generation replacement.
+
+A verified accepted operation at or below the cutoff retains its historical
+Controller provenance. Above it, every accepted merge requires its compact
+invocation record in the same transaction as publication and receipt. Missing
+new provenance requires recovery, never a legacy-origin fallback. Marker,
+cutoff and guard shapes are checked together. New writers read markers `1` and
+`2`; marker-1-only fresh opens reject `2`. Persistent SQL acceptance guards also
+refuse a pre-opened old producer that omits the required record. The original
+operation/receipt bytes and historical input/result identities are unchanged;
+there is no backfill or new public digest domain.
+
 ### Protected host setup and invocation ownership
 
 The private administrative entry point `__trusted-specialist-host` separates
@@ -1308,6 +1326,18 @@ share the existing 256 MiB Run quota and serialization lease. Public result
 references and Artifact metadata/chunks read these exact bytes under current
 aggregate Controller authorization, with no observation-time publication.
 
+The existing native `merge_group_results` is K under both owner paths. External
+admission retains the full original protected context in its existing operation
+column/envelope; managed admission retains its genuine Root/Turn/tool-call with
+null external context. Merge does not acquire assignment caller scope or spend a
+round. Original-key lookup authenticates the aggregate before revealing key
+state and verifies receipt, publication and origin in one read snapshot.
+Ordinary external and managed native lookups return the exact merged-output
+BytesRef and separate merged-domain digest. The Controller gateway retains the
+merge UUID in `result_ref`. A completed merge can contain unknown sources; it does
+not complete those Tasks. Lost replies
+recover the original operation, with no replacement invocation or redispatch.
+
 `assign_synthesis` is an explicit ordinary task acceptance, with its own actual
 Task, caller round and complete result. The request binds a retained merged digest
 and exact merged-output BytesRef. Public task-body syntax retains its 16 MiB
@@ -1323,6 +1353,27 @@ constraints under `dolgorae.structured-task/v1`; an internal execution projectio
 never replaces their accepted bytes or identity. Controller synthesis uses its
 own authenticated acceptance origin, without manufacturing a native source call,
 Podway round scope or group receipt.
+
+The protected native host classifies the existing `assign_synthesis` method as
+K and permits its original namespace for lookup, preserving its checked native
+binding and owner/scope fences.
+
+Original-key synthesis lookup authenticates the current aggregate owner before
+reading a key, including the managed Root and existing Broker compatibility
+fence. It verifies the actual accepted `assign_synthesis` receipt and retained
+normalized input in the same read snapshot as the Task and result. Pending,
+running and uncertain execution remain distinct; an exact original unknown
+Submit claim without a known Turn is unknown, while proven terminal facts take
+precedence over an old unknown claim. Settled lookup returns the complete result
+BytesRef and its separate CompleteResult domain digest after body retirement.
+It never recaptures input, invokes recovery or changes caller accounting.
+
+Explicit native external synthesis recovery verifies its own `assign_synthesis`
+namespace, immutable input and accepted body, current owner and member, and
+original native invocation and caller accounting before the existing history
+owner runs. A missing proof cannot acquire ordinary-assignment, group-child,
+Controller or legacy provenance. Controller synthesis retains its separate
+origin. This authorization performs no new acceptance or redispatch.
 
 Queued synthesis and restart reconstruction resolve the original accepted
 `assign_synthesis` operation by its actual Task binding. They verify the complete
