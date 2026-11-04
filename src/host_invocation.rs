@@ -107,7 +107,8 @@ pub fn method_class(operation: &str) -> Result<MethodClass, MachineError> {
         | "hire_external_specialist"
         | "assign_external_specialist_task"
         | "spawn_specialist"
-        | "assign_specialist_task" => Ok(MethodClass::Keyed),
+        | "assign_specialist_task"
+        | "assign_group" => Ok(MethodClass::Keyed),
         "validate_provisioning"
         | "get_external_engagement"
         | "await_external_specialist_task"
@@ -116,7 +117,9 @@ pub fn method_class(operation: &str) -> Result<MethodClass, MachineError> {
         | "lookup_operation"
         | "await_specialist_task"
         | "collect_specialist_task"
-        | "get_managed_delegation_identity" => Ok(MethodClass::Read),
+        | "get_managed_delegation_identity"
+        | "await_group"
+        | "collect_group" => Ok(MethodClass::Read),
         "close_external_engagement"
         | "cancel_external_specialist_task"
         | "release_external_specialist"
@@ -449,6 +452,7 @@ impl HostStore {
                     | "open_external_engagement"
                     | "hire_external_specialist"
                     | "assign_external_specialist_task"
+                    | "assign_group"
             ) {
                 return Err(refusal());
             }
@@ -802,7 +806,21 @@ impl HostStore {
         let store = crate::engagement::EngagementStore::open_read_only(
             &crate::engagement::EngagementStore::workspace_database_path(&self.owner.state_root),
         )?;
-        let lookup = store.intent_lookup_bound(&keyed.namespace, &record.context)?;
+        let lookup = if keyed.namespace.operation_kind == "assign_group" {
+            let proof = binding.trusted_keyed()?;
+            crate::delegation_service::lookup_native_group(
+                &crate::delegation_service::DelegationScope {
+                    view: &self.owner.view,
+                    state_root: &self.owner.state_root,
+                    controller: &self.owner.controller,
+                    trusted_invocation: Some(&proof),
+                },
+                &self.caller_scope()?,
+                &record.request,
+            )?
+        } else {
+            store.intent_lookup_bound(&keyed.namespace, &record.context)?
+        };
         match &lookup {
             crate::engagement::IntentLookup::Accepted(receipt) => {
                 receipt.validate()?;
@@ -1750,7 +1768,7 @@ pub(crate) mod tests {
                 );
             }
         }
-        assert_eq!(supported, 20);
+        assert_eq!(supported, 23);
         let duplicate = r#"{"schema":"dolgorae.external-specialist-request/v5","operation":"open_external_engagement","operation":"open_external_engagement","workspace_ref":"workspace","idempotency_key":"key","expected_revision":null}"#;
         assert!(parse_public_request(duplicate).is_err());
         let mut fractional = request("hire_external_specialist");
@@ -1989,7 +2007,12 @@ pub(crate) mod tests {
                 if !operation.contains("external")
                     && !matches!(
                         operation.as_str(),
-                        "validate_provisioning" | "install_provisioning" | "lookup_operation"
+                        "validate_provisioning"
+                            | "install_provisioning"
+                            | "lookup_operation"
+                            | "assign_group"
+                            | "await_group"
+                            | "collect_group"
                     )
                 {
                     assert!(store.bind_native(event(&operation), value).is_err());
@@ -2034,10 +2057,17 @@ pub(crate) mod tests {
                         count[0] += 1;
                         assert_eq!(first, Delivery::Dispatch);
                         assert_eq!(second, Delivery::Reconcile);
-                        assert!(matches!(
-                            store.reconcile_keyed(&bound).unwrap(),
-                            crate::engagement::IntentLookup::Absent { .. }
-                        ));
+                        if operation == "assign_group" {
+                            // This grammar-only corpus has no retained aggregate
+                            // owner. Group reconciliation must refuse it even
+                            // for an unused key; real owner paths are separate.
+                            assert!(store.reconcile_keyed(&bound).is_err());
+                        } else {
+                            assert!(matches!(
+                                store.reconcile_keyed(&bound).unwrap(),
+                                crate::engagement::IntentLookup::Absent { .. }
+                            ));
+                        }
                     }
                     MethodClass::Read => {
                         count[1] += 1;
@@ -2051,14 +2081,14 @@ pub(crate) mod tests {
                     }
                 }
             }
-            assert_eq!(count, [4, 6, 3]);
+            assert_eq!(count, [5, 8, 3]);
             assert_eq!(
                 store
                     .connection
                     .query_row("SELECT COUNT(*) FROM native_calls", [], |row| row
                         .get::<_, u64>(0))
                     .unwrap(),
-                13
+                16
             );
             let product = crate::engagement::EngagementStore::open_read_only(
                 &crate::engagement::EngagementStore::workspace_database_path(

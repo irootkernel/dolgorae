@@ -514,6 +514,10 @@ and authorization boundaries. Their task records own conservative accepted/
 uncertain round accounting, original receipt linkage and current settlement
 proof. Group admission durably accepts an immutable bounded assignment set;
 member provisioning and upstream dispatch may then progress or fail separately.
+The protected host classifies group assignment as K and group waits/collection
+as R. Original-key lookup joins the original group receipt and normalized
+manifest in one read snapshot under its current aggregate owner; the group
+identity is separate from every child Task and result.
 Partial dispatch cannot rewrite the group manifest. Group collection includes
 terminal and unknown members. Deterministic finding merge reads immutable
 complete sources, preserves conflicts and coverage, and makes no model call.
@@ -4061,8 +4065,8 @@ architecture contract allows them:
   `orchestration`, `paths`, `provisioning`, `review`, `run`, `successor_capture`,
   `task_request`, `trusted_host`: protected preparation and source projection
 - `host_invocation` → `caller_scope`, `darwin`, `delegation_identity`,
-  `engagement`, `jcs`, `machine`, `operation`, `trusted_host`: protected native
-  identity, K-only linkage and delivery bookkeeping
+  `delegation_service`, `engagement`, `jcs`, `machine`, `operation`, `trusted_host`:
+  protected native identity, K-only linkage and delivery bookkeeping
 
 `specialist_stdio` depends on `darwin`, `host_invocation`, `jcs`, `machine`, `paths`, `specialist_facade` and `trusted_host`. `specialist_facade` depends on `caller_scope`, `controller`, `delegation_identity`, `delegation_service`, `engagement`, `host_invocation`, `machine`, `operation`, `paths`, `semantic`, `source_binding`, `task_request` and `trusted_host`; it owns transport projection, never product acceptance. `managed_specialist` uses the same verified owner and service projection from `worker`, plus `run`, `turn`, `controller`, `delegation_identity`, `operation`, `paths`, `machine` and `host_invocation`. It resolves the protected Root connection and current authority before dispatch. `trusted_host` calls it only for explicit connection publication. `trusted_host` owns administrative member recovery. It authenticates Operator and exact protected owner scope, then calls the existing reconciliation services/semantic port. `delegation_service` reads managed recovery provenance from the original accepted task and verified intent/receipt in one read snapshot. It returns only an internal owned context, never a model capability. The adapter revalidates its protected configuration before the effectful port; no host persistence lock spans history I/O. The existing lifecycle/history owner retains settlement, member credentials and original-generation absence proofs. No observer or ordinary MCP dispatch enters this boundary.
 

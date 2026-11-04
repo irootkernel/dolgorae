@@ -26543,7 +26543,8 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
                 assert!(Instant::now() < deadline);
                 thread::sleep(Duration::from_millis(10));
             }
-            fs::write(root.join("leaf.pid"), leaf.id().to_string()).unwrap();
+            fs::write(root.join("leaf.pid.tmp"), leaf.id().to_string()).unwrap();
+            fs::rename(root.join("leaf.pid.tmp"), root.join("leaf.pid")).unwrap();
             loop {
                 thread::sleep(Duration::from_millis(100));
             }

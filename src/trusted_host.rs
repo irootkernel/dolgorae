@@ -1094,6 +1094,24 @@ pub(crate) mod tests {
             carrier: &CredentialCarrier,
             owner: crate::delegation_service::SettlementOwner,
         ) -> Self {
+            Self::for_caller(
+                home,
+                workspace,
+                carrier,
+                owner,
+                HostRoute::Codex,
+                crate::caller_scope::fixture(3).accepted().clone(),
+            )
+        }
+
+        pub(crate) fn for_caller(
+            home: DolgoraeHome,
+            workspace: PathBuf,
+            carrier: &CredentialCarrier,
+            owner: crate::delegation_service::SettlementOwner,
+            route: HostRoute,
+            caller_scope: CallerScope,
+        ) -> Self {
             let root = home.root().parent().unwrap().to_path_buf();
             let private = root.join("private");
             for path in [&private, &private.join("native")] {
@@ -1124,12 +1142,23 @@ pub(crate) mod tests {
                 operator,
                 controller: controller.clone(),
                 draft: OwnerDraft {
-                    route: HostRoute::Codex,
+                    route,
                     executable: HostExecutable {
                         path: private.join("not-launched"),
-                        version: "0.164.0".into(),
-                        sha256: "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
-                            .into(),
+                        version: match route {
+                            HostRoute::Codex => "0.164.0",
+                            HostRoute::Claude => "2.1.310",
+                        }
+                        .into(),
+                        sha256: match route {
+                            HostRoute::Codex => {
+                                "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
+                            }
+                            HostRoute::Claude => {
+                                "ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd"
+                            }
+                        }
+                        .into(),
                     },
                     owner: if managed {
                         OwnerKind::Managed {
@@ -1151,7 +1180,7 @@ pub(crate) mod tests {
                         reference: Some(owner.scope_ref().to_string()),
                     }],
                     tools: vec!["specialist".into()],
-                    caller_scope: crate::caller_scope::fixture(3).accepted().clone(),
+                    caller_scope,
                     adapter_id: if managed {
                         "dolgorae.managed/1"
                     } else {

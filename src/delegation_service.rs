@@ -5681,6 +5681,14 @@ fn member_ambient_disclosure_in(
     )
 }
 
+pub(crate) fn lookup_native_group(
+    scope: &DelegationScope<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    request: &Value,
+) -> Result<IntentLookup, MachineError> {
+    research_group::native_lookup(scope, caller, request)
+}
+
 pub fn lookup_operation(
     scope: &DelegationScope<'_>,
     operation_kind: &str,
@@ -5720,6 +5728,26 @@ fn lookup_operation_in(
         let session = observer.session(session_id)?;
         managed_scope_identity(scope, &session, session_id, operation_kind)?;
     }
+    if operation_kind == "assign_group" {
+        let (kind, reference) =
+            aggregate_scope.ok_or_else(|| owner_refusal_for("lookup_operation"))?;
+        let id = Uuid::parse_str(reference).map_err(|_| owner_refusal_for("lookup_operation"))?;
+        match kind {
+            "external_engagement" => transport_owner(
+                scope,
+                SettlementOwner::External { engagement_id: id },
+                None,
+                "lookup_operation",
+            )?,
+            "orchestrated_session" => {
+                let observer =
+                    crate::orchestration::OrchestrationStore::open_observer(scope.state_root)?;
+                let session = observer.session(id)?;
+                managed_scope_identity(scope, &session, id, "lookup_operation")?;
+            }
+            _ => return Err(owner_refusal_for("lookup_operation")),
+        }
+    }
     let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
         scope.state_root,
     ))?;
@@ -5730,6 +5758,9 @@ fn lookup_operation_in(
     let observed = managed_lookup(&store, &lookup, operation_kind, aggregate_scope, key)?;
     match observed {
         IntentLookup::Accepted(receipt) => {
+            if operation_kind == "assign_group" {
+                research_group::lookup_assignment(&store, &receipt)?;
+            }
             let result = ordinary_lookup_result(scope, &store, &receipt)?;
             Ok(json!({
                 "schema": LOOKUP_SCHEMA,
@@ -7232,6 +7263,9 @@ fn current_outcome(
     receipt: &OperationReceipt,
 ) -> Result<&'static str, MachineError> {
     match operation_kind {
+        // A group receipt accepts the assignment set, not a single execution.
+        // Child outcomes and complete coverage belong to await/collect.
+        "assign_group" => Ok("pending"),
         // Install and open have no delegated execution to observe.
         "install_provisioning" | "open_external_engagement" => Ok("completed"),
         "assign_external_specialist_task" => {
@@ -25483,6 +25517,1109 @@ pub(crate) mod tests {
             assert!(authorize(&carrier, task, "read_only", &manifest).is_err());
             assert_eq!(f.database_bytes(), before);
             assert_eq!(port.dispatched.borrow().len(), dispatched);
+        }
+    }
+    // Real protected producers supply authority; the port only isolates native
+    // provisioning/settlement from these provider-owned dispatch regressions.
+    fn task084_native_fixture(
+        managed: bool,
+        count: usize,
+    ) -> (
+        Fixture,
+        DolgoraeHome,
+        crate::controller::CredentialCarrier,
+        SettlementOwner,
+        FakePort,
+        Value,
+    ) {
+        let mut f = Fixture::new();
+        let home = DolgoraeHome::from_canonical_home(f.root.clone()).unwrap();
+        let workspace = f.view.canonical_path.to_path_buf().unwrap();
+        fs::remove_dir(&f.state_root).unwrap();
+        f.view = crate::workspace::WorkspaceService::new(
+            crate::workspace::SystemWorkspacePlatform,
+            crate::workspace::SystemGitRunner,
+            home.root().to_path_buf(),
+        )
+        .initialize(Some(&workspace), crate::workspace::WorkspaceMode::Git)
+        .unwrap();
+        f.state_root = home.workspace_root(&f.view.workspace_id);
+        f.initialize_writer_authority();
+        let path = f.root.join("group-controller.json");
+        let created = crate::controller::create_controller_credential(
+            &path,
+            if managed {
+                ControllerKind::HumanCli
+            } else {
+                ControllerKind::Automation
+            },
+            "group-owner".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        let carrier = crate::controller::CredentialCarrier::open_path(&path).unwrap();
+        f.controller =
+            crate::controller::binding_from_credential(&created.credential, 1, &carrier).unwrap();
+        f.set_up_namespace();
+        let owner = if managed {
+            let id = Uuid::now_v7();
+            let mut sessions =
+                crate::orchestration::OrchestrationStore::open(&f.state_root).unwrap();
+            let session = sessions
+                .prepare_session(
+                    &f.view.workspace_id,
+                    id,
+                    "native-group-bootstrap",
+                    &"b".repeat(64),
+                    &managed_policy(),
+                )
+                .unwrap();
+            let mut manifest = root_manifest(&f.view, &f.controller, id);
+            manifest.control_mode = crate::domain::ControlMode::DirectInteractive;
+            manifest.aggregate_binding = Some(crate::run::AggregateBinding {
+                aggregate_kind: crate::domain::AggregateKind::OrchestratedSession,
+                aggregate_id: id,
+                operation_id: session.bootstrap_operation_id,
+                member_kind: crate::run::AggregateMemberKind::Primary,
+                policy_sha256: Some(session.specialist_policy_sha256),
+                role_reference: None,
+                role_snapshot_sha256: None,
+                agent_configuration_sha256: None,
+            });
+            crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &f.state_root)
+                .publish(&manifest)
+                .unwrap();
+            sessions.mark_primary_intent(id).unwrap();
+            sessions.finish_primary_publication(id, Ok(())).unwrap();
+            SettlementOwner::Managed { session_id: id }
+        } else {
+            SettlementOwner::External {
+                engagement_id: f.open(),
+            }
+        };
+        let installed = f.install();
+        let snapshot =
+            crate::provisioning::retained_snapshot(&f.state_root, &installed.provisioning_ref)
+                .unwrap();
+        let (_, configuration) = snapshot.admitted_configuration().unwrap();
+        let mut entries = Vec::new();
+        let mut inputs = Vec::new();
+        for n in 0..count {
+            let mut body = fixture_task();
+            body.brief = format!("Native group source {n}");
+            let (accepted, _) = crate::successor_capture::capture_facade_task(
+                &configuration,
+                &body,
+                "read_only",
+                None,
+            )
+            .unwrap();
+            let input = json!({"schema":"dolgorae.group-task-input/v1","provisioning_ref":installed.provisioning_ref,"assignment":{"task_body":body,"accepted_task_identity":accepted,"deadline_seconds":30}});
+            let bytes = crate::operation::canonical(&input).unwrap();
+            let path = workspace.join(format!("native-group-{n:02}.json"));
+            fs::write(&path, &bytes).unwrap();
+            let key = format!("source-{n:02}");
+            entries.push(json!({"entry_key":key,"role_snapshot_digest":installed.role_snapshot_digest,"agent_configuration_digest":installed.agent_configuration_digest,"accepted_task_digest":accepted.digest().unwrap()}));
+            inputs.push(json!({"entry_key":key,"absolute_file_path":path,"content":crate::delegation_identity::BytesRef::from_bytes(&bytes)}));
+        }
+        let request = json!({"schema":"dolgorae.external-specialist-request/v5","operation":"assign_group","scope_kind":owner.scope_kind(),"scope_ref":owner.scope_ref(),"idempotency_key":"native-group-original","expected_revision":null,"manifest":{"schema":"dolgorae.group-assignment/v1","scope_kind":owner.scope_kind(),"scope_ref":owner.scope_ref(),"entries":entries},"inputs":inputs});
+        (f, home, carrier, owner, FakePort::new(), request)
+    }
+
+    fn task084_external_call(
+        host: &crate::trusted_host::tests::Fixture,
+        route: crate::trusted_host::HostRoute,
+        port: &FakePort,
+        request: &Value,
+        call: &str,
+    ) -> Value {
+        let (_, capability) = host
+            .ready()
+            .bind_native(
+                crate::host_invocation::NativeEvent {
+                    session: "original-native-session".into(),
+                    turn: Some("native-turn".into()),
+                    tool_use: call.into(),
+                    server: "dolgorae".into(),
+                    server_source: (route == crate::trusted_host::HostRoute::Claude)
+                        .then(|| "dynamic".into()),
+                    tool: "specialist".into(),
+                },
+                request.clone(),
+            )
+            .unwrap();
+        let carrier = match route {
+            crate::trusted_host::HostRoute::Codex => {
+                crate::specialist_facade::NativeCarrier::Codex {
+                    session: "original-native-session",
+                    call,
+                }
+            }
+            crate::trusted_host::HostRoute::Claude => {
+                crate::specialist_facade::NativeCarrier::Claude(&capability)
+            }
+        };
+        crate::specialist_facade::external_with_port(
+            &host.home,
+            &host.path(),
+            "specialist",
+            carrier,
+            request,
+            port,
+        )
+    }
+
+    fn task084_lookup(f: &Fixture, owner: SettlementOwner) -> Value {
+        let ns = Namespace::delegation(
+            &f.controller.identity,
+            &f.view.workspace_id,
+            Some((owner.scope_kind(), &owner.scope_ref().to_string())),
+            "assign_group",
+            "native-group-original",
+        )
+        .unwrap();
+        json!({"schema":"dolgorae.external-specialist-request/v5","operation":"lookup_operation","namespace":LookupNamespace::from(&ns)})
+    }
+
+    fn task084_observe(owner: SettlementOwner, group: &Value, operation: &str) -> Value {
+        let mut request = json!({"schema":"dolgorae.external-specialist-request/v5","operation":operation,"scope_kind":owner.scope_kind(),"scope_ref":owner.scope_ref(),"group_ref":group,"cursor":null,"limit":64});
+        if operation == "await_group" {
+            request.as_object_mut().unwrap().remove("cursor");
+            request.as_object_mut().unwrap().remove("limit");
+            request["predicate"] = json!({"kind":"any"});
+            request["timeout_seconds"] = json!(0);
+        }
+        request
+    }
+
+    #[test]
+    fn task084_protected_external_groups_replay_observe_and_recover_both_native_carriers() {
+        use crate::trusted_host::HostRoute;
+        for route in [HostRoute::Codex, HostRoute::Claude] {
+            let (f, home, carrier, owner, port, request) = task084_native_fixture(false, 2);
+            let host = crate::trusted_host::tests::Fixture::for_caller(
+                home,
+                f.view.canonical_path.to_path_buf().unwrap(),
+                &carrier,
+                owner,
+                route,
+                caller(4).accepted().clone(),
+            );
+            host.initialize().unwrap();
+            let absent = task084_external_call(
+                &host,
+                route,
+                &port,
+                &task084_lookup(&f, owner),
+                "lookup-before",
+            );
+            assert_eq!(absent["lookup"]["state"], "absent", "{absent}");
+            let assigned = research_group::with_dispatch_limit(0, || {
+                task084_external_call(&host, route, &port, &request, "assign-original")
+            });
+            assert!(
+                crate::specialist_facade::validates(&assigned, "assign_group_response"),
+                "{assigned}"
+            );
+            assert_eq!(f.task_count(), 0);
+            let receipt: OperationReceipt =
+                serde_json::from_value(assigned["receipt"].clone()).unwrap();
+            assert_eq!(receipt.namespace.operation_kind, "assign_group");
+            assert_eq!(
+                receipt.accepted_subjects.group_ref,
+                assigned["group_ref"].as_str().map(str::to_owned)
+            );
+            assert!(receipt.accepted_subjects.task_ref.is_none());
+            let lookup = task084_external_call(
+                &host,
+                route,
+                &port,
+                &task084_lookup(&f, owner),
+                "lost-ack-lookup",
+            );
+            assert_eq!(lookup["lookup"]["receipt"], assigned["receipt"]);
+            assert_eq!(lookup["lookup"]["current_outcome"], "pending");
+            assert!(lookup["lookup"]["result_ref"].is_null());
+            assert!(lookup["lookup"]["result_digest"].is_null());
+            assert!(
+                crate::specialist_facade::validates(&lookup, "lookup_operation_response"),
+                "{lookup}"
+            );
+            for input in request["inputs"].as_array().unwrap() {
+                fs::remove_file(input["absolute_file_path"].as_str().unwrap()).unwrap();
+            }
+            // Reopening the host and re-delivering the original protected call
+            // recovers its acceptance from the retained capture.
+            assert_eq!(
+                task084_external_call(&host, route, &port, &request, "assign-original"),
+                assigned
+            );
+            let replay_before = f.database_bytes();
+            let replay_calls = port.calls();
+            for _ in 0..2 {
+                let fresh = task084_external_call(&host, route, &port, &request, "assign-reopened");
+                assert_eq!(fresh["error"]["code"], "IDEMPOTENCY_CONFLICT", "{fresh}");
+                assert_eq!(fresh["error"]["effect"], "none", "{fresh}");
+                assert_eq!(f.database_bytes(), replay_before);
+                assert_eq!(port.calls(), replay_calls);
+            }
+            let recovered = task084_external_call(
+                &host,
+                route,
+                &port,
+                &task084_lookup(&f, owner),
+                "lookup-after-conflict",
+            );
+            assert_eq!(recovered["lookup"]["receipt"], assigned["receipt"]);
+            assert_eq!(f.database_bytes(), replay_before);
+            assert_eq!(port.calls(), replay_calls);
+            for used in [true, false] {
+                for axis in 0..4 {
+                    let mut foreign = task084_lookup(&f, owner);
+                    if !used {
+                        foreign["namespace"]["idempotency_key"] = json!("not-used");
+                    }
+                    match axis {
+                        0 => foreign["namespace"]["scope_ref"] = json!(Uuid::now_v7()),
+                        1 => foreign["namespace"]["workspace_ref"] = json!("foreign"),
+                        2 => foreign["namespace"]["controller_generation"] = json!(2),
+                        _ => foreign["namespace"]["controller_principal"] = json!("foreign"),
+                    }
+                    assert!(
+                        host.ready()
+                            .bind_native(
+                                crate::host_invocation::NativeEvent {
+                                    session: "foreign-key-owner".into(),
+                                    turn: None,
+                                    tool_use: format!("foreign-{used}-{axis}"),
+                                    server: "dolgorae".into(),
+                                    server_source: (route == HostRoute::Claude)
+                                        .then(|| "dynamic".into()),
+                                    tool: "specialist".into(),
+                                },
+                                foreign
+                            )
+                            .is_err()
+                    );
+                }
+            }
+            let writer = EngagementStore::open(&f.database()).unwrap();
+            let original_context:String = writer.connection().query_row(
+                "SELECT trusted_invocation_json FROM delegation_operations WHERE operation_ref=?1",
+                [&receipt.operation_ref], |row|row.get(0),
+            ).unwrap();
+            writer.connection().execute("UPDATE delegation_operations SET trusted_invocation_json=NULL WHERE operation_ref=?1", [&receipt.operation_ref]).unwrap();
+            let missing_before = f.database_bytes();
+            let missing = task084_external_call(
+                &host,
+                route,
+                &port,
+                &task084_lookup(&f, owner),
+                "missing-original-proof",
+            );
+            assert_eq!(
+                missing["schema"], "dolgorae.external-specialist-failure/v5",
+                "{missing}"
+            );
+            assert_eq!(missing["error"]["effect"], "none");
+            assert_eq!(f.database_bytes(), missing_before);
+            let mut changed_context: Value = serde_json::from_str(&original_context).unwrap();
+            changed_context["native_event_digest"] = json!(format!("sha256:{}", "0".repeat(64)));
+            writer.connection().execute("UPDATE delegation_operations SET trusted_invocation_json=?2 WHERE operation_ref=?1", rusqlite::params![receipt.operation_ref, serde_json::to_string(&changed_context).unwrap()]).unwrap();
+            let mismatched_before = f.database_bytes();
+            let mismatched_calls = port.calls();
+            let mismatched =
+                task084_external_call(&host, route, &port, &request, "assign-original");
+            assert_eq!(
+                mismatched["error"]["code"], "RECOVERY_REQUIRED",
+                "{mismatched}"
+            );
+            assert_eq!(f.database_bytes(), mismatched_before);
+            assert_eq!(port.calls(), mismatched_calls);
+            writer.connection().execute("UPDATE delegation_operations SET trusted_invocation_json=?2 WHERE operation_ref=?1", rusqlite::params![receipt.operation_ref, original_context]).unwrap();
+            drop(writer);
+            assert_eq!(
+                task084_external_call(&host, route, &port, &request, "assign-original"),
+                assigned
+            );
+            assert_eq!(f.task_count(), 2);
+            assert_eq!(port.starts.borrow().len(), 1);
+            assert!(port.dispatched.borrow().is_empty());
+            let collect_request = task084_observe(owner, &assigned["group_ref"], "collect_group");
+            let initial =
+                task084_external_call(&host, route, &port, &collect_request, "collect-before");
+            assert!(
+                crate::specialist_facade::validates(&initial, "collect_group_response"),
+                "{initial}"
+            );
+            let rows = initial["coverage"]["sources"].as_array().unwrap();
+            assert_eq!(rows.len(), 2);
+            let first = &rows[0];
+            let member = Uuid::parse_str(first["worker_ref"].as_str().unwrap()).unwrap();
+            let task = Uuid::parse_str(first["task_ref"].as_str().unwrap()).unwrap();
+            let manifest = f.publish_external_member_manifest(owner.scope_ref(), member);
+            let context = MemberTaskSettlement {
+                view: &f.view,
+                state_root: &f.state_root,
+                owner,
+                member_ref: member,
+                task_ref: task,
+                execution_intent: "read_only",
+            };
+            assert!(authorize_successor_native_recovery(&context, &carrier, &manifest).unwrap());
+            assert!(
+                !research_group::authorize_external_recovery(
+                    &f.state_root,
+                    &f.view,
+                    &carrier,
+                    owner.scope_ref(),
+                    member,
+                    task,
+                    &manifest
+                )
+                .unwrap()
+            );
+            assert!(
+                authorize_successor_native_recovery(
+                    &MemberTaskSettlement {
+                        execution_intent: "canonical_workspace_write",
+                        ..context
+                    },
+                    &carrier,
+                    &manifest
+                )
+                .is_err()
+            );
+            task076_publish(&f, owner, member, task, true);
+            let before = f.database_bytes();
+            let calls = port.calls();
+            for (n, predicate, expected) in [
+                (0, json!({"kind":"any"}), true),
+                (1, json!({"kind":"all"}), false),
+                (2, json!({"kind":"k","k":1}), true),
+            ] {
+                let mut wait = task084_observe(owner, &assigned["group_ref"], "await_group");
+                wait["predicate"] = predicate;
+                let observed =
+                    task084_external_call(&host, route, &port, &wait, &format!("wait-{n}"));
+                assert!(
+                    crate::specialist_facade::validates(&observed, "await_group_response"),
+                    "{observed}"
+                );
+                assert_eq!(observed["predicate_satisfied"], expected, "{observed}");
+                assert_eq!(observed["coverage"]["sources"][0]["state"], "expired");
+                assert_eq!(observed["coverage"]["sources"][1]["state"], "unknown");
+            }
+            let after =
+                task084_external_call(&host, route, &port, &collect_request, "collect-after");
+            assert_ne!(
+                after["coverage"], initial["coverage"],
+                "R must observe fresh product state"
+            );
+            assert_eq!(
+                f.database_bytes(),
+                before,
+                "R creates no product intent, task, round or settlement"
+            );
+            assert_eq!(port.calls(), calls);
+            let mut conflict = request.clone();
+            conflict["manifest"]["entries"][0]["accepted_task_digest"] =
+                json!(format!("sha256:{}", "0".repeat(64)));
+            let refusal =
+                task084_external_call(&host, route, &port, &conflict, "changed-original-key");
+            assert_eq!(
+                refusal["error"]["code"], "IDEMPOTENCY_CONFLICT",
+                "{refusal}"
+            );
+            assert_eq!(f.database_bytes(), before);
+        }
+    }
+
+    #[test]
+    fn task084_managed_worker_groups_bind_original_root_and_read_only_lookup() {
+        let (f, home, carrier, owner, port, request) = task084_native_fixture(true, 2);
+        let host = crate::trusted_host::tests::Fixture::for_caller(
+            home,
+            f.view.canonical_path.to_path_buf().unwrap(),
+            &carrier,
+            owner,
+            crate::trusted_host::HostRoute::Codex,
+            caller(4).accepted().clone(),
+        );
+        crate::managed_specialist::connect(&host.owner()).unwrap();
+        let root = owner.scope_ref();
+        let base = crate::turn::PrimaryToolCall {
+            tool_name: crate::specialist_facade::MANAGED_TOOL.into(),
+            source_thread_id: "root-thread".into(),
+            request_id: 1,
+            run_generation: 2,
+            context: crate::primary_tool::PrimaryCallContext {
+                session_id: root,
+                source_run_id: root,
+                source_turn_id: "root-turn".into(),
+                source_tool_call_id: "assign-call".into(),
+                idempotency_key: "original-native-key".into(),
+            },
+            payload: request.clone(),
+        };
+        let invoke = |call: &crate::turn::PrimaryToolCall| {
+            crate::managed_specialist::dispatch_with_port(
+                &f.state_root,
+                call,
+                root,
+                2,
+                &f.view.workspace_id,
+                &port,
+            )
+        };
+        let assigned = research_group::with_dispatch_limit(0, || invoke(&base));
+        assert!(
+            crate::specialist_facade::validates(&assigned, "assign_group_response"),
+            "{assigned}"
+        );
+        for input in request["inputs"].as_array().unwrap() {
+            fs::remove_file(input["absolute_file_path"].as_str().unwrap()).unwrap();
+        }
+        assert_eq!(invoke(&base), assigned);
+        let mut lookup = base.clone();
+        lookup.context.source_tool_call_id = "lookup-call".into();
+        lookup.payload = task084_lookup(&f, owner);
+        let before = f.database_bytes();
+        let calls = port.calls();
+        let db = EngagementStore::open_read_only(&f.database()).unwrap();
+        let receipt: OperationReceipt =
+            serde_json::from_value(assigned["receipt"].clone()).unwrap();
+        assert!(
+            engagement::accepted_native_context(db.connection(), &receipt)
+                .unwrap()
+                .is_none()
+        );
+        let mut rows = db
+            .connection()
+            .prepare(
+                "SELECT source_turn_id,source_tool_call_id FROM brokered_tasks ORDER BY task_id",
+            )
+            .unwrap();
+        let provenance = rows
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            provenance,
+            vec![("root-turn".to_owned(), "assign-call".to_owned()); 2]
+        );
+        drop(rows);
+        drop(db);
+        let mut reopened = base.clone();
+        reopened.context.source_tool_call_id = "fresh-managed-assign-call".into();
+        assert_eq!(invoke(&reopened), assigned);
+        assert_eq!(f.database_bytes(), before);
+        assert_eq!(port.calls(), calls);
+        let observed = invoke(&lookup);
+        assert_eq!(observed["lookup"]["receipt"], assigned["receipt"]);
+        assert_eq!(observed["lookup"]["current_outcome"], "pending");
+        assert!(observed["lookup"]["result_ref"].is_null());
+        assert_eq!(f.database_bytes(), before);
+        for operation in ["await_group", "collect_group"] {
+            let mut read = base.clone();
+            read.context.source_tool_call_id = operation.into();
+            read.payload = task084_observe(owner, &assigned["group_ref"], operation);
+            let observed = invoke(&read);
+            assert!(
+                crate::specialist_facade::validates(&observed, &format!("{operation}_response")),
+                "{observed}"
+            );
+            assert_eq!(observed["coverage"]["sources"].as_array().unwrap().len(), 2);
+            assert_eq!(f.database_bytes(), before);
+        }
+        for used in [true, false] {
+            for axis in 0..9 {
+                let mut changed = lookup.clone();
+                if !used {
+                    changed.payload["namespace"]["idempotency_key"] = json!("unused");
+                }
+                match axis {
+                    0 => changed.run_generation = 3,
+                    1 => changed.context.session_id = Uuid::now_v7(),
+                    2 => changed.context.source_run_id = Uuid::now_v7(),
+                    3 => changed.source_thread_id.clear(),
+                    4 => changed.payload["namespace"]["scope_ref"] = json!(Uuid::now_v7()),
+                    5 => changed.payload["namespace"]["workspace_ref"] = json!("foreign"),
+                    6 => changed.payload["namespace"]["controller_generation"] = json!(2),
+                    7 => changed.payload["namespace"]["controller_principal"] = json!("foreign"),
+                    _ => changed.payload["namespace"]["scope_kind"] = json!("external_engagement"),
+                }
+                let refused = invoke(&changed);
+                assert_eq!(
+                    refused["schema"], "dolgorae.external-specialist-failure/v5",
+                    "axis {axis}: {refused}"
+                );
+                assert_eq!(refused["error"]["effect"], "none");
+                assert_eq!(f.database_bytes(), before);
+            }
+        }
+        assert!(port.dispatched.borrow().is_empty());
+    }
+    #[test]
+    fn task084_native_group_refusals_precede_acceptance_and_effects() {
+        use crate::trusted_host::HostRoute;
+        for route in [HostRoute::Codex, HostRoute::Claude] {
+            let (f, home, carrier, owner, port, request) = task084_native_fixture(false, 2);
+            let host = crate::trusted_host::tests::Fixture::for_caller(
+                home,
+                f.view.canonical_path.to_path_buf().unwrap(),
+                &carrier,
+                owner,
+                route,
+                caller(1).accepted().clone(),
+            );
+            host.initialize().unwrap();
+            let before = f.database_bytes();
+            let refused = task084_external_call(&host, route, &port, &request, "budget");
+            assert_eq!(refused["error"]["code"], "ROUNDS_EXHAUSTED", "{refused}");
+            assert_eq!(
+                refused["error"]["effect"], "unresolved",
+                "untyped post-entry refusal remains conservative"
+            );
+            for used in [false, true] {
+                let mut lookup = task084_lookup(&f, owner);
+                if !used {
+                    lookup["namespace"]["idempotency_key"] = json!("unused");
+                }
+                lookup["namespace"]["scope_ref"] = json!(Uuid::now_v7());
+                assert!(
+                    host.ready()
+                        .bind_native(
+                            crate::host_invocation::NativeEvent {
+                                session: "foreign-owner".into(),
+                                turn: None,
+                                tool_use: format!("foreign-{used}"),
+                                server: "dolgorae".into(),
+                                server_source: (route == HostRoute::Claude)
+                                    .then(|| "dynamic".into()),
+                                tool: "specialist".into(),
+                            },
+                            lookup
+                        )
+                        .is_err()
+                );
+            }
+            for axis in 0..5 {
+                let mut invalid = request.clone();
+                match axis {
+                    0 => {
+                        invalid.as_object_mut().unwrap().remove("idempotency_key");
+                    }
+                    1 => invalid["operation"] = json!("unsupported_group"),
+                    2 => invalid["scope_ref"] = json!(Uuid::now_v7()),
+                    3 => invalid["caller_scope"] = json!(caller(32).accepted()),
+                    _ => invalid["manifest"]["entries"] = json!([]),
+                }
+                assert!(
+                    host.ready()
+                        .bind_native(
+                            crate::host_invocation::NativeEvent {
+                                session: "invalid".into(),
+                                turn: None,
+                                tool_use: format!("invalid-{axis}"),
+                                server: "dolgorae".into(),
+                                server_source: (route == HostRoute::Claude)
+                                    .then(|| "dynamic".into()),
+                                tool: "specialist".into(),
+                            },
+                            invalid
+                        )
+                        .is_err(),
+                    "axis {axis}"
+                );
+            }
+            let no_carrier = crate::specialist_facade::external_with_port(
+                &host.home,
+                &host.path(),
+                "specialist",
+                crate::specialist_facade::NativeCarrier::Codex {
+                    session: "missing",
+                    call: "missing",
+                },
+                &request,
+                &port,
+            );
+            assert_eq!(no_carrier["error"]["effect"], "none", "{no_carrier}");
+            assert_eq!(f.database_bytes(), before);
+            assert_eq!(f.task_count(), 0);
+            assert!(port.starts.borrow().is_empty());
+            assert!(port.dispatched.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn task084_group_lookup_refuses_corrupt_receipt_without_observation_effects() {
+        for managed in [false, true] {
+            let (f, _, _, owner, port, request) = task084_native_fixture(managed, 1);
+            let caller = caller(4);
+            let context = f.managed_context(owner.scope_ref(), "native-group-original");
+            let assigned = research_group::with_dispatch_limit(0, || {
+                research_group::assign(
+                    &f.scope(),
+                    managed.then_some(&context),
+                    &caller,
+                    &port,
+                    &request,
+                )
+            })
+            .unwrap();
+            let original: OperationReceipt =
+                serde_json::from_value(assigned["receipt"].clone()).unwrap();
+            let observe = || {
+                lookup_operation(
+                    &f.scope(),
+                    "assign_group",
+                    Some((owner.scope_kind(), &owner.scope_ref().to_string())),
+                    "native-group-original",
+                )
+            };
+            let expected = observe().unwrap();
+            assert_eq!(expected["receipt"], assigned["receipt"]);
+            let db = EngagementStore::open(&f.database()).unwrap();
+            let mut corrupt = original.clone();
+            corrupt.accepted_subjects.group_ref = Some(Uuid::now_v7().to_string());
+            corrupt.receipt_digest = corrupt.compute_digest().unwrap();
+            task076_mutate_frozen(db.connection(), "delegation_receipt_frozen", || {
+                db.connection()
+                    .execute(
+                        "UPDATE delegation_operations SET receipt_json=?2 WHERE operation_ref=?1",
+                        rusqlite::params![
+                            original.operation_ref,
+                            serde_json::to_string(&corrupt).unwrap()
+                        ],
+                    )
+                    .unwrap();
+            });
+            let before = f.database_bytes();
+            assert!(observe().is_err());
+            assert_eq!(f.database_bytes(), before);
+            task076_mutate_frozen(db.connection(), "delegation_receipt_frozen", || {
+                db.connection()
+                    .execute(
+                        "UPDATE delegation_operations SET receipt_json=?2 WHERE operation_ref=?1",
+                        rusqlite::params![
+                            original.operation_ref,
+                            serde_json::to_string(&original).unwrap()
+                        ],
+                    )
+                    .unwrap();
+            });
+            assert_eq!(observe().unwrap(), expected);
+            assert!(port.starts.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn task084_controller_group_shared_admission_accepts_64_and_refuses_0_and_65() {
+        for count in [0, 64, 65] {
+            let (f, home, carrier, owner, port, request) = task084_native_fixture(false, count);
+            let assign = || {
+                research_group::with_dispatch_limit(0, || {
+                    research_group::public_call(
+                        &home,
+                        &f.view,
+                        &carrier,
+                        None,
+                        owner.scope_kind(),
+                        owner.scope_ref(),
+                        "assign_group",
+                        Some("native-group-original"),
+                        None,
+                        &request,
+                        &port,
+                    )
+                })
+            };
+            let before = f.database_bytes();
+            let calls = port.calls();
+            let assigned = assign();
+            if count != 64 {
+                assert_eq!(assigned.unwrap_err().code, "GROUP_MANIFEST_INVALID");
+                assert_eq!(f.database_bytes(), before);
+                let db = EngagementStore::open_read_only(&f.database()).unwrap();
+                let retained: u64 = db.connection().query_row(
+                    "SELECT (SELECT COUNT(*) FROM delegation_operations WHERE operation_kind='assign_group')
+                         + (SELECT COUNT(*) FROM result_content_refs WHERE owner_kind IN ('research_group','research_group_input','group_member_birth'))
+                         + (SELECT COUNT(*) FROM metadata WHERE key GLOB 'group-capture-quota:v1:*')",
+                    [], |row| row.get(0),
+                ).unwrap();
+                assert_eq!(
+                    retained, 0,
+                    "no intent, capture, quota or birth reservation"
+                );
+            } else {
+                let assigned = assigned.unwrap();
+                assert_eq!(assigned["manifest"], request["manifest"]);
+                assert_eq!(
+                    assigned["response"]["coverage"]["sources"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    64
+                );
+                let group = assigned["response"]["group_ref"].as_str().unwrap();
+                let db = EngagementStore::open_read_only(&f.database()).unwrap();
+                let document = research_group::read_document(&db, group).unwrap();
+                assert_eq!(document["manifest"], request["manifest"]);
+                assert_eq!(document["allocations"].as_array().unwrap().len(), 64);
+                assert_eq!(document["mode"], "controller");
+                assert!(document["caller_scope"].is_null());
+                let charges: u64 = db
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM metadata WHERE key GLOB 'group-capture-quota:v1:*'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(charges, 64);
+                drop(db);
+                for input in request["inputs"].as_array().unwrap() {
+                    fs::remove_file(input["absolute_file_path"].as_str().unwrap()).unwrap();
+                }
+                let accepted = f.database_bytes();
+                let replay = assign().unwrap();
+                assert_eq!(replay["response"], assigned["response"]);
+                assert_eq!(replay["manifest"], request["manifest"]);
+                assert_eq!(f.database_bytes(), accepted);
+                let db = EngagementStore::open_read_only(&f.database()).unwrap();
+                assert_eq!(research_group::read_document(&db, group).unwrap(), document);
+            }
+            assert_eq!(f.task_count(), 0);
+            assert_eq!(port.calls(), calls);
+            assert!(port.starts.borrow().is_empty());
+            assert!(port.dispatched.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn task084_native_group_key_collision_preserves_controller_origin() {
+        use crate::trusted_host::HostRoute;
+        for route in [HostRoute::Codex, HostRoute::Claude] {
+            let (f, home, carrier, owner, port, request) = task084_native_fixture(false, 2);
+            let assigned = research_group::with_dispatch_limit(0, || {
+                research_group::public_call(
+                    &home,
+                    &f.view,
+                    &carrier,
+                    None,
+                    owner.scope_kind(),
+                    owner.scope_ref(),
+                    "assign_group",
+                    Some("native-group-original"),
+                    None,
+                    &request,
+                    &port,
+                )
+            })
+            .unwrap();
+            let host = crate::trusted_host::tests::Fixture::for_caller(
+                home,
+                f.view.canonical_path.to_path_buf().unwrap(),
+                &carrier,
+                owner,
+                route,
+                caller(4).accepted().clone(),
+            );
+            host.initialize().unwrap();
+            let before = f.database_bytes();
+            let calls = port.calls();
+            for _ in 0..2 {
+                let refused =
+                    task084_external_call(&host, route, &port, &request, "native-collision");
+                assert_eq!(
+                    refused["error"]["code"], "IDEMPOTENCY_CONFLICT",
+                    "{refused}"
+                );
+                assert_eq!(refused["error"]["effect"], "none", "{refused}");
+                assert_eq!(f.database_bytes(), before);
+                assert_eq!(port.calls(), calls);
+            }
+            let observed = task084_external_call(
+                &host,
+                route,
+                &port,
+                &task084_lookup(&f, owner),
+                "controller-origin-lookup",
+            );
+            assert_eq!(
+                observed["lookup"]["receipt"],
+                assigned["response"]["receipt"]
+            );
+            assert_eq!(observed["lookup"]["current_outcome"], "pending");
+            let db = EngagementStore::open_read_only(&f.database()).unwrap();
+            let receipt: OperationReceipt =
+                serde_json::from_value(assigned["response"]["receipt"].clone()).unwrap();
+            assert!(
+                engagement::accepted_native_context(db.connection(), &receipt)
+                    .unwrap()
+                    .is_none()
+            );
+            let group = assigned["response"]["group_ref"].as_str().unwrap();
+            assert_eq!(
+                research_group::read_document(&db, group).unwrap()["mode"],
+                "controller"
+            );
+            assert_eq!(f.database_bytes(), before);
+            assert_eq!(port.calls(), calls);
+            assert_eq!(f.task_count(), 0);
+        }
+    }
+
+    #[test]
+    fn task084_fifty_source_public_groups_keep_bounded_real_queues_in_both_owners() {
+        for managed in [false, true] {
+            let (f, home, carrier, owner, port, request) = task084_native_fixture(managed, 50);
+            let admitted = research_group::public_call(
+                &home,
+                &f.view,
+                &carrier,
+                managed.then_some(owner.scope_ref()),
+                owner.scope_kind(),
+                owner.scope_ref(),
+                "assign_group",
+                Some("native-group-original"),
+                None,
+                &request,
+                &port,
+            )
+            .unwrap();
+            let group = &admitted["response"]["group_ref"];
+            assert!(group.is_string(), "{admitted}");
+            let db = EngagementStore::open_read_only(&f.database()).unwrap();
+            let table = if managed { "brokered_tasks" } else { "tasks" };
+            let member = if managed {
+                "target_run_id"
+            } else {
+                "specialist_run_id"
+            };
+            let mut statement = db
+                .connection()
+                .prepare(&format!(
+                    "SELECT {member},COUNT(*) FROM {table} GROUP BY {member}"
+                ))
+                .unwrap();
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(rows.iter().map(|(_, count)| count).sum::<usize>(), 50);
+            assert_eq!(rows.len(), 13);
+            assert!(rows.iter().all(|(_, count)| *count <= 4));
+            assert_eq!(port.starts.borrow().len(), 13);
+            assert!(port.dispatched.borrow().is_empty());
+            let accounted: usize = db
+                .connection()
+                .query_row("SELECT COUNT(*) FROM caller_scope_assignments", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                accounted, 0,
+                "Controller group does not fabricate native caller rounds"
+            );
+            let context = f.managed_context(owner.scope_ref(), "observe-fifty");
+            let coverage = research_group::collect_in(
+                &f.scope(),
+                managed.then_some(&context),
+                &port,
+                &task084_observe(owner, group, "collect_group"),
+                true,
+            )
+            .unwrap();
+            assert_eq!(
+                coverage["coverage"]["sources"].as_array().unwrap().len(),
+                50
+            );
+            assert!(
+                coverage["coverage"]["sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row["state"] == "unknown")
+            );
+            assert_eq!(
+                research_group::public_call(
+                    &home,
+                    &f.view,
+                    &carrier,
+                    managed.then_some(owner.scope_ref()),
+                    owner.scope_kind(),
+                    owner.scope_ref(),
+                    "assign_group",
+                    Some("native-group-original"),
+                    None,
+                    &request,
+                    &port
+                )
+                .unwrap()["response"],
+                admitted["response"]
+            );
+            assert_eq!(port.starts.borrow().len(), 13);
+        }
+    }
+    #[test]
+    fn task084_original_group_native_lookup_keeps_closed_nonaccepted_states() {
+        use crate::trusted_host::HostRoute;
+        for route in [HostRoute::Codex, HostRoute::Claude] {
+            let (f, home, carrier, owner, port, base) = task084_native_fixture(false, 1);
+            let host = crate::trusted_host::tests::Fixture::for_caller(
+                home,
+                f.view.canonical_path.to_path_buf().unwrap(),
+                &carrier,
+                owner,
+                route,
+                caller(4).accepted().clone(),
+            );
+            host.initialize().unwrap();
+            for input in base["inputs"].as_array().unwrap() {
+                fs::remove_file(input["absolute_file_path"].as_str().unwrap()).unwrap();
+            }
+            for state in ["absent", "prepared", "unresolved", "refused"] {
+                let mut request = base.clone();
+                request["idempotency_key"] = json!(format!("original-{state}"));
+                let (bound, _) = host
+                    .ready()
+                    .bind_native(
+                        crate::host_invocation::NativeEvent {
+                            session: "original-native-session".into(),
+                            turn: Some("native-turn".into()),
+                            tool_use: state.into(),
+                            server: "dolgorae".into(),
+                            server_source: (route == HostRoute::Claude).then(|| "dynamic".into()),
+                            tool: "specialist".into(),
+                        },
+                        request.clone(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    host.ready().begin_delivery(&bound).unwrap(),
+                    crate::host_invocation::Delivery::Dispatch
+                );
+                let proof = bound.trusted_keyed().unwrap();
+                let scope = DelegationScope {
+                    trusted_invocation: Some(&proof),
+                    ..f.scope()
+                };
+                let normalized = json!({"manifest":request["manifest"],"inputs":request["inputs"].as_array().unwrap().iter().map(|input|json!({"entry_key":input["entry_key"],"content":input["content"]})).collect::<Vec<_>>()});
+                let identity = intent_identity(&scope, "assign_group", Some((owner.scope_kind(), &owner.scope_ref().to_string())), request["idempotency_key"].as_str().unwrap(),
+                    "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_group_normalized_body", &normalized).unwrap();
+                let operation = Uuid::now_v7();
+                if state != "absent" {
+                    EngagementStore::open(&f.database())
+                        .unwrap()
+                        .transact(|tx| {
+                            engagement::intent_prepare(
+                                tx,
+                                engagement::IntentAdmission {
+                                    operation_ref: operation,
+                                    namespace: &identity.lookup,
+                                    mutation_envelope_json: &identity.json,
+                                    mutation_envelope_digest: &identity.digest,
+                                    trusted_invocation: identity.trusted_invocation.as_ref(),
+                                    expected_revision: None,
+                                    now_ms: 1,
+                                },
+                            )?;
+                            if state == "unresolved" {
+                                engagement::intent_mark_unresolved(tx, operation, 2)?;
+                            }
+                            if state == "refused" {
+                                engagement::intent_refuse_before_acceptance(
+                                    tx,
+                                    operation,
+                                    "CAPABILITY_UNSUPPORTED",
+                                    2,
+                                )?;
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+                let before = f.database_bytes();
+                let lookup = host.ready().reconcile_keyed(&bound).unwrap();
+                assert!(match state {
+                    "absent" => matches!(lookup, IntentLookup::Absent { .. }),
+                    "prepared" | "unresolved" =>
+                        matches!(lookup, IntentLookup::Unresolved { operation_ref, .. } if operation_ref == operation),
+                    "refused" =>
+                        matches!(lookup, IntentLookup::NotAccepted { operation_ref, .. } if operation_ref == operation),
+                    _ => unreachable!(),
+                });
+                if state != "absent" {
+                    let (other, _) = host
+                        .ready()
+                        .bind_native(
+                            crate::host_invocation::NativeEvent {
+                                session: "original-native-session".into(),
+                                turn: Some("native-turn".into()),
+                                tool_use: format!("different-{state}"),
+                                server: "dolgorae".into(),
+                                server_source: (route == HostRoute::Claude)
+                                    .then(|| "dynamic".into()),
+                                tool: "specialist".into(),
+                            },
+                            request.clone(),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        host.ready().begin_delivery(&other).unwrap(),
+                        crate::host_invocation::Delivery::Dispatch
+                    );
+                    let error = host.ready().reconcile_keyed(&other).unwrap_err();
+                    assert_eq!(error.code, "RECOVERY_REQUIRED");
+                    assert_eq!(
+                        error.message,
+                        "host invocation context differs from original binding"
+                    );
+                    assert_eq!(error.details["effect"], "none");
+                    assert_eq!(f.database_bytes(), before);
+                }
+                let mut read = task084_lookup(&f, owner);
+                read["namespace"]["idempotency_key"] = request["idempotency_key"].clone();
+                let observed =
+                    task084_external_call(&host, route, &port, &read, &format!("lookup-{state}"));
+                assert!(
+                    crate::specialist_facade::validates(&observed, "lookup_operation_response"),
+                    "{observed}"
+                );
+                assert_eq!(
+                    observed["lookup"]["state"],
+                    match state {
+                        "prepared" => "unresolved",
+                        "refused" => "not_accepted",
+                        other => other,
+                    }
+                );
+                let repeated = task084_external_call(&host, route, &port, &request, state);
+                assert_eq!(
+                    repeated["schema"], "dolgorae.external-specialist-failure/v5",
+                    "{repeated}"
+                );
+                assert_eq!(
+                    repeated["error"]["code"],
+                    if state == "refused" {
+                        "CAPABILITY_UNSUPPORTED"
+                    } else {
+                        "OUTCOME_UNKNOWN"
+                    }
+                );
+                assert_eq!(f.database_bytes(), before);
+                assert_eq!(f.task_count(), 0);
+                assert!(port.starts.borrow().is_empty());
+            }
         }
     }
 }

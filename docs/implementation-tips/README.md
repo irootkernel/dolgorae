@@ -762,6 +762,23 @@ the actual aggregate Controller and retains its own origin; it supplies no
 native Turn/tool provenance or Podway caller scope. Native facade assignments
 keep their configured caller accounting and limits.
 
+Exercise `assign_group` through real protected Codex and Claude host bindings,
+and through the managed Worker entrypoint, rather than calling only the group
+service. Its K mirror must verify the retained original namespace, normalized
+input, caller scope and native proof on re-delivery of the original logical call.
+Keep the full accepted envelope identity unchanged: a different protected
+invocation UUID conflicts even under the same key. Test a Controller-origin
+null-invocation key collision separately from fresh R lookup and managed
+source-call checks. A changed managed `source_tool_call_id` must not rewrite the
+accepted group or child provenance; it does not supply an external invocation UUID.
+`await_group` and `collect_group` remain fresh R observations, with no assignment
+or accounting writes. Original-key lookup returns the group receipt and leaves
+each child's progress to coverage. Exercise 0, 64 and 65 entries through the
+Controller-origin service/store fixture: accept the full 64-entry manifest and
+refuse invalid counts before intent, capture, quota or birth reservation.
+The focused `task084_` tests exercise these routes. The managed test port replaces
+only native provisioning/settlement after the normal Worker authority checks.
+
 Generation 7 fences writers that do not account for group captures and result
 component bindings. Preserve the historical 5-to-6 migration's literal target;
 the separate 6-to-7 transaction changes only the writer generation and extension

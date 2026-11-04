@@ -64,6 +64,9 @@ development commits.
 
 ### Fixed
 
+- Authenticate native research-group assignment, original-key lookup and fresh waits/collection through external hosts
+  and managed Workers, preserving the original protected invocation identity on replay.
+
 - Return retained settled-result references and domain digests from ordinary task
   lookup, and authenticate successor native tasks and group children for original-task recovery.
 

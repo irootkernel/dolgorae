@@ -1107,6 +1107,7 @@ impl ProtectedInvocation {
                     | "assign_external_specialist_task"
                     | "spawn_specialist"
                     | "assign_specialist_task"
+                    | "assign_group"
             )
             || self.operation_ref.is_some_and(|value| {
                 value.get_version_num() != 7 || value.get_variant() != uuid::Variant::RFC4122

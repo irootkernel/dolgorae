@@ -783,7 +783,31 @@ pub(super) fn read_document(store: &EngagementStore, group: &str) -> Result<Valu
         serde_json::from_str(&envelope_json).map_err(|_| retained_source_invalid())?;
     let expected =
         crate::delegation_identity::BytesRef::from_bytes(&encode(&document["normalized"])?);
-    if document["digest"] != digest(&document["manifest"])?
+    if document["mode"] == "native" {
+        let caller: crate::delegation_identity::CallerScope =
+            serde_json::from_value(document["caller_scope"].clone())
+                .map_err(|_| retained_source_invalid())?;
+        caller.validate().map_err(|_| retained_source_invalid())?;
+    }
+    let schema = match document["mode"].as_str() {
+        Some("native") if !document["caller_scope"].is_null() => {
+            "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_group_normalized_body"
+        }
+        Some("controller") if document["caller_scope"].is_null() => {
+            "https://dolgorae.local/schema/v014-identities/v1#/$defs/public_assign_group_normalized_body"
+        }
+        _ => return Err(retained_source_invalid()),
+    };
+    if receipt.namespace.operation_kind != "assign_group"
+        || receipt.accepted_subjects.group_ref.as_deref() != Some(group)
+        || document["manifest"]["scope_kind"] != json!(receipt.namespace.scope_kind)
+        || document["manifest"]["scope_ref"] != json!(receipt.namespace.scope_ref)
+        || LookupNamespace::from(&envelope.namespace) != receipt.namespace
+        || envelope.request_schema != schema
+        || crate::operation::envelope_digest(&envelope).map_err(|_| retained_source_invalid())?
+            != receipt.accepted_input_digest
+        || !matches!(engagement::intent_lookup(store.connection(), &receipt.namespace)?, IntentLookup::Accepted(ref original) if original.as_ref() == &receipt)
+        || document["digest"] != digest(&document["manifest"])?
         || document["normalized"]["manifest"] != document["manifest"]
         || envelope.request_body.byte_length != expected.byte_length
         || envelope.request_body.sha256 != expected.sha256
@@ -792,6 +816,26 @@ pub(super) fn read_document(store: &EngagementStore, group: &str) -> Result<Valu
     }
     Ok(document)
 }
+/// Group acceptance has no synthetic Task or CompleteResult. Child progress is
+/// observed separately through await/collect, as in the public group lookup.
+pub(super) fn lookup_assignment(
+    store: &EngagementStore,
+    receipt: &OperationReceipt,
+) -> Result<(), MachineError> {
+    let group = receipt
+        .accepted_subjects
+        .group_ref
+        .as_deref()
+        .ok_or_else(retained_source_invalid)?;
+    let document = read_document(store, group)?;
+    if document["manifest"]["scope_kind"] != json!(receipt.namespace.scope_kind)
+        || document["manifest"]["scope_ref"] != json!(receipt.namespace.scope_ref)
+    {
+        return Err(retained_source_invalid());
+    }
+    Ok(())
+}
+
 fn receipt_by_key(
     store: &EngagementStore,
     scope: &DelegationScope<'_>,
@@ -942,6 +986,90 @@ fn resume_entries(
     Ok(())
 }
 
+/// Protected mirror read for the original native group call.
+pub(super) fn native_lookup(
+    scope: &DelegationScope<'_>,
+    caller: &crate::caller_scope::TrustedCallerScope,
+    request: &Value,
+) -> Result<IntentLookup, MachineError> {
+    let own = owner(request)?;
+    transport_owner(scope, own, None, "lookup_operation")?;
+    let proof = scope
+        .trusted_invocation
+        .ok_or_else(retained_source_invalid)?;
+    let identity = intent_identity(
+        scope,
+        "assign_group",
+        Some((own.scope_kind(), &own.scope_ref().to_string())),
+        checked_key(request["idempotency_key"].as_str().ok_or_else(invalid)?)?,
+        "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/assign_group_normalized_body",
+        &normalized(request),
+    )?;
+    let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
+        scope.state_root,
+    ))?;
+    let snapshot = store
+        .connection()
+        .unchecked_transaction()
+        .map_err(|_| retained_source_invalid())?;
+    let observed = engagement::intent_lookup(store.connection(), &identity.lookup)?;
+    if let IntentLookup::Accepted(receipt) = &observed {
+        if receipt.accepted_input_digest != identity.digest {
+            return Err(idempotency_conflict());
+        }
+        let group = receipt
+            .accepted_subjects
+            .group_ref
+            .as_deref()
+            .ok_or_else(retained_source_invalid)?;
+        let document = read_document(&store, group)?;
+        if document["mode"] != "native"
+            || document["caller_scope"] != json!(caller.accepted())
+            || engagement::accepted_native_context(store.connection(), receipt)?.as_ref()
+                != Some(proof.context())
+        {
+            return Err(retained_source_invalid());
+        }
+        return Ok(observed);
+    }
+    if let IntentLookup::Unresolved { operation_ref, .. }
+    | IntentLookup::NotAccepted { operation_ref, .. } = &observed
+    {
+        let invalid_context = |reason| {
+            MachineError::new(
+                "RECOVERY_REQUIRED",
+                reason,
+                false,
+                json!({"subject":"delegation_operations","required_action":"restore_state","effect":"none"}),
+            )
+        };
+        let text: Option<String> = snapshot
+            .query_row(
+                "SELECT trusted_invocation_json FROM delegation_operations WHERE operation_ref=?1",
+                [operation_ref.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                MachineError::new(
+                    "INTERNAL_ERROR",
+                    "durable engagement authority failed",
+                    false,
+                    json!({"reason":error.to_string()}),
+                )
+            })?;
+        let context: crate::delegation_identity::TrustedInvocationContext = serde_json::from_str(
+            &text.ok_or_else(|| invalid_context("host invocation context is missing"))?,
+        )
+        .map_err(|_| invalid_context("host invocation context is malformed"))?;
+        if &context != proof.context() {
+            return Err(invalid_context(
+                "host invocation context differs from original binding",
+            ));
+        }
+    }
+    Ok(observed)
+}
+
 /// Accept the complete capture and receipt in one transaction before any member effect.
 pub(crate) fn assign(
     scope: &DelegationScope<'_>,
@@ -978,14 +1106,29 @@ fn assign_in(
         &normalized(request),
     )?;
     let mut store = open_store(scope)?;
-    if let Some(receipt) = replay(&store, &identity.lookup, &identity.digest, "assign_group")? {
+    let snapshot = store
+        .connection()
+        .unchecked_transaction()
+        .map_err(|_| retained_source_invalid())?;
+    if let Some(receipt) = replay_outcome(
+        engagement::intent_lookup(store.connection(), &identity.lookup)?,
+        &identity.digest,
+        "assign_group",
+    )? {
         let group = receipt
             .accepted_subjects
             .group_ref
             .as_ref()
             .ok_or_else(retained_source_invalid)?;
         let doc = read_document(&store, group)?;
+        if let Some(proof) = scope.trusted_invocation
+            && engagement::accepted_native_context(store.connection(), &receipt)?.as_ref()
+                != Some(proof.context())
+        {
+            return Err(retained_source_invalid());
+        }
         let group_id = Uuid::parse_str(group).map_err(|_| retained_source_invalid())?;
+        drop(snapshot);
         drop(store);
         if doc["mode"]
             != if caller.is_some() {
@@ -1003,6 +1146,7 @@ fn assign_in(
             true,
         ));
     }
+    drop(snapshot);
     let manifest = &request["manifest"];
     let entries = manifest["entries"].as_array().ok_or_else(invalid)?;
     let inputs = request["inputs"].as_array().ok_or_else(invalid)?;

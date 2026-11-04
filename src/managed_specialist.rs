@@ -122,6 +122,36 @@ pub(crate) fn dispatch(
     run_generation: u64,
     workspace: &str,
 ) -> Value {
+    dispatch_in(state_root, call, root_run, run_generation, workspace, None)
+}
+
+#[cfg(test)]
+pub(crate) fn dispatch_with_port(
+    state_root: &Path,
+    call: &crate::turn::PrimaryToolCall,
+    root_run: Uuid,
+    run_generation: u64,
+    workspace: &str,
+    port: &dyn crate::delegation_service::RunSettlementPort,
+) -> Value {
+    dispatch_in(
+        state_root,
+        call,
+        root_run,
+        run_generation,
+        workspace,
+        Some(port),
+    )
+}
+
+fn dispatch_in(
+    state_root: &Path,
+    call: &crate::turn::PrimaryToolCall,
+    root_run: Uuid,
+    run_generation: u64,
+    workspace: &str,
+    supplied_port: Option<&dyn crate::delegation_service::RunSettlementPort>,
+) -> Value {
     if call.tool_name == crate::native_consumer::MANAGED_CONTROL {
         return control(state_root, call, root_run, run_generation, workspace);
     }
@@ -160,7 +190,7 @@ pub(crate) fn dispatch(
             let scoped = ns.scope_kind.as_deref().zip(ns.scope_ref.as_deref());
             if !match ns.operation_kind.as_str() {
                 "install_provisioning" => scoped.is_none(),
-                "spawn_specialist" | "assign_specialist_task" => {
+                "spawn_specialist" | "assign_specialist_task" | "assign_group" => {
                     scoped == Some(("orchestrated_session", root_ref.as_str()))
                 }
                 _ => false,
@@ -200,9 +230,10 @@ pub(crate) fn dispatch(
         let carrier =
             crate::controller::CredentialCarrier::open_path(&owner.configuration.controller_file)
                 .map_err(|_| refusal())?;
-        let port = crate::semantic::SemanticRunSettlementPort { carrier: &carrier };
+        let semantic_port = crate::semantic::SemanticRunSettlementPort { carrier: &carrier };
+        let port = supplied_port.unwrap_or(&semantic_port);
         let admission = || {
-            bridge(&owner, call, root_run, run_generation, &port)?
+            bridge(&owner, call, root_run, run_generation, port)?
                 .assignment_binding(&mut crate::podway_client::PublicCli, request)
         };
         entered = true;
@@ -211,7 +242,7 @@ pub(crate) fn dispatch(
             &owner,
             &scope,
             Some(&context),
-            &port,
+            port,
             request,
             native.then_some(&admission),
         )?;

@@ -390,7 +390,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "caller_scope",
                 "darwin",
                 "delegation_identity",
-                // Test-only: a real product acceptance before mirror recovery.
+                // Group mirror recovery verifies the original protected acceptance.
                 "delegation_service",
                 "engagement",
                 "jcs",
@@ -906,6 +906,10 @@ fn source_module_dependencies_match_the_approved_graph() {
             "delegation_service",
             &[
                 "controller",
+                // Test-only: real native group binding and managed Worker authority.
+                "host_invocation",
+                "managed_specialist",
+                "primary_tool",
                 "group_quota", // Test-only: immutable source capture charges across merge placement.
                 "result_component_artifact",
                 "specialist_facade",

@@ -457,6 +457,25 @@ trusted context; their existing intent and receipt transaction remains the sole
 acceptance authority. A delivery marker commits before a mutator runs. Repeated
 ambiguous delivery performs authorized original-key or state observation only;
 it cannot retry a mutation transparently. Read methods always observe afresh.
+Native group assignment is K: its protected linkage names the original
+`assign_group` namespace and the immutable group receipt. Native `await_group`
+and `collect_group` are R and authenticate each observation without admitting an
+operation, charging a round or resuming a child. Both external host carriers and
+the managed Worker use the existing group service and its aggregate owner proof.
+Original-key lookup verifies the accepted group receipt, captured manifest and
+normalized input in one read snapshot. It returns the group identity with
+`pending` and null result metadata. The group has no single Task or CompleteResult;
+current child outcomes belong to await/collect coverage.
+Lookup never reopens assignment files or provisions or dispatches a member.
+Re-delivery of the original protected logical invocation retains its complete
+accepted envelope and native proof. A fresh native K invocation with a different
+`trusted_invocation_ref` under an accepted key returns `IDEMPOTENCY_CONFLICT`,
+even when its normalized assignment and caller scope match. Fresh authorized R
+lookup reads the original receipt without rebinding that mutation.
+Controller-origin replay retains its non-native origin. Managed calls retain
+their actual Root, Thread, Turn and tool-call checks and original child provenance;
+they have no external invocation UUID.
+
 Host locks cover authentication, marker publication and mirror reconciliation,
 then release before service operations or awaits. Reconnection and response loss
 retain original identities and receipts. Stdio EOF has no cancellation, release

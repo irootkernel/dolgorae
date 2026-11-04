@@ -874,8 +874,15 @@ Select the aggregate's Controller and an immutable ordered group manifest with
 Each document names installed provisioning and the rich accepted assignment.
 Symlinks, changed sources and identity mismatches are refused before acceptance.
 
-Retain the accepted group identity and original operation key. Public-v2
-GroupService and checked managed/external facades share retained captures;
+Retain the accepted group identity and original operation key. Native Codex and
+Claude hosts and the managed Worker use `assign_group` with that key; use fresh
+`await_group`/`collect_group` calls for child coverage. Group original-key lookup
+returns the retained assignment receipt, not a single Task result. After a lost
+reply, use authorized R lookup of the original key. Native K replay must retain
+the original protected logical invocation; a new invocation UUID conflicts even
+with the same key and assignment. Controller-origin replay and managed source-call
+checks retain their separate identity rules.
+Public-v2 GroupService and checked managed/external facades share retained captures;
 accepted replay still works after the source files are removed. Public
 OperationService lookup recovers the accepted receipt under the same Controller,
 workspace and aggregate. Unknown member effects require the existing owner
