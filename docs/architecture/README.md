@@ -1017,7 +1017,12 @@ only that original Thread as a reader and retains uncertainty until explicit
 reconciliation proves idle empty history.
 Explicit resume can retire a pending writer guard with current qualified
 Reader proof. It cannot turn interrupted writable startup into success or
-reacquire Writer authority. Without a retained native identity, recovery
+reacquire Writer authority. Separately, explicit recovery can confirm an already
+applied Write transition in the same live Worker generation using fresh qualified
+proof and the original pending transaction. It issues no new Write update and
+does not replace a Thread or Run. Only then can identical original-key start
+replay publish the missing receipt; the initial failure remains recorded.
+Without a retained native identity, recovery
 reports the unavailable original binding. Pre-execution Writer contention
 seals the original Starting Run as StartFailed under the startup lock.
 After the entire old generation is verified absent, caller Writer retirement
@@ -1914,6 +1919,14 @@ only read-only attachment and checked reconciliation without a new task Turn.
 A startup-child refusal also records the expected Dedicated leader scope,
 the prior observation for that PID, and the failed identity comparisons. These
 values come from the refused check; diagnostics add no kernel lookup or wait.
+A bounded private command-name sidecar may retain the short-BSD name already
+read by that census, including a sample whose later identity lookup reports
+absence. It is diagnostic text only and changes no identity or absence verdict.
+Only the current UID and selected Worker/Dedicated groups are retained; command
+arguments and full paths are excluded. Persisted census and startup-witness
+shapes do not include this sidecar. Each retained short sample is explicitly
+identity-unverified, and a resampled census discards the preceding attempt
+sidecar instead of joining names by PID across observations.
 Initial descendant admission additionally identifies its census call site and
 bounded typed ancestor chain. It uses two complete kernel observations to bind
 every ancestor PID, birth and UID to the actual Dedicated leader. These

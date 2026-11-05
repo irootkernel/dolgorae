@@ -602,6 +602,13 @@ impl RunSnapshot {
                     .and_then(|ledger| ledger.records().last())
                     .is_some_and(|record| record.hash() != sources.projection.ledger_head.hash)
                 {
+                    #[cfg(all(test, dolgorae_native_acceptance))]
+                    crate::worker::native_acceptance_run_diagnostic(
+                        state_root,
+                        run_id,
+                        "snapshot_ledger",
+                        "head_mismatch",
+                    );
                     return Err(state_conflict(
                         run_id,
                         sources.projection.lifecycle,
@@ -620,7 +627,25 @@ impl RunSnapshot {
                 } else {
                     Ok(Vec::new())
                 };
-                let effective_policy = durable_policy(sources, ledger.as_ref())?;
+                let policy = durable_policy(sources, ledger.as_ref());
+                #[cfg(all(test, dolgorae_native_acceptance))]
+                if policy.is_err() {
+                    let head = policy_at_head(
+                        &sources.projection,
+                        ledger.as_ref(),
+                        sources
+                            .runtime_record
+                            .as_ref()
+                            .and_then(|r| r.app_server_epoch),
+                    );
+                    crate::worker::native_acceptance_run_diagnostic(
+                        state_root,
+                        run_id,
+                        "snapshot_policy",
+                        native_snapshot_policy_category(sources, head.as_ref().ok()),
+                    );
+                }
+                let effective_policy = policy?;
                 let observation = observe(sources, ledger.as_ref(), &effective_policy)?;
                 Ok(Some((
                     revision,
@@ -636,6 +661,13 @@ impl RunSnapshot {
             (interaction_state_revision, effective_policy, observation, ledger, broker_approvals),
         )) = captured
         else {
+            #[cfg(all(test, dolgorae_native_acceptance))]
+            crate::worker::native_acceptance_run_diagnostic(
+                state_root,
+                run_id,
+                "snapshot_sources",
+                "source_motion_exhausted",
+            );
             return Err(state_conflict(
                 run_id,
                 store.load_state_projection(run_id)?.lifecycle,
@@ -937,6 +969,41 @@ impl RunObservation {
     }
 }
 
+#[cfg(test)]
+fn native_snapshot_policy_category(
+    sources: &CaptureSources,
+    policy: Option<&crate::domain::EffectivePolicy>,
+) -> &'static str {
+    let Some(policy) = policy else {
+        return "policy_history";
+    };
+    if sources
+        .runtime_record
+        .as_ref()
+        .and_then(|r| r.app_server_epoch)
+        .is_some_and(|epoch| Some(epoch) != policy.server_epoch)
+    {
+        "server_epoch"
+    } else if policy.access == crate::domain::Access::Write {
+        if !sources
+            .writer
+            .holder
+            .as_ref()
+            .is_some_and(|h| h.run_id == sources.manifest.run_id)
+        {
+            "writer_holder"
+        } else if sources.writer.state != crate::writer::WriterAuthorityState::Active {
+            "writer_state"
+        } else if policy.writer_generation != Some(sources.writer.writer_generation) {
+            "writer_generation"
+        } else {
+            "other"
+        }
+    } else {
+        "other"
+    }
+}
+
 fn durable_policy(
     sources: &CaptureSources,
     ledger: Option<&ObservedLedger>,
@@ -1050,6 +1117,37 @@ fn policy_from_payloads(
 mod capture_tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn native_policy_diagnostic_uses_closed_failure_predicates() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let mut projection = RunStateProjection::starting(fixture.member_ref);
+        projection.thread_id = Some("original-thread".into());
+        let sources = CaptureSources {
+            manifest: fixture.manifest.clone(),
+            projection,
+            writer: WriterRecord::empty(&fixture.view.workspace_id),
+            controller: fixture.owner_binding.clone(),
+            runtime_record: None,
+        };
+        assert!(durable_policy(&sources, None).is_err());
+        assert_eq!(
+            native_snapshot_policy_category(&sources, None),
+            "policy_history"
+        );
+        let policy = crate::domain::EffectivePolicy {
+            access: crate::domain::Access::Write,
+            verification: crate::domain::PolicyVerification::Verified,
+            policy_epoch: crate::domain::PolicyEpoch(1),
+            thread_generation: Some(1),
+            server_epoch: Some(1),
+            writer_generation: Some(1),
+        };
+        assert_eq!(
+            native_snapshot_policy_category(&sources, Some(&policy)),
+            "writer_holder"
+        );
+    }
 
     #[test]
     fn explicit_source_motion_recaptures_the_current_coherent_head() {

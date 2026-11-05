@@ -6822,9 +6822,10 @@ pub(crate) fn admit_successor_spawn(
 
 /// Settle the member Run start of one accepted successor spawn.
 ///
-/// A failure keeps the accepted spawn as `recovery_required` with its member
-/// `degraded`/`unavailable`, exactly as the legacy publication recovery does: the
-/// member Run may exist, so the cleanup owner is preserved and never replaced.
+/// A failure records the accepted spawn as `recovery_required`. A member still
+/// provisioning becomes `degraded`/`unavailable`; concurrent release admission or
+/// retirement keeps its membership. The Run may exist, so its cleanup owner is
+/// preserved and never replaced.
 pub(crate) fn settle_successor_spawn(
     transaction: &Transaction<'_>,
     session_id: Uuid,
@@ -6857,7 +6858,7 @@ pub(crate) fn settle_successor_spawn(
     transaction
         .execute(
             "UPDATE brokered_members SET membership_state=?2,actor_residency=?3,updated_at_ms=?4
-              WHERE run_id=?1",
+              WHERE run_id=?1 AND membership_state='provisioning'",
             params![
                 member_run_id.to_string(),
                 membership_state,

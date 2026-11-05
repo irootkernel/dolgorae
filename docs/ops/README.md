@@ -178,6 +178,23 @@ fixture checks their pinned identities and keeps extraction in its private root.
 This source-defined trace still requires frozen-candidate native qualification;
 its expected counts are not a passing runtime result.
 
+Fresh consumer qualification selects the official Podway 0.2.15 generation-1
+artifact declared in the [runtime specification](../specs/dolgorae-v014-delegation-runtime.md#task-086-consumer-qualification).
+The earlier unshipped build retains its historical applicability. This selection
+has no `integration.show` permission contract; it does not qualify later
+integration settings or change installed tools. Preserve final packaged H3
+qualification as a separate obligation.
+
+The production-host runner's complete-consumer cases inspect original bytes
+before explicit Record and Accept, then observe the receipt and issue a separate
+Primary completion. Its fence case instead preserves the historical receipt
+while testing staleness and a fresh unaccepted attempt. Group coverage, immutable
+merge bytes and synthesis Task identity remain separate. Neither that receipt
+nor a deterministic native model response proves the user's goal achieved.
+An actual applicable Aquarium Judge workflow remains required for semantic
+progression; loading selected prose or accepting a fixture Action supplies no
+such verdict.
+
 Cleanup uses the fixture's Operator to interrupt only its confirmed Profile,
 then requires process-inventory absence before removing the fixture. It does
 not project modern Runs through the frozen public-v1 adapter.
@@ -388,6 +405,15 @@ owns this diagnostic. Public-v2, H3 and actual consumer qualification remain
 separate roadmap obligations.
 
 ## Retained Close and executable changes
+
+Caller policy verification records a private `dolgorae.writer-census-failure/v1`
+diagnostic when the parent's final workload-absence proof fails. It uses the
+existing bounded process predicates and private Dedicated Server log. The same
+proof still fails closed; the diagnostic does not retry or relax it.
+A bounded sidecar may include command names from the same short-BSD census
+reads for the current user and selected Worker/Dedicated groups. Names are
+diagnostic only, include no command arguments or full paths, and add no kernel
+lookup or wait. Missing birth identity or a zombie never proves absence.
 
 After owner or gateway loss, repeat the same Close or use authorized
 Recover/Reconcile with a current Run revision. Keep the retained operation and
@@ -738,7 +764,28 @@ The integrated acceptance entrypoint also accepts
 configuration enable, raw argv enable and repeated override order against the
 accepted launch hash/key, actual process argv, shared and Dedicated native
 feature readback and unchanged quiescent startup. It does not replace the
-existing pre-disabled regression. Each variant starts and normally closes one
+existing pre-disabled regression. This mode omits plugin configuration and
+requires enabled plugin readback on both servers. Other caller modes retain
+their optional-plugin isolation. A variant reports either first-attempt startup
+or explicit recovery of the original Run, preserving the initial error and
+recovery/replay observations in its output before normal cleanup.
+
+An uncertain `TRANSPORT_FAILURE` is not permission for an automatic start retry.
+Only a retained original reservation and the closed Idle/Write census-refusal
+case with matching live Worker and Dedicated identities and the same blocked
+Writer transaction may use the original Controller to call existing `Recover`
+once. The result must be Active Write in the same generation before replaying
+the identical original start input and key. Reader recovery, identity changes
+and incomplete proof fail; no new Run, Thread, key, Turn, added wait or retry loop
+is allowed. This confirms an already applied transition and publishes its missing
+receipt; it does not rewrite the initial failure as first-attempt success.
+
+Default plugin initialization can fetch anonymous public plugin sources. The
+fixture reports observed repository revisions separately and makes no claim
+that all network traffic is loopback or metered. A clone observation does not
+identify the child responsible for a census refusal. The four shell snapshot
+inputs and process-quiescence guards remain unchanged.
+Each variant starts and normally closes one
 Run; the full caller-pipeline mode retains the separate writer/replay/recovery
 regression. Qualified fixture cleanup selects the retained
 accepted binding and uses the existing operator-authorized non-interrupting
@@ -953,3 +1000,20 @@ Writer generation 8 protects merged-artifact quota and synthesis recovery
 bindings. Open an older verified workspace through the supported writable
 upgrade; preserve its namespace birth and receipts. Generation-7 writers must
 refuse generation 8. There is no operator downgrade or manual marker repair.
+
+### Current consumer qualification
+
+Use the explicit [current consumer selection](../specs/dolgorae-v014-current-consumer-qualification.md)
+and its [fixture entrypoints](../implementation-tips/README.md#source-preparation-checks).
+External Codex, external Claude and managed Codex producer observations retain
+their own identities. The later ordinary native roles run under an external
+same-host Primary; a managed Root cannot bypass its immutable subagent policy.
+Keep native delivery, semantic applicability, Podway structural acceptance and
+separate Primary completion as distinct observations. Rejected current-role
+placements cannot record or advance; earlier valid producer receipts remain
+historical facts. All native execution requires the exact frozen proposal and
+explicit opt-in. Source checks and capability probes leave AQ/PW runtime rows
+pending, and TASK-087 still owns packaged H3 requalification.
+The production-host entrypoint also requires `--unsupported-peer-producer`
+with the separately pinned public writer from that selection. This creates only
+an isolated negative peer; it does not replace the selected Podway reader.

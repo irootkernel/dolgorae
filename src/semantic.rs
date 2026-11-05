@@ -9109,9 +9109,13 @@ fn settle_member_release(
     #[cfg(test)]
     run_release_pre_lease_interleave();
     let mut retried = false;
+    let run_store = RunStore::new(SystemWorkspacePlatform, input.state_root);
     let lease = loop {
-        let generation = match RunStore::new(SystemWorkspacePlatform, input.state_root)
-            .load_state_projection(input.member_ref)
+        // A missing projection defaults to Starting. It cannot establish that
+        // an admitted member ever published a Run whose lease can be settled.
+        let generation = match run_store
+            .load_manifest(input.member_ref)
+            .and_then(|_| run_store.load_state_projection(input.member_ref))
         {
             Ok(projection) => projection.run_generation.max(1),
             Err(error) => {
@@ -9120,14 +9124,14 @@ fn settle_member_release(
                     operation_ref,
                     "recovery_needed",
                     "MEMBER_RUN_CLOSE_UNVERIFIED",
-                    "recover_run",
+                    "reconcile_operation",
                 );
                 return Err(after(MachineError::new(
                     "RECOVERY_REQUIRED",
                     "the member Run could not reach Closed for release",
                     false,
                     json!({"operation_ref":operation_ref,"run_id":input.member_ref,
-                        "reason":error.code,"required_action":"recover_run"}),
+                        "reason":error.code,"required_action":"reconcile_operation"}),
                 )));
             }
         };
@@ -9522,19 +9526,29 @@ fn settle_admitted_release(
         }
     })();
     if let Err(error) = closed {
+        // A close may fail before its manifest read (for example while loading
+        // the member carrier). Name Run recovery only when its entry is readable.
+        let required_action = if RunStore::new(SystemWorkspacePlatform, input.state_root)
+            .load_manifest(member)
+            .is_err()
+        {
+            "reconcile_operation"
+        } else {
+            "recover_run"
+        };
         record_member_release_failure(
             input.state_root,
             operation_ref,
             "recovery_needed",
             "MEMBER_RUN_CLOSE_UNVERIFIED",
-            "recover_run",
+            required_action,
         );
         return Err(MachineError::new(
             "RECOVERY_REQUIRED",
             "the member Run could not reach Closed for release",
             false,
             json!({"operation_ref":operation_ref,"run_id":member,
-                "reason":error.code,"required_action":"recover_run"}),
+                "reason":error.code,"required_action":required_action}),
         ));
     }
     // The shared owned-cleanup verifier, run even when the Run was already
@@ -12230,7 +12244,7 @@ fn validate_caller_policy_current_authorized(
         .map_err(|error| error.machine_error(run_id, state_root))?;
     let runtime = crate::worker::read_runtime_record(&path, uid)
         .map_err(|error| error.machine_error(run_id, &path))?;
-    crate::worker::prove_worker_workload_absent(&runtime)
+    crate::worker::prove_worker_workload_absent_with_diagnostic(state_root, &runtime)
         .map_err(|error| error.machine_error(run_id, &path))?;
     let socket_path =
         crate::worker::dedicated_server_socket_path(uid, run_id, runtime.identity.run_generation)
@@ -16590,17 +16604,8 @@ fn settle_reconciled_terminal(
     retained: &[crate::successor_capture::RetainedChangeSide],
     now: i64,
 ) -> Result<(), MachineError> {
-    let expected = match &complete {
-        CompleteSettlement::Result(result) | CompleteSettlement::CheckedResult(result,_,_)
-            | CompleteSettlement::FindingsInvalid(result) | CompleteSettlement::SourceRejected(result,_) => {
-                crate::operation::canonical(&serde_json::to_value(result).map_err(|_|internal("invalid result"))?).map_err(|error|internal(error.to_string()))?
-            }
-        CompleteSettlement::Unavailable => crate::operation::canonical(&json!({
-            "schema":"dolgorae.complete-result-unavailable/v1","reason":"complete_result_unavailable",
-            "task_ref":request.task_ref.to_string(),
-        })).map_err(|error|internal(error.to_string()))?,
-    };
-    match settle_terminal_task(store, request, terminal, complete, retained, now) {
+    let expected = complete.canonical(request.task_ref)?;
+    match settle_terminal_task(store, request, terminal, complete, retained, now, &expected) {
         Ok(()) => Ok(()),
         Err(error) if error.code == "STATE_CONFLICT" => {
             let matches = match request.owner {
@@ -17047,6 +17052,7 @@ fn settle_successor_task_from_turn(
                 CompleteSettlement::Unavailable,
                 &[],
                 now,
+                &CompleteSettlement::Unavailable.canonical(request.task_ref)?,
             )?;
         }
         Err(error) => return Err(error),
@@ -17689,7 +17695,7 @@ fn settle_complete_result(
         attachments: Vec::new(),
         safe_failure_code: failure.map(str::to_owned),
     };
-    result.digest()?;
+    result.validate()?;
     Ok(if let Some(error) = source_error {
         CompleteSettlement::SourceRejected(result, error)
     } else if findings_invalid {
@@ -17711,6 +17717,24 @@ pub(crate) enum CompleteSettlement {
     FindingsInvalid(crate::delegation_identity::CompleteResult),
     /// No complete result can be published.
     Unavailable,
+}
+
+impl CompleteSettlement {
+    fn canonical(&self, task_ref: Uuid) -> Result<Vec<u8>, MachineError> {
+        match self {
+            Self::Result(result)
+            | Self::CheckedResult(result, _, _)
+            | Self::FindingsInvalid(result)
+            | Self::SourceRejected(result, _) => {
+                let value = serde_json::to_value(result).map_err(|_| internal("invalid result"))?;
+                crate::operation::canonical(&value).map_err(|error| internal(error.to_string()))
+            }
+            Self::Unavailable => crate::operation::canonical(&json!({
+                "schema":"dolgorae.complete-result-unavailable/v1","reason":"complete_result_unavailable",
+                "task_ref":task_ref.to_string(),
+            })).map_err(|error| internal(error.to_string())),
+        }
+    }
 }
 
 /// A writer record that exists but cannot be read is unobservable.
@@ -17790,6 +17814,7 @@ fn settle_terminal_task(
     complete: CompleteSettlement,
     retained: &[crate::successor_capture::RetainedChangeSide],
     now_ms: i64,
+    canonical: &[u8],
 ) -> Result<(), MachineError> {
     let (outcome, failure) = settle_terminal_outcome(&terminal.status);
     let mut state = match outcome {
@@ -17852,30 +17877,10 @@ fn settle_terminal_task(
     };
     // The terminal row always carries its published bytes: the complete result,
     // or the typed-unavailable condition. A partial change set is never one.
-    let (digest, canonical, _complete_result) = match complete {
-        Some(result) => {
-            let value = serde_json::to_value(&result)
-                .map_err(|_| internal("the complete result is unrepresentable"))?;
-            let canonical = crate::operation::canonical(&value)
-                .map_err(|_| internal("the complete result is unrepresentable"))?;
-            // The row keeps the content digest of the published bytes; the
-            // complete-result domain digest is re-derived from the object.
-            result.digest()?;
-            (crate::jcs::sha256_hex(&canonical), canonical, true)
-        }
-        None => {
-            let marker = serde_json::json!({
-                "schema": "dolgorae.complete-result-unavailable/v1",
-                // Every cause of an unavailable result shares one reason: the
-                // marker states the condition, not which producer noticed it.
-                "reason": "complete_result_unavailable",
-                "task_ref": request.task_ref.to_string(),
-            });
-            let canonical = crate::operation::canonical(&marker)
-                .map_err(|_| internal("the unavailable result is unrepresentable"))?;
-            (crate::jcs::sha256_hex(&canonical), canonical, false)
-        }
-    };
+    if let Some(result) = &complete {
+        result.validate()?;
+    }
+    let digest = crate::jcs::sha256_hex(canonical);
     let checked_reader = if checked_payload.is_some() {
         let manifest = RunStore::new(SystemWorkspacePlatform, request.state_root)
             .load_manifest(request.member_ref)?;
@@ -17942,7 +17947,7 @@ fn settle_terminal_task(
                     transaction,
                     engagement_id,
                     request.task_ref,
-                    &canonical,
+                    canonical,
                     &digest,
                 )?;
                 let settled = crate::engagement::terminalize_external_task_in(
@@ -17990,7 +17995,7 @@ fn settle_terminal_task(
                 crate::orchestration::retain_successor_task_result(
                     transaction,
                     request.task_ref,
-                    &canonical,
+                    canonical,
                 )?;
                 let settled = crate::orchestration::settle_successor_task_result(
                     transaction,
@@ -19829,8 +19834,19 @@ pub(crate) fn schedule_actor(
         let text = scheduler::captured_operation(store.connection(), actor, &operation)?;
         let identity: ActorExecutionIdentity = serde_json::from_str(&text)
             .map_err(|_| scheduler::error("activation_capture_invalid"))?;
-        let resident =
-            now < until && actor_ready_verified(state_root, &snapshot, &identity).unwrap_or(false);
+        let resident = now < until && {
+            let ready = actor_ready_verified(state_root, &snapshot, &identity);
+            #[cfg(all(test, dolgorae_native_acceptance))]
+            if let Err(error) = &ready {
+                crate::worker::native_acceptance_run_diagnostic(
+                    state_root,
+                    actor.run,
+                    "actor_ready",
+                    scheduler::native_acceptance_failure_label(error),
+                );
+            }
+            ready.unwrap_or(false)
+        };
         if resident || now >= until {
             store.transact(|tx| {
                 if resident {
@@ -20096,11 +20112,46 @@ pub(crate) fn schedule_actor(
         } else {
             ensure_run_worker(view, state_root, actor.run)
         };
+        #[cfg(all(test, dolgorae_native_acceptance))]
+        if let Err(error) = &started {
+            crate::worker::native_acceptance_run_diagnostic(
+                state_root,
+                actor.run,
+                "actor_start",
+                scheduler::native_acceptance_failure_label(error),
+            );
+        }
         let after = crate::snapshot::RunSnapshot::load(state_root, actor.run, 0);
+        #[cfg(all(test, dolgorae_native_acceptance))]
+        if let Err(error) = &after {
+            crate::worker::native_acceptance_run_diagnostic(
+                state_root,
+                actor.run,
+                "actor_snapshot",
+                scheduler::native_acceptance_failure_label(error),
+            );
+        }
         let resident = started.is_ok()
             && after.as_ref().is_ok_and(|next| {
-                actor_ready_verified(state_root, next, &captured).unwrap_or(false)
+                let ready = actor_ready_verified(state_root, next, &captured);
+                #[cfg(all(test, dolgorae_native_acceptance))]
+                if let Err(error) = &ready {
+                    crate::worker::native_acceptance_run_diagnostic(
+                        state_root,
+                        actor.run,
+                        "actor_ready",
+                        scheduler::native_acceptance_failure_label(error),
+                    );
+                }
+                ready.unwrap_or(false)
             });
+        #[cfg(all(test, dolgorae_native_acceptance))]
+        crate::worker::native_acceptance_run_diagnostic(
+            state_root,
+            actor.run,
+            "actor_ready",
+            if resident { "ready" } else { "not_ready" },
+        );
         store.transact(|tx| {
             if resident {
                 scheduler::record_ready(
@@ -20247,6 +20298,15 @@ pub(crate) fn schedule_actor(
                     )
                 }
             };
+            #[cfg(all(test, dolgorae_native_acceptance))]
+            if let Err(error) = &outcome {
+                crate::worker::native_acceptance_run_diagnostic(
+                    state_root,
+                    actor.run,
+                    "accepted_dispatch_error",
+                    &error.code,
+                );
+            }
             let outcome = outcome.unwrap_or(
                 crate::delegation_service::MemberDispatchOutcome::Uncertain {
                     code: "RECOVERY_REQUIRED".into(),
@@ -20256,6 +20316,8 @@ pub(crate) fn schedule_actor(
             store.transact(|tx| {
                 scheduler::finish_dispatch(tx, &permit, &outcome, scheduler::now_ms()?)
             })?;
+            #[cfg(all(test, dolgorae_native_acceptance))]
+            crate::worker::native_ack_loss_hold_claim(state_root, &permit)?;
         } else {
             let record = crate::collaboration::execution_record(store.connection(), permit.work)?;
             if record.session != actor.owner.scope().1 || record.target != actor.run {
@@ -23305,12 +23367,12 @@ mod tests {
     }
 
     /// The hire crash and the recovery_required spawn — a member
-    /// whose Run never started — end in the typed close recovery row, never an
-    /// unrecorded escape, and stay recoverable.
+    /// whose Run never started — end in the retained close recovery row. Its
+    /// supported scope reconciliation must not promise manifest-dependent repair.
     #[test]
     fn a_never_started_member_run_records_the_close_recovery_row() {
         use crate::delegation_service::MemberReleaseFailure;
-        for external in [true, false] {
+        for (external, absent) in [(true, false), (false, false), (true, true), (false, true)] {
             let scene = if external {
                 super::release_fixture::ReleasableMember::external(
                     super::release_fixture::ReleaseScene::CloseSettlement,
@@ -23320,28 +23382,49 @@ mod tests {
                     super::release_fixture::ReleaseScene::CloseSettlement,
                 )
             };
-            // The Run's durable state is unreadable — the shape a hire
-            // crash or a recovery_required spawn leaves when no Run ever came
-            // up cleanly.
-            let state =
-                crate::run::run_root(&scene.state_root, scene.member_ref).join("state.json");
-            std::fs::write(&state, b"not a projection").unwrap();
-            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
-            let MemberReleaseFailure::AfterAdmission { error, .. } =
-                scene.release(scene.revision).unwrap_err()
+            // Exercise both damaged state and an unpublished Run. Neither can
+            // borrow the manifest-dependent Run recovery entrypoint.
+            let root = crate::run::run_root(&scene.state_root, scene.member_ref);
+            let state = root.join("state.json");
+            if absent {
+                std::fs::remove_file(&state).unwrap();
+                std::fs::remove_file(root.join("manifest.json")).unwrap();
+            } else {
+                std::fs::write(&state, b"not a projection").unwrap();
+                std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let MemberReleaseFailure::AfterAdmission {
+                operation_ref,
+                error,
+            } = scene.release(scene.revision).unwrap_err()
             else {
                 panic!("an unreadable Run state surfaces its settlement failure");
             };
             assert_eq!(error.code, "RECOVERY_REQUIRED");
+            assert_eq!(
+                error.details["required_action"], "reconcile_operation",
+                "external={external}, absent={absent}, cause={}",
+                error.details["reason"]
+            );
             let row = scene.row();
             assert_eq!(row[11], "recovery_needed");
             assert_eq!(row[12], "MEMBER_RUN_CLOSE_UNVERIFIED");
-            assert_eq!(row[13], "recover_run");
+            assert_eq!(row[13], "reconcile_operation");
             assert_eq!(row[14], "-");
             assert_eq!(
                 scene.member_state(),
                 if external { "releasing" } else { "retiring" }
             );
+            let MemberReleaseFailure::AfterAdmission {
+                operation_ref: repeated,
+                error,
+            } = scene.release(scene.revision).unwrap_err()
+            else {
+                panic!("the same scope can reconcile its original nonterminal release");
+            };
+            assert_eq!(repeated, operation_ref);
+            assert_eq!(error.details["required_action"], "reconcile_operation");
+            assert_eq!(scene.row()[14], "-");
         }
     }
 
@@ -23777,6 +23860,156 @@ mod tests {
             before,
             "the owned rows are byte-identical between the calls"
         );
+    }
+
+    fn assert_late_spawn_publication_preserves_release(terminal: bool) {
+        use crate::delegation_service::MemberReleaseOutcome;
+        for started in [true, false] {
+            for late in [true, false] {
+                let scene = super::release_fixture::ReleasableMember::managed_with_pending_spawn(
+                    if terminal {
+                        super::release_fixture::ReleaseScene::AlreadyClosed
+                    } else {
+                        super::release_fixture::ReleaseScene::LostLocator
+                    },
+                );
+                let crate::delegation_service::SettlementOwner::Managed { session_id } =
+                    scene.owner
+                else {
+                    unreachable!()
+                };
+                let store = EngagementStore::open_read_only(
+                    &EngagementStore::workspace_database_path(&scene.state_root),
+                )
+                .unwrap();
+                let member = crate::orchestration::successor_member(
+                    store.connection(),
+                    session_id,
+                    scene.member_ref,
+                )
+                .unwrap()
+                .unwrap();
+                let spawn_ref = member.spawn_operation_id;
+                drop(store);
+                let publish = || {
+                    EngagementStore::open(&EngagementStore::workspace_database_path(
+                        &scene.state_root,
+                    ))
+                    .unwrap()
+                    .transact(|tx| {
+                        crate::orchestration::settle_successor_spawn(
+                            tx,
+                            session_id,
+                            spawn_ref,
+                            scene.member_ref,
+                            started,
+                            if started {
+                                None
+                            } else {
+                                Some("TRANSPORT_FAILURE")
+                            },
+                            unix_time_ms_semantic().unwrap(),
+                        )
+                    })
+                    .unwrap();
+                };
+                if !late {
+                    publish();
+                }
+                let release = scene.release(scene.revision);
+                if terminal {
+                    let MemberReleaseOutcome::Operation(operation) = release.unwrap() else {
+                        panic!("release returns its real operation")
+                    };
+                    assert_eq!(operation.progress, "terminal");
+                    assert!(scene.membership_released());
+                } else {
+                    assert!(release.is_err());
+                }
+                let release_row = scene.row();
+                let revision = super::release_probe::scope_membership_revision(
+                    &scene.state_root,
+                    &scene.view.workspace_id,
+                    scene.owner.scope_kind(),
+                    scene.owner.scope_ref(),
+                );
+                let events = scene.event_count();
+                let credential = scene
+                    .state_root
+                    .join("orchestration/broker-credentials")
+                    .join(format!("{}.json", scene.member_ref));
+                let credential_before = std::fs::read(&credential).ok();
+                if late {
+                    publish();
+                }
+                assert_eq!(
+                    scene.member_state(),
+                    if terminal { "retired" } else { "retiring" },
+                    "started={started}, late={late}"
+                );
+                assert_eq!(scene.row(), release_row);
+                assert_eq!(scene.event_count(), events);
+                assert_eq!(
+                    super::release_probe::scope_membership_revision(
+                        &scene.state_root,
+                        &scene.view.workspace_id,
+                        scene.owner.scope_kind(),
+                        scene.owner.scope_ref()
+                    ),
+                    revision
+                );
+                assert_eq!(std::fs::read(&credential).ok(), credential_before);
+                if terminal {
+                    assert!(credential_before.is_none());
+                    assert!(scene.membership_released());
+                }
+                let connection = rusqlite::Connection::open(
+                    EngagementStore::workspace_database_path(&scene.state_root),
+                )
+                .unwrap();
+                let state: String = connection
+                    .query_row(
+                        "SELECT state FROM brokered_spawn_operations WHERE operation_id=?1",
+                        [spawn_ref.to_string()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    state,
+                    if started {
+                        "ready"
+                    } else {
+                        "recovery_required"
+                    }
+                );
+                drop(connection);
+                let repeat = scene.release(scene.revision);
+                if terminal {
+                    let MemberReleaseOutcome::Operation(operation) = repeat.unwrap() else {
+                        panic!("terminal repeat returns its original operation")
+                    };
+                    assert_eq!(operation.operation_ref, release_row[0]);
+                    assert_eq!(operation.progress, "terminal");
+                } else {
+                    assert!(repeat.is_err());
+                }
+                assert_eq!(scene.row(), release_row);
+                assert_eq!(
+                    scene.member_state(),
+                    if terminal { "retired" } else { "retiring" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_late_spawn_publication_preserves_an_admitted_release() {
+        assert_late_spawn_publication_preserves_release(false);
+    }
+
+    #[test]
+    fn a_late_spawn_publication_preserves_a_terminal_release() {
+        assert_late_spawn_publication_preserves_release(true);
     }
 
     /// The retired member's Broker credential is the dead state the
@@ -29297,7 +29530,20 @@ pub(crate) mod release_fixture {
 
         /// One managed successor member a release can settle end to end.
         pub(crate) fn managed(scene: ReleaseScene) -> Self {
-            let fixture = super::successor_fixture::ManagedMember::new();
+            Self::managed_from(scene, super::successor_fixture::ManagedMember::new())
+        }
+
+        pub(crate) fn managed_with_pending_spawn(scene: ReleaseScene) -> Self {
+            Self::managed_from(
+                scene,
+                super::successor_fixture::ManagedMember::pending_spawn(),
+            )
+        }
+
+        fn managed_from(
+            scene: ReleaseScene,
+            fixture: super::successor_fixture::ManagedMember,
+        ) -> Self {
             let owner = fixture.owner();
             let member_ref = fixture.member_ref;
             Self::assemble(
@@ -32029,12 +32275,36 @@ pub(crate) mod successor_fixture {
             Self::with_runtime_lane(access, purpose, qualified, historical, "dedicated")
         }
 
+        pub(crate) fn pending_spawn() -> Self {
+            Self::with_runtime_lane_and_settlement(
+                "read_only",
+                "review",
+                true,
+                false,
+                "dedicated",
+                false,
+            )
+        }
+
         fn with_runtime_lane(
             access: &str,
             purpose: &str,
             qualified: bool,
             historical: bool,
             lane: &str,
+        ) -> Self {
+            Self::with_runtime_lane_and_settlement(
+                access, purpose, qualified, historical, lane, true,
+            )
+        }
+
+        fn with_runtime_lane_and_settlement(
+            access: &str,
+            purpose: &str,
+            qualified: bool,
+            historical: bool,
+            lane: &str,
+            settle_spawn: bool,
         ) -> Self {
             use crate::specialist_policy::{
                 InstalledSpecialistPolicy, InstalledSpecialistRole, RoleSource,
@@ -32306,15 +32576,18 @@ pub(crate) mod successor_fixture {
                             now_ms: now,
                         },
                     )?;
-                    crate::orchestration::settle_successor_spawn(
-                        transaction,
-                        session_id,
-                        spawn_ref,
-                        member_ref,
-                        true,
-                        None,
-                        now,
-                    )
+                    if settle_spawn {
+                        crate::orchestration::settle_successor_spawn(
+                            transaction,
+                            session_id,
+                            spawn_ref,
+                            member_ref,
+                            true,
+                            None,
+                            now,
+                        )?;
+                    }
+                    Ok(())
                 })
                 .unwrap();
 

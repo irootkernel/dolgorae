@@ -6713,7 +6713,9 @@ pub(crate) fn mark_external_member_releasing(
 ) -> Result<(), MachineError> {
     let changed = transaction
         .execute(
-            "UPDATE members SET state='releasing',updated_at_ms=?3
+            "UPDATE members SET actor_residency=CASE
+                 WHEN state='provisioning' THEN 'recovering' ELSE actor_residency END,
+                 state='releasing',updated_at_ms=?3
               WHERE engagement_id=?1 AND specialist_run_id=?2
                 AND state NOT IN ('released','retired')",
             params![engagement_id.to_string(), member_ref.to_string(), now_ms],

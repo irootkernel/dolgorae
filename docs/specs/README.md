@@ -35,6 +35,11 @@ owns release-scoped Aquarium, Podway and Gul contract/owner/transport mappings,
 external prerequisites and runtime evidence. Its exact contract selection is
 required before successor publication; planning proves no runtime support.
 
+The [current consumer qualification](dolgorae-v014-current-consumer-qualification.md)
+owns TASK-086's later Aquarium ordinary-v3 source/application selection and its
+unchanged identity, applicability and acceptance duties. Frozen H1 v1 references
+remain intact; current v3 reports are not relabeled as historical formal reports.
+
 The [Gate A acceptance](dolgorae-v014-gate-a-acceptance.md) records TASK-069's
 independent acceptance of completed Gul E15/H2, its immutable source binding,
 foundation scope and watch/timing/harness agreement. Later H3/H4 and actual
@@ -6442,6 +6447,20 @@ enable, raw argv enable and repeated enable/disable ordering. It checks actual
 enforced argv/effective disabling against the immutable accepted launch snapshot,
 digest and server key, retaining the existing process-quiescence requirements.
 Each startup-only variant retains normal close/release and owned cleanup.
+The default-feature fixture omits plugin configuration and verifies that plugins
+remain enabled on both shared and Dedicated servers. Configuration, raw argv and
+ordering variants retain their explicit shell snapshot inputs. Each result
+distinguishes first-attempt startup from explicit recovery of the original Run.
+Only an uncertain census refusal with a matching original reservation, Idle
+Writable Dedicated Run, live Worker and Dedicated identities and original
+blocked Writer transaction is eligible for one immediate existing recovery call.
+Recovery must confirm the same generation as Writer before identical-input,
+original-key replay; a Reader result or changed identity fails qualification.
+No new task, Turn, Run, Thread, delay or retry loop is permitted.
+The result retains the initial error and actual recovery/replay observations
+before cleanup. Default plugin initialization may fetch anonymous public plugin
+sources; their observed revisions are reported separately. Zero loopback model
+requests and no account use do not establish absence of other network traffic.
 The separate full caller-pipeline regression retains its writer, replay and
 generation-recovery scenarios.
 The separate production host driver keeps the original eighteen rows per exact

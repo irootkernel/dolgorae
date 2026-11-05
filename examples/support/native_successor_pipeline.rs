@@ -30,6 +30,9 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const PROFILE: &str = "integrated-successor";
+fn producer_only() -> bool {
+    std::env::var("DOLGORAE_NATIVE_MANAGED_PRODUCER").as_deref() == Ok("1")
+}
 fn private(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -267,11 +270,13 @@ fn consumer_task(
     } else {
         "ordinary-dispatch.txt"
     };
-    request.contexts.push(crate::task_request::TaskContext {
-        id: "aquarium-assignment".into(),
-        content: fs::read_to_string(root.join(dispatch)).unwrap(),
-        provenance: "caller".into(),
-    });
+    if !producer_only() {
+        request.contexts.push(crate::task_request::TaskContext {
+            id: "aquarium-assignment".into(),
+            content: fs::read_to_string(root.join(dispatch)).unwrap(),
+            provenance: "caller".into(),
+        });
+    }
     if formal {
         let package: Value =
             serde_json::from_slice(&fs::read(root.join("package.json")).unwrap()).unwrap();
@@ -425,13 +430,19 @@ fn primary_turn(
         }))
         .unwrap(),
     );
-    let message = format!(
-        "native-primary-{phase}\nApply this selected formal contract to delivery only; no goal acceptance is authorized.\n{}",
-        fs::read_to_string(
-            root.join("aquarium-source/references/formal-agent-orchestration-v1.md")
+    let message = if producer_only() {
+        format!(
+            "native-primary-{phase}\nConsume the original Dolgorae delivery and structural receipt only. This producer is not an Aquarium native consumer Role; no semantic goal acceptance is authorized."
         )
-        .unwrap()
-    );
+    } else {
+        format!(
+            "native-primary-{phase}\nApply this selected formal contract to delivery only; no goal acceptance is authorized.\n{}",
+            fs::read_to_string(
+                root.join("aquarium-source/references/formal-agent-orchestration-v1.md")
+            )
+            .unwrap()
+        )
+    };
     let args: Vec<OsString> = vec![
         primary.to_string(),
         "--workspace".into(),
@@ -3137,7 +3148,9 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         &home.root().join("roles/general/AGENTS.md"),
         &[
             b"integrated-general-017\n".as_slice(),
-            &if startup_only {
+            &if producer_only() {
+                b"Deliver the accepted Dolgorae task only. Report original evidence and gaps; do not claim an Aquarium Role or semantic goal acceptance.\n".to_vec()
+            } else if startup_only {
                 b"Bounded native successor startup fixture.\n".to_vec()
             } else {
                 fs::read(root.join("aquarium-source/references/executor-guidance.md")).unwrap()
@@ -3255,8 +3268,15 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         role_name: "general",
         role: SelectedInstructionSource::File(vec!["roles".to_owned(), "general".to_owned()]),
         dependencies: vec![SelectedNamedSource {
-            name: "formal-agent-orchestration-v1".into(),
-            source: SelectedInstructionSource::Inline(if startup_only {
+            name: if producer_only() {
+                "producer-delivery"
+            } else {
+                "formal-agent-orchestration-v1"
+            }
+            .into(),
+            source: SelectedInstructionSource::Inline(if producer_only() {
+                "Keep the complete accepted task, native write output and remaining gaps separate from any consumer decision.".into()
+            } else if startup_only {
                 "Bounded accepted successor startup; no model Turn.".into()
             } else {
                 fs::read_to_string(
@@ -3266,7 +3286,36 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
             }),
         }],
         selected_guidance: Vec::new(),
-        profile_binding: binding,
+        profile_binding: if startup_only {
+            binding
+        } else {
+            GlobalProfileStore::new(&home)
+                .add(
+                    "integrated-successor-members".into(),
+                    RuntimeProfile {
+                        argv: vec![codex.to_str().unwrap().into()],
+                        codex_home: root.join("profile-members").to_str().unwrap().into(),
+                        environment: BTreeMap::from([
+                            ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+                            ("LANG".into(), "C".into()),
+                            ("LC_ALL".into(), "C".into()),
+                        ]),
+                        native_subagents: NativeSubagents::Enabled,
+                    },
+                )
+                .unwrap();
+            let member_binding =
+                ResolvedGlobalProfile::resolve(&home, "integrated-successor-members")
+                    .unwrap()
+                    .prepare_specialist(&home, false)
+                    .unwrap();
+            member_binding.record_qualified(&home).unwrap();
+            private(
+                &root.join("qualified-member-binding.json"),
+                &serde_json::to_vec(&member_binding).unwrap(),
+            );
+            member_binding
+        },
         admission: ProvisioningAdmission {
             model: "gpt-5.6-luna".to_owned(),
             effort: "low".to_owned(),
@@ -3450,6 +3499,58 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
                 && v["header"]["data"]["effect"] == "committed")
     );
     consumer_finish(root);
+    if producer_only() {
+        let caller = caller_scope::TrustedCallerScope::from_port(
+            &crate::trusted_host::ConfiguredCallerPort(&consumer_owner),
+        )
+        .unwrap();
+        let identity = delegation::get_managed_delegation_identity(
+            &scope,
+            &context(primary, "producer-export"),
+            &caller,
+            &port,
+            delegation::CollectSpecialistTask {
+                member_ref: member,
+                task_ref: task_id,
+                adapter_id: "dolgorae.managed/1",
+                adapter_version: env!("CARGO_PKG_VERSION"),
+            },
+        )
+        .unwrap();
+        let configuration = delegation::preparation_configuration(
+            &scope,
+            delegation::SettlementOwner::Managed {
+                session_id: primary,
+            },
+            member,
+        )
+        .unwrap();
+        assert_eq!(
+            configuration
+                .admitted_configuration
+                .as_ref()
+                .unwrap()
+                .digest()
+                .unwrap(),
+            identity.identity.agent_configuration_digest
+        );
+        assert_eq!(
+            configuration
+                .instructions
+                .delegation()
+                .unwrap()
+                .role_snapshot_digest,
+            identity.identity.role_snapshot_digest
+        );
+        let original =
+            delegation::original_delegation_task(&state_root, &identity.identity.complete_result)
+                .unwrap();
+        private(&root.join("managed-producer-export.json"), &serde_json::to_vec(&json!({
+            "identity":identity.identity,"accepted_configuration":configuration,
+            "original_task":{"body_utf8":String::from_utf8(original.task_body).unwrap(),
+                "contexts":original.contexts.into_iter().map(|(id,body)|json!({"id":id,"content":crate::delegation_identity::BytesRef::from_bytes(&body),"body_utf8":String::from_utf8(body).unwrap()})).collect::<Vec<_>>()}
+        })).unwrap());
+    }
     let ordering = std::rc::Rc::new(std::cell::RefCell::new(None));
     crate::semantic::set_member_release_before_retirement({
         let root = state_root.clone();
@@ -3498,13 +3599,17 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         )
         .is_err()
     );
-    sources.dependencies.clear();
-    let (ordinary_candidate, _) = checked(
-        root,
-        "ordinary provisioning",
-        delegation::install_provisioning(&scope, &sources, "native-ordinary-install", None),
-    );
-    let external_evidence = external_campaign(root, &view, &state_root, &home, &ordinary_candidate);
+    let external_evidence = if producer_only() {
+        Value::Null
+    } else {
+        sources.dependencies.clear();
+        let (ordinary_candidate, _) = checked(
+            root,
+            "ordinary provisioning",
+            delegation::install_provisioning(&scope, &sources, "native-ordinary-install", None),
+        );
+        external_campaign(root, &view, &state_root, &home, &ordinary_candidate)
+    };
     let closed = mutate(
         &view,
         &owner,
@@ -3522,6 +3627,14 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         &CredentialCarrier::open_path(&operator).unwrap(),
     )
     .unwrap();
+    checked(
+        root,
+        "member Profile retirement",
+        crate::profile::retire_qualified_global_server(
+            &sources.profile_binding,
+            &CredentialCarrier::open_path(&operator).unwrap(),
+        ),
+    );
     private(&root.join("cleanup-result"), b"complete\n");
     json!({"schema":"dolgorae.native-successor-pipeline/v1","passed":true,"managed_manifest":4,"shell_snapshot_disabled":true,"dispatch_failures":failure_evidence,"external":external_evidence,"production_managed_dispatch":true,"broker_writer_acquisition":true,"dispatch_index_before_submit":true,"published_changes":changes.len(),"normal_live_close":ordering.borrow().clone().unwrap(),"cleanup_before_profile_retirement":true,"profile_retired":true,"broker_credential_retired_after_terminal":true,"receipt_operation":receipt["namespace"]["operation_kind"],"actual_primary_consumer":true})
 }

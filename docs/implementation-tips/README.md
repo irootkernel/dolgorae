@@ -639,6 +639,67 @@ identity; an external Engagement or synthetic fixture identity is not a
 substitute. Keep all original campaign bounds until their owner resolves a
 demonstrated trace conflict.
 
+The production-host runner preserves its eighteen original scenario budgets.
+Its separate `consumer-complete`, `consumer-rounds`, `consumer-release`,
+`consumer-fences`, `consumer-group` and `consumer-group-gaps` cases use declared
+bounds for full source pages, prepared inputs, original outcomes and receipts.
+The group cases map only the genuine synthesis Task to a receipt. Use
+`--trace-only --rows <names> --hosts codex claude` to inspect the planned bounds;
+this executes no qualification. `--verify-distribution-only --podway-archive
+<archive> --podway <executable>` verifies selected packaged bytes and closed
+schemas without running the consumer. It proves no native row.
+
+Pass the same archive with `--podway-archive` to the actual production-host
+campaign and provide the selected Aquarium full archive with
+`--aquarium-archive`. `--direct-contract-only` uses the selected public CLI and
+production client for Direct progression, reactivation and an unsupported
+workspace generation. It requires the normal explicit runtime opt-in. Keep
+short canonical scratch roots for macOS sockets and preserve failed receipts.
+A physical worker-loss case must prove original Task settlement before retiring
+its Profile; unresolved history stops cleanup for explicit recovery.
+
+For a frozen managed campaign, `--successor-driver` and
+`--successor-driver-sha256` select the already-built exact driver. The runner
+checks its bytes before making a private copy, which its workers and Profile
+drainer also use. Omit these options only when an explicitly authorized source
+build is intended. Keep the main binary, each driver, input artifacts and source
+manifest together. A single-image campaign must use that exact image set for
+every row. Separately identified passing phases may form a current evidence
+composition only after comparing each original command, coverage, input,
+dependency and environment with the current candidate. Preserve original image
+identities and failed campaign outcomes; never present that composition as one
+single-image campaign. Changed guarantees require affected current execution,
+and unknown applicability requires requalification. TASK-087 still requires
+qualification against its exact post-cleanup packaged artifact.
+
+For current qualification, select `--managed-producer-only` in the integrated
+runner. It retains a `producer-facts.json` after genuine managed Root dispatch,
+original page reads, structural receipt and owned cleanup. The old
+`--successor-only` mode retains its historical formal consumption scope; it is
+not the current ordinary-v3 qualification entrypoint. Supply a frozen driver
+with the pair above; current qualification does not build at runtime.
+
+`tests/e2e/run_native_aquarium_consumer.py` consumes the exact producer facts from
+the external and managed cases. Its independent opt-in is
+`DOLGORAE_RUN_NATIVE_AQUARIUM_CONSUMER=1`. Pass `--producer-facts`,
+`--task-criteria`, the selected Aquarium/Podway archives and native executables,
+both model names and a short canonical `--scratch`. `--hosts codex claude`
+selects actual same-host collection/Evaluator roles. The cases are `current`,
+`wrong_candidate`, `wrong_goal`, `wrong_attempt`, `incomplete`, `superseded` and
+`wrong_schema`. Each case has a 180-second, 32-POST, 4 MiB-input bound, at most
+three actual native children, 20 Primary requests and three count-token requests.
+The ordinary Actions use no fabricated formal receipts. Preserve the actual
+native handle, entire returned report and observed Primary decision; negative
+cases leave the affected placement unchanged. The runner never claims a global
+Task pass or semantic model reasoning.
+
+The Codex official distribution also requires its matching sibling
+`codex-code-mode-host`. Preserve both exact executable hashes and the archive
+provenance when freezing the campaign. Advertisement and tiny child-capability
+checks are preparation evidence only. A current wording correction to the
+advertisement script permits its one metadata-only `functions.exec` call;
+historical frozen probes retain their original bytes and outcomes.
+
 The existing successor program has five Turns: Primary spawn (two POSTs),
 Primary assignment/await (three), managed Writer (two), Primary consumer
 (ten plus four required continuation exchanges), and external Writer (two).

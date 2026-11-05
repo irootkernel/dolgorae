@@ -319,9 +319,737 @@ def collaboration_cleanup_timeout_preserves_first_failure() -> None:
         assert json.loads(reports[0].read_text())==[{"stage":"owner_cleanup","error":"TimeoutExpired"}]
 
 
+def successor_shutdown_failure_still_closes_fixture() -> None:
+    import hashlib
+    for cleanup_timeout in (False, True):
+        with tempfile.TemporaryDirectory(prefix="successor-cleanup-", dir=os.environ["TMPDIR"]) as temporary:
+            base=Path(temporary).resolve(); image=base/"image"; image.write_bytes(b"offline-image")
+            seen=[]
+            foreground=Mock(stdout=io.StringIO('{"ok":true,"command":"serve"}\n'))
+            foreground.communicate.side_effect=subprocess.TimeoutExpired("foreground",7)
+            fixture=Mock(failure=None,base_url="http://127.0.0.1:1/v1",posts=0,input_sizes=[],failure_details=None)
+            def run(argv, **kwargs):
+                seen.append(argv)
+                if "--cleanup" in argv:
+                    if cleanup_timeout: raise subprocess.TimeoutExpired(argv,120)
+                    return subprocess.CompletedProcess(argv,0,"","")
+                if str(argv[0]).endswith("fixture-successor-driver"):
+                    return subprocess.CompletedProcess(argv,1,"","original driver refusal")
+                return subprocess.CompletedProcess(argv,0,'{"ok":true}',"")
+            with patch.dict(os.environ,{probe.OPT_IN:"1","TMPDIR":str(base)}), \
+                 patch.object(probe,"executable_identity",return_value={"sha256":probe.CODEX_SHA256}), \
+                 patch.object(probe,"checked_codex"),patch.object(probe,"successor_aquarium_sources"), \
+                 patch.object(probe,"SuccessorResponses",return_value=fixture), \
+                 patch.object(probe,"cleanup_removed_root") as absence, \
+                 patch.object(probe.subprocess,"run",side_effect=run), \
+                 patch.object(probe.subprocess,"Popen",return_value=foreground), \
+                 patch("select.select",return_value=([foreground.stdout],[],[])):
+                try:
+                    probe.successor_campaign(image,image,image,image,frozen_driver=image,
+                        frozen_driver_sha256=hashlib.sha256(image.read_bytes()).hexdigest())
+                except probe.ProbeCheckFailure as error:
+                    assert error.kind == "successor_driver_failed"
+                else:
+                    raise AssertionError("original driver refusal was lost")
+                assert absence.called is (not cleanup_timeout)
+            assert foreground.terminate.called and fixture.close.called
+            assert any("--cleanup" in argv for argv in seen)
+            roots=list(base.glob("dsn-*")); assert len(roots)==1
+            errors=json.loads((roots[0]/"cleanup-errors.json").read_text())
+            assert errors==([{"stage":"foreground_stop", "error":"TimeoutExpired"}]
+                + ([{"stage":"owner_cleanup", "error":"TimeoutExpired"}] if cleanup_timeout else []))
+
+
+def complete_consumer_pages_offline() -> None:
+    """Exercise actual page/check machinery; no native qualification credit."""
+    import copy
+    import hashlib
+    import gzip
+    import run_native_production_host as production
+    with tempfile.TemporaryDirectory(prefix="consumer-pages-", dir=os.environ["TMPDIR"]) as temporary:
+        root = Path(temporary)
+        source = ("quoted UTF8 界🙂\n" * 100).encode()
+        (root / "input.json").write_text(json.dumps({"podway_archive": str(root / "not-opened-in-page-test.tar.gz")}))
+        flow = production.CompleteConsumer(root)
+        flow.read("final_response", "actual-selection", {"kind": "final_response"}, source)
+        request = flow.read_call()
+        end = 1024
+        while True:
+            try:
+                first = source[:end].decode()
+                break
+            except UnicodeDecodeError:
+                end -= 1
+        header = {"ok": True, "data": {"kind": "page", "encoding": "utf8", "offset": 0,
+            "returned_length": end, "source_length": len(source),
+            "source_digest": "sha256:" + hashlib.sha256(source).hexdigest(), "continuation": "original-cursor"}}
+        wrong_call = copy.deepcopy(request)
+        wrong_call["selection_ref"] = "foreign-selection"
+        rejected(lambda: flow.check_page(header, ["metadata", first], False, wrong_call, 1, "call"))
+        rejected(lambda: flow.check_page(header, ["metadata", "x" + first[1:]], False, request, 1, "call"))
+        flow.check_page(header, ["metadata", first], False, request, 1, "call")
+        assert not flow.finished and flow.read_call()["range"] == {"kind": "continue", "cursor": "original-cursor"}
+        request = flow.read_call()
+        rest = source[end:].decode()
+        last = copy.deepcopy(header)
+        last["data"].update(offset=end, returned_length=len(source)-end, continuation=None)
+        corrupted = copy.deepcopy(last)
+        corrupted["data"]["source_digest"] = "sha256:" + "0" * 64
+        broken = copy.deepcopy(flow)
+        rejected(lambda: broken.check_page(corrupted, ["metadata", rest], False, request, 2, "call-2"))
+        flow.check_page(last, ["metadata", rest], False, request, 2, "call-2")
+        assert flow.finished["final_response"] == source and len(flow.witnesses) == 2
+        assert flow.read_call() is None
+    body=json.dumps({"input":[{"role":"user","content":"quoted 界🙂"}]},ensure_ascii=False).encode()
+    decoded,raw=production.model_request(gzip.compress(body),"gzip")
+    assert decoded==json.loads(body) and raw==body
+    rejected(lambda:production.model_request(gzip.compress(b"x"*(production.BODY+1)),"gzip"))
+    rejected(lambda:production.model_request(body,"unrecognized"))
+    for row in production.ORIGINAL_ROWS:
+        assert production.trace(row)["combined_post_limit"] == 8
+        assert production.trace(row)["delivery_limit"] == 32
+    assert production.trace("consumer-complete")["combined_post_limit"] == 72
+
+
+def ordinary_native_consumer_offline() -> None:
+    import run_native_aquarium_consumer as ordinary
+    from run_native_production_host import admitted_native_input
+    task = {'purpose': 'change', 'brief': 'Exact original', 'contexts': [], 'criteria': [], 'expected_output': 'complete_result'}
+    configuration = {'model': 'fixture-model', 'default_effort': 'low', 'instructions': {'common': {'body': 'common\n'}, 'role': {'body': 'original Role\n'}, 'dependencies': [{'source': {'body': 'dependency\n'}}], 'selected_guidance': [{'source': {'body': 'guidance\n'}}]}}
+    request = {'model': 'fixture-model', 'reasoning': {'effort': 'low'}, 'instructions': 'common\noriginal Role\ndependency\nguidance\n',
+        'input': [{'role': 'user', 'content': [{'type': 'input_text', 'text': 'Accepted task:\n' + json.dumps(task)}]}]}
+    original_task = {'body_utf8': json.dumps(task)}
+    assert admitted_native_input(request, configuration, original_task)['accepted_task_input'] == request['input'][0]['content'][0]['text']
+    for field, changed in [('instructions', request['instructions'].replace('original Role', 'same-name changed Role')), ('model', 'changed-model'), ('reasoning', {'effort': 'high'})]:
+        rejected(lambda: admitted_native_input(dict(request, **{field: changed}), configuration, original_task))
+    changed_task = dict(task, brief='envelope substituted for accepted task')
+    rejected(lambda: admitted_native_input(request, configuration, {'body_utf8': json.dumps(changed_task)}))
+    original = 'Complete native report\n"quoted" 界🙂\n'
+    framed = '[Subagent hand-back]\nThe report follows:\n' + '\n'.join('  ' + line for line in original.split('\n')) + '\nagentId: actual-public-handle\n<usage>observed</usage>'
+    assert ordinary.claude_handback(framed) == ('actual-public-handle', original)
+    for broken in (original, framed.replace('  "quoted"', ' "quoted"'), framed.replace('\nagentId: ', '\nmissingId: ')):
+        rejected(lambda: ordinary.claude_handback(broken))
+    context = {'host': 'codex', 'facts': [{'identity': {'task_ref': 'original-producer-task'}}],
+        'target': {'sha256': 'original-candidate'}, 'procedure': {'goal_revision': 1, 'attempt_ref': 'evaluation-attempt'},
+        'original_criteria': {'mappings': 'Original mappings', 'runtime': 'Original runtime', 'recovery': 'Original recovery', 'delivery': 'Original delivery'},
+        'executor_result': {'procedure': {'attempt_ref': 'collection-attempt'}},
+        'assignment': {'schema': 'aquarium.assignment/v3', 'role': 'evaluator', 'work': {'task': 'TASK-086'}, 'authority': {'allowed': [], 'excluded': []}},
+        'assignment_content': {'sha256': 'prepared-original', 'byte_length': 10}}
+    for variant in ordinary.CASES:
+        value = object.__new__(ordinary.NativeConsumer)
+        value.root, value.host, value.case = Path('/unused'), 'codex', variant
+        value.context, value.phase, value.posts, value.parent_posts = dict(context, variant=variant), 'evaluate', 3, 0
+        value.current_handle, value.current_label = 'actual-evaluator', 'evaluator'
+        value.handles, value.witnesses = ['actual-collector', 'actual-evaluator'], []
+        value.dispatches = {'evaluator': {'context': value.context}}
+        report = ordinary.role_report(value.context)
+        assert all(row['state'] == 'unverified' for row in report['criteria'])
+        assert report['verdict'] == 'evidence-needed' and report['native']['agent_ref'] is None
+        value.current_report = ordinary.canonical(report).decode()
+        value.reports = {'prepared-original': value.current_report}
+        value.pending = {'call_id': 'close-current', 'operation': 'close_agent'}
+        if variant == 'superseded':
+            value.replacement = True
+            value.handles.insert(1, 'retired-evaluator')
+            value.superseded = {'handle': 'retired-evaluator', 'report': value.current_report}
+        request = custom_result('close-current', {'close_agent': {'previous_status': {'completed': value.current_report}}})
+        returned = value.respond(request)[1]['item']['content'][0]['text']
+        observed = json.loads(returned)
+        assert observed['decision'] == ('accept_delivery' if variant == 'current' else 'reject_delivery')
+        assert observed['semantic_goal_pass'] is False and bool(observed['rejections']) == (variant != 'current')
+        if variant == 'current':
+            value.current_report = 'preview'
+            rejected(value.check_report_bytes)
+    value = object.__new__(ordinary.NativeConsumer)
+    value.posts, value.phase, value.witnesses = 3, 'collect', []
+    metadata = {'type': 'text', 'text': '<system-reminder>\n<total_tokens>123 tokens left</total_tokens>\n</system-reminder>'}
+    tool_result = {'type': 'tool_result', 'tool_use_id': 'actual-call',
+        'content': [{'type': 'text', 'text': framed}, metadata], 'cache_control': {'type': 'ephemeral'}}
+    request = {'messages': [{'role': 'user', 'content': [tool_result]}]}
+    assert value.claude_result(request, {'call_id': 'actual-call'}) == ('actual-public-handle', original)
+    assert value.witnesses[-1]['actual_native_tool_result'] == tool_result
+    assert value.witnesses[-1]['actual_native_tool_result'] is not tool_result
+    assert value.witnesses[-1]['complete_report'] == ordinary.content(original.encode())
+    single = json.loads(json.dumps(request))
+    single['messages'][0]['content'][0]['content'].pop()
+    assert value.claude_result(single, {'call_id': 'actual-call'}) == ('actual-public-handle', original)
+    reordered = json.loads(json.dumps(request))
+    reordered['messages'][0]['content'][0]['content'].reverse()
+    assert value.claude_result(reordered, {'call_id': 'actual-call'}) == ('actual-public-handle', original)
+    for blocks in ([metadata], [{'type': 'text', 'text': framed}, {'type': 'text', 'text': framed}, metadata],
+            [{'type': 'text', 'text': framed.replace('The report follows:\n', 'missing report:\n')}, metadata],
+            [{'type': 'image', 'data': 'unrecognized-native-body'}, {'type': 'text', 'text': framed}]):
+        malformed = json.loads(json.dumps(request))
+        malformed['messages'][0]['content'][0]['content'] = blocks
+        rejected(lambda: value.claude_result(malformed, {'call_id': 'actual-call'}))
+    errored = json.loads(json.dumps(request))
+    errored['messages'][0]['content'][0]['is_error'] = True
+    rejected(lambda: value.claude_result(errored, {'call_id': 'actual-call'}))
+    duplicate = json.loads(json.dumps(request))
+    duplicate['messages'][0]['content'].append(tool_result)
+    rejected(lambda: value.claude_result(duplicate, {'call_id': 'actual-call'}))
+    rejected(lambda: value.claude_result(request, {'call_id': 'foreign-call'}))
+    value.current_handle, value.current_label = 'actual-public-handle', 'collector'
+    value.dispatches = {'collector': {'context': {'assignment_content': {'sha256': 'original-assignment'}}}}
+    value.reports = {'original-assignment': original}
+    value.current_report = value.claude_result(request, {'call_id': 'actual-call'})[1]
+    value.check_report_bytes()
+    truncated = json.loads(json.dumps(request))
+    truncated['messages'][0]['content'][0]['content'][0]['text'] = framed.replace('  "quoted" 界🙂\n  ', '  "quoted" 界\n  ')
+    value.current_report = value.claude_result(truncated, {'call_id': 'actual-call'})[1]
+    rejected(value.check_report_bytes)
+
+
+def ownerless_mcp_fixture_offline() -> None:
+    from run_native_caller_pipeline import InteractionResponses
+    with tempfile.TemporaryDirectory(prefix='dg86-mcp-offline-', dir='/tmp') as temporary:
+        fixture = InteractionResponses(Path(temporary).resolve(), max_mcp_requests=3, protected_canary='offline-protected-question')
+        try:
+            connection = HTTPConnection('127.0.0.1', fixture.mcp_http.server_port, timeout=3)
+            request = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-03-26'}}
+            connection.request('POST', '/mcp', json.dumps(request), {'Content-Type': 'application/json'})
+            assert json.loads(connection.getresponse().read())['result']['capabilities'] == {'tools': {}}
+            connection.close()
+            call = HTTPConnection('127.0.0.1', fixture.mcp_http.server_port, timeout=3)
+            call.request('POST', '/mcp', json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': 'ask', 'arguments': {}}}), {'Content-Type': 'application/json'})
+            response = call.getresponse()
+            assert response.readline() == b'event: message\n'
+            elicitation = json.loads(response.readline().removeprefix(b'data: '))
+            assert elicitation['method'] == 'elicitation/create' and elicitation['params']['message'] == 'offline-protected-question'
+            response.readline()
+            decision = {'jsonrpc': '2.0', 'id': elicitation['id'], 'result': {'action': 'decline', 'content': None}}
+            answer = HTTPConnection('127.0.0.1', fixture.mcp_http.server_port, timeout=3)
+            answer.request('POST', '/mcp', json.dumps(decision), {'Content-Type': 'application/json'})
+            assert answer.getresponse().status == 202
+            answer.close()
+            returned = response.read(65536)
+            assert b'Input decision received.' in returned and b'offline-protected-question' not in returned
+            call.close()
+            assert fixture.mcp_requests == 3 and fixture.mcp_decision == 'decline' and fixture.mcp_response == decision
+            extra = HTTPConnection('127.0.0.1', fixture.mcp_http.server_port, timeout=3)
+            extra.request('POST', '/mcp', '{}', {'Content-Type': 'application/json'})
+            assert extra.getresponse().status == 400 and fixture.failure == 'mcp_request_budget_exceeded'
+            extra.close()
+        finally:
+            fixture.close()
+
+
+def production_return_protocol_offline() -> None:
+    import contextlib
+    import threading
+    import run_native_production_host as production
+    from run_native_host_invocation_fixture import ProbeFailure
+    from run_native_workspace_policy_fixture import ProbeCheckFailure, terminal_output
+    for value in ({"permissions": {}, "scope": "turn"},
+                  '{"permissions":{"network":null,"file_system":null},"scope":"turn"}',
+                  {"permissions": {"network": {}, "file_system": None}, "scope": "turn"}):
+        original = json.loads(value) if isinstance(value, str) else value
+        assert production.checked_permission_decline(value) == original
+    for invalid in ('not JSON', '{"permissions":{},"scope":"turn","scope":"session"}',
+                    {"permissions": {}, "scope": "session"}, {"permissions": {}, "scope": "turn", "error": "denied"},
+                    {"permissions": {"network": {"enabled": True}}, "scope": "turn"},
+                    {"permissions": {"file_system": {"read": ["/private"]}}, "scope": "turn"},
+                    {"permissions": {"foreign": None}, "scope": "turn"},
+                    {"permissions": None, "scope": "turn"}):
+        rejected(lambda: production.checked_permission_decline(invalid))
+    error = ProbeCheckFailure("native_terminal_output_unverified", {"protected": "never publish"})
+    assert production.fixture_failure(error) == "native_terminal_output_unverified"
+    assert production.fixture_failure(ProbeCheckFailure("unlisted private label")) == "native_probe_check_failed"
+    try:
+        terminal_output({"session_id": 72572, "output": ""})
+    except ProbeCheckFailure as error:
+        assert production.fixture_failure(error) == "native_terminal_output_unverified"
+    else:
+        raise AssertionError("running native session became terminal evidence")
+    with tempfile.TemporaryDirectory(prefix="production-return-", dir=os.environ["TMPDIR"]) as temporary:
+        root = Path(temporary)
+        (root / "input.json").write_text(json.dumps({"scenario": "reconnect"}))
+        value = object.__new__(production.Responses)
+        value.root, value.posts, value.calls, value.pending, value.returns = root, 3, 1, {}, []
+        extra = {"schema": production.CONTROL, "action": "inspect", "selection_ref": "original-selection",
+                 "view": {"kind": "structured_output"}, "range": {"kind": "start", "offset": 0}}
+        value.extra_calls = Mock(return_value=[extra])
+        tools = [{"name": "mcp__dolgorae__specialist_consumer", "input_schema": {"type": "object"}}]
+        events = value.claude_events({"model": "fixture", "tools": tools},
+            {"type": "tool_use", "id": "original-call", "name": "mcp__dolgorae__specialist_native", "input": {}},
+            {"type": "input_json_delta", "partial_json": "{}"})
+        uses = [event["content_block"] for event in events if event["type"] == "content_block_start"]
+        assert len(uses) == 2 and uses[1]["name"] == tools[0]["name"]
+        assert value.pending[uses[1]["id"]] == extra
+        rejected(lambda: value.claude_events({"model": "fixture", "tools": []}, uses[0], {}))
+        rejected(lambda: value.claude_events({"model": "fixture", "tools": tools + tools}, uses[0], {}))
+        (root / "input.json").write_text(json.dumps({"scenario": "Rfreshobservation"}))
+        value = object.__new__(production.Responses)
+        value.root, value.posts, value.executor_posts = root, 1, 0
+        value.lock = threading.Lock()
+        value.complete, value.budget = None, production.trace("Rfreshobservation")
+        calls = []
+        def collect(data, call_id, native_calls):
+            calls.extend(native_calls)
+            return {"type": "custom_tool_call", "input": "not executed"}
+        with patch.object(production, "code_call", collect):
+            value.executor({"input": []})
+        assert calls[0][2] == {"cmd": "cat file.txt", "yield_time_ms": 30000, "shell": "/bin/sh", "login": False}
+        pending = custom_result("executor-evidence", {"executor-evidence": {"session_id": 72572, "output": ""}})
+        try:
+            value.executor(pending)
+        except ProbeCheckFailure as error:
+            assert error.kind == "native_terminal_output_unverified" and value.executor_posts == 2
+        else:
+            raise AssertionError("pending tool result supplied final evidence")
+        rejected(lambda: value.executor(pending))
+        archive = root / "selected.tar"; archive.write_bytes(b"not opened")
+        (root / "podway").write_bytes(b"not executed")
+        arguments = ["production", "--binary", str(root / "binary"), "--driver", str(root / "driver"),
+            "--codex", str(root / "codex"), "--claude", str(root / "claude"), "--podway", str(root / "podway"),
+            "--podway-archive", str(archive), "--codex-model", "fixture", "--claude-model", "fixture",
+            "--unsupported-peer-producer", str(root / "podway"),
+            "--executor-model", "fixture", "--scratch", str(root), "--hosts", "claude", "--rows", "initialK", "replay"]
+        with patch.object(production.sys, "argv", arguments), patch.dict(os.environ, {production.OPT_IN: "1"}), \
+                patch.object(production, "PodwayDistribution"), \
+                patch.object(production, "qualify", side_effect=[ProbeFailure("native_resumed_process_failed"), {"passed": True}]) as qualify:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                assert production.main() == 1
+            rows = json.loads(output.getvalue())["rows"]
+            assert len(rows) == 2 and rows[0]["host"] == "claude" and rows[0]["row"] == "initialK"
+            assert rows[0]["passed"] is False and rows[1]["passed"] is True and qualify.call_count == 2
+        with patch.object(production.sys, "argv", arguments), patch.dict(os.environ, {production.OPT_IN: "1"}), \
+                patch.object(production, "PodwayDistribution", side_effect=ValueError("invalid global contract")), \
+                patch.object(production, "qualify") as qualify:
+            rejected(production.main)
+            assert qualify.call_count == 0
+
+
+def production_advertisement_offline() -> None:
+    import copy
+    import tomllib
+    from run_native_production_host import codex_host_config, native_tool, trace
+    namespace = {'type': 'namespace', 'name': 'mcp__dolgorae', 'tools': [
+        {'type': 'function', 'name': name, 'parameters': {'type': 'object'}}
+        for name in ('specialist_native', 'specialist_consumer')]}
+    request = {'input': [code_advertisement()]}
+    rejected(lambda: native_tool(request, 'specialist_native'))
+    request['input'][0]['tools'].append(namespace)
+    for name in ('specialist_native', 'specialist_consumer'):
+        assert native_tool(request, name) == (name, 'mcp__dolgorae')
+        assert native_tool({'tools': [namespace]}, name) == (name, 'mcp__dolgorae')
+        flat = {'name': 'mcp__dolgorae__' + name, 'input_schema': {'type': 'object'}}
+        assert native_tool({'tools': [flat]}, name) == (flat['name'], None)
+        wrapped = {'type': 'function', 'function': {'name': flat['name'], 'parameters': {'type': 'object'}}}
+        assert native_tool({'tools': [wrapped]}, name) == (flat['name'], None)
+    duplicate = copy.deepcopy(request)
+    duplicate['tools'] = [namespace]
+    rejected(lambda: native_tool(duplicate, 'specialist_native'))
+    duplicate = copy.deepcopy(request)
+    duplicate['input'].append(copy.deepcopy(request['input'][0]))
+    rejected(lambda: native_tool(duplicate, 'specialist_native'))
+    foreign = copy.deepcopy(namespace)
+    foreign['name'] = 'mcp__foreign'
+    rejected(lambda: native_tool({'tools': [foreign]}, 'specialist_native'))
+    for name in ('specialist_native', 'prefix_specialist_native', 'mcp__foreign__specialist_native', 'mcp__dolgorae__prefix_specialist_native'):
+        rejected(lambda: native_tool({'tools': [{'name': name, 'input_schema': {'type': 'object'}}]}, 'specialist_native'))
+    malformed = copy.deepcopy(namespace)
+    del malformed['tools'][0]['parameters']
+    rejected(lambda: native_tool({'tools': [malformed]}, 'specialist_native'))
+    rejected(lambda: native_tool({'input': [{'type': 'message', 'role': 'user', 'tools': [namespace]}]}, 'specialist_native'))
+    config = tomllib.loads(codex_host_config('http://127.0.0.1:12345', 'fixture-model', ['fixture.py', '--proxy', '/private/tmp/owned-fixture']))
+    assert config['features'] == {'hooks': True, 'code_mode': {'direct_only_tool_namespaces': ['mcp__dolgorae']}}
+    server = config['mcp_servers']['dolgorae']
+    assert server['required'] is True and server['args'] == ['fixture.py', '--proxy', '/private/tmp/owned-fixture']
+    assert server['env'] == {'DOLGORAE_RUN_NATIVE_PRODUCTION_HOST': '1'}
+    assert server['tools'] == {'specialist_native': {'approval_mode': 'approve'}, 'specialist_consumer': {'approval_mode': 'approve'}}
+    provider = config['model_providers']['production_host']
+    assert provider['base_url'] == 'http://127.0.0.1:12345/v1' and provider['requires_openai_auth'] is False
+    assert provider['request_max_retries'] == provider['stream_max_retries'] == 0
+    budget = trace('initialK')
+    assert (budget['deadline_seconds'], budget['combined_post_limit'], budget['delivery_limit'], budget['executor_posts']) == (90, 8, 32, 0)
+
+
+def production_procedure_offline() -> dict[str, bytes]:
+    import hashlib
+    import time
+    import run_native_production_host as production
+    candidate = {'role_snapshot_digest': 'sha256:' + 'a' * 64}
+    generated = {}
+    with tempfile.TemporaryDirectory(prefix='dolgorae-procedure-', dir='/tmp') as temporary:
+        for index, scenario in enumerate((*production.CONNECTED, 'reconnect', 'backendrestart', 'Sloss/duplicate')):
+            root = Path(temporary).resolve() / str(index)
+            root.mkdir()
+            (root / 'workspace').mkdir()
+            executable = root / 'podway-fixture'
+            executable.write_bytes(b'offline command boundary; never executable')
+            digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+            (root / 'input.json').write_text(json.dumps({'scenario': scenario, 'adapter_version': 'fixture'}))
+            calls = []
+            def command(argv, **kwargs):
+                calls.append(argv)
+                result = {'procedure_digest': 'fixture-digest', 'contract_manifest_digest': 'fixture-manifest',
+                          'session': {'id': 'fixture-session'}, 'current': {'attempt': {'attempt_id': 'fixture-attempt'}}}
+                return subprocess.CompletedProcess(argv, 0, json.dumps({'workspace': {'uuid': 'fixture-workspace'}, 'result': result}).encode(), b'')
+            with patch.object(production.subprocess, 'run', side_effect=command):
+                production.podway_fixture(root, executable, digest, candidate, {}, time.monotonic() + 30)
+            source = (root / 'workspace/.podway/procedures/native-host.yaml').read_bytes()
+            generated[scenario] = source
+            begin = next(argv[argv.index('begin') + 1:] for argv in calls if 'begin' in argv)
+            if scenario == 'consumer-fences':
+                assert source.count(b'\ngoal_tracking: true\n') == 1
+                expected = '6137c4e713904d6827955ccd9ae768e06b5bdbbd44155fc5f9a6a0a805026f61'
+                assert begin == ['--goal', 'Inspect the exact native fixture candidate', '--criterion',
+                                 'proof=Preserve original native evidence', '--idempotency-key', 'fixture-begin']
+            else:
+                # Original complete Procedure bytes, including source evidence,
+                # manual rework and after_accept, remain the known answers.
+                expected = ('4942783b87609819656577566b002273fc8cf39e7fd0fba407692231123b78d5' if scenario == 'consumer-release'
+                            else '7f80b5997e516aff2eb961bcac212006ea2db73dbc13c7a39dccda2b03db5fa1' if scenario in production.CONSUMER_ROWS
+                            else 'f8f59a6230b30bd85328b4bd8e4cca94899696524a7759e55f349abf8b32e149')
+                assert begin == ['--idempotency-key', 'fixture-begin']
+            assert hashlib.sha256(source).hexdigest() == expected
+            assert calls[1][-2:] == ['preview', '.podway/procedures/native-host.yaml']
+            start = next(argv for argv in calls if 'start' in argv)
+            assert start[start.index('--expect-procedure-digest') + 1] == 'fixture-digest'
+    return generated
+
+
+def production_source_response_barrier_offline():
+    import threading
+    import time
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+    import run_native_production_host as production
+    with tempfile.TemporaryDirectory(prefix="dolgorae-response-barrier-", dir="/tmp") as temporary:
+        root = Path(temporary).resolve()
+        (root / "input.json").write_text(json.dumps({"scenario":"consumer-group-gaps", "podway_archive":"unused-offline-input"}))
+        (root / "deadline").write_text(str(time.monotonic()+5))
+        peer = production.Responses(root, "codex")
+        def request(index):
+            body = json.dumps({"input":[{"role":"user","content":[{"type":"input_text","text":
+                f"TASK086_GROUP_SOURCE_{index} Inspect the original fixture evidence."}]}]}).encode()
+            call = urllib.request.Request(peer.base_url+"/executor/v1/responses", data=body,
+                headers={"Content-Type":"application/json"})
+            with urllib.request.urlopen(call, timeout=2) as response:
+                return response.read()
+        try:
+            with patch.object(production, "code_call", return_value={"type":"custom_tool_call", "input":"offline; never executed"}):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    held = pool.submit(request, 1)
+                    try:
+                        until = time.monotonic()+1
+                        while not (root / "unknown-post-observed").exists():
+                            assert time.monotonic() < until
+                            time.sleep(.005)
+                        assert not held.done()
+                        # The second source progresses while the first model reply is held.
+                        other = request(0)
+                        assert b"custom_tool_call" in other and not held.done()
+                    finally:
+                        (root / "release-source1-response").write_bytes(b"release")
+                    original = held.result(timeout=2)
+                    assert b"structured_findings_v1" in original
+                    import re
+                    assert set(re.findall(rb'"id":\s*"resp_production_(\d+)"', original)) == {b"1"}
+                    assert set(re.findall(rb'"id":\s*"resp_production_(\d+)"', other)) == {b"2"}
+            assert peer.executor_posts == 2 and peer.posts == 2 and peer.failure is None
+        finally:
+            peer.server.shutdown()
+            peer.server.server_close()
+            peer.thread.join(timeout=2)
+            assert not peer.thread.is_alive()
+
+
+def production_timings_offline():
+    import time
+    import run_native_production_host as production
+    with tempfile.TemporaryDirectory(prefix="dolgorae-timing-", dir="/tmp") as temporary:
+        root = Path(temporary).resolve()
+        (root / "deadline").write_text(str(time.monotonic()+10))
+        for site in ["prepare", "assign", "observe", "validation", "backend", "first_byte", "frame", "decode", "journal", "host"]:
+            production.timing(root, site, "ok", time.monotonic_ns(), 7)
+        path = root / "phase-timings.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [r["ordinal"] for r in rows] == list(range(1, 11))
+        assert all(set(r) == {"site", "outcome", "monotonic_ns", "elapsed_ns", "remaining_ns", "byte_count", "ordinal"} for r in rows)
+        assert all(r["elapsed_ns"] >= 0 and r["remaining_ns"] > 0 and r["byte_count"] == 7 for r in rows)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda _: production.timing(root, "backend", "ok", time.monotonic_ns()), range(16)))
+        concurrent_rows = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [r["ordinal"] for r in concurrent_rows] == list(range(1, 27))
+        before = path.read_bytes()
+        try:
+            production.timing(root, "secret-payload-canary", "ok", time.monotonic_ns())
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("unknown timing site admitted")
+        assert path.read_bytes() == before and b"secret-payload-canary" not in before
+        path.chmod(0o644)
+        try:
+            production.timing(root, "backend", "ok", time.monotonic_ns())
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("public timing sink admitted")
+        path.unlink()
+        target = root / "unrelated"
+        target.write_bytes(b"preserve")
+        path.symlink_to(target)
+        try:
+            production.timing(root, "backend", "ok", time.monotonic_ns())
+        except OSError:
+            pass
+        else:
+            raise AssertionError("symlink timing sink admitted")
+        assert target.read_bytes() == b"preserve"
+
+
+
+def nested_podway_builders_offline():
+    """Reach both actual nested builders; reject the old global selector."""
+    import argparse
+    import hashlib
+    import inspect
+    import run_native_aquarium_consumer as ordinary
+    import run_native_production_host as production
+
+    class PreviewReached(Exception):
+        pass
+
+    with tempfile.TemporaryDirectory(prefix="task086 builders 界 ", dir="/tmp") as temporary:
+        scratch = Path(temporary).resolve()
+        executable = scratch / "podway marker"
+        binary = scratch / "product marker"
+        executable.write_bytes(b"not executable")
+        binary.write_bytes(b"not executable")
+        facts = scratch / "producer.json"
+        facts.write_text(json.dumps({"schema": "dolgorae.native-producer-facts/v1",
+            "semantic_goal_pass": False, "identity": {"complete_result": {"original": True}},
+            "native_admitted_input": {"original": True}}))
+        criteria = scratch / "criteria.json"
+        criteria.write_text(json.dumps({k: k for k in ("mappings", "runtime", "recovery", "delivery")}))
+        for module, entry, closure_name in (
+            (production, production.qualify_direct_contract, "command"),
+            (ordinary, ordinary.qualify, "public"),
+        ):
+            calls, captured = [], []
+            stop = True
+
+            def run(argv, **kwargs):
+                if argv[0] == "/usr/bin/git":
+                    assert argv[:3] == ["/usr/bin/git", "init", "-q"]
+                    return subprocess.CompletedProcess(argv, 0, b"", b"")
+                if argv[0] == str(binary):
+                    assert argv[1:] == ["version", "--json"]
+                    return subprocess.CompletedProcess(argv, 0, b'{"version":"v0.1.3"}', b"")
+                assert argv[0] == str(executable) and argv[1] == "--contract-generation"
+                assert argv[2] in ("1", "2") and argv.count("--json") == 1
+                tail = argv[argv.index("--json") + 1:]
+                selected = "--worktree" in argv[:argv.index("--json")]
+                if tail[0] in ("procedure", "version", "help"):
+                    assert not selected, "procedure/version/help reject the old --worktree selector"
+                else:
+                    assert selected and argv[argv.index("--worktree") + 1] == str(kwargs["cwd"])
+                assert isinstance(argv, list) and kwargs["env"] is not None
+                assert 0 < kwargs["timeout"] <= 10
+                calls.append((list(argv), kwargs))
+                if stop and tail[:2] == ["procedure", "preview"]:
+                    frame = inspect.currentframe()
+                    while frame is not None and frame.f_code is not entry.__code__:
+                        frame = frame.f_back
+                    assert frame is not None
+                    captured.append(frame.f_locals[closure_name])
+                    raise PreviewReached
+                return subprocess.CompletedProcess(argv, 0,
+                    b'{"result":{"procedure_digest":"exact-digest"}}', b"")
+
+            distribution = Mock()
+            args = argparse.Namespace(binary=binary, driver=binary, podway=executable,
+                scratch=scratch, contract=distribution, producer_facts=[facts],
+                task_criteria=criteria, aquarium_archive=scratch / "unused archive",
+                podway_archive=scratch / "unused archive")
+            with patch.dict(os.environ, {production.OPT_IN: "1"}), \
+                 patch.object(module.subprocess, "run", side_effect=run), \
+                 patch.object(ordinary, "successor_aquarium_sources"), \
+                 patch.object(ordinary, "PodwayDistribution", return_value=distribution):
+                try:
+                    entry(args) if module is production else entry(args, "codex", "current")
+                except PreviewReached:
+                    pass
+                else:
+                    raise AssertionError("actual nested builder did not reach preview")
+                assert len(captured) == 1
+                assert calls[0][0][calls[0][0].index("--json") + 1] == "init"
+                assert calls[1][0][-2:] == ["preview", "procedure.json"]
+                stop = False
+                builder = captured[0]
+                workspace = calls[0][1]["cwd"]
+                path = "procedures/name with spaces 界.json"
+                generations = (1, 2) if module is production else (1,)
+                for generation in generations:
+                    invoke = (lambda *a: builder(workspace, *a, generation=generation)) if module is production else builder
+                    invoke("procedure", "preview", path)
+                    invoke("version", "--identity")
+                    invoke("start", "--procedure", path, "--expect-procedure-digest",
+                           "exact-digest", "--idempotency-key", "original-key")
+                    assert calls[-3][0][-1] == path
+                    assert calls[-2][0][-2:] == ["version", "--identity"]
+                    assert calls[-1][0][-6:] == ["--procedure", path, "--expect-procedure-digest",
+                                                 "exact-digest", "--idempotency-key", "original-key"]
+                    assert all(c[1]["cwd"] == workspace for c in calls[-3:])
+                    if module is production:
+                        invoke("help", "delegation.package")
+                        assert calls[-1][0][-2:] == ["help", "delegation.package"]
+                        assert "--worktree" not in calls[-1][0]
+                        assert calls[-1][1]["cwd"] == workspace
+                malformed = [str(executable), "--contract-generation", "1", "--worktree",
+                             str(workspace), "--json", "procedure", "preview", path]
+                try:
+                    run(malformed, cwd=workspace, env={}, timeout=1)
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError("offline boundary accepted malformed old argv")
+
+
+def task086_protected_returns_offline():
+    import native_task086
+    import run_native_production_host as production
+    header = {"schema": "dolgorae.native-specialist-response/v1", "ok": True}
+    request = {"schema": production.SCHEMA, "operation": "lookup_operation"}
+    result = {"content": [{"type": "text", "text": json.dumps(header)}], "isError": False}
+    with tempfile.TemporaryDirectory(prefix="task086-return-", dir="/tmp") as temporary:
+        root = Path(temporary)
+        (root / "tool-replies.jsonl").write_text(json.dumps({
+            "native_call_id": "actual-native-call", "request": request, "reply": {"result": result}}) + "\n")
+        value = object.__new__(native_task086.Responses)
+        value.root, value.host, value.protected_code_mode = root, "codex", True
+        value.outer, value.pending, value.delivery_offset = "outer-wrapper", {"logical-label": request}, 0
+        with patch.object(native_task086, "code_results", return_value={"logical-label": result}):
+            texts, error = value.returned_result({}, "logical-label")
+            assert texts == [result["content"][0]["text"]] and error is False
+        altered = {"content": [{"type": "text", "text": "different actual return"}]}
+        with patch.object(native_task086, "code_results", return_value={"logical-label": altered}):
+            rejected(lambda: value.returned_result({}, "logical-label"))
+
+
+def managed_dispatch_shutdown_order_offline() -> None:
+    with tempfile.TemporaryDirectory(prefix="managed-shutdown-", dir=os.environ["TMPDIR"]) as temporary:
+        value = object.__new__(probe.SuccessorResponses)
+        value.consumer_root = Path(temporary)
+        value.posts, value.writer_steps, value.pending, value.producer_only = 5, 0, True, True
+        order = []
+        value.managed_dispatch_finished = lambda: order.append("gateway-stopped")
+        with patch.object(probe.IntegratedResponses, "respond", return_value=[]):
+            assert value.respond({"input": []}) == []
+        assert order == [] and value.writer_steps == 0
+        value.posts = 6
+        events = [{"type": "response.output_item.done", "item": {"type": "message",
+            "role": "assistant", "content": [{"type": "output_text", "text": "original final"}]}}]
+
+        def completed(request):
+            value.pending = False
+            order.append("native-write-returned")
+            return events
+
+        with patch.object(probe.IntegratedResponses, "respond", side_effect=completed):
+            returned = value.respond({"input": []})
+        assert order == ["native-write-returned", "gateway-stopped"]
+        assert value.writer_steps == 1
+        assert returned[0]["item"]["content"][0]["text"] == value.managed_original.decode()
+
+
+def managed_primary_await_transport_offline() -> None:
+    value = object.__new__(probe.SuccessorResponses)
+    value.posts, value.primary_phase = 4, "assignment"
+    value.primary_carrier_request = {"input": [{"type": "additional_tools", "tools": [
+        {"name": "functions", "tools": [{"type": "custom", "name": "exec",
+            "format": {"type": "grammar"}, "description": "### `dolgorae_specialists_native`"}]}]}]}
+    body = {"operation": "await_specialist_task", "timeout_seconds": 60,
+            "member_ref": "original-member", "task_ref": "original-task"}
+    events = value.primary_calls([("dolgorae_specialists_native", body, None)])
+    item = events[1]["item"]
+    directive, code = item["input"].split("\n", 1)
+    assert directive == '// @exec: {"yield_time_ms": 65000}'
+    assert code.count("await tools.dolgorae_specialists_native(") == 1
+    assert json.loads(code.split("await tools.dolgorae_specialists_native(", 1)[1].split(")", 1)[0]) == body
+    assert len(value.primary_pending) == 1
+    assert next(iter(value.primary_pending.values())) == (body, None)
+    running = {"input": [{"type": "custom_tool_call_output", "call_id": value.primary_outer_call,
+        "output": "Script running with cell ID 3\nWall time 31.0 seconds\nOutput:\n"}]}
+    rejected(lambda: value.primary_return(running, next(iter(value.primary_pending))))
+    events = value.primary_calls([("dolgorae_specialists_native", {"operation": "collect_specialist_task"}, None)])
+    assert not events[1]["item"]["input"].startswith("// @exec:")
+
+
+def managed_primary_contract_scope_offline() -> None:
+    with tempfile.TemporaryDirectory(prefix="managed-contract-", dir=os.environ["TMPDIR"]) as temporary:
+        root = Path(temporary).resolve()
+        formal = root / "aquarium-source/references/formal-agent-orchestration-v1.md"
+        formal.parent.mkdir(parents=True)
+        formal.write_text("Original formal Primary contract.\n")
+        reference = "018f0000-0000-7000-8000-000000000001"
+        digest = "sha256:" + "a" * 64
+        phase = {"phase": "spawn", "root_run": reference, "input": {"candidate": {
+            "provisioning_ref": reference, "agent_configuration_digest": digest,
+            "role_snapshot_digest": digest}}}
+
+        def response(producer_only: bool) -> probe.SuccessorResponses:
+            value = object.__new__(probe.SuccessorResponses)
+            value.lock = threading.Lock()
+            value.posts = 0
+            value.consumer_root = Path(tempfile.mkdtemp(prefix="case-", dir=root))
+            selected = value.consumer_root / "aquarium-source/references" / formal.name
+            selected.parent.mkdir(parents=True)
+            selected.write_bytes(formal.read_bytes())
+            value.producer_only = producer_only
+            value.primary_calls = Mock(side_effect=lambda calls: calls)
+            return value
+
+        def request(include_formal: bool) -> dict:
+            instruction = "native-primary-spawn\nDelivery-only producer instruction."
+            if include_formal:
+                instruction += "\n" + formal.read_text()
+            return {"instructions": "\n".join((probe.CORE_PREFIX, probe.COMMON, probe.GENERAL, probe.PROFILE)),
+                    "input": [{"type": "message", "role": "user", "content": [
+                        {"type": "input_text", "text": instruction}]}]}
+
+        for producer_only in (True, False):
+            value = response(producer_only)
+            calls = value.primary_response(request(not producer_only), phase)
+            assert len(calls) == 1
+            assert calls[0][1]["operation"] == "spawn_specialist"
+            assert calls[0][1]["scope_ref"] == reference
+            value.primary_calls.assert_called_once()
+            for changed in ("ambient", "missing-role"):
+                invalid = request(not producer_only)
+                if changed == "ambient":
+                    invalid["instructions"] += "\n" + probe.AMBIENT[0]
+                else:
+                    invalid["instructions"] = invalid["instructions"].replace(probe.GENERAL, "")
+                value = response(producer_only)
+                rejected(lambda: value.primary_response(invalid, phase))
+                value.primary_calls.assert_not_called()
+        value = response(False)
+        rejected(lambda: value.primary_response(request(False), phase))
+        value.primary_calls.assert_not_called()
+
+
 def main() -> int:
     from test_native_task085 import run_offline
     run_offline()
+    nested_podway_builders_offline()
+    task086_protected_returns_offline()
+    production_source_response_barrier_offline()
+    production_timings_offline()
+    production_procedure_offline()
+    production_advertisement_offline()
+    production_return_protocol_offline()
+    ordinary_native_consumer_offline()
+    ownerless_mcp_fixture_offline()
+    complete_consumer_pages_offline()
+    managed_primary_contract_scope_offline()
+    managed_primary_await_transport_offline()
+    managed_dispatch_shutdown_order_offline()
     checked = validator(probe.PROTOCOL, "dolgorae-collaboration-tool-v1.schema.json")
     for name, field, value in (("collaboration-read-request.invalid-limit.json", "limit", 1),
                                ("collaboration-submit.invalid-source-injection.json", "source_run_id", None)):
@@ -356,6 +1084,7 @@ def main() -> int:
     collaboration_component_offline()
     caller_policy_writer_component_offline()
     collaboration_cleanup_timeout_preserves_first_failure()
+    successor_shutdown_failure_still_closes_fixture()
     root = Path("/owned-integrated-fixture")
     effects = []
     retirement = subprocess.CompletedProcess([], 0, '{"retained_profiles_retired":true}', "")
@@ -599,6 +1328,7 @@ def main() -> int:
             result.assignment_seen = threading.Event()
             result.assignment_seen.set()
             result.writer_steps = 0
+            result.managed_dispatch_finished = Mock()
             result.managed_task = {"task_ref": reference, "accepted_task_digest": digest}
             return result
 
@@ -629,6 +1359,7 @@ def main() -> int:
             rejected(lambda: value.respond(custom_result("foreign", {value.call_id: {"exit_code": 0, "output": "written\n"}})))
             value.respond(custom_result(value.call_id, {value.call_id: {"exit_code": 0, "output": "written\n"}}))
         assert value.steps == 2 and not value.pending
+        value.managed_dispatch_finished.assert_called_once_with()
         assert value.ordinary_handoff["schema"] == "aquarium.executor-handoff/v3"
         assert value.ordinary_handoff["gaps"] == assignment["gaps"]
         assert value.ordinary_handoff["procedure"] is None

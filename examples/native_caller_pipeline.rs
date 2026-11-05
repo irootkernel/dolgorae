@@ -26,21 +26,27 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 fn record_failure(root: &Path, stage: &str, error: &dolgorae::machine::MachineError) {
-    let bytes = serde_json::to_vec(&json!({
+    let mut bytes = serde_json::to_vec(&json!({
         "schema": "dolgorae.native-caller-pipeline-diagnostic/v1",
         "stage": stage,
         "error": error,
     }))
     .unwrap();
-    if bytes.len() <= 65_536 {
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(root.join(format!("failure-{}.json", Uuid::now_v7())))
-            .and_then(|mut file| file.write_all(&bytes))
-            .expect("private failure diagnostic could not be retained");
+    if bytes.len() > 65_536 {
+        bytes = serde_json::to_vec(&json!({
+            "schema":"dolgorae.native-caller-pipeline-diagnostic/v1", "stage":stage,
+            "error_omitted":{"code":error.code,"bytes":bytes.len(),
+                "sha256":dolgorae::jcs::sha256_hex(&bytes)},
+        }))
+        .unwrap();
     }
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join(format!("failure-{}.json", Uuid::now_v7())))
+        .and_then(|mut file| file.write_all(&bytes))
+        .expect("private failure diagnostic could not be retained");
 }
 
 fn fail(root: &Path, stage: &str, error: dolgorae::machine::MachineError) -> ! {
@@ -75,6 +81,18 @@ fn start(
     key: &str,
     reader: bool,
 ) -> Result<dolgorae::semantic::RunStartReceipt, dolgorae::machine::MachineError> {
+    CoreSemanticService.start_caller_run(
+        start_input(view, profile, key, reader),
+        CredentialCarrier::open_path(credential).unwrap(),
+    )
+}
+
+fn start_input(
+    view: &WorkspaceView,
+    profile: &str,
+    key: &str,
+    reader: bool,
+) -> dolgorae::run::CallerRunStartRequest {
     let mut input: Value = serde_json::from_str(include_str!(
         "../docs/protocol/examples/workspace-execution-start-defaults.valid.json"
     ))
@@ -86,10 +104,254 @@ fn start(
         input["access"] = json!("read-only");
         input["role"] = json!("reviewer");
     }
-    CoreSemanticService.start_caller_run(
-        serde_json::from_value(input).unwrap(),
-        CredentialCarrier::open_path(credential).unwrap(),
+    serde_json::from_value(input).unwrap()
+}
+
+fn uncertain_start_run(error: &dolgorae::machine::MachineError) -> Option<Uuid> {
+    if serde_json::to_vec(error).ok()?.len() > 65_536
+        || error.code != "TRANSPORT_FAILURE"
+        || error.retryable
+        || error.details.as_object()?.len() != 4
+        || error.details["acceptance"] != "uncertain"
+        || error.details["stage"] != "correlate"
+        || error.details.get("request_id") != Some(&Value::Null)
+    {
+        return None;
+    }
+    Uuid::parse_str(error.details["run_id"].as_str()?)
+        .ok()
+        .filter(|run| run.get_version_num() == 7)
+}
+
+fn startup_census_refusal(log: &str) -> Option<Value> {
+    let mut refusals = log.lines().filter_map(|line| {
+        let value: Value = serde_json::from_str(line).ok()?;
+        (value["schema"] == "dolgorae.writer-census-failure/v1").then_some(value)
+    });
+    let refusal = refusals.next()?;
+    if refusals.next().is_some()
+        || refusal["error"] != "InvalidIdentity"
+        || !matches!(
+            refusal["details"]["predicate"].as_str(),
+            Some("dedicated_census_membership" | "worker_scope")
+        )
+    {
+        return None;
+    }
+    Some(refusal)
+}
+
+fn default_feature_start(
+    root: &Path,
+    view: &WorkspaceView,
+    credential: &Path,
+    state_root: &Path,
+) -> (dolgorae::semantic::RunStartReceipt, Value) {
+    use dolgorae::domain::{CallerWorkspaceAccess, ExecutionLane};
+    use dolgorae::writer::{WriterAuthorityState, WriterStore};
+
+    let error = match start(view, credential, "fixture-a", "first", false) {
+        Ok(receipt) => {
+            assert!(!receipt.exact_replay);
+            let observation = json!({"path":"first_attempt", "initial_error":null,
+                "recovery":null, "run_id":receipt.snapshot.manifest.run_id,
+                "thread_id":receipt.snapshot.projection.thread_id});
+            return (receipt, observation);
+        }
+        Err(error) => error,
+    };
+    record_failure(root, "initial default-feature startup", &error);
+    let Some(run_id) = uncertain_start_run(&error) else {
+        fail(root, "ineligible default-feature startup", error);
+    };
+    // These retained reads only select the existing recovery entrypoint. Actual
+    // Controller, policy and workload proof still belongs to the service/Worker.
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    assert_eq!(fs::read_dir(state_root.join("runs")).unwrap().count(), 1);
+    let manifest = store.load_manifest(run_id).unwrap();
+    let manifest_path = state_root
+        .join("runs")
+        .join(run_id.to_string())
+        .join("manifest.json");
+    let manifest_bytes = fs::read(&manifest_path).unwrap();
+    assert_eq!(manifest.schema_version, 3);
+    assert_eq!(
+        manifest.requested_access,
+        Some(CallerWorkspaceAccess::Writable)
+    );
+    assert_eq!(manifest.execution_lane, ExecutionLane::Dedicated);
+    let carrier = CredentialCarrier::open_path(credential).unwrap();
+    assert_eq!(
+        dolgorae::controller::binding_from_carrier(
+            &carrier,
+            manifest.controller.identity.generation
+        )
+        .unwrap(),
+        manifest.controller
+    );
+    let request = start_input(view, "fixture-a", "first", false)
+        .resolve()
+        .unwrap();
+    let request_digest = dolgorae::run::caller_start_request_digest(
+        &request,
+        &view.canonical_path,
+        &manifest.controller,
     )
+    .unwrap();
+    let reservation =
+        dolgorae::run::StartReservationStore::new(SystemWorkspacePlatform, state_root)
+            .load_caller("first", &request_digest)
+            .unwrap()
+            .unwrap();
+    assert_eq!(reservation.run_id, run_id);
+    assert_eq!(reservation.accepted_intent.request, request);
+    assert!(
+        store
+            .load_caller_start_receipt(run_id, &reservation.normalized_identity_sha256)
+            .unwrap()
+            .is_none()
+    );
+    let projection = store.load_state_projection(run_id).unwrap();
+    assert_eq!(projection.lifecycle, RunLifecycle::Idle);
+    assert_eq!(projection.access, Access::Write);
+    assert!(projection.active_turn_id.is_none() && projection.latest_turn_id.is_none());
+    assert!(projection.pending_requests.is_empty());
+    let thread = projection.thread_id.clone().unwrap();
+    let runtime_path =
+        dolgorae::worker::runtime_record_path(&dolgorae::worker::runtime_root(state_root), run_id)
+            .unwrap();
+    let runtime = read_runtime_record(&runtime_path, DarwinSystem.current_uid()).unwrap();
+    assert_eq!(runtime.identity.run_id, run_id);
+    assert_eq!(runtime.identity.run_generation, projection.run_generation);
+    assert_eq!(
+        classify_worker_identity(&runtime),
+        ProcessIdentityVerdict::Match
+    );
+    assert!(!runtime.control_recovery_required);
+    let dedicated = runtime.dedicated_server_identity.as_ref().unwrap();
+    assert_eq!(
+        dolgorae::worker::classify_dedicated_server_identity(dedicated),
+        ProcessIdentityVerdict::Match
+    );
+    let writer_store = WriterStore::new(state_root, &view.workspace_id, DarwinSystem.current_uid());
+    let writer = writer_store.load().unwrap();
+    assert_eq!(writer.state, WriterAuthorityState::BlockedUnknown);
+    assert_eq!(writer.transaction_id, Some(run_id));
+    assert_eq!(
+        writer.recovery_action.as_deref(),
+        Some("reverify_writer_policy")
+    );
+    assert!(
+        json!(writer)
+            .get("generation_release")
+            .is_none_or(Value::is_null)
+    );
+    let mut holder = WriterStore::holder(
+        run_id,
+        manifest.profile.profile_name.clone(),
+        &manifest.controller,
+        runtime.identity.run_generation,
+        manifest.profile_capability_snapshot.server_key.clone(),
+        runtime.app_server_epoch.unwrap(),
+        Some(thread.clone()),
+        RunLifecycle::Idle,
+    );
+    holder.last_event_cursor = projection.last_event_cursor.clone();
+    assert_eq!(writer.holder.as_ref(), Some(&holder));
+    let log = fs::read_to_string(
+        state_root
+            .join("runs")
+            .join(run_id.to_string())
+            .join(format!(
+                "dedicated-server-{}.log",
+                runtime.identity.run_generation
+            )),
+    )
+    .unwrap();
+    let census =
+        startup_census_refusal(&log).expect("one eligible original census refusal required");
+
+    // One explicit recovery, before replay. No delay, policy update or new Run.
+    let recovered = mutation(
+        view,
+        credential,
+        run_id,
+        RunMutationOperation::Recover,
+        "explicit default-feature recovery",
+    );
+    let recovery_result = json!({"run_id":recovered.manifest.run_id,
+        "projection":recovered.projection,"writer":recovered.writer});
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("default-startup-recovery-result.json"))
+        .unwrap()
+        .write_all(&serde_json::to_vec(&recovery_result).unwrap())
+        .unwrap();
+    check_policy(state_root, &recovered, Access::Write, &thread);
+    assert_eq!(recovered.writer.state, WriterAuthorityState::Active);
+    assert_eq!(recovered.writer.writer_generation, writer.writer_generation);
+    assert!(recovered.writer.transaction_id.is_none());
+    assert_eq!(recovered.manifest, manifest);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_bytes);
+    assert_eq!(
+        read_runtime_record(&runtime_path, DarwinSystem.current_uid()).unwrap(),
+        runtime
+    );
+    let replay = start(view, credential, "fixture-a", "first", false)
+        .unwrap_or_else(|error| fail(root, "explicit default-feature replay", error));
+    let replay_result = json!({"exact_replay":replay.exact_replay,
+        "manifest":replay.snapshot.manifest,"projection":replay.snapshot.projection});
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("default-startup-replay-result.json"))
+        .unwrap()
+        .write_all(&serde_json::to_vec(&replay_result).unwrap())
+        .unwrap();
+    assert!(replay.exact_replay);
+    assert_eq!(replay.snapshot.manifest, manifest);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_bytes);
+    assert_eq!(
+        replay.snapshot.projection.run_generation,
+        projection.run_generation
+    );
+    check_policy(state_root, &replay.snapshot, Access::Write, &thread);
+    assert_eq!(
+        read_runtime_record(&runtime_path, DarwinSystem.current_uid()).unwrap(),
+        runtime
+    );
+    assert_eq!(
+        classify_worker_identity(&runtime),
+        ProcessIdentityVerdict::Match
+    );
+    assert_eq!(
+        dolgorae::worker::classify_dedicated_server_identity(dedicated),
+        ProcessIdentityVerdict::Match
+    );
+    assert_eq!(fs::read_dir(state_root.join("runs")).unwrap().count(), 1);
+    let receipt = store
+        .load_caller_start_receipt(run_id, &reservation.normalized_identity_sha256)
+        .unwrap()
+        .expect("replay must publish the original bound receipt");
+    assert_eq!(receipt.run_id, run_id);
+    assert_eq!(receipt.original_thread_id, thread);
+    assert_eq!(receipt.run_generation, projection.run_generation);
+    let observation = json!({"path":"recovered", "initial_error":error, "run_id":run_id,
+        "thread_id":thread, "recovery":{"operation":"Recover", "census_refusal":census,
+        "request_sha256":request_digest, "reservation_sha256":reservation.normalized_identity_sha256,
+        "run_generation":projection.run_generation, "writer_generation":writer.writer_generation,
+        "writer_state":recovered.writer.state, "policy_access":Access::Write,
+        "worker_identity":runtime.identity, "dedicated_identity":dedicated,
+        "manifest_sha256":dolgorae::jcs::sha256_hex(&manifest_bytes),
+        "manifest_unchanged":true, "worker_identity_unchanged":true,
+        "dedicated_identity_unchanged":true, "runs":1,
+        "receipt":receipt,
+        "replay":{"exact_replay":replay.exact_replay, "run_id":replay.snapshot.manifest.run_id,
+        "thread_id":replay.snapshot.projection.thread_id}}});
+    (replay, observation)
 }
 
 fn check_policy(state_root: &Path, snapshot: &RunSnapshot, access: Access, thread: &str) {
@@ -185,13 +447,14 @@ fn inject_writer_guard(state_root: &Path, workspace_id: &str, run_id: Uuid) {
         .unwrap();
 }
 
-fn observed_shell_snapshot(socket: &Path, home: &str, thread: Option<&str>) -> Value {
+fn observed_startup_features(socket: &Path, home: &str, thread: Option<&str>) -> Value {
     let mut rpc =
         dolgorae::app_server::JsonRpcConnection::connect(socket, Duration::from_secs(5)).unwrap();
     let initialized = rpc.request("initialize", json!({"clientInfo":{"name":"dolgorae-m6-observer","version":"1"},"capabilities":{"experimentalApi":false}})).unwrap();
     assert_eq!(initialized["codexHome"], home);
     rpc.notify("initialized", json!({})).unwrap();
     let mut cursor = Value::Null;
+    let mut observed = serde_json::Map::new();
     for _ in 0..16 {
         let page = rpc
             .request(
@@ -200,24 +463,31 @@ fn observed_shell_snapshot(socket: &Path, home: &str, thread: Option<&str>) -> V
             )
             .unwrap();
         for feature in page["data"].as_array().unwrap() {
-            if feature["name"] == "shell_snapshot" {
+            if matches!(feature["name"].as_str(), Some("shell_snapshot" | "plugins")) {
                 assert_eq!(
-                    feature["enabled"], false,
-                    "native effective feature must be disabled"
+                    feature["enabled"],
+                    feature["name"] == "plugins",
+                    "native effective feature disagrees with default-feature qualification"
                 );
-                return feature.clone();
+                observed.insert(
+                    feature["name"].as_str().unwrap().to_owned(),
+                    feature.clone(),
+                );
             }
+        }
+        if observed.len() == 2 {
+            return Value::Object(observed);
         }
         cursor = page["nextCursor"].clone();
         assert!(
             !cursor.is_null(),
-            "native shell_snapshot feature observation missing"
+            "native startup feature observation missing"
         );
     }
     panic!("native feature pagination exceeded bound");
 }
 
-fn default_feature_observation(root: &Path, snapshot: &RunSnapshot) -> Value {
+fn default_feature_observation(root: &Path, snapshot: &RunSnapshot, startup: Value) -> Value {
     use sha2::{Digest as _, Sha256};
     let binding = snapshot.manifest.global_profile_binding.as_ref().unwrap();
     binding.validate_for_recovery().unwrap();
@@ -280,7 +550,7 @@ fn default_feature_observation(root: &Path, snapshot: &RunSnapshot) -> Value {
             .any(|window| window == expected),
         "actual process argv differs from immutable launch"
     );
-    let shared_feature = observed_shell_snapshot(
+    let shared_features = observed_startup_features(
         Path::new(state["socket_path"].as_str().unwrap()),
         &launch.canonical_codex_home,
         None,
@@ -295,7 +565,7 @@ fn default_feature_observation(root: &Path, snapshot: &RunSnapshot) -> Value {
     let session = bootstrap.session.as_ref().unwrap();
     let dedicated = session.dedicated_server.as_ref().unwrap();
     assert!(dedicated.argv.starts_with(&launch.normalized_argv));
-    let dedicated_feature = observed_shell_snapshot(
+    let dedicated_features = observed_startup_features(
         &session.app_server_socket,
         &launch.canonical_codex_home,
         snapshot.projection.thread_id.as_deref(),
@@ -312,7 +582,7 @@ fn default_feature_observation(root: &Path, snapshot: &RunSnapshot) -> Value {
     }
     let evidence = json!({"variant":fs::read_to_string(root.join("default-feature-variant")).unwrap(),
         "actual_pid":pid,"actual_command":actual.trim(),"accepted_launch":launch,"recomputed_launch_digest":launch.launch_contract_sha256,"recomputed_server_key":binding.server_key,
-        "run_launch_digest":snapshot.manifest.profile.launch_contract_sha256,"effective_shell_snapshot":dedicated_feature["enabled"],"shared_feature_observation":shared_feature,"dedicated_feature_observation":dedicated_feature,"dedicated_argv":dedicated.argv,"quiescent_startup":true});
+        "run_launch_digest":snapshot.manifest.profile.launch_contract_sha256,"effective_shell_snapshot":dedicated_features["shell_snapshot"]["enabled"],"shared_feature_observation":shared_features["shell_snapshot"],"dedicated_feature_observation":dedicated_features["shell_snapshot"],"shared_plugin_observation":shared_features["plugins"],"dedicated_plugin_observation":dedicated_features["plugins"],"dedicated_argv":dedicated.argv,"quiescent_startup":startup["path"]=="first_attempt","quiescent_verified_result":true,"startup":startup});
     fs::write(
         root.join("default-feature-observation.json"),
         serde_json::to_vec(&evidence).unwrap(),
@@ -444,15 +714,21 @@ fn campaign(root: &Path, codex: &Path) -> Value {
         {
             return pool_campaign(root, &home, &view, &credential);
         }
-        let first = start(&view, &credential, "fixture-a", "first", false)
-            .unwrap_or_else(|error| fail(root, "caller startup", error));
+        let default_mode = root.join("default-feature-variant").exists();
+        let (first, startup) = if default_mode {
+            default_feature_start(root, &view, &credential, &state_root)
+        } else {
+            (
+                start(&view, &credential, "fixture-a", "first", false)
+                    .unwrap_or_else(|error| fail(root, "caller startup", error)),
+                Value::Null,
+            )
+        };
         let first_id = first.snapshot.manifest.run_id;
         let first_thread = first.snapshot.projection.thread_id.clone().unwrap();
         check_policy(&state_root, &first.snapshot, Access::Write, &first_thread);
-        let default_features = root
-            .join("default-feature-variant")
-            .exists()
-            .then(|| default_feature_observation(root, &first.snapshot));
+        let default_features =
+            default_mode.then(|| default_feature_observation(root, &first.snapshot, startup));
         if let Some(features) = &default_features {
             return json!({"schema":"dolgorae.native-caller-pipeline/v1",
                 "mode":"default_feature_startup_only","runs":1,"threads":1,"turns":0,
@@ -1536,6 +1812,84 @@ fn main() {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn only_the_named_uncertain_census_failure_can_enter_default_recovery() {
+        let run = Uuid::now_v7();
+        let error = dolgorae::machine::MachineError::new(
+            "TRANSPORT_FAILURE",
+            "private worker transport failed",
+            false,
+            json!({"stage":"correlate","acceptance":"uncertain","request_id":null,"run_id":run}),
+        );
+        assert_eq!(uncertain_start_run(&error), Some(run));
+        for (key, value) in [
+            ("stage", json!("connect")),
+            ("acceptance", json!("not_dispatched")),
+            ("request_id", json!("foreign")),
+            ("run_id", json!("unknown")),
+        ] {
+            let mut changed = error.clone();
+            changed.details[key] = value;
+            assert!(uncertain_start_run(&changed).is_none());
+        }
+        let mut changed = error.clone();
+        changed.retryable = true;
+        assert!(uncertain_start_run(&changed).is_none());
+        changed = error.clone();
+        changed.code = "RUN_STATE_CONFLICT".to_owned();
+        assert!(uncertain_start_run(&changed).is_none());
+        changed = error;
+        changed
+            .details
+            .as_object_mut()
+            .unwrap()
+            .remove("request_id");
+        changed.details["foreign"] = Value::Null;
+        assert!(uncertain_start_run(&changed).is_none());
+        let refusal =
+            json!({"schema":"dolgorae.writer-census-failure/v1","error":"InvalidIdentity",
+            "details":{"predicate":"dedicated_census_membership"}})
+            .to_string();
+        assert!(startup_census_refusal(&format!("native log\n{refusal}\n")).is_some());
+        assert!(startup_census_refusal(&format!("{refusal}\n{refusal}\n")).is_none());
+        assert!(
+            startup_census_refusal(
+                &refusal.replace("dedicated_census_membership", "dedicated_identity")
+            )
+            .is_none()
+        );
+        assert!(startup_census_refusal("unknown\n").is_none());
+    }
+
+    #[test]
+    fn oversized_failure_still_retains_a_bounded_private_diagnostic() {
+        let root = std::env::temp_dir().join(format!("native-diagnostic-{}", Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let error = dolgorae::machine::MachineError::new(
+            "INTERNAL_ERROR",
+            "fixture",
+            false,
+            json!({"private":"x".repeat(70_000)}),
+        );
+        record_failure(&root, "oversized", &error);
+        let path = fs::read_dir(&root).unwrap().next().unwrap().unwrap().path();
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.len() < 65_536);
+        let record: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(record["error_omitted"]["code"], "INTERNAL_ERROR");
+        assert!(record["error_omitted"]["bytes"].as_u64().unwrap() > 65_536);
+        assert_eq!(
+            record["error_omitted"]["sha256"].as_str().unwrap().len(),
+            64
+        );
+        assert!(!record.to_string().contains(&"x".repeat(128)));
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn rejected_preparation_cleanup_requires_empty_history_and_absent_profile_root() {

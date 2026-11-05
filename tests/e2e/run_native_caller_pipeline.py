@@ -7,6 +7,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,23 +24,30 @@ CODEX_SHA256 = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf
 
 class InteractionResponses(ScriptedResponses):
     """Two current interaction Turns; responses stay on the owned loopback fixture."""
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, *, max_mcp_requests: int | None = None, protected_canary: str | None = None):
         super().__init__()
         self.workspace = workspace
         self.issued_cases = set()
         self.completed_cases = set()
         self.mcp_reply = threading.Event()
         self.mcp_decision = None
+        self.mcp_response = None
+        self.mcp_requests = 0
         owner = self
         class McpHandler(BaseHTTPRequestHandler):
             def log_message(self, *_args):
                 pass
             def do_POST(self):
+                owner.mcp_requests += 1
+                if max_mcp_requests is not None and owner.mcp_requests > max_mcp_requests:
+                    owner.failure = "mcp_request_budget_exceeded"
+                    self.send_error(400); return
                 size = int(self.headers.get("Content-Length", "0"))
                 if not 0 < size <= 65536 or self.headers.get("Authorization"):
                     self.send_error(400); return
                 request = json.loads(self.rfile.read(size))
                 if "method" not in request:
+                    owner.mcp_response = request
                     owner.mcp_decision = request.get("result", {}).get("action")
                     owner.mcp_reply.set()
                     self.send_response(202); self.end_headers(); return
@@ -52,7 +60,7 @@ class InteractionResponses(ScriptedResponses):
                     result = {"tools":[{"name":"ask","description":"Request one protected input.","inputSchema":{"type":"object","properties":{}}}]}
                 elif method == "tools/call":
                     self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
-                    message = {"jsonrpc":"2.0","id":7901,"method":"elicitation/create","params":{"message":"Protected fixture input","requestedSchema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}
+                    message = {"jsonrpc":"2.0","id":7901,"method":"elicitation/create","params":{"message":protected_canary or "Protected fixture input","requestedSchema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}
                     self.wfile.write(("event: message\ndata: " + json.dumps(message) + "\n\n").encode()); self.wfile.flush()
                     if not owner.mcp_reply.wait(90):
                         owner.failure = "mcp_reply_timeout"; return
@@ -131,10 +139,13 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, r
             config += fixture_config(fixture.base_url)
             if interactions:
                 config += (f'\n[mcp_servers.fixture]\nurl = "http://127.0.0.1:{fixture.mcp_http.server_port}/mcp"\ndefault_tools_approval_mode = "approve"\n').encode()
+            config += b'\n[features]\n'
+            if default_variant is None:
+                config += b'plugins = false\n'
             if default_variant == "config-enable":
-                config += b'\n[features]\nshell_snapshot = true\n'
+                config += b'shell_snapshot = true\n'
             elif default_variant is None:
-                config += b'\n[features]\nshell_snapshot = false\n'
+                config += b'shell_snapshot = false\n'
                 if interactions:
                     config += b'request_permissions_tool = true\ntool_search_always_defer_mcp_tools = false\n'
             private_file(scratch / name / "config.toml", config)
@@ -178,6 +189,10 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, r
         observations.update(external_provider_requests=0, loopback_posts=fixture.posts,
                             real_account_or_credentials_used=False, executable_sha256=CODEX_SHA256,
                             codex_version=CODEX_VERSION, profile_capability_mutated=False)
+        if default_variant is not None:
+            observations.update(external_provider_requests=None, other_network_metered=False,
+                                scripted_model_provider_requests=fixture.posts,
+                                plugin_sources=observed_plugin_sources(scratch))
         passed = True
         return observations
     finally:
@@ -196,9 +211,75 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, r
 DEFAULT_FEATURE_VARIANTS = ("default", "config-enable", "argv-enable", "ordered-overrides")
 
 
+def observed_plugin_sources(root: Path) -> list[dict[str, object]]:
+    """Retain public source observations before cleanup, without invoking Git."""
+    result = []
+    for name in ("fixture-a", "fixture-b"):
+        git = root / name / ".tmp/plugins/.git"
+        row = {"profile": name, "repository_present": git.is_dir(), "revision": None}
+        if git.is_dir():
+            config = (git / "config").read_text() if (git / "config").is_file() else ""
+            public_origin = "https://github.com/openai/plugins.git"
+            row["origin"] = public_origin if f"url = {public_origin}" in config else "unrecognized"
+            head = (git / "HEAD").read_text().strip() if (git / "HEAD").is_file() else ""
+            if head.startswith("ref: "):
+                ref = head[5:]
+                if ref != "refs/heads/main":
+                    raise ValueError("unexpected default plugin source reference")
+                loose = git / ref
+                head = loose.read_text().strip() if loose.is_file() else ""
+                packed = git / "packed-refs"
+                if not head and packed.is_file():
+                    head = next((line.split()[0] for line in packed.read_text().splitlines()
+                                 if line.endswith(" " + ref)), "")
+            if re.fullmatch(r"[0-9a-f]{40}", head):
+                row["revision"] = head
+        result.append(row)
+    return result
+
+
+def require_default_startup_path(value: dict) -> None:
+    startup = value.get("startup", {})
+    path = startup.get("path")
+    if (not {"path", "initial_error", "recovery", "run_id", "thread_id"} <= startup.keys()
+            or not startup.get("run_id") or not startup.get("thread_id")):
+        raise ValueError("original startup identity missing")
+    if path == "first_attempt":
+        if (startup.get("initial_error") is not None or startup.get("recovery") is not None
+                or value.get("quiescent_startup") is not True):
+            raise ValueError("first-attempt startup evidence conflicts")
+        return
+    if path != "recovered" or value.get("quiescent_startup") is not False:
+        raise ValueError("startup path unproved")
+    error, recovery = startup.get("initial_error"), startup.get("recovery")
+    if not isinstance(error, dict) or not isinstance(recovery, dict):
+        raise ValueError("original failure and recovery evidence required")
+    details, replay = error.get("details", {}), recovery.get("replay", {})
+    receipt = recovery.get("receipt", {})
+    if (error.get("code") != "TRANSPORT_FAILURE" or error.get("retryable") is not False
+            or details.get("acceptance") != "uncertain" or details.get("stage") != "correlate"
+            or details.get("run_id") != startup["run_id"] or details.get("request_id") is not None
+            or recovery.get("operation") != "Recover" or recovery.get("writer_state") != "active"
+            or recovery.get("policy_access") != "write" or recovery.get("runs") != 1
+            or any(recovery.get(key) is not True for key in
+                   ("manifest_unchanged", "worker_identity_unchanged", "dedicated_identity_unchanged"))
+            or recovery.get("census_refusal", {}).get("details", {}).get("predicate") not in
+                   ("dedicated_census_membership", "worker_scope")
+            or not all(re.fullmatch(r"[0-9a-f]{64}", recovery.get(key, "")) for key in
+                       ("request_sha256", "reservation_sha256", "manifest_sha256"))
+            or replay.get("exact_replay") is not True or replay.get("run_id") != startup["run_id"]
+            or replay.get("thread_id") != startup["thread_id"]
+            or receipt.get("run_id") != startup["run_id"]
+            or receipt.get("original_thread_id") != startup["thread_id"]
+            or receipt.get("accepted_intent_sha256") != recovery.get("reservation_sha256")
+            or receipt.get("run_generation") != recovery.get("run_generation")):
+        raise ValueError("original-Run writable recovery and replay unproved")
+
+
 def require_default_feature_observation(value, variant: str) -> None:
-    if not isinstance(value, dict) or value.get("variant") != variant or value.get("effective_shell_snapshot") is not False or value.get("quiescent_startup") is not True:
+    if not isinstance(value, dict) or value.get("variant") != variant or value.get("effective_shell_snapshot") is not False or value.get("quiescent_verified_result") is not True:
         raise ValueError("actual default-feature behavior unproved")
+    require_default_startup_path(value)
     launch=value.get("accepted_launch", {})
     if ("shell_snapshot" not in launch.get("disabled_features", [])
             or value.get("recomputed_launch_digest") != launch.get("launch_contract_sha256")
@@ -212,6 +293,10 @@ def require_default_feature_observation(value, variant: str) -> None:
             or value.get("dedicated_feature_observation", {}).get("name") != "shell_snapshot"
             or value.get("dedicated_argv", [])[:len(launch.get("normalized_argv", []))] != launch.get("normalized_argv")):
         raise ValueError("actual argv/accepted launch binding unproved")
+    for key in ("shared_plugin_observation", "dedicated_plugin_observation"):
+        observed = value.get(key, {})
+        if observed.get("name") != "plugins" or observed.get("enabled") is not True:
+            raise ValueError("actual default-enabled plugin input unproved")
     argv=launch.get("normalized_argv", [])
     decisions=[a == "--enable" for a,b in zip(argv,argv[1:]) if a in ("--enable","--disable") and b == "shell_snapshot"]
     if not decisions or decisions[-1] is not False or "--disable shell_snapshot" not in value["actual_command"]:
@@ -223,7 +308,9 @@ def default_feature_campaign(driver: Path, codex: Path) -> dict[str, object]:
         raise ValueError("explicit native caller pipeline opt-in required")
     observations=[campaign(driver,codex,default_variant=v) for v in DEFAULT_FEATURE_VARIANTS]
     return {"schema":"dolgorae.default-feature-startup/v1","variants":observations,"passed":True,
-            "external_provider_requests":0,"native_model_turns":0,"existing_quiescence_rules_unchanged":True}
+            "external_provider_requests":None,"other_network_metered":False,
+            "scripted_model_provider_requests":sum(row["loopback_posts"] for row in observations),
+            "native_model_turns":0,"existing_quiescence_rules_unchanged":True}
 
 
 def main() -> int:

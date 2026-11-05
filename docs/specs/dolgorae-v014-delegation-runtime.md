@@ -313,8 +313,36 @@ receipt stays readable after a close intent (MDC:134, MDC:186-200).
 | --- | --- |
 | `install_provisioning`, `open_external_engagement` | `completed` |
 | `hire_external_specialist` | derived from the external member row and residency: `pending` while provisioning, `unknown` while recovering or degraded-unproven, `failed` when unavailable, else `completed` |
-| `spawn_specialist` | the same derivation over the Broker member row and its Run residency |
-| `assign_*_task` | derived from the task row: `pending`, `running`, `completed`, `failed`, `cancelled`, `expired`, else `unknown` |
+| `spawn_specialist` | the same derivation over the Broker member row and its Run residency; an original spawn still marked `recovery_required` remains `unknown`, including retained degraded/unavailable members |
+| `assign_*_task` | derived from the original Task and its validated assignment claim: `pending`, `running`, `completed`, `failed`, `cancelled`, `expired`, else `unknown` |
+
+An error starting an already accepted external hire or managed spawn may precede
+the member Run's manifest. It returns `Unknown` with the schema's `unresolved`
+effect floor and `lookup_original_key`, retaining the original accepted receipt,
+member and cleanup owner. The response preserves only a closed safe cause code;
+runtime messages and private details are not copied. Original-key replay returns
+the same admission without starting another Run. A missing manifest is neither
+proof of no effect nor a reason to promise `recover_run`, whose entrypoint requires
+that manifest. Unresolved members cannot supply idle or released disposition.
+
+While an accepted member start remains unsettled, admitting its release preserves
+that uncertainty: original-key lookup remains `unknown` after release admission.
+A late managed start publication records the original spawn outcome without
+changing `retiring` or `retired` membership, the release proof, membership revision
+or credential retirement. A start already settled successfully remains
+`completed` while its separate release is nonterminal.
+
+An accepted assignment remains `accepted` when its dispatch outcome is unknown.
+In one read snapshot, the provider validates the original receipt namespace,
+Controller, workspace, scope, member, Task identity and execution intent. A
+`dispatching` Task with no bound Turn yields `current_outcome = unknown` only
+when its own valid assignment claim has phase `unknown`, no Turn and blocker
+`dispatch_outcome_unknown`. The detailed Task phase and immutable receipt remain
+unchanged. Terminal Task facts and a known positive Turn retain precedence;
+foreign or contradictory claim metadata is a typed recovery refusal. A claim
+for another Task on the same member cannot taint the original operation. Lease
+expiry neither changes the outcome nor permits dispatch. This metadata lookup
+does not reopen retained source payloads or mutate scheduler state.
 
 `result_ref` and `result_digest` are populated for task kinds from the
 settled CompleteResult. Ordinary task lookup returns a reference to its exact
@@ -1033,6 +1061,13 @@ in its own small transaction with the completion revisions left null
 actions. Errors after admission keep the `operation_ref` and the unresolved
 effect floor.
 
+If the member's durable Run state cannot be read, the retained release directs
+the owner to `reconcile_operation` through the same authenticated release
+surface (RPC §7.6). That entrypoint reads the original release before requiring
+Run state; it can preserve the unresolved operation even without a manifest.
+It does not promise successful Run repair or terminal release. Completion
+revisions stay null until actual Closed, cleanup and retirement proofs exist.
+
 `member_release_proof/v1` is re-derived from the frozen terminal row on every
 read and validated against the revision separation —
 `admitted_membership_revision < terminal_membership_revision`, the terminal
@@ -1172,7 +1207,7 @@ automatic migration, compensation and diagnostics. The exact current pin applies
 only at qualified-mechanism admission callers; shared snapshot, bind, history
 and Profile launch helpers do not apply that pin.
 
-Current consumer qualification selects Aquarium commit
+Earlier TASK-077 consumer qualification selected Aquarium commit
 `db132845624c24bb4d0a889503b35a2a59b2571d` and Podway commit
 `7c4a4c1ec98fd4e6eb143852419977180755d0df` (0.2.15), with Podway contract
 generation 1. Aquarium owns finding severity and local-correction policy;
@@ -1405,3 +1440,125 @@ exact ordinary key or Task-bound synthesis key. An unrelated key supplies no
 assignment binding; a generation-4 Worker returns
 `ACCEPTED_ASSIGNMENT_NOT_FOUND` before submitting a Turn. An exact accepted key
 still requires its original Run, dispatch claim and complete rendered bytes.
+
+## TASK-086 consumer qualification
+
+Fresh qualification selects the official immutable Podway 0.2.15 distribution,
+source `9a3f94c8752298f689832d05aa827a0f6496c1af`, executable SHA-256
+`dece7fecd90eaf6130b330e2cb70e98532f3e6b73950227cc2ff935a8be8e5ae`,
+and contract generation 1. Its manifest digest is
+`sha256:293cfcf7bcaebb55b55b9e7cabb5842df228dbd9afacea5d1ae78474c25ae01b`.
+This replaces the earlier unshipped qualification build as a fresh runtime
+selection; it does not rewrite those earlier results. The source delta preserves
+schemas, catalog, Store and delegated APIs; the changed generation-2 writer-name
+diagnostic is outside this generation-1 selection. Actual DOLV3 and native
+consumer acceptance remain required. H1's eleven contract-source pins stay fixed.
+
+The Aquarium input remains the complete source archive of
+`db132845624c24bb4d0a889503b35a2a59b2571d`, SHA-256
+`542a7836dee2d412b06f6c78e16712124cce8f89c14413d943c1bd3fab5454e9`.
+The historical TASK-077 scope selected six instruction/helper inputs. Current
+TASK-086 qualification also includes the selected source's Goal Evaluator body
+and its applicable dependencies under the
+[current consumer qualification](dolgorae-v014-current-consumer-qualification.md#operative-source-closure).
+Current neighboring Aquarium changes and Podway's later default-disabled
+integration permission feature are separate applicability boundaries. The selected
+Podway contract has no `integration.show`; it does not qualify a toggle-aware adapter.
+
+Qualification composes the existing production host and consumer handlers and
+public Podway CLI. External Codex and Claude hosts and the genuine managed Codex
+Primary are distinct supported paths. Each due AQ/PW row requires its own exact
+input, actual invocation/result observations, source byte identities, original
+recovery keys and cleanup. Full result/component inspection precedes explicit
+semantic item decisions, structural receipt acceptance and separate Primary
+completion. Group/merge provenance stays executor-owned; only an individual or
+separately accepted synthesis Task supplies an Action receipt and real caller
+rounds. A row cannot pass from a trace, metadata-only probe, fixture ledger,
+preview, model acknowledgement or a different row's success. Final packaged H3
+and post-cleanup requalification remain TASK-087's obligations.
+
+The external `consumer-complete` qualification case adds a separate bounded
+budget to the original eighteen host scenarios. It admits explicit Dolgorae
+producer Role, dependency and guidance bytes and uses one genuine writable Task.
+These producer instructions do not claim an Aquarium formal-v1 Role. The current
+Aquarium Role bodies and ordinary helpers belong to the separate native consumer
+composition. The native
+Primary reads the complete result, final response, both change sides and work
+package through byte-bound continuation pages. It then inspects the prepared
+Record and Accept inputs, returned outcomes and structural receipt. Public
+receipt observation must match the accepted Task; acceptance must leave the
+Action running until the Primary issues the separate completion command.
+Original loss-case budgets and evidence remain unchanged.
+
+The separate `consumer-rounds` case reuses one genuine member for three accepted
+Tasks with explicit feedback. It replays and polls original assignments without
+adding rounds, then requires a fourth assignment to fail as `ROUNDS_EXHAUSTED`
+without an extra executor Turn. The final Task has its own complete result and
+three-round receipt. `consumer-release` uses the same full-read sequence after a
+settled member release and requires the released disposition proof; an interrupt
+acknowledgement cannot substitute. These cases retain their own original keys
+and declare their additional executor POSTs independently of the old rows.
+
+The `consumer-group` case accepts two research entries under the real caller
+scope, merges their immutable complete source identities with the exact merge
+algorithm, and retains an explicit conflict between their claims. It reads the
+published merged artifact through the authorized artifact/chunk owner, then
+accepts one explicit synthesis Task over those exact bytes. The synthesis is
+the third caller round and the only Task mapped to the Action receipt. Group
+references cannot be used as consumer evidence selections. Neither the merge
+nor the receipt resolves the source conflict or supplies a Judge verdict.
+
+The distinct `consumer-fences` case preserves a genuine accepted receipt while
+checking cosmetic edit/revert staleness, exact original-key replay and conflict,
+a fresh attempt, historical receipt lookup and late old-attempt refusal. It
+leaves that explicit fresh attempt unaccepted for owned cleanup; other complete
+consumer cases prove separate Action completion. Invalid Role and round claims
+must fail before acceptance without changing current items or session state.
+All public fixture commands use the fixture's isolated HOME and configuration.
+
+The selected-distribution check verifies the release archive and executable,
+the manifest's canonical self-digest, every manifest-bound asset, the packaged
+adapter catalog and the closed schema reference set. Runtime cases validate
+public success and refusal bodies with those actual packaged schemas. Artifact
+verification alone covers no route execution, migration or native row.
+The separate direct-contract case exercises genuine Direct progression and
+completed-to-running reactivation, retired-command refusal and a generation-2
+workspace rejected by the generation-1 production client. The adapter observes
+that unsupported workspace without migrating it. This does not qualify the
+later generation-2 diagnostic contract or a toggle-aware consumer.
+
+`consumer-group-gaps` repeats the small group path with one physical worker loss
+while its original native response is held. Signalling requires a fresh match
+of Run, generation, frozen image digest, UID, birth, process group and session.
+Its original accepted operation remains unknown without rewriting the Task
+phase or redispatching; the merge retains that explicit source gap. A separate
+genuine synthesis Task may report the gap but cannot relabel it as success. Cleanup must reconcile the original Task from
+its native history before retiring the owned Profile; an unresolved history
+keeps the failed receipt and requires explicit recovery.
+
+The original six-input Aquarium scope does not qualify an operative Judge Role.
+AQ-03 must also bind the selected source's actual Goal Evaluator body and its
+applicable resolved dependencies. Current ordinary-v3 Evaluator documents and
+retained formal-v1 Judge documents keep their own schemas and Role semantics.
+A qualifier must establish the applicable route before admitting that Role;
+reading the formal reference does not convert a current v3 body into a retained
+v1 snapshot. Formal semantic progression requires separate Worker delivery and
+Judge assessment Actions followed by the Primary's Decision. A single delivery
+receipt case does not satisfy that workflow. A test oracle may check observed
+native decisions but cannot supply the missing consumer authority.
+
+Complete-consumer cases also capture a real upstream Direct Action's declared
+text evidence. The executor receives its exact bytes as accepted context, and
+the Primary reads the full typed value through `package_evidence` continuation
+pages. Those pages remain bound to the current package's original source
+attempt, item revision and value digest. The worker-loss case runs the independent
+Direct compatibility flow while the original research Task is still unknown;
+it cannot recover that Task by issuing new work.
+
+Current AQ-02/AQ-03 consumer qualification follows the explicit
+[ordinary-v3 source/application selection](dolgorae-v014-current-consumer-qualification.md).
+Dolgorae supplies authentic producer facts; actual same-host collection Executor
+and Goal Evaluator roles produce current v3 documents, followed by the Primary's
+Decision. These roles do not turn a managed producer Root into a native consumer
+or claim the unresolved Aquarium formal-v1 hybrid. Individual Podway structural
+receipt domains and authentic historical formal meanings remain separate.

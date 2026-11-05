@@ -194,6 +194,17 @@ Thread, verified read-only policy and workload absence checks succeed. This
 MUST NOT acknowledge the interrupted writable startup as successful or
 automatically reacquire writer authority.
 
+This Reader-resume restriction does not prohibit confirming an already applied
+Write transition in the same live Worker generation. Explicit recovery of that
+generation MAY commit the original pending Writer transaction only after a fresh
+qualified Write proof verifies the original Controller, Thread, accepted launch,
+generation and workload absence. It MUST NOT send another Write update, replace
+the Thread or allocate another Run. After that confirmation, explicit replay of
+the identical original start input and key MAY publish its missing receipt.
+The initial uncertain start response remains an error; recovery and receipt
+publication are separate observations. A Reader proof cannot complete writable
+startup, and generation recovery retains its conservative Reader semantics.
+
 If an idle Worker generation is lost, explicit recovery MAY acknowledge its
 verified reader attachment without changing logical Idle or replaying history.
 Retiring the verified absent generation MUST inspect its committed policy and

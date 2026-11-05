@@ -45,6 +45,24 @@ fn main() {
             assert!(driver::cleanup(std::path::Path::new(&args[2])));
             return;
         }
+        if args[1] == "--control-plane" {
+            let home = paths::DolgoraeHome::system().unwrap();
+            global_profile::require_generation(&home).unwrap();
+            let backend_home = home.clone();
+            gateway::serve(
+                &home,
+                &std::path::Path::new(&args[2]).join("gateway.sock"),
+                None,
+                move |instance_id| {
+                    std::sync::Arc::new(gateway_service::CoreGatewayBackend::new(
+                        backend_home,
+                        instance_id,
+                    ))
+                },
+            )
+            .unwrap();
+            return;
+        }
         assert!(
             !(std::env::var("DOLGORAE_NATIVE_SUCCESSOR_STARTUP_COMPONENT").as_deref() == Ok("1")
                 && std::env::var("DOLGORAE_NATIVE_SCHEDULER_COMPONENT").as_deref() == Ok("1")),

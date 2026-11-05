@@ -29,7 +29,8 @@ EPIC-009 is COMPLETE; EPIC-021 is ACTIVE and EPIC-022 remains PLANNED for v0.1.4
 execution order. TASK-067 is COMPLETE;
 TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
-TASK-084 and TASK-085 are COMPLETE; TASK-086 through TASK-089 remain PLANNED.
+TASK-084 through TASK-086 are COMPLETE.
+TASK-087 through TASK-089 remain PLANNED.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -2859,7 +2860,7 @@ Handoff: Merged artifacts readable through the public result and chunk surfaces.
 
 ### TASK-086: Qualify Receipt Mappings and Consumer Handoffs
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-085.
 

@@ -1422,6 +1422,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "machine",
                 "projection",
                 "run",
+                "semantic", // Test-only authentic member fixture for closed policy diagnostics.
                 "turn",
                 "worker",
                 "workspace",

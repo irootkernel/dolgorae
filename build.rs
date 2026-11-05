@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(dolgorae_native_acceptance)");
     let proto = "docs/protocol/dolgorae/public/v1/dolgorae.proto";
     println!("cargo:rerun-if-changed={proto}");
     println!("cargo:rerun-if-changed=docs/protocol/dolgorae-public-v1.descriptor.pb");

@@ -653,6 +653,49 @@ pub struct ProcessCensusEntry {
     pub zombie: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ProcessCensusCommand {
+    pid: u32,
+    parent_pid: u32,
+    uid: u32,
+    process_group_id: u32,
+    zombie: bool,
+    command_name: String,
+    sample_stage: &'static str,
+    identity_verified: bool,
+}
+
+fn retain_census_command(
+    observations: &mut Vec<ProcessCensusCommand>,
+    uid: u32,
+    groups: &[u32],
+    sample: &ProcBsdShortInfo,
+    sample_stage: &'static str,
+) {
+    if sample.uid != uid || !groups.contains(&sample.process_group_id) {
+        return;
+    }
+    let bytes = sample
+        .command
+        .iter()
+        .map(|byte| *byte as u8)
+        .take_while(|byte| *byte != 0)
+        .collect::<Vec<_>>();
+    let observation = ProcessCensusCommand {
+        pid: sample.pid,
+        parent_pid: sample.parent_pid,
+        uid: sample.uid,
+        process_group_id: sample.process_group_id,
+        zombie: sample.status == SZOMB,
+        command_name: String::from_utf8_lossy(&bytes).into_owned(),
+        sample_stage,
+        identity_verified: false,
+    };
+    if observations.len() < 16 && !observations.contains(&observation) {
+        observations.push(observation);
+    }
+}
+
 fn census_entry_from_samples(
     pid: u32,
     before: ProcBsdShortInfo,
@@ -712,6 +755,18 @@ fn census_denied_birth_error(
         Err(absent) if absent.raw_os_error() == Some(libc::ESRCH) => absent,
         _ => error,
     }
+}
+
+fn resample_census_observed(
+    commands: &mut Vec<ProcessCensusCommand>,
+    mut sample: impl FnMut(
+        &mut Vec<ProcessCensusCommand>,
+    ) -> Result<Vec<ProcessCensusEntry>, std::io::Error>,
+) -> Result<Vec<ProcessCensusEntry>, std::io::Error> {
+    resample_incoherent_census(|| {
+        commands.clear();
+        sample(commands)
+    })
 }
 
 fn resample_incoherent_census(
@@ -1194,7 +1249,11 @@ impl DarwinSystem {
         }
     }
 
-    fn process_census_entry(self, pid: u32) -> Result<ProcessCensusEntry, std::io::Error> {
+    fn process_census_entry(
+        self,
+        pid: u32,
+        observe: &mut impl FnMut(&ProcBsdShortInfo, &'static str),
+    ) -> Result<ProcessCensusEntry, std::io::Error> {
         let read_short = || {
             let mut info = MaybeUninit::<ProcBsdShortInfo>::zeroed();
             let size = std::mem::size_of::<ProcBsdShortInfo>() as libc::c_int;
@@ -1229,6 +1288,7 @@ impl DarwinSystem {
                 "process census PID changed",
             ));
         }
+        observe(&before, "short_before");
         // SAFETY: getsid is a read-only kernel lookup.
         let session_id = unsafe { libc::getsid(pid as libc::pid_t) };
         if session_id < 0 {
@@ -1246,16 +1306,33 @@ impl DarwinSystem {
             None
         };
         let after = read_short()?;
+        observe(&after, "short_after");
         // SAFETY: this read-only lookup verifies the sampled session.
         let final_session_id = unsafe { libc::getsid(pid as libc::pid_t) };
         census_entry_from_samples(pid, before, full, after, session_id, final_session_id)
     }
 
     pub fn all_process_identities(self) -> Result<Vec<ProcessCensusEntry>, std::io::Error> {
-        resample_incoherent_census(|| self.all_process_identities_once())
+        resample_incoherent_census(|| self.all_process_identities_once(&mut |_, _| {}))
     }
 
-    fn all_process_identities_once(self) -> Result<Vec<ProcessCensusEntry>, std::io::Error> {
+    pub(crate) fn all_process_identities_observed(
+        self,
+        uid: u32,
+        groups: &[u32],
+        commands: &mut Vec<ProcessCensusCommand>,
+    ) -> Result<Vec<ProcessCensusEntry>, std::io::Error> {
+        resample_census_observed(commands, |commands| {
+            self.all_process_identities_once(&mut |sample, stage| {
+                retain_census_command(commands, uid, groups, sample, stage);
+            })
+        })
+    }
+
+    fn all_process_identities_once(
+        self,
+        observe: &mut impl FnMut(&ProcBsdShortInfo, &'static str),
+    ) -> Result<Vec<ProcessCensusEntry>, std::io::Error> {
         let mut capacity = 1_024_usize;
         loop {
             let mut pids = vec![0 as libc::pid_t; capacity];
@@ -1284,9 +1361,12 @@ impl DarwinSystem {
                 if pid <= 0 {
                     continue;
                 }
-                match self.process_census_entry(u32::try_from(pid).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid census PID")
-                })?) {
+                match self.process_census_entry(
+                    u32::try_from(pid).map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid census PID")
+                    })?,
+                    observe,
+                ) {
                     Ok(identity) => identities.push(identity),
                     Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
                     Err(error) => return Err(error),
@@ -2420,6 +2500,107 @@ mod tests {
         // Reading it twice is the same answer: it is a lookup, not a
         // snapshot of mutable process state.
         assert_eq!(DarwinSystem.account_environment().unwrap(), account);
+    }
+
+    #[test]
+    fn census_command_sidecar_is_bounded_scoped_and_preserves_exit_observations() {
+        let mut sample = ProcBsdShortInfo {
+            pid: 42,
+            parent_pid: 40,
+            process_group_id: 42,
+            uid: 501,
+            // SAFETY: the remaining C integer and character fields accept zero.
+            ..unsafe { std::mem::zeroed() }
+        };
+        for (target, byte) in sample.command.iter_mut().zip(b"short-command\0xx") {
+            *target = *byte as libc::c_char;
+        }
+        let mut notes = Vec::new();
+        retain_census_command(&mut notes, 502, &[42], &sample, "short_before");
+        retain_census_command(&mut notes, 501, &[43], &sample, "short_before");
+        assert!(notes.is_empty());
+        retain_census_command(&mut notes, 501, &[42], &sample, "short_before");
+        retain_census_command(&mut notes, 501, &[42], &sample, "short_before");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].command_name, "short-command");
+        sample.status = SZOMB;
+        retain_census_command(&mut notes, 501, &[42], &sample, "short_before");
+        assert_eq!(notes.len(), 2);
+        assert!(!notes[0].zombie && notes[1].zombie);
+        for pid in 43..80 {
+            sample.pid = pid;
+            retain_census_command(&mut notes, 501, &[42], &sample, "short_before");
+        }
+        assert_eq!(notes.len(), 16);
+        assert!(notes.iter().all(|row| row.command_name == "short-command"));
+    }
+
+    #[test]
+    fn census_command_sidecar_keeps_only_the_current_sample() {
+        let mut commands = Vec::new();
+        let mut calls = 0;
+        let result = resample_census_observed(&mut commands, |commands| {
+            calls += 1;
+            let sample = ProcBsdShortInfo {
+                pid: 42,
+                parent_pid: 40,
+                process_group_id: 42,
+                uid: 501,
+                // SAFETY: the remaining C integer and character fields accept zero.
+                ..unsafe { std::mem::zeroed() }
+            };
+            retain_census_command(
+                commands,
+                501,
+                &[42],
+                &sample,
+                if calls == 1 {
+                    "old_attempt"
+                } else {
+                    "short_before"
+                },
+            );
+            if calls == 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "changed",
+                ));
+            }
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+        });
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::ESRCH));
+        assert_eq!(calls, 2);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].sample_stage, "short_before");
+        assert!(!commands[0].identity_verified);
+        // No available short sample yields no name, including initial ESRCH.
+        let result = resample_census_observed(&mut commands, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+        });
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::ESRCH));
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn census_command_sidecar_handles_fixed_width_and_invalid_text() {
+        let mut sample = ProcBsdShortInfo {
+            pid: 42,
+            process_group_id: 42,
+            uid: 501,
+            // SAFETY: the remaining C integer and character fields accept zero.
+            ..unsafe { std::mem::zeroed() }
+        };
+        let mut commands = Vec::new();
+        retain_census_command(&mut commands, 501, &[42], &sample, "short_before");
+        assert_eq!(commands[0].command_name, "");
+        sample.command = [b'x' as libc::c_char; 16];
+        retain_census_command(&mut commands, 501, &[42], &sample, "short_before");
+        assert_eq!(commands[1].command_name, "xxxxxxxxxxxxxxxx");
+        sample.command = [0; 16];
+        sample.command[0] = -1;
+        retain_census_command(&mut commands, 501, &[42], &sample, "short_before");
+        assert_eq!(commands[2].command_name, "\u{fffd}");
+        assert!(commands.iter().all(|row| !row.identity_verified));
     }
 
     #[test]

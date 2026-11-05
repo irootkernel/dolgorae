@@ -503,6 +503,11 @@ pub struct CompleteResult {
 
 impl CompleteResult {
     pub fn digest(&self) -> Result<String, MachineError> {
+        self.validate()?;
+        domain_digest(COMPLETE_RESULT_SCHEMA, self)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), MachineError> {
         if self.schema != COMPLETE_RESULT_SCHEMA
             || self.changes.len() > MAX_COMPLETE_RESULT_CHANGES
             || self.attachments.len() > MAX_COMPLETE_RESULT_CHANGES
@@ -566,7 +571,7 @@ impl CompleteResult {
                 "invalid complete result identity",
             ));
         }
-        domain_digest(COMPLETE_RESULT_SCHEMA, self)
+        Ok(())
     }
 }
 
@@ -1512,11 +1517,16 @@ pub(crate) fn domain_digest(domain: &str, value: &impl Serialize) -> Result<Stri
     let json = serde_json::to_string(value).map_err(|_| invalid())?;
     let parsed = parse(&json).map_err(|_| invalid())?;
     let canonical = canonicalize(&parsed).map_err(|_| invalid())?;
+    Ok(domain_digest_from_canonical(domain, &canonical))
+}
+
+/// Hash already-canonical bytes; the caller owns typed validation and encoding.
+pub(crate) fn domain_digest_from_canonical(domain: &str, canonical: &[u8]) -> String {
     let mut bytes = Vec::with_capacity(domain.len() + 1 + canonical.len());
     bytes.extend_from_slice(domain.as_bytes());
     bytes.push(b'\n');
-    bytes.extend_from_slice(&canonical);
-    Ok(format!("sha256:{}", sha256_hex(&bytes)))
+    bytes.extend_from_slice(canonical);
+    format!("sha256:{}", sha256_hex(&bytes))
 }
 
 fn invalid() -> MachineError {
@@ -1649,6 +1659,15 @@ mod tests {
         {
             let result: CompleteResult = serde_json::from_value(vector["input"].clone()).unwrap();
             assert_eq!(result.digest().unwrap(), vector["expected_digest"]);
+            let sorted = serde_json::to_vec(&vector["input"]).unwrap();
+            assert_eq!(
+                sorted,
+                canonicalize(&parse(std::str::from_utf8(&sorted).unwrap()).unwrap()).unwrap()
+            );
+            assert_eq!(
+                domain_digest_from_canonical(COMPLETE_RESULT_SCHEMA, &sorted),
+                vector["expected_digest"]
+            );
             count += 1;
         }
         assert_eq!(count, 3);
@@ -1669,6 +1688,34 @@ mod tests {
             count += 1;
         }
         assert!(count > 0);
+    }
+
+    #[test]
+    fn complete_result_sorted_encoding_remains_jcs_at_unicode_and_integer_bounds() {
+        let mut result: CompleteResult = serde_json::from_value(result_vector()).unwrap();
+        result.changes = vec![ChangeRef {
+            kind: "modify".into(),
+            path: "quote-\"/tab-\t/界-😀-\u{e000}.txt".into(),
+            old_path: None,
+            before: Some(BytesRef::from_bytes(b"before")),
+            after: Some(BytesRef::from_bytes(b"after")),
+            before_mode: Some(MAX_JCS_SAFE_INTEGER),
+            after_mode: Some(0),
+        }];
+        result.structured_output_schema = Some("schema-界".into());
+        result.structured_output = Some(BytesRef {
+            byte_length: MAX_JCS_SAFE_INTEGER,
+            sha256: format!("sha256:{}", "00".repeat(32)),
+        });
+        result.validate().unwrap();
+        let sorted = serde_json::to_vec(&serde_json::to_value(&result).unwrap()).unwrap();
+        let canonical =
+            canonicalize(&parse(std::str::from_utf8(&sorted).unwrap()).unwrap()).unwrap();
+        assert_eq!(sorted, canonical);
+        assert_eq!(
+            result.digest().unwrap(),
+            domain_digest_from_canonical(COMPLETE_RESULT_SCHEMA, &sorted)
+        );
     }
 
     #[test]

@@ -9,6 +9,12 @@ development commits.
 
 ### Added
 
+- Add bounded native consumer cases for complete result pages, accepted rounds, settled release, group/synthesis provenance and original receipt recovery.
+  Prepare genuine managed producer exports and separate same-host Aquarium ordinary-v3 collection, assessment and Primary decisions.
+  Report authentic original-key accepted-assignment uncertainty without rewriting the Task phase or receipt.
+  Verify the explicitly selected Podway distribution without changing installed tools or historical qualification.
+  Qualify default plugin inputs while retaining first-start errors and explicit original-Run recovery evidence.
+
 - Merge research findings deterministically with immutable source links, explicit conflicts and complete coverage.
   Synthesis requires a separate task over that input, with its own accounting and result; generation 8 protects the new storage owners.
 
@@ -64,6 +70,10 @@ development commits.
 
 ### Fixed
 
+- Preserve unresolved member startup and original-key lookup without promising
+  Run recovery before a manifest exists; retain the original release owner.
+  Keep member retirement and release receipts intact when a delayed start result arrives.
+
 - Authenticate native findings merge and original-key lookup through both owners,
   retaining original provenance without interrupting an active Primary.
 
@@ -75,6 +85,9 @@ development commits.
 
 - Return retained settled-result references and domain digests from ordinary task
   lookup, and authenticate successor native tasks and group children for original-task recovery.
+
+- Preserve each explicit synthesis Task's authentic accepted operation in checked
+  orchestration projections, including its original receipt and recovery key.
 
 - Retire caller Writer generations through a retained release owner and verified
   original-Thread Reader succession, preserving accepted work and recovery guards.

@@ -824,6 +824,289 @@ pub(crate) fn append_private_diagnostic(path: &Path, diagnostic: &Value) {
     }
 }
 
+#[cfg(all(test, dolgorae_native_acceptance))]
+fn native_acceptance_append(path: &Path, stage: &str, category: &str) {
+    let stage = match stage {
+        "reader_thread"
+        | "app_server_read"
+        | "control_serve"
+        | "control_caller"
+        | "drain"
+        | "fixture_assign"
+        | "fixture_cleanup"
+        | "reader_maintenance"
+        | "reader_binding"
+        | "lifecycle_owner"
+        | "reader_retirement"
+        | "actor_failure"
+        | "actor_start"
+        | "actor_snapshot"
+        | "actor_ready"
+        | "aggregate_refresh"
+        | "accepted_dispatch_error"
+        | "snapshot_ledger"
+        | "snapshot_policy"
+        | "snapshot_sources" => stage,
+        _ => "other",
+    };
+    let category = match category {
+        "invalid_identity"
+        | "owner_lock_open"
+        | "owner_lock_probe"
+        | "owner_missing"
+        | "owner_read_invalid"
+        | "owner_scope_mismatch"
+        | "owner_lock_revalidate"
+        | "owner_process_absent"
+        | "owner_process_mismatch"
+        | "owner_process_unverifiable"
+        | "owner_digest_invalid"
+        | "wire_io"
+        | "wire_upgrade_rejected"
+        | "wire_invalid_frame"
+        | "wire_message_too_large"
+        | "wire_invalid_utf8"
+        | "wire_invalid_json"
+        | "wire_correlation_mismatch"
+        | "wire_remote_error"
+        | "wire_closed"
+        | "panic"
+        | "ingest_failure"
+        | "storage_failure"
+        | "begin"
+        | "owned_server_missing"
+        | "runtime_server_missing"
+        | "server_identity_mismatch"
+        | "invalid_runtime_record"
+        | "socket_identity_mismatch"
+        | "ledger_replay"
+        | "io"
+        | "thread_failure"
+        | "worker_pid"
+        | "generation"
+        | "server_epoch"
+        | "socket_epoch"
+        | "dedicated_server_identity"
+        | "successor_missing"
+        | "ready"
+        | "not_ready"
+        | "run_busy"
+        | "startup_busy"
+        | "run_state_conflict"
+        | "recovery_required_other"
+        | "audit_integrity_failure"
+        | "complete_result_unavailable"
+        | "accepted_receipt_ambiguous"
+        | "accepted_body_changed"
+        | "accepted_body_unbound"
+        | "accepted_identity_changed"
+        | "accepted_owner_changed"
+        | "actor_capture_changed"
+        | "actor_binding_changed"
+        | "actor_reader_policy_unverified"
+        | "claim_ledger_invalid"
+        | "scheduler_storage_unavailable"
+        | "transport_failure"
+        | "internal_error"
+        | "invalid_argument"
+        | "specialist_configuration_mismatch"
+        | "compatibility_rejected"
+        | "head_mismatch"
+        | "policy_history"
+        | "writer_holder"
+        | "writer_state"
+        | "writer_generation"
+        | "source_motion_exhausted" => category,
+        _ if crate::machine::registered_errors().contains_key(category) => category,
+        _ => "other",
+    };
+    append_private_diagnostic(
+        path,
+        &serde_json::json!({
+            "stage":"native_acceptance", "failure_site":stage, "category":category,
+        }),
+    );
+}
+
+#[cfg(all(test, dolgorae_native_acceptance))]
+pub(crate) fn native_acceptance_run_diagnostic(
+    state_root: &Path,
+    run: Uuid,
+    stage: &str,
+    category: &str,
+) {
+    let Ok(manifest) = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run) else {
+        return;
+    };
+    let Some(binding) = manifest.global_profile_binding else {
+        return;
+    };
+    let Ok(root) = profile_diagnostics_root(state_root, &binding.server_key) else {
+        return;
+    };
+    native_acceptance_append(&root.join("server.log"), stage, category);
+}
+
+#[cfg(all(test, dolgorae_native_acceptance))]
+pub(crate) fn native_ack_loss_read(
+    root: &Path,
+    name: &str,
+) -> Result<Option<serde_json::Value>, MachineError> {
+    use std::io::Read as _;
+    if !matches!(
+        name,
+        "native-ack-arm.json"
+            | "native-ack-held.json"
+            | "native-ack-continue.json"
+            | "native-claim-unknown.json"
+            | "native-recovery-release.json"
+    ) {
+        return Err(crate::scheduler::error("native_ack_binding_invalid"));
+    }
+    let Some(file) = crate::workspace::open_secure_file_if_present(
+        &root.join(name),
+        DarwinSystem.current_uid(),
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(65_537)
+        .read_to_end(&mut bytes)
+        .map_err(|_| crate::scheduler::error("native_ack_read_failed"))?;
+    if bytes.len() > 65_536 {
+        return Err(crate::scheduler::error("native_ack_read_bound"));
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| crate::scheduler::error("native_ack_binding_invalid"))
+}
+
+#[cfg(all(test, dolgorae_native_acceptance))]
+pub(crate) fn native_ack_loss_write(
+    root: &Path,
+    name: &str,
+    value: &serde_json::Value,
+) -> Result<(), MachineError> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    if !matches!(
+        name,
+        "native-ack-arm.json"
+            | "native-ack-held.json"
+            | "native-ack-continue.json"
+            | "native-claim-unknown.json"
+            | "native-recovery-release.json"
+    ) {
+        return Err(crate::scheduler::error("native_ack_binding_invalid"));
+    }
+    crate::workspace::verify_secure_directory(root, DarwinSystem.current_uid())?;
+    let bytes = serde_json::to_vec(value)
+        .map_err(|_| crate::scheduler::error("native_ack_binding_invalid"))?;
+    if bytes.len() > 65_536 {
+        return Err(crate::scheduler::error("native_ack_read_bound"));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root.join(name))
+        .map_err(|_| crate::scheduler::error("native_ack_write_failed"))?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| crate::scheduler::error("native_ack_write_failed"))
+}
+
+#[cfg(all(test, dolgorae_native_acceptance))]
+fn native_ack_loss_wait(
+    root: &Path,
+    release: &str,
+    until_ms: u64,
+    binding: &serde_json::Value,
+) -> Result<(), MachineError> {
+    for key in ["run_id", "task_ref"] {
+        if binding[key]
+            .as_str()
+            .and_then(|v| Uuid::parse_str(v).ok())
+            .is_none()
+        {
+            return Err(crate::scheduler::error("native_ack_binding_invalid"));
+        }
+    }
+    let check_deadline = || {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| crate::scheduler::error("native_ack_clock_invalid"))?
+            .as_millis();
+        if now >= u128::from(until_ms) {
+            return Err(crate::scheduler::error("native_ack_barrier_expired"));
+        }
+        Ok(())
+    };
+    loop {
+        check_deadline()?;
+        if let Some(released) = native_ack_loss_read(root, release)? {
+            if released["run_id"] != binding["run_id"]
+                || released["task_ref"] != binding["task_ref"]
+                || (binding.get("claim_id").is_some()
+                    && released["claim_id"] != binding["claim_id"])
+            {
+                return Err(crate::scheduler::error("native_ack_release_changed"));
+            }
+            check_deadline()?;
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(all(test, dolgorae_native_acceptance))]
+pub(crate) fn native_ack_loss_hold_claim(
+    root: &Path,
+    permit: &crate::scheduler::AcceptedWork,
+) -> Result<(), MachineError> {
+    let Some(held) = native_ack_loss_read(root, "native-ack-held.json")? else {
+        return Ok(());
+    };
+    if held["run_id"] != permit.target.to_string() || held["task_ref"] != permit.work.to_string() {
+        return Ok(());
+    }
+    if held["scope_ref"] != permit.scope_ref.to_string() {
+        return Err(crate::scheduler::error("native_ack_claim_changed"));
+    }
+    let store = crate::engagement::EngagementStore::open_read_only(
+        &crate::engagement::EngagementStore::workspace_database_path(root),
+    )?;
+    let claim: (String,String,String,String,Option<String>,Option<String>) = store.connection().query_row(
+        "SELECT kind,target_run_id,scope_kind,scope_ref,turn_id,safe_blocker FROM scheduler_claims WHERE claim_id=?1 AND work_ref=?2 AND phase='unknown'",
+        rusqlite::params![permit.claim.to_string(),permit.work.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(crate::scheduler::sql)?;
+    if claim
+        != (
+            "assignment".into(),
+            permit.target.to_string(),
+            permit.scope_kind.clone(),
+            permit.scope_ref.to_string(),
+            None,
+            Some("dispatch_outcome_unknown".into()),
+        )
+    {
+        return Err(crate::scheduler::error("native_ack_claim_changed"));
+    }
+    drop(store);
+    let mut witness = held;
+    witness["claim_id"] = serde_json::json!(permit.claim);
+    native_ack_loss_write(root, "native-claim-unknown.json", &witness)?;
+    native_ack_loss_wait(
+        root,
+        "native-recovery-release.json",
+        witness["until_ms"]
+            .as_u64()
+            .ok_or_else(|| crate::scheduler::error("native_ack_binding_invalid"))?,
+        &witness,
+    )
+}
+
 /// The dedicated Server argv a caller-workspace Run launches with.
 ///
 /// A generation-3 and a generation-4 Run present the same argv. The owned-runtime
@@ -2513,6 +2796,16 @@ fn scope_observation(process: &crate::darwin::ProcessCensusEntry) -> Value {
     })
 }
 
+fn with_census_commands(
+    mut observation: Value,
+    commands: &[crate::darwin::ProcessCensusCommand],
+) -> Value {
+    if !commands.is_empty() {
+        observation["sampled_commands"] = serde_json::json!(commands);
+    }
+    observation
+}
+
 fn group_observation(members: &[u32], enumerated: &[u32]) -> Value {
     serde_json::json!({
         "member_count": members.len(), "members": members.iter().take(16).collect::<Vec<_>>(),
@@ -3016,11 +3309,31 @@ fn prove_group_empty_samples(
         if !allow_recorded_worker {
             members.retain(|pid| *pid != record.identity.pid);
         }
-        let census = DarwinSystem.all_process_identities().map_err(|error| {
+        let mut commands = Vec::new();
+        let groups = [
+            record.identity.process_group_id,
+            record
+                .dedicated_server_identity
+                .as_ref()
+                .map_or(0, |server| server.process_group_id),
+        ];
+        let sampled = if diagnostic.is_some() {
+            DarwinSystem.all_process_identities_observed(
+                record.identity.uid,
+                &groups,
+                &mut commands,
+            )
+        } else {
+            DarwinSystem.all_process_identities()
+        };
+        let census = sampled.map_err(|error| {
             proof_refusal(
                 &mut diagnostic,
                 "worker_census_read",
-                serde_json::json!({"os_error": error.raw_os_error(), "reason": error.to_string()}),
+                with_census_commands(
+                    serde_json::json!({"os_error": error.raw_os_error(), "reason": error.to_string()}),
+                    &commands,
+                ),
             )
         })?;
         let mut enumerated_group = census
@@ -3036,7 +3349,7 @@ fn prove_group_empty_samples(
             return Err(proof_refusal(
                 &mut diagnostic,
                 "worker_census_membership",
-                group_observation(&members, &enumerated_group),
+                with_census_commands(group_observation(&members, &enumerated_group), &commands),
             ));
         }
         let by_pid = census
@@ -3091,7 +3404,7 @@ fn prove_group_empty_samples(
             return Err(proof_refusal(
                 &mut diagnostic,
                 "worker_scope",
-                scope_observation(process),
+                with_census_commands(scope_observation(process), &commands),
             ));
         }
         let recorded = record
@@ -3325,11 +3638,24 @@ fn dedicated_group_has_only_expected_leader_sample(
     if !allow_leader {
         members.retain(|pid| *pid != server.pid);
     }
-    let census = DarwinSystem.all_process_identities().map_err(|error| {
+    let mut commands = Vec::new();
+    let sampled = if diagnostic.is_some() {
+        DarwinSystem.all_process_identities_observed(
+            server.uid,
+            &[server.process_group_id],
+            &mut commands,
+        )
+    } else {
+        DarwinSystem.all_process_identities()
+    };
+    let census = sampled.map_err(|error| {
         proof_refusal(
             &mut diagnostic,
             "dedicated_census_read",
-            serde_json::json!({"os_error": error.raw_os_error(), "reason": error.to_string()}),
+            with_census_commands(
+                serde_json::json!({"os_error": error.raw_os_error(), "reason": error.to_string()}),
+                &commands,
+            ),
         )
     })?;
     let mut enumerated = census
@@ -3355,7 +3681,7 @@ fn dedicated_group_has_only_expected_leader_sample(
                 proof_refusal(
                     &mut diagnostic,
                     "dedicated_census_membership",
-                    group_observation(&members, &enumerated),
+                    with_census_commands(group_observation(&members, &enumerated), &commands),
                 );
                 return Ok(false);
             }
@@ -3401,7 +3727,7 @@ fn dedicated_group_has_only_expected_leader_sample(
         proof_refusal(
             &mut diagnostic,
             "dedicated_scope",
-            scope_observation(process),
+            with_census_commands(scope_observation(process), &commands),
         );
         return Ok(false);
     }
@@ -3913,6 +4239,11 @@ pub(crate) fn lifecycle_owner_verdict(
     workspace_id: &str,
     run_id: Uuid,
 ) -> LifecycleOwnerVerdict {
+    let unverifiable = |_category: &str| {
+        #[cfg(all(test, dolgorae_native_acceptance))]
+        native_acceptance_run_diagnostic(state_root, run_id, "lifecycle_owner", _category);
+        LifecycleOwnerVerdict::HeldUnverifiable
+    };
     let Ok(lock) = StartupLockFile::open_with_create(
         &lifecycle_lock_path(state_root, run_id),
         DarwinSystem.current_uid(),
@@ -3920,7 +4251,7 @@ pub(crate) fn lifecycle_owner_verdict(
     ) else {
         // The verdict is only meaningful after an acquire proved the lock is
         // held; an observation that cannot even open it is never a free owner.
-        return LifecycleOwnerVerdict::HeldUnverifiable;
+        return unverifiable("owner_lock_open");
     };
     match DarwinSystem.lock_exclusive_nonblocking(&lock.file) {
         Ok(()) => {
@@ -3928,21 +4259,31 @@ pub(crate) fn lifecycle_owner_verdict(
             LifecycleOwnerVerdict::Free
         }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            let Ok(Some(owner)) = lock.read_owner(0) else {
-                return LifecycleOwnerVerdict::HeldUnverifiable;
+            let owner = match lock.read_owner(0) {
+                Ok(Some(owner)) => owner,
+                Ok(None) => return unverifiable("owner_missing"),
+                Err(_) => return unverifiable("owner_read_invalid"),
             };
-            let verified = owner.identity.workspace_id == workspace_id
-                && owner.identity.run_id == run_id
-                && lock.revalidate().is_ok()
-                && classify_process_identity(&owner.identity) == ProcessIdentityVerdict::Match;
-            if !verified {
-                return LifecycleOwnerVerdict::HeldUnverifiable;
+            if owner.identity.workspace_id != workspace_id || owner.identity.run_id != run_id {
+                return unverifiable("owner_scope_mismatch");
             }
-            owner_witness_digest(&owner).map_or(LifecycleOwnerVerdict::HeldUnverifiable, |digest| {
-                LifecycleOwnerVerdict::HeldVerified(digest)
-            })
+            if lock.revalidate().is_err() {
+                return unverifiable("owner_lock_revalidate");
+            }
+            match classify_process_identity(&owner.identity) {
+                ProcessIdentityVerdict::Match => {}
+                ProcessIdentityVerdict::Absent => return unverifiable("owner_process_absent"),
+                ProcessIdentityVerdict::Mismatch => return unverifiable("owner_process_mismatch"),
+                ProcessIdentityVerdict::Unverifiable => {
+                    return unverifiable("owner_process_unverifiable");
+                }
+            }
+            owner_witness_digest(&owner).map_or_else(
+                || unverifiable("owner_digest_invalid"),
+                LifecycleOwnerVerdict::HeldVerified,
+            )
         }
-        Err(_) => LifecycleOwnerVerdict::HeldUnverifiable,
+        Err(_) => unverifiable("owner_lock_probe"),
     }
 }
 
@@ -5541,6 +5882,13 @@ impl WorkerControlServer {
     }
 
     fn contain_thread_failure(&self) -> Result<(), WorkerProtocolError> {
+        #[cfg(all(test, dolgorae_native_acceptance))]
+        native_acceptance_run_diagnostic(
+            &self.authority.state_root,
+            self.facts.run_id,
+            "reader_thread",
+            "thread_failure",
+        );
         self.thread_failed.store(true, Ordering::Release);
         self.stop();
         let retained = (|| {
@@ -5789,6 +6137,13 @@ impl WorkerControlServer {
                         .as_ref()
                         .is_some_and(|session| session.thread_failed.load(Ordering::Acquire))
                 {
+                    #[cfg(all(test, dolgorae_native_acceptance))]
+                    native_acceptance_run_diagnostic(
+                        &self.authority.state_root,
+                        self.facts.run_id,
+                        "control_serve",
+                        "thread_failure",
+                    );
                     return Err(WorkerProtocolError::Io);
                 }
                 if std::time::Instant::now() >= next_maintenance {
@@ -5796,6 +6151,13 @@ impl WorkerControlServer {
                         Ok(Some(new_lease)) => replacement = Some(new_lease),
                         Ok(None) => {}
                         Err(error) => {
+                            #[cfg(all(test, dolgorae_native_acceptance))]
+                            native_acceptance_run_diagnostic(
+                                &self.authority.state_root,
+                                self.facts.run_id,
+                                "reader_maintenance",
+                                native_acceptance_worker_label(&error),
+                            );
                             let persisted = self.persist_control_recovery();
                             let _ = self.terminate();
                             persisted?;
@@ -5864,6 +6226,13 @@ impl WorkerControlServer {
                             }))
                             .is_err()
                             {
+                                #[cfg(all(test, dolgorae_native_acceptance))]
+                                native_acceptance_run_diagnostic(
+                                    &authority.state_root,
+                                    facts.run_id,
+                                    "control_caller",
+                                    "panic",
+                                );
                                 thread_failed.store(true, Ordering::Release);
                             }
                         }));
@@ -6476,6 +6845,8 @@ struct SessionMailbox {
     panic_next_read: AtomicBool,
     #[cfg(test)]
     panic_next_primary: AtomicBool,
+    #[cfg(all(test, dolgorae_native_acceptance))]
+    native_diagnostics_state_root: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -6524,6 +6895,15 @@ impl SessionMailbox {
             panic_next_read: AtomicBool::new(false),
             #[cfg(test)]
             panic_next_primary: AtomicBool::new(false),
+            #[cfg(all(test, dolgorae_native_acceptance))]
+            native_diagnostics_state_root: None,
+        }
+    }
+
+    #[cfg(all(test, dolgorae_native_acceptance))]
+    fn native_diagnostic(&self, site: &str, category: &str) {
+        if let Some(state_root) = &self.native_diagnostics_state_root {
+            native_acceptance_run_diagnostic(state_root, self.facts.run_id, site, category);
         }
     }
 
@@ -7702,6 +8082,10 @@ impl WorkerSession {
         let mut mailbox =
             SessionMailbox::with_failure_latch(facts.clone(), Arc::clone(&thread_failed));
         mailbox.approval_progress_reserved = crate::orchestration::approval::caller_root(&manifest);
+        #[cfg(all(test, dolgorae_native_acceptance))]
+        {
+            mailbox.native_diagnostics_state_root = Some(state_root.to_path_buf());
+        }
         let mailbox = Arc::new(mailbox);
         let primary_tool =
             session_tool_contract(state_root, &manifest)?.map(|(session_id, contract)| {
@@ -8830,6 +9214,31 @@ impl WorkerSession {
                 {
                     return Ok(false);
                 }
+                #[cfg(all(test, dolgorae_native_acceptance))]
+                native_acceptance_run_diagnostic(
+                    &self.retirement_state_root,
+                    self.facts.run_id,
+                    "reader_binding",
+                    if runtime.identity.pid != std::process::id() {
+                        "worker_pid"
+                    } else if let Some(successor) = release.successor.as_ref() {
+                        if successor.run_generation != runtime.identity.run_generation {
+                            "generation"
+                        } else if Some(successor.server_epoch) != runtime.app_server_epoch {
+                            "server_epoch"
+                        } else if successor.control_socket_epoch != runtime.control_socket_epoch {
+                            "socket_epoch"
+                        } else if owned.is_none() {
+                            "owned_server_missing"
+                        } else if runtime.dedicated_server_identity.is_none() {
+                            "runtime_server_missing"
+                        } else {
+                            "server_identity_mismatch"
+                        }
+                    } else {
+                        "successor_missing"
+                    },
+                );
                 return Err(WorkerProtocolError::InvalidIdentity);
             }
             if release.phase != crate::writer::GenerationReleasePhase::StopStarted {
@@ -8872,6 +9281,13 @@ impl WorkerSession {
         if let Err(error) = &retirement
             && let Some(log) = &retirement_log
         {
+            #[cfg(all(test, dolgorae_native_acceptance))]
+            native_acceptance_run_diagnostic(
+                &self.retirement_state_root,
+                self.facts.run_id,
+                "reader_retirement",
+                native_acceptance_worker_label(error),
+            );
             append_private_diagnostic(
                 log,
                 &serde_json::json!({
@@ -9320,6 +9736,33 @@ fn dedicated_scope_is_owned(
     })
 }
 
+#[cfg(all(test, dolgorae_native_acceptance))]
+fn native_acceptance_transport_label(error: &TransportError) -> &'static str {
+    match error {
+        TransportError::Io(_) => "wire_io",
+        TransportError::UpgradeRejected => "wire_upgrade_rejected",
+        TransportError::InvalidFrame(_) => "wire_invalid_frame",
+        TransportError::MessageTooLarge => "wire_message_too_large",
+        TransportError::InvalidUtf8 => "wire_invalid_utf8",
+        TransportError::InvalidJson => "wire_invalid_json",
+        TransportError::CorrelationMismatch => "wire_correlation_mismatch",
+        TransportError::RemoteError { .. } => "wire_remote_error",
+        TransportError::Closed => "wire_closed",
+    }
+}
+
+#[cfg(test)]
+fn native_acceptance_worker_label(error: &WorkerProtocolError) -> &'static str {
+    match error {
+        WorkerProtocolError::InvalidIdentity => "invalid_identity",
+        WorkerProtocolError::InvalidRuntimeRecord => "invalid_runtime_record",
+        WorkerProtocolError::SocketIdentityMismatch => "socket_identity_mismatch",
+        WorkerProtocolError::LedgerReplay => "ledger_replay",
+        WorkerProtocolError::Io => "io",
+        _ => "other",
+    }
+}
+
 impl Drop for WorkerSession {
     fn drop(&mut self) {
         self.shutdown();
@@ -9332,25 +9775,33 @@ impl Drop for WorkerSession {
 /// long as the app-server is quiet without holding anything a control caller
 /// needs.
 fn read_app_server(wire: &DuplexConnection, mailbox: &SessionMailbox, thread_failed: &AtomicBool) {
-    let reader_failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let reader_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         while mailbox.await_grant() {
             #[cfg(test)]
             if mailbox.panic_next_read.swap(false, Ordering::AcqRel) {
                 panic!("injected reader failure");
             }
-            if wire
-                .receive_background(|message| match message {
-                    Some(message) => mailbox.deliver(Ok(message)),
-                    None => mailbox.return_read_grant(),
-                })
-                .is_err()
-            {
+            if let Err(error) = wire.receive_background(|message| match message {
+                Some(message) => mailbox.deliver(Ok(message)),
+                None => mailbox.return_read_grant(),
+            }) {
+                #[cfg(all(test, dolgorae_native_acceptance))]
+                mailbox.native_diagnostic(
+                    "app_server_read",
+                    native_acceptance_transport_label(&error),
+                );
+                #[cfg(not(all(test, dolgorae_native_acceptance)))]
+                let _ = error;
                 return true;
             }
         }
         false
-    }))
-    .unwrap_or(true);
+    }));
+    #[cfg(all(test, dolgorae_native_acceptance))]
+    if reader_result.is_err() {
+        mailbox.native_diagnostic("app_server_read", "panic");
+    }
+    let reader_failed = reader_result.unwrap_or(true);
     if reader_failed {
         thread_failed.store(true, Ordering::Release);
         for mutation in mailbox.fail_thread() {
@@ -9579,6 +10030,8 @@ fn drain_run(
             match mailbox.next_work() {
                 SessionWork::Stop => break,
                 SessionWork::Message(Err(error)) => {
+                    #[cfg(all(test, dolgorae_native_acceptance))]
+                    mailbox.native_diagnostic("drain", "transport_failure");
                     // A transport that dies under an accepted Turn has cost this
                     // Run that Turn's outcome, not merely its next message.  The
                     // loss is recorded durably and restated as the uncertainty it
@@ -9609,9 +10062,13 @@ fn drain_run(
                                 &authority.state_root,
                                 identity.run_id,
                             ) {
+                                #[cfg(all(test, dolgorae_native_acceptance))]
+                                mailbox.native_diagnostic("drain", "storage_failure");
                                 progress.fail(TurnError::Journal(storage.message));
                             }
                             if *coordinator.state() == CoordinatorState::OutcomeUnknown {
+                                #[cfg(all(test, dolgorae_native_acceptance))]
+                                mailbox.native_diagnostic("drain", "ingest_failure");
                                 progress.fail(error);
                             }
                         }
@@ -9758,6 +10215,8 @@ fn drain_run(
     }))
     .is_err();
     if panicked {
+        #[cfg(all(test, dolgorae_native_acceptance))]
+        mailbox.native_diagnostic("drain", "panic");
         thread_failed.store(true, Ordering::Release);
         progress.fail(TurnError::OutcomeUnknown);
     }
@@ -13932,6 +14391,15 @@ fn serve_control_caller(
             },
         );
     }
+    #[cfg(all(test, dolgorae_native_acceptance))]
+    let ack_candidate = match &request {
+        ControlRequestV1::ExternalSubmit {
+            engagement_id,
+            request,
+            ..
+        } => Some((*engagement_id, request.idempotency_key.clone())),
+        _ => None,
+    };
     let response = match request {
         ControlRequestV1::Hello { .. } => ControlResponseV1::Hello {
             hello: hello.clone(),
@@ -14010,6 +14478,31 @@ fn serve_control_caller(
             serve_run_operation(other, facts, run, authority, credential)?
         }
     };
+    #[cfg(all(test, dolgorae_native_acceptance))]
+    if let (Some((scope_ref, submit_key)), ControlResponseV1::Accepted { accepted }) =
+        (ack_candidate, &response)
+        && let Some(mut binding) = crate::delegation_service::native_ack_loss_binding(
+            &authority.state_root,
+            facts.run_id,
+            scope_ref,
+            &submit_key,
+        )
+        .map_err(|_| WorkerProtocolError::InvalidIdentity)?
+    {
+        binding["accepted"] = serde_json::json!(accepted);
+        binding["worker_identity"] = serde_json::json!(hello.identity);
+        native_ack_loss_write(&authority.state_root, "native-ack-held.json", &binding)
+            .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+        native_ack_loss_wait(
+            &authority.state_root,
+            "native-ack-continue.json",
+            binding["until_ms"]
+                .as_u64()
+                .ok_or(WorkerProtocolError::InvalidIdentity)?,
+            &binding,
+        )
+        .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    }
     write_frame(&mut stream, &response)
 }
 
@@ -27403,8 +27896,215 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
         assert_eq!(fs::read(&path).unwrap(), original);
     }
 
+    #[cfg(dolgorae_native_acceptance)]
+    #[test]
+    fn native_acceptance_run_diagnostics_follow_retained_profile_binding() {
+        let mut fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let state = fixture
+            .root
+            .join("home/.dolgorae/workspaces")
+            .join(&fixture.view.workspace_id);
+        fs::create_dir_all(state.parent().unwrap()).unwrap();
+        fs::rename(&fixture.state_root, &state).unwrap();
+        fixture.state_root = state;
+        let profile =
+            profile_diagnostics_root(&fixture.state_root, &fixture.profile_binding.server_key)
+                .unwrap();
+        fs::create_dir_all(&profile).unwrap();
+        fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+        let log = profile.join("server.log");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&log)
+            .unwrap();
+        drop(file);
+        native_acceptance_run_diagnostic(
+            &fixture.state_root,
+            fixture.member_ref,
+            "reader_maintenance",
+            "invalid_identity",
+        );
+        let original = fs::read(&log).unwrap();
+        let record: Value = serde_json::from_slice(&original).unwrap();
+        assert_eq!(
+            record,
+            serde_json::json!({"stage":"native_acceptance","failure_site":"reader_maintenance","category":"invalid_identity"})
+        );
+        assert_eq!(fs::metadata(&log).unwrap().mode() & 0o777, 0o600);
+        for error in [
+            TransportError::Io("diagnostic-secret-canary".into()),
+            TransportError::RemoteError {
+                code: -999,
+                message: "diagnostic-secret-canary".into(),
+            },
+        ] {
+            native_acceptance_run_diagnostic(
+                &fixture.state_root,
+                fixture.member_ref,
+                "app_server_read",
+                native_acceptance_transport_label(&error),
+            );
+        }
+        let original = fs::read(&log).unwrap();
+        assert!(!String::from_utf8_lossy(&original).contains("diagnostic-secret-canary"));
+        for line in original
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let row: Value = serde_json::from_slice(line).unwrap();
+            assert_eq!(row.as_object().unwrap().len(), 3);
+        }
+        native_acceptance_run_diagnostic(
+            &fixture.state_root,
+            Uuid::now_v7(),
+            "reader_thread",
+            "private secret",
+        );
+        assert_eq!(
+            fs::read(&log).unwrap(),
+            original,
+            "unbound identity must not choose a fallback sink"
+        );
+    }
+
+    #[cfg(dolgorae_native_acceptance)]
+    #[test]
+    fn native_acceptance_diagnostics_retain_only_closed_fields_in_private_sink() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("dg-native-diagnostic-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let log = root.join("server.log");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&log)
+            .unwrap();
+        drop(file);
+        for stage in [
+            "reader_thread",
+            "reader_maintenance",
+            "reader_binding",
+            "reader_retirement",
+            "actor_failure",
+            "actor_start",
+            "actor_snapshot",
+            "actor_ready",
+            "aggregate_refresh",
+            "accepted_dispatch_error",
+            "snapshot_ledger",
+            "snapshot_policy",
+            "snapshot_sources",
+        ] {
+            native_acceptance_append(&log, stage, "invalid_identity");
+        }
+        native_acceptance_append(&log, "private path", "secret body and credential");
+        native_acceptance_append(&log, "accepted_dispatch_error", "INVALID_ARGUMENT");
+        let original = fs::read(&log).unwrap();
+        let rows = String::from_utf8(original.clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 15);
+        assert_eq!(rows[14]["category"], "INVALID_ARGUMENT");
+        assert_eq!(
+            rows[13],
+            serde_json::json!({"stage":"native_acceptance","failure_site":"other","category":"other"})
+        );
+        assert!(rows.iter().all(|row| row.as_object().unwrap().len() == 3));
+        assert!(
+            !String::from_utf8(original.clone())
+                .unwrap()
+                .contains("secret")
+        );
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o644)).unwrap();
+        native_acceptance_append(&log, "reader_binding", "invalid_identity");
+        assert_eq!(fs::read(&log).unwrap(), original);
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = root.join("linked.log");
+        symlink(&log, &link).unwrap();
+        native_acceptance_append(&link, "reader_binding", "invalid_identity");
+        assert_eq!(fs::read(&log).unwrap(), original);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(dolgorae_native_acceptance)]
+    #[test]
+    fn native_ack_loss_private_markers_refuse_foreign_release_and_unsafe_sink() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("dg-native-ack-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        assert!(native_ack_loss_read(&root, "../other").is_err());
+        assert!(native_ack_loss_write(&root, "../other", &serde_json::json!({})).is_err());
+        assert!(
+            crate::delegation_service::native_ack_loss_binding(
+                &root,
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                "group:00000000-0000-7000-8000-000000000000:1:assign"
+            )
+            .unwrap()
+            .is_none()
+        );
+        native_ack_loss_write(
+            &root,
+            "native-ack-arm.json",
+            &serde_json::json!({"schema":"native-ack-loss/v1","scope_ref":Uuid::now_v7()}),
+        )
+        .unwrap();
+        assert!(
+            crate::delegation_service::native_ack_loss_binding(
+                &root,
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                "group:00000000-0000-7000-8000-000000000000:1:assign"
+            )
+            .is_err()
+        );
+        assert!(!root.join("engagements").exists());
+        let binding = serde_json::json!({"run_id":Uuid::now_v7(),"task_ref":Uuid::now_v7(),"claim_id":Uuid::now_v7()});
+        native_ack_loss_write(&root, "native-recovery-release.json", &binding).unwrap();
+        assert!(native_ack_loss_write(&root, "native-recovery-release.json", &binding).is_err());
+        assert!(
+            native_ack_loss_wait(&root, "native-recovery-release.json", u64::MAX, &binding).is_ok()
+        );
+        assert_eq!(
+            native_ack_loss_wait(&root, "native-recovery-release.json", 0, &binding).unwrap_err(),
+            crate::scheduler::error("native_ack_barrier_expired")
+        );
+        let mut foreign = binding.clone();
+        foreign["claim_id"] = serde_json::json!(Uuid::now_v7());
+        assert!(
+            native_ack_loss_wait(&root, "native-recovery-release.json", u64::MAX, &foreign)
+                .is_err()
+        );
+        fs::remove_file(root.join("native-recovery-release.json")).unwrap();
+        assert!(native_ack_loss_wait(&root, "native-recovery-release.json", 0, &binding).is_err());
+        symlink(
+            root.join("native-recovery-release.json"),
+            root.join("native-ack-held.json"),
+        )
+        .unwrap();
+        assert!(native_ack_loss_read(&root, "native-ack-held.json").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn generation_release_reader_joins_original_holder_with_current_authorized_controller() {
+        assert_eq!(
+            super::native_acceptance_worker_label(&super::WorkerProtocolError::InvalidIdentity),
+            "invalid_identity"
+        );
+        assert_eq!(
+            super::native_acceptance_worker_label(&super::WorkerProtocolError::ProtocolMismatch {
+                expected_protocol: 1,
+                actual_protocol: 999
+            }),
+            "other"
+        );
         use crate::domain::{Access, ControllerKind};
         use crate::writer::{
             GenerationRelease, GenerationReleasePhase as P, ReaderReservation, WriterRecord,

@@ -47,6 +47,8 @@ pub(crate) struct Publication {
     manifest_id: Uuid,
     identity_ids: Vec<Uuid>,
     page_ids: Vec<Uuid>,
+    #[serde(skip)]
+    prepared_logical_bytes: Option<u64>,
 }
 fn integrity() -> MachineError {
     MachineError::new(
@@ -103,17 +105,37 @@ fn manifest_page(p: &Publication, index: usize) -> Result<Vec<u8>, MachineError>
     )
 }
 fn manifest(p: &Publication) -> Result<Vec<u8>, MachineError> {
+    manifest_with_logical_bytes(p).map(|(bytes, _)| bytes)
+}
+fn manifest_with_logical_bytes(p: &Publication) -> Result<(Vec<u8>, u64), MachineError> {
     let identity = encode(&p.result)?;
+    let mut page_bytes = 0u64;
     let pages = p
         .page_ids
         .iter()
         .enumerate()
-        .map(|(index, id)| Ok(generated_ref(p, *id, &manifest_page(p, index)?)))
+        .map(|(index, id)| {
+            let bytes = manifest_page(p, index)?;
+            page_bytes = page_bytes
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(integrity)?;
+            Ok(generated_ref(p, *id, &bytes))
+        })
         .collect::<Result<Vec<_>, MachineError>>()?;
-    encode(
+    let bytes = encode(
         &json!({"schema":"dolgorae.result-component-manifest/v1","result_id":p.result_id,"result_digest":p.result.digest()?,
         "identity":{"content":BytesRef::from_bytes(&identity),"chunks":p.identity_ids.iter().enumerate().map(|(index,id)| Ok(generated_ref_media(p,*id,identity_chunk(&identity,index)?,"application/octet-stream"))).collect::<Result<Vec<_>,MachineError>>()?},"component_pages":pages}),
-    )
+    )?;
+    let generated = (bytes.len() as u64)
+        .checked_add(identity.len() as u64)
+        .and_then(|total| total.checked_add(page_bytes))
+        .ok_or_else(integrity)?;
+    let total = p.components.iter().try_fold(generated, |total, c| {
+        total
+            .checked_add(c.reference.byte_length)
+            .ok_or_else(integrity)
+    })?;
+    Ok((bytes, total))
 }
 fn identity_chunk(bytes: &[u8], index: usize) -> Result<&[u8], MachineError> {
     let start = index
@@ -145,7 +167,7 @@ impl Publication {
         run_id: Uuid,
         result: &CompleteResult,
     ) -> Result<Self, MachineError> {
-        result.digest()?;
+        result.validate()?;
         if result.source.worker_ref != run_id.to_string() || !result.attachments.is_empty() {
             return Err(integrity());
         }
@@ -178,7 +200,7 @@ impl Publication {
                 }
             }
         }
-        let publication = Self {
+        let mut publication = Self {
             schema: "dolgorae.result-component-binding/v1".into(),
             result_id: Uuid::now_v7(),
             workspace_id: view.workspace_id.clone(),
@@ -198,10 +220,13 @@ impl Publication {
             identity_ids: (0..encode(result)?.len().div_ceil(MAX_ARTIFACT as usize))
                 .map(|_| Uuid::now_v7())
                 .collect(),
+            prepared_logical_bytes: None,
         };
-        if manifest(&publication)?.len() as u64 > MAX_ARTIFACT {
+        let (manifest, logical_bytes) = manifest_with_logical_bytes(&publication)?;
+        if manifest.len() as u64 > MAX_ARTIFACT {
             return Err(unavailable());
         }
+        publication.prepared_logical_bytes = Some(logical_bytes);
         Ok(publication)
     }
     fn validate(&self, task: &str) -> Result<(), MachineError> {
@@ -216,7 +241,7 @@ impl Publication {
         {
             return Err(integrity());
         }
-        self.result.digest()?;
+        self.result.validate()?;
         let mut expected = Vec::new();
         if let Some(reference) = &self.result.final_response {
             expected.push((
@@ -321,20 +346,10 @@ impl Publication {
     }
 
     pub(crate) fn logical_bytes(&self) -> Result<u64, MachineError> {
-        let mut total = manifest(self)?.len() as u64;
-        total = total
-            .checked_add(encode(&self.result)?.len() as u64)
-            .ok_or_else(integrity)?;
-        for index in 0..self.page_ids.len() {
-            total = total
-                .checked_add(manifest_page(self, index)?.len() as u64)
-                .ok_or_else(integrity)?;
-        }
-        self.components.iter().try_fold(total, |total, c| {
-            total
-                .checked_add(c.reference.byte_length)
-                .ok_or_else(integrity)
-        })
+        self.prepared_logical_bytes.map_or_else(
+            || manifest_with_logical_bytes(self).map(|(_, total)| total),
+            Ok,
+        )
     }
     pub(crate) fn retain(&self, tx: &Transaction<'_>) -> Result<(), MachineError> {
         let body = String::from_utf8(encode(self)?).map_err(|_| integrity())?;
@@ -940,6 +955,16 @@ mod tests {
         let f = Fixture::new();
         let result = f.result(b"original");
         let p = Publication::prepare(&f.view, f.run, &result).unwrap();
+        let encoded = encode(&p).unwrap();
+        let reopened: Publication = serde_json::from_slice(&encoded).unwrap();
+        assert!(reopened.prepared_logical_bytes.is_none());
+        assert_eq!(
+            p.logical_bytes().unwrap(),
+            reopened.logical_bytes().unwrap()
+        );
+        let mut injected: Value = serde_json::from_slice(&encoded).unwrap();
+        injected["prepared_logical_bytes"] = json!(0);
+        assert!(serde_json::from_value::<Publication>(injected).is_err());
         let mut store =
             EngagementStore::open(&EngagementStore::workspace_database_path(&f.root)).unwrap();
         assert!(
@@ -999,6 +1024,22 @@ mod tests {
             assert!(manifest_page(&p, index).unwrap().len() < INLINE as usize);
         }
         let root: Value = serde_json::from_slice(&manifest(&p).unwrap()).unwrap();
+        let identity = encode(&result).unwrap();
+        let generated_bytes = (manifest(&p).unwrap().len() + identity.len()) as u64
+            + (0..p.page_ids.len())
+                .map(|index| manifest_page(&p, index).unwrap().len() as u64)
+                .sum::<u64>();
+        let content_bytes = p
+            .components
+            .iter()
+            .map(|c| c.reference.byte_length)
+            .sum::<u64>();
+        assert_eq!(p.logical_bytes().unwrap(), generated_bytes + content_bytes);
+        let reopened: Publication = serde_json::from_slice(&encode(&p).unwrap()).unwrap();
+        assert_eq!(
+            reopened.logical_bytes().unwrap(),
+            p.logical_bytes().unwrap()
+        );
         assert_eq!(root["result_digest"], result.digest().unwrap());
         assert_eq!(
             root["identity"]["content"],

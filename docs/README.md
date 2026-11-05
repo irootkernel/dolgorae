@@ -22,6 +22,8 @@ The checked [protocol](protocol/) artifacts derive wire, persisted-state, and
 machine-output contracts from the product specification. The
 [v0.1.4 consumer acceptance specification](specs/dolgorae-consumer-acceptance-v014.md)
 owns mandatory Aquarium, Podway and Gul requirements-to-evidence mappings;
+the [current consumer qualification](specs/dolgorae-v014-current-consumer-qualification.md)
+records the later ordinary-v3 consumer applicability without changing frozen H1;
 the [alignment dossier](todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md) supplies
 the five-phase whole-Epic execution graph and four normal handoffs. The
 [release-proof correction dossier](todo/TODO-DOLGORAE-RELEASE-PROOF-CORRECTION.md)

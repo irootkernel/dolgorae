@@ -16,6 +16,40 @@ pub(crate) fn error(reason: &str) -> MachineError {
         serde_json::json!({"reason":reason}),
     )
 }
+#[cfg(test)]
+pub(crate) fn native_acceptance_failure_label(error: &MachineError) -> &'static str {
+    match error
+        .details
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("accepted_receipt_ambiguous") => "accepted_receipt_ambiguous",
+        Some("accepted_body_changed") => "accepted_body_changed",
+        Some("accepted_body_unbound") => "accepted_body_unbound",
+        Some("accepted_identity_changed") => "accepted_identity_changed",
+        Some("accepted_owner_changed") => "accepted_owner_changed",
+        Some("actor_capture_changed") => "actor_capture_changed",
+        Some("actor_binding_changed") => "actor_binding_changed",
+        Some("actor_reader_policy_unverified") => "actor_reader_policy_unverified",
+        Some("claim_ledger_invalid") => "claim_ledger_invalid",
+        Some("scheduler_storage_unavailable") => "scheduler_storage_unavailable",
+        _ => match error.code.as_str() {
+            "TRANSPORT_FAILURE" => "transport_failure",
+            "INTERNAL_ERROR" => "internal_error",
+            "INVALID_ARGUMENT" => "invalid_argument",
+            "SPECIALIST_CONFIGURATION_MISMATCH" => "specialist_configuration_mismatch",
+            "COMPATIBILITY_REJECTED" => "compatibility_rejected",
+            "RUN_BUSY" => "run_busy",
+            "STARTUP_BUSY" => "startup_busy",
+            "RUN_STATE_CONFLICT" => "run_state_conflict",
+            "RECOVERY_REQUIRED" => "recovery_required_other",
+            "AUDIT_INTEGRITY_FAILURE" => "audit_integrity_failure",
+            "COMPLETE_RESULT_UNAVAILABLE" => "complete_result_unavailable",
+            _ => "other",
+        },
+    }
+}
+
 pub(crate) fn sql(_: rusqlite::Error) -> MachineError {
     error("scheduler_storage_unavailable")
 }
@@ -1734,6 +1768,13 @@ fn reconcile_home(
                 &crate::engagement::EngagementStore::workspace_database_path(&root),
             )
         {
+            #[cfg(all(test, dolgorae_native_acceptance))]
+            crate::worker::native_acceptance_run_diagnostic(
+                &root,
+                actor.run,
+                "actor_failure",
+                native_acceptance_failure_label(&failure),
+            );
             // Persist only a closed safe code. Detailed errors may contain
             // retained task or transport data and are never actor projections.
             let code = match failure.code.as_str() {
@@ -1771,7 +1812,7 @@ fn reconcile_home(
     }
     let mut first_error = None;
     for workspace in workspaces {
-        let result = (|| {
+        let result: Result<(), MachineError> = (|| {
             registered_workspace(home, &workspace)?;
             let root = home.workspace_root(&workspace);
             if let Some(mut owner) = crate::orchestration::OrchestrationStore::open_existing(&root)?
@@ -1781,6 +1822,21 @@ fn reconcile_home(
             Ok(())
         })();
         if let Err(error) = result {
+            #[cfg(all(test, dolgorae_native_acceptance))]
+            if let Ok(store) = crate::engagement::EngagementStore::open_read_only(
+                &crate::engagement::EngagementStore::workspace_database_path(
+                    &home.workspace_root(&workspace),
+                ),
+            ) && let Ok(actors) = actors(store.connection())
+                && let Some(actor) = actors.first()
+            {
+                crate::worker::native_acceptance_run_diagnostic(
+                    &home.workspace_root(&workspace),
+                    actor.run,
+                    "aggregate_refresh",
+                    &error.code,
+                );
+            }
             first_error.get_or_insert(error);
         }
     }
@@ -2291,6 +2347,22 @@ fn operation_outcome(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_acceptance_diagnostic_labels_do_not_copy_error_data() {
+        let error = super::error("accepted_body_changed");
+        assert_eq!(
+            super::native_acceptance_failure_label(&error),
+            "accepted_body_changed"
+        );
+        let error = crate::machine::MachineError::new(
+            "private-code",
+            "private body",
+            false,
+            serde_json::json!({"reason":"private path and credential", "capture":"private capture"}),
+        );
+        assert_eq!(super::native_acceptance_failure_label(&error), "other");
+    }
+
     use super::*;
 
     #[tokio::test]

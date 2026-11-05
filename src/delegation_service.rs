@@ -1098,12 +1098,11 @@ fn hire_external_specialist_in(
     let outcome = if start.is_ok() {
         engagement::RuntimeOutcome::Accepted
     } else {
-        // An error after the acceptance commit may hide a started writer, so the
-        // member stays degraded until its Run is recovered.
+        // An error after the acceptance commit may hide a started writer, or
+        // precede its manifest. Preserve the original admission and uncertainty.
         engagement::RuntimeOutcome::Unknown
     };
-    // Everything from the acceptance commit onwards reports that effect: the
-    // member admission is durable, so a later failure is recovery .
+    // The receipt remains accepted even when the execution effect is unresolved.
     accepted_boundary(
         "hire_external_specialist",
         Some(operation_ref),
@@ -1138,12 +1137,12 @@ fn hire_external_specialist_in(
                     "HIRE_START_UNRESOLVED",
                     "hire_external_specialist",
                     Some(operation_ref),
-                    "accepted",
-                    "RecoveryNeeded",
-                    "recover_run",
+                    "unresolved",
+                    "Unknown",
+                    "lookup_original_key",
                     &format!(
-                        "the accepted member Run could not be started: {}",
-                        error.code
+                        "the accepted member Run start is unresolved: {}",
+                        member_start_failure_code(&error)
                     ),
                 )),
             }
@@ -2396,13 +2395,17 @@ fn collect_external_specialist_task_from_store(
             "collect_external_specialist_task",
         ));
     }
+    let (result_digest, complete_result, typed) = match complete {
+        Some((digest, value, result)) => (Some(digest), Some(value), Some(result)),
+        None => (None, None, None),
+    };
     let observation = DelegationTaskObservation {
         task_ref: task_ref.to_string(),
         member_ref: member_ref.to_string(),
         accepted_task_digest,
         state: state.to_owned(),
-        result_digest: complete.as_ref().map(|(digest, _, _)| digest.clone()),
-        complete_result: complete.as_ref().map(|(_, value, _)| value.clone()),
+        result_digest,
+        complete_result,
         // `available` only with the complete result; a task still in flight has
         // nothing to publish yet.
         content_availability: if terminal {
@@ -2412,7 +2415,6 @@ fn collect_external_specialist_task_from_store(
         },
         required_action: required_action.to_owned(),
     };
-    let typed = complete.map(|(_, _, result)| result);
     Ok((observation, typed, accepted))
 }
 
@@ -3071,9 +3073,10 @@ fn spawn_specialist_in(
         broker: Some(&credential),
         idempotency_key: format!("delegated-member-spawn:{operation_ref}"),
     });
-    // An error after the acceptance commit may hide a started Run, so the member
-    // stays degraded until its Run is recovered (hire's HIRE_START_UNRESOLVED).
+    // An error may hide a started Run or precede its manifest. Retain the original
+    // admission; neither a replacement nor manifest-dependent recovery is implied.
     let started = start.is_ok();
+    let failure_code = start.as_ref().err().map(member_start_failure_code);
     accepted_boundary(
         "spawn_specialist",
         Some(operation_ref),
@@ -3085,7 +3088,7 @@ fn spawn_specialist_in(
                     operation_ref,
                     member_run_id,
                     started,
-                    (!started).then_some(SPAWN_START_UNRESOLVED),
+                    failure_code,
                     now,
                 )
             })?;
@@ -3096,10 +3099,13 @@ fn spawn_specialist_in(
                     SPAWN_START_UNRESOLVED,
                     "spawn_specialist",
                     Some(operation_ref),
-                    "accepted",
-                    "RecoveryNeeded",
-                    "recover_run",
-                    "the accepted member Run could not be started",
+                    "unresolved",
+                    "Unknown",
+                    "lookup_original_key",
+                    &format!(
+                        "the accepted member Run start is unresolved: {}",
+                        failure_code.expect("a failed start has its safe code")
+                    ),
                 ))
             }
         })(),
@@ -5035,7 +5041,7 @@ pub(crate) fn complete_result_of(
     };
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| complete_result_unavailable(operation_kind))?;
-    let result: crate::delegation_identity::CompleteResult = serde_json::from_value(value.clone())
+    let result = crate::delegation_identity::CompleteResult::deserialize(&value)
         .map_err(|_| complete_result_unavailable(operation_kind))?;
     // The row keeps the content digest of exactly these bytes, and the object
     // must re-derive its own identity digest.
@@ -5072,7 +5078,13 @@ pub(crate) fn complete_result_of(
             "the checked review could not adopt its candidate evidence",
         ));
     }
-    let identity_digest = result.digest()?;
+    result.validate()?;
+    // This closed type has only ASCII field names and bounded integers. Its
+    // sorted Value encoding, already checked against the content digest, is JCS.
+    let identity_digest = crate::delegation_identity::domain_digest_from_canonical(
+        crate::delegation_identity::COMPLETE_RESULT_SCHEMA,
+        canonical.as_bytes(),
+    );
     Ok(Some((identity_digest, value, result)))
 }
 
@@ -7397,6 +7409,14 @@ fn current_outcome(
     operation_kind: &str,
     receipt: &OperationReceipt,
 ) -> Result<&'static str, MachineError> {
+    if matches!(
+        operation_kind,
+        "assign_external_specialist_task" | "assign_specialist_task"
+    ) && receipt.namespace.operation_kind != "assign_synthesis"
+    {
+        return accepted_assignment_outcome(store, receipt);
+    }
+    // Synthesis keeps its own Task/Turn observation and established precedence.
     match operation_kind {
         // A group receipt accepts the assignment set, not a single execution.
         // Child outcomes and complete coverage belong to await/collect.
@@ -7462,15 +7482,15 @@ fn current_outcome(
             let (state, residency) = store.external_member_state(engagement_id, member_id)?;
             Ok(match (state.as_str(), residency.as_str()) {
                 ("provisioning", _) => "pending",
-                ("active", "recovering") | ("degraded", "recovering") | ("unknown", _) => "unknown",
+                ("active" | "degraded" | "releasing", "recovering") | ("unknown", _) => "unknown",
                 ("degraded", "unavailable") => "failed",
                 ("degraded", _) => "unknown",
                 _ => "completed",
             })
         }
         "spawn_specialist" => {
-            // The managed analogue of the hire arm: the Broker member row and its
-            // Run residency are the only facts that decide the outcome.
+            // Bind the original spawn before deriving its current member outcome.
+            // A failed publication may have no manifest, including retained rows.
             let member_ref = receipt
                 .accepted_subjects
                 .member_ref
@@ -7494,6 +7514,36 @@ fn current_outcome(
                     .ok_or_else(|| {
                         MachineError::invalid_argument("receipt", "the receipt names no member")
                     })?;
+            let unbound = || crate::scheduler::error("accepted_identity_changed");
+            if facts.spawn_operation_id.to_string() != receipt.operation_ref {
+                return Err(unbound());
+            }
+            let spawn_state: String = store
+                .connection()
+                .query_row(
+                    "SELECT state FROM brokered_spawn_operations
+                 WHERE operation_id=?1 AND session_id=?2 AND child_run_id=?3",
+                    rusqlite::params![
+                        receipt.operation_ref,
+                        session_id.to_string(),
+                        member_id.to_string()
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|_| unbound())?;
+            if matches!(facts.membership_state.as_str(), "retired" | "released") {
+                return Ok("completed");
+            }
+            if spawn_state == "requested" {
+                return Ok(if facts.membership_state == "provisioning" {
+                    "pending"
+                } else {
+                    "unknown"
+                });
+            }
+            if spawn_state == "recovery_required" {
+                return Ok("unknown");
+            }
             Ok(
                 match (
                     facts.membership_state.as_str(),
@@ -7547,6 +7597,271 @@ fn current_outcome(
     }
 }
 
+/// Outcome metadata shares the receipt's pinned read transaction. No source
+/// content, live port, schema installation or dispatch authority enters lookup.
+fn accepted_assignment_outcome(
+    store: &EngagementStore,
+    receipt: &OperationReceipt,
+) -> Result<&'static str, MachineError> {
+    use rusqlite::OptionalExtension as _;
+    let c = store.connection();
+    let refused = || crate::scheduler::error("accepted_identity_changed");
+    let scope = receipt
+        .namespace
+        .scope_ref
+        .as_deref()
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .ok_or_else(refused)?;
+    let task = receipt
+        .accepted_subjects
+        .task_ref
+        .as_deref()
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .ok_or_else(refused)?;
+    let member = receipt
+        .accepted_subjects
+        .member_ref
+        .as_deref()
+        .ok_or_else(refused)?;
+    let managed = receipt.namespace.operation_kind == "assign_specialist_task";
+    let expected_scope = if managed {
+        "orchestrated_session"
+    } else {
+        "external_engagement"
+    };
+    if receipt.namespace.scope_kind.as_deref() != Some(expected_scope) {
+        return Err(refused());
+    }
+    let (state, turn, identity_present) = if managed {
+        let facts = crate::orchestration::successor_task(c, scope, task)?.ok_or_else(refused)?;
+        let accepted =
+            crate::successor_capture::retained_accepted_task(&facts.accepted_request_json)?;
+        let marker: Value = serde_json::from_str(&facts.request_json).map_err(|_| refused())?;
+        let digest: String = c
+            .query_row(
+                "SELECT accepted_request_sha256 FROM brokered_task_acceptances WHERE task_id=?1",
+                [task.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(crate::scheduler::sql)?;
+        if facts.member_ref != member
+            || crate::jcs::sha256_hex(facts.accepted_request_json.as_bytes()) != digest
+            || marker["execution_intent"].as_str() != Some(accepted.execution_intent.as_str())
+            || marker["schema"] != "dolgorae.successor-task/v1"
+        {
+            return Err(refused());
+        }
+        (facts.state, facts.target_turn_id, true)
+    } else {
+        let facts = store.external_task(scope, task)?;
+        if facts.specialist_run_id.to_string() != member {
+            return Err(refused());
+        }
+        let metadata = engagement::external_task_identity_metadata_on(c, scope, task)?;
+        if let Some(accepted) = &metadata {
+            let (intent, _) = engagement::external_task_dispatch_facts_on(c, scope, task)?;
+            if intent != accepted.execution_intent {
+                return Err(refused());
+            }
+        }
+        let identity_present = if let Some(accepted) = &metadata {
+            let (objective, reference): (String, Option<String>) = c
+                .query_row(
+                    "SELECT objective_sha256,external_request_ref_json FROM tasks WHERE task_id=?1",
+                    [task.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(crate::scheduler::sql)?;
+            let digest = accepted.digest()?;
+            if objective != digest {
+                return Err(refused());
+            }
+            let reference: Option<Value> = reference
+                .map(|v| serde_json::from_str(&v))
+                .transpose()
+                .map_err(|_| refused())?;
+            reference
+                .as_ref()
+                .and_then(|v| v["accepted_task_digest"].as_str())
+                == Some(digest.as_str())
+        } else {
+            false
+        };
+        (facts.state, facts.turn_id, identity_present)
+    };
+    crate::scheduler::validate_schema(c)?;
+    let exists: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_claims')", [], |r| r.get(0)).map_err(crate::scheduler::sql)?;
+    type ClaimRow = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+    let claim: Option<ClaimRow> = if exists {
+        c.query_row("SELECT claim_id,kind,target_run_id,scope_kind,scope_ref,phase,turn_id,safe_blocker FROM scheduler_claims WHERE work_ref=?1",[task.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional().map_err(crate::scheduler::sql)?
+    } else {
+        None
+    };
+    let mut unknown = false;
+    if let Some((id, kind, target, scope_kind, scope_ref, phase, claim_turn, blocker)) = claim {
+        if Uuid::parse_str(&id).is_err()
+            || kind != "assignment"
+            || target != member
+            || scope_kind != expected_scope
+            || scope_ref != scope.to_string()
+            || !matches!(
+                phase.as_str(),
+                "claimed" | "dispatching" | "accepted" | "unknown" | "refused"
+            )
+            || (phase == "accepted" && claim_turn.is_none())
+            || (phase == "unknown" && blocker.as_deref() != Some("dispatch_outcome_unknown"))
+            || (claim_turn.is_some() && turn.is_none())
+            || (claim_turn.is_some() && turn.is_some() && claim_turn != turn)
+        {
+            return Err(crate::scheduler::error("claim_identity_invalid"));
+        }
+        unknown = state == "dispatching"
+            && turn.is_none()
+            && phase == "unknown"
+            && claim_turn.is_none()
+            && blocker.as_deref() == Some("dispatch_outcome_unknown");
+        let terminal = matches!(
+            state.as_str(),
+            "completed_not_delivered" | "delivered" | "failed" | "cancelled" | "expired"
+        );
+        if unknown && !identity_present {
+            return Err(refused());
+        }
+        if !terminal && phase == "unknown" && turn.is_none() && !unknown {
+            return Err(crate::scheduler::error("claim_identity_invalid"));
+        }
+    }
+    Ok(match state.as_str() {
+        "completed_not_delivered" | "delivered" => "completed",
+        "failed" => "failed",
+        "cancelled" => "cancelled",
+        "expired" => "expired",
+        "accepted" | "queued" | "claimed" => "pending",
+        "dispatching" if unknown => "unknown",
+        "dispatching" | "running" => "running",
+        _ => "unknown",
+    })
+}
+
+#[cfg(all(test, dolgorae_native_acceptance))]
+pub(crate) fn native_ack_loss_binding(
+    state_root: &Path,
+    run: Uuid,
+    scope_ref: Uuid,
+    submit_key: &str,
+) -> Result<Option<Value>, MachineError> {
+    // Ordinary external source keys are unchanged by dispatch_key; synthesis
+    // uses its separately bound synthesis-task:<Task> key. Ignore non-targets
+    // before reading an ordinary-assignment receipt.
+    let selected: Vec<_> = submit_key.split(':').collect();
+    if selected.len() != 4
+        || selected[0] != "group"
+        || selected[2] != "1"
+        || selected[3] != "assign"
+    {
+        return Ok(None);
+    }
+    let Some(arm) = crate::worker::native_ack_loss_read(state_root, "native-ack-arm.json")? else {
+        return Ok(None);
+    };
+    let invalid = || crate::scheduler::error("native_ack_binding_invalid");
+    if arm["schema"] != "native-ack-loss/v1" || arm["scope_ref"] != scope_ref.to_string() {
+        return Err(invalid());
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| invalid())?
+        .as_millis();
+    let until = arm["until_ms"].as_u64().ok_or_else(invalid)?;
+    if u128::from(until) <= now || u128::from(until) > now + 180_000 {
+        return Err(invalid());
+    }
+    let store =
+        EngagementStore::open_read_only(&EngagementStore::workspace_database_path(state_root))?;
+    let manifest = crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, state_root)
+        .load_manifest(run)?;
+    let (workspace, owner) = engagement::accepted_external_owner_on(store.connection(), scope_ref)?;
+    if workspace != manifest.workspace_id || owner != manifest.controller {
+        return Err(invalid());
+    }
+    let task = store
+        .external_task_for_dispatch(&workspace, scope_ref, run, submit_key)?
+        .ok_or_else(invalid)?;
+    let accepted =
+        engagement::external_task_identity_metadata_on(store.connection(), scope_ref, task)?
+            .ok_or_else(invalid)?;
+    let (receipt_text,): (String,) = store.connection().query_row(
+        "SELECT receipt_json FROM delegation_operations WHERE state='accepted' AND operation_kind='assign_external_specialist_task' AND json_extract(accepted_subjects_json,'$.task_ref')=?1",
+        [task.to_string()], |r| Ok((r.get(0)?,))).map_err(crate::scheduler::sql)?;
+    let receipt: OperationReceipt = serde_json::from_str(&receipt_text).map_err(|_| invalid())?;
+    match engagement::intent_lookup(store.connection(), &receipt.namespace)? {
+        IntentLookup::Accepted(ref retained) if **retained == receipt => {}
+        _ => return Err(invalid()),
+    }
+    let parts: Vec<_> = receipt.namespace.idempotency_key.split(':').collect();
+    if parts.len() != 4 || parts[0] != "group" || parts[2] != "1" || parts[3] != "assign" {
+        return Ok(None);
+    }
+    if receipt.namespace.workspace_ref != workspace
+        || receipt.namespace.scope_ref.as_deref() != Some(scope_ref.to_string().as_str())
+        || receipt.accepted_subjects.member_ref.as_deref() != Some(run.to_string().as_str())
+        || receipt.namespace
+            != LookupNamespace::from(
+                &Namespace::delegation(
+                    &owner.identity,
+                    &workspace,
+                    Some(("external_engagement", &scope_ref.to_string())),
+                    "assign_external_specialist_task",
+                    &receipt.namespace.idempotency_key,
+                )
+                .map_err(|_| invalid())?,
+            )
+    {
+        return Err(invalid());
+    }
+    let group = Uuid::parse_str(parts[1]).map_err(|_| invalid())?;
+    let document = research_group::read_document(&store, &group.to_string())?;
+    let group_key: String = store.connection().query_row(
+        "SELECT idempotency_key FROM delegation_operations WHERE state='accepted' AND operation_kind='assign_group' AND json_extract(accepted_subjects_json,'$.group_ref')=?1",
+        [group.to_string()], |r| r.get(0)).map_err(crate::scheduler::sql)?;
+    if group_key != arm["group_key"] {
+        return Ok(None);
+    }
+    let objective: String = store
+        .connection()
+        .query_row(
+            "SELECT objective_sha256 FROM tasks WHERE task_id=?1",
+            [task.to_string()],
+            |r| r.get(0),
+        )
+        .map_err(crate::scheduler::sql)?;
+    if accepted.digest()? != arm["accepted_task_digest"] || objective != accepted.digest()? {
+        return Err(invalid());
+    }
+    if document["manifest"]["scope_kind"] != "external_engagement"
+        || document["manifest"]["scope_ref"] != scope_ref.to_string()
+        || document["manifest"] != arm["manifest"]
+        || group_key != arm["group_key"]
+        || document["manifest"]["entries"][1]["entry_key"] != "source-1"
+        || document["manifest"]["entries"][1]["accepted_task_digest"] != arm["accepted_task_digest"]
+    {
+        return Err(invalid());
+    }
+    Ok(Some(
+        json!({"run_id":run,"task_ref":task,"scope_ref":scope_ref,
+        "group_ref":group,"submit_key":submit_key,"receipt":receipt,"until_ms":arm["until_ms"]}),
+    ))
+}
+
 fn ambient_guidance(
     snapshot: &RetainedSnapshot,
 ) -> Result<AmbientGuidanceDisclosure, MachineError> {
@@ -7589,6 +7904,19 @@ fn now_ms() -> Result<i64, MachineError> {
             .as_millis(),
     )
     .map_err(|_| MachineError::invalid_argument("clock", "unavailable"))
+}
+
+/// Only closed product codes may survive a failed Run start; no runtime payload
+/// or arbitrary upstream code is copied into the member observation or message.
+fn member_start_failure_code(error: &MachineError) -> &str {
+    let code = error.code.as_str();
+    if code == "SPECIALIST_CONFIGURATION_MISMATCH"
+        || crate::machine::registered_errors().contains_key(code)
+    {
+        code
+    } else {
+        "INTERNAL_ERROR"
+    }
 }
 
 fn successor_error(
@@ -7704,8 +8032,9 @@ fn accepted_error(
 
 /// An uncertain dispatch keeps the accepted effect and the counted round.
 ///
-/// `Unknown` requires an unresolved effect, which would deny the durable
-/// acceptance; recovery is the correct classification.
+/// This dispatch has a supported original-task reconciliation path, so its
+/// accepted receipt keeps `RecoveryNeeded`. A member start with no guaranteed
+/// manifest instead uses `Unknown`'s unresolved floor without erasing its receipt.
 fn uncertain_dispatch(
     operation_kind: &str,
     code: &str,
@@ -8746,7 +9075,7 @@ pub(crate) fn original_delegation_response(
     structured: bool,
 ) -> Result<Option<Vec<u8>>, MachineError> {
     let unavailable = || complete_result_unavailable("native_result_content");
-    result.digest()?;
+    result.validate()?;
     let identity = &result.source;
     let member = Uuid::parse_str(&identity.worker_ref).map_err(|_| unavailable())?;
     let task = Uuid::parse_str(&identity.task_ref).map_err(|_| unavailable())?;
@@ -8846,7 +9175,7 @@ pub(crate) fn original_delegation_task(
     result: &crate::delegation_identity::CompleteResult,
 ) -> Result<crate::successor_capture::AcceptedTaskContents, MachineError> {
     let unavailable = || complete_result_unavailable("native_task_content");
-    result.digest()?;
+    result.validate()?;
     let identity = &result.source;
     let task = Uuid::parse_str(&identity.task_ref).map_err(|_| unavailable())?;
     let scope = Uuid::parse_str(&identity.scope_ref).map_err(|_| unavailable())?;
@@ -8914,6 +9243,7 @@ pub(crate) mod tests {
         started: RefCell<Vec<AgentConfigurationSnapshot>>,
         starts: RefCell<Vec<StartRecord>>,
         failure: Option<&'static str>,
+        interrupt_start: std::cell::Cell<bool>,
         dispatched: RefCell<Vec<(Uuid, String, String)>>,
         dispatch_outcome: RefCell<Option<MemberDispatchOutcome>>,
         /// Reserve the managed dispatch boundary before reporting the outcome,
@@ -8936,6 +9266,7 @@ pub(crate) mod tests {
                 started: RefCell::new(Vec::new()),
                 starts: RefCell::new(Vec::new()),
                 failure: None,
+                interrupt_start: std::cell::Cell::new(false),
                 dispatched: RefCell::new(Vec::new()),
                 dispatch_outcome: RefCell::new(None),
                 reserve_before_outcome: std::cell::Cell::new(false),
@@ -9186,6 +9517,10 @@ pub(crate) mod tests {
             request: AdmittedMemberStart<'_>,
         ) -> Result<MemberRunStart, MachineError> {
             self.calls.set(self.calls.get() + 1);
+            assert!(
+                !self.interrupt_start.get(),
+                "fixture stops after accepted member admission"
+            );
             if let Some(code) = self.failure {
                 return Err(MachineError::new(
                     code,
@@ -12124,7 +12459,7 @@ pub(crate) mod tests {
         let engagement_id = fixture.open();
         let candidate = fixture.install();
         let scope = fixture.scope();
-        let failing = FakePort::failing("WORKER_STARTUP_FAILED");
+        let failing = FakePort::failing("TRANSPORT_FAILURE");
         let error = hire_external_specialist(
             &scope,
             &failing,
@@ -12132,9 +12467,12 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, "HIRE_START_UNRESOLVED");
-        assert_eq!(error.details["effect"], "accepted");
-        assert_eq!(error.details["classification"], "RecoveryNeeded");
-        assert_eq!(error.details["required_action"], "recover_run");
+        assert_eq!(error.details["effect"], "unresolved");
+        assert_eq!(error.details["classification"], "Unknown");
+        assert_eq!(error.details["required_action"], "lookup_original_key");
+        assert_eq!(error.details["retry_new_key"], false);
+        assert_eq!(error.details.as_object().unwrap().len(), 8);
+        assert!(error.message.ends_with("TRANSPORT_FAILURE"));
         let lookup = lookup_operation(
             &scope,
             "hire_external_specialist",
@@ -12171,6 +12509,314 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(failed["current_outcome"], "failed");
+    }
+
+    fn assert_original_unsettled_admission_release_outcome(managed: bool) {
+        for interrupted in [true, false] {
+            let mut fixture = Fixture::new();
+            let credential = fixture.root.join("release-owner.json");
+            crate::controller::create_controller_credential(
+                &credential,
+                ControllerKind::Automation,
+                "release-owner".to_owned(),
+                None,
+                None,
+            )
+            .unwrap();
+            let carrier = crate::controller::CredentialCarrier::open_path(&credential).unwrap();
+            fixture.controller = crate::controller::binding_from_carrier(&carrier, 1).unwrap();
+            let aggregate = if managed {
+                fixture.managed_session()
+            } else {
+                fixture.set_up_namespace();
+                fixture.open()
+            };
+            let runs = fixture.state_root.join("runs");
+            fs::create_dir_all(&runs).unwrap();
+            fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).unwrap();
+            let candidate = fixture.install();
+            let port = FakePort::new();
+            port.interrupt_start.set(interrupted);
+            let key = "original-unsettled-admission";
+            let admit = |port: &FakePort| {
+                if managed {
+                    fixture.spawn(aggregate, &candidate, key, Some(0), port)
+                } else {
+                    hire_external_specialist(
+                        &fixture.scope(),
+                        port,
+                        hire_request(aggregate, &candidate, key, Some(0)),
+                    )
+                }
+            };
+            let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| admit(&port)));
+            if interrupted {
+                assert!(response.is_err());
+            } else {
+                response.unwrap().unwrap();
+            }
+            assert_eq!(port.calls(), 1);
+            let lookup = || {
+                lookup_operation(
+                    &fixture.scope(),
+                    if managed {
+                        "spawn_specialist"
+                    } else {
+                        "hire_external_specialist"
+                    },
+                    Some((
+                        if managed {
+                            "orchestrated_session"
+                        } else {
+                            "external_engagement"
+                        },
+                        &aggregate.to_string(),
+                    )),
+                    key,
+                )
+                .unwrap()
+            };
+            let before = lookup();
+            assert_eq!(before["state"], "accepted");
+            assert_eq!(
+                before["current_outcome"],
+                if interrupted { "pending" } else { "completed" }
+            );
+            let member = Uuid::parse_str(
+                before["receipt"]["accepted_subjects"]["member_ref"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let revision = if managed {
+                fixture.session_membership_revision(aggregate)
+            } else {
+                fixture.membership_revision(aggregate)
+            };
+            let run_directories = fixture.run_directories();
+            let release = || {
+                let actual = crate::semantic::SemanticRunSettlementPort { carrier: &carrier };
+                if managed {
+                    release_specialist(
+                        &fixture.scope(),
+                        &fixture.managed_context(aggregate, "original-release"),
+                        &actual,
+                        ReleaseSpecialist {
+                            member_ref: member,
+                            expected_revision: revision,
+                            allow_interrupt: false,
+                        },
+                    )
+                } else {
+                    release_external_specialist(
+                        &fixture.scope(),
+                        &actual,
+                        ReleaseExternalSpecialist {
+                            engagement_id: aggregate,
+                            member_ref: member,
+                            expected_revision: revision,
+                            allow_interrupt: false,
+                        },
+                    )
+                }
+            };
+            let first_release = release().unwrap_err();
+            assert_eq!(
+                first_release.details["required_action"],
+                "reconcile_operation"
+            );
+            let expected = if interrupted { "unknown" } else { "completed" };
+            let after = lookup();
+            assert_eq!(
+                after["current_outcome"], expected,
+                "managed={managed}, interrupted={interrupted}"
+            );
+            assert_eq!(after["receipt"], before["receipt"]);
+            let mut owner =
+                crate::orchestration::OrchestrationStore::open(&fixture.state_root).unwrap();
+            owner
+                .refresh_checked_state(&fixture.view.workspace_id)
+                .unwrap();
+            let checked: Value = serde_json::from_slice(
+                &fs::read(fixture.state_root.join("orchestration/state.json")).unwrap(),
+            )
+            .unwrap();
+            let spawn = checked["spawn_operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|spawn| spawn["child_run_id"] == member.to_string())
+                .unwrap();
+            assert_eq!(
+                spawn["state"],
+                if interrupted {
+                    if managed {
+                        "requested"
+                    } else {
+                        "recovery_required"
+                    }
+                } else {
+                    "ready"
+                }
+            );
+            drop(owner);
+
+            let replay_port = FakePort::new();
+            let replay = admit(&replay_port).unwrap();
+            assert_eq!(
+                serde_json::to_value(replay.receipt).unwrap(),
+                before["receipt"]
+            );
+            assert_eq!(replay_port.calls(), 0);
+            assert_eq!(port.calls(), 1);
+            assert_eq!(fixture.run_directories(), run_directories);
+            assert_eq!(
+                if managed {
+                    fixture.broker_member_rows()
+                } else {
+                    fixture.member_rows()
+                },
+                1
+            );
+            let repeat = release().unwrap_err();
+            assert_eq!(
+                repeat.details["operation_ref"],
+                first_release.details["operation_ref"]
+            );
+            assert_eq!(repeat.details["required_action"], "reconcile_operation");
+            let row = crate::semantic::release_probe::release_row(&fixture.state_root, member);
+            assert_eq!(row[11], "recovery_needed");
+            assert_eq!(row[14], "-");
+            assert_eq!(
+                crate::semantic::release_probe::release_row_count(&fixture.state_root),
+                1
+            );
+            assert_eq!(lookup()["current_outcome"], expected);
+        }
+    }
+
+    #[test]
+    fn an_external_unsettled_admission_release_keeps_its_original_outcome() {
+        assert_original_unsettled_admission_release_outcome(false);
+    }
+
+    #[test]
+    fn a_managed_unsettled_admission_release_keeps_its_original_outcome() {
+        assert_original_unsettled_admission_release_outcome(true);
+    }
+
+    #[test]
+    fn an_uncertain_hire_stays_unknown_after_its_original_release_is_admitted() {
+        for corrupt_manifest in [false, true] {
+            let mut fixture = Fixture::new();
+            let credential = fixture.root.join("release-owner.json");
+            crate::controller::create_controller_credential(
+                &credential,
+                ControllerKind::Automation,
+                "release-owner".to_owned(),
+                None,
+                None,
+            )
+            .unwrap();
+            let carrier = crate::controller::CredentialCarrier::open_path(&credential).unwrap();
+            fixture.controller = crate::controller::binding_from_carrier(&carrier, 1).unwrap();
+            fixture.set_up_namespace();
+            let engagement = fixture.open();
+            let candidate = fixture.install();
+            let failing = FakePort::failing("TRANSPORT_FAILURE");
+            let refused = hire_external_specialist(
+                &fixture.scope(),
+                &failing,
+                hire_request(engagement, &candidate, "original-unknown-hire", Some(0)),
+            )
+            .unwrap_err();
+            assert_eq!(refused.details["classification"], "Unknown");
+            let lookup = || {
+                lookup_operation(
+                    &fixture.scope(),
+                    "hire_external_specialist",
+                    Some(("external_engagement", &engagement.to_string())),
+                    "original-unknown-hire",
+                )
+                .unwrap()
+            };
+            let before = lookup();
+            assert_eq!(before["current_outcome"], "unknown");
+            let member = Uuid::parse_str(
+                before["receipt"]["accepted_subjects"]["member_ref"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            if corrupt_manifest {
+                let root = fixture.state_root.join("runs").join(member.to_string());
+                fs::create_dir_all(&root).unwrap();
+                for directory in [fixture.state_root.join("runs"), root.clone()] {
+                    fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                fs::write(root.join("manifest.json"), b"not a manifest").unwrap();
+                fs::set_permissions(
+                    root.join("manifest.json"),
+                    fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+            }
+            let revision = fixture.membership_revision(engagement);
+            let release = || {
+                release_external_specialist(
+                    &fixture.scope(),
+                    &crate::semantic::SemanticRunSettlementPort { carrier: &carrier },
+                    ReleaseExternalSpecialist {
+                        engagement_id: engagement,
+                        member_ref: member,
+                        expected_revision: revision,
+                        allow_interrupt: false,
+                    },
+                )
+            };
+            let first_release = release().unwrap_err();
+            assert_eq!(
+                first_release.details["required_action"],
+                "reconcile_operation"
+            );
+            let after = lookup();
+            assert_eq!(
+                after["current_outcome"], "unknown",
+                "corrupt_manifest={corrupt_manifest}"
+            );
+            assert_eq!(after["state"], "accepted");
+            assert_eq!(after["receipt"], before["receipt"]);
+            let replay_port = FakePort::new();
+            let replay = hire_external_specialist(
+                &fixture.scope(),
+                &replay_port,
+                hire_request(engagement, &candidate, "original-unknown-hire", Some(0)),
+            )
+            .unwrap();
+            // Admission replay observes the existing release; it does not restart the hire.
+            assert_eq!(replay.member.state, "releasing");
+            assert_eq!(
+                serde_json::to_value(replay.receipt).unwrap(),
+                before["receipt"]
+            );
+            assert_eq!(replay_port.calls(), 0);
+            assert_eq!(failing.calls(), 1);
+            assert_eq!(fixture.member_rows(), 1);
+            let repeated = release().unwrap_err();
+            assert_eq!(
+                repeated.details["operation_ref"],
+                first_release.details["operation_ref"]
+            );
+            assert_eq!(repeated.details["required_action"], "reconcile_operation");
+            let row = crate::semantic::release_probe::release_row(&fixture.state_root, member);
+            assert_eq!(row[11], "recovery_needed");
+            assert_eq!(row[14], "-");
+            assert_eq!(
+                crate::semantic::release_probe::release_row_count(&fixture.state_root),
+                1
+            );
+            assert_eq!(lookup()["current_outcome"], "unknown");
+        }
     }
 
     #[test]
@@ -15474,30 +16120,35 @@ pub(crate) mod tests {
         let fixture = Fixture::new();
         let session = fixture.managed_session();
         let candidate = fixture.install();
-        let port = FakePort::failing("SPECIALIST_PUBLICATION_UNKNOWN");
+        let port = FakePort::failing("SPECIALIST_CONFIGURATION_MISMATCH");
         let error = fixture
             .spawn(session, &candidate, "spawn-key", None, &port)
             .unwrap_err();
         assert_eq!(error.code, "SPAWN_START_UNRESOLVED");
         assert_eq!(error.details["schema"], SUCCESSOR_ERROR_SCHEMA);
-        assert_eq!(error.details["effect"], "accepted");
-        assert_eq!(error.details["classification"], "RecoveryNeeded");
-        assert_eq!(error.details["required_action"], "recover_run");
+        assert_eq!(error.details["effect"], "unresolved");
+        assert_eq!(error.details["classification"], "Unknown");
+        assert_eq!(error.details["required_action"], "lookup_original_key");
+        assert_eq!(error.details["retry_new_key"], false);
+        assert_eq!(error.details.as_object().unwrap().len(), 8);
+        assert!(error.message.ends_with("SPECIALIST_CONFIGURATION_MISMATCH"));
         // The accepted spawn keeps its member as the cleanup owner, degraded.
         assert_eq!(fixture.broker_member_rows(), 1);
         let connection = rusqlite::Connection::open(fixture.database()).unwrap();
-        let (spawn_state, member_state, residency): (String, String, String) = connection
-            .query_row(
-                "SELECT s.state,m.membership_state,m.actor_residency
+        let (spawn_state, member_state, residency, cause): (String, String, String, String) =
+            connection
+                .query_row(
+                    "SELECT s.state,m.membership_state,m.actor_residency,s.safe_error_code
                    FROM brokered_spawn_operations s
                    JOIN brokered_members m ON m.spawn_operation_id=s.operation_id",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
         assert_eq!(spawn_state, "recovery_required");
         assert_eq!(member_state, "degraded");
         assert_eq!(residency, "unavailable");
+        assert_eq!(cause, "SPECIALIST_CONFIGURATION_MISMATCH");
         // The key stays accepted, so a retry replays the retained receipt.
         let lookup = lookup_operation(
             &fixture.scope(),
@@ -15507,7 +16158,91 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(lookup["state"], "accepted");
-        assert_eq!(lookup["current_outcome"], "failed");
+        assert_eq!(lookup["current_outcome"], "unknown");
+        let member = Uuid::parse_str(
+            lookup["receipt"]["accepted_subjects"]["run_ref"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::run::RunStore::new(
+                crate::workspace::SystemWorkspacePlatform,
+                &fixture.state_root
+            )
+            .load_manifest(member)
+            .unwrap_err()
+            .code,
+            "RUN_NOT_FOUND"
+        );
+        let replay_port = FakePort::new();
+        let replay = fixture
+            .spawn(session, &candidate, "spawn-key", Some(0), &replay_port)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(replay.receipt).unwrap(),
+            lookup["receipt"]
+        );
+        assert_eq!(replay.member.state, "unknown");
+        assert_eq!(replay_port.calls(), 0);
+        assert_eq!(port.calls(), 1);
+        assert_eq!(fixture.broker_member_rows(), 1);
+
+        // An admitted release does not turn an unproven start into a failed one.
+        connection
+            .execute(
+                "UPDATE brokered_members SET membership_state='retiring'",
+                [],
+            )
+            .unwrap();
+        let still_unknown = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "spawn-key",
+        )
+        .unwrap();
+        assert_eq!(still_unknown["current_outcome"], "unknown");
+        // Contradictory provenance cannot borrow this original receipt.
+        connection
+            .execute(
+                "UPDATE brokered_members SET spawn_operation_id=?1",
+                [Uuid::now_v7().to_string()],
+            )
+            .unwrap();
+        let refused = lookup_operation(
+            &fixture.scope(),
+            "spawn_specialist",
+            Some(("orchestrated_session", &session.to_string())),
+            "spawn-key",
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "RECOVERY_REQUIRED");
+        assert_eq!(refused.details["classification"], "RecoveryNeeded");
+    }
+
+    #[test]
+    fn a_failed_managed_start_does_not_publish_an_unrecognized_runtime_code() {
+        let fixture = Fixture::new();
+        let session = fixture.managed_session();
+        let candidate = fixture.install();
+        let port = FakePort::failing("private runtime path and credential");
+        let error = fixture
+            .spawn(session, &candidate, "private-start", None, &port)
+            .unwrap_err();
+        assert_eq!(error.details["classification"], "Unknown");
+        assert_eq!(error.details["effect"], "unresolved");
+        assert!(error.message.ends_with("INTERNAL_ERROR"));
+        assert!(!error.message.contains("private runtime"));
+        let connection = rusqlite::Connection::open(fixture.database()).unwrap();
+        let cause: String = connection
+            .query_row(
+                "SELECT safe_error_code FROM brokered_spawn_operations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cause, "INTERNAL_ERROR");
     }
 
     #[test]
@@ -19330,8 +20065,108 @@ pub(crate) mod tests {
                 .transact(|tx| crate::scheduler::prepare_dispatch(tx, &permit, now_ms()?))
                 .unwrap();
             crate::scheduler::require_dispatch_claim(store.connection(), expected, member).unwrap();
+            store
+                .transact(|tx| {
+                    if managed {
+                        crate::orchestration::mark_successor_task_dispatching(
+                            tx,
+                            scope,
+                            expected,
+                            now_ms()?,
+                        )
+                    } else {
+                        engagement::mark_external_task_dispatching_in(
+                            tx,
+                            scope,
+                            expected,
+                            now_ms()?,
+                        )
+                        .map(|_| ())
+                    }
+                })
+                .unwrap();
             // Expiry is not a replay grant after the dispatch boundary.
-            store.transact(|tx|{tx.execute("UPDATE scheduler_claims SET lease_until_ms=0,phase='unknown' WHERE claim_id=?1",[permit.claim.to_string()]).unwrap();Ok(())}).unwrap();
+            store
+                .transact(|tx| {
+                    crate::scheduler::finish_dispatch(
+                        tx,
+                        &permit,
+                        &MemberDispatchOutcome::Uncertain {
+                            code: "TRANSPORT_FAILURE".into(),
+                            message: "mapping-only port proof".into(),
+                        },
+                        now_ms()?,
+                    )
+                })
+                .unwrap();
+            store
+                .transact(|tx| {
+                    tx.execute(
+                        "UPDATE scheduler_claims SET lease_until_ms=0 WHERE claim_id=?1",
+                        [permit.claim.to_string()],
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            for receipt in &accepted {
+                let observed = lookup_operation(
+                    &fixture.scope(),
+                    &receipt.namespace.operation_kind,
+                    Some((
+                        receipt.namespace.scope_kind.as_deref().unwrap(),
+                        receipt.namespace.scope_ref.as_deref().unwrap(),
+                    )),
+                    &receipt.namespace.idempotency_key,
+                )
+                .unwrap();
+                assert_eq!(observed["state"], "accepted");
+                assert_eq!(observed["receipt"], json!(receipt));
+                assert_eq!(
+                    observed["current_outcome"],
+                    if receipt.accepted_subjects.task_ref.as_deref()
+                        == Some(expected.to_string().as_str())
+                    {
+                        "unknown"
+                    } else {
+                        "pending"
+                    }
+                );
+            }
+            let original_target = member.to_string();
+            store
+                .transact(|tx| {
+                    tx.execute(
+                        "UPDATE scheduler_claims SET target_run_id=?2 WHERE claim_id=?1",
+                        rusqlite::params![permit.claim.to_string(), Uuid::now_v7().to_string()],
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            let receipt = &accepted[1];
+            assert!(
+                lookup_operation(
+                    &fixture.scope(),
+                    &receipt.namespace.operation_kind,
+                    Some((
+                        receipt.namespace.scope_kind.as_deref().unwrap(),
+                        receipt.namespace.scope_ref.as_deref().unwrap()
+                    )),
+                    &receipt.namespace.idempotency_key
+                )
+                .is_err()
+            );
+            store
+                .transact(|tx| {
+                    tx.execute(
+                        "UPDATE scheduler_claims SET target_run_id=?2 WHERE claim_id=?1",
+                        rusqlite::params![permit.claim.to_string(), original_target],
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+                .unwrap();
             assert!(
                 crate::scheduler::require_dispatch_claim(store.connection(), expected, member)
                     .is_err()
@@ -19342,6 +20177,202 @@ pub(crate) mod tests {
                     .unwrap()
                     .is_none()
             );
+
+            let receipt = &accepted[1];
+            let lookup_original = || {
+                lookup_operation(
+                    &fixture.scope(),
+                    &receipt.namespace.operation_kind,
+                    Some((
+                        receipt.namespace.scope_kind.as_deref().unwrap(),
+                        receipt.namespace.scope_ref.as_deref().unwrap(),
+                    )),
+                    &receipt.namespace.idempotency_key,
+                )
+            };
+            let foreign = Fixture::new();
+            let foreign_scope = DelegationScope {
+                controller: &foreign.controller,
+                ..fixture.scope()
+            };
+            let foreign_lookup = lookup_operation(
+                &foreign_scope,
+                &receipt.namespace.operation_kind,
+                Some((
+                    receipt.namespace.scope_kind.as_deref().unwrap(),
+                    receipt.namespace.scope_ref.as_deref().unwrap(),
+                )),
+                &receipt.namespace.idempotency_key,
+            );
+            assert!(foreign_lookup.is_err() || foreign_lookup.unwrap()["state"] != "accepted");
+            // Retirement is physical content availability, not lookup metadata.
+            store.transact(|tx| { tx.execute("UPDATE result_content_refs SET retired_operation=?2 WHERE owner_kind='accepted_task' AND owner_id=?1",
+                rusqlite::params![expected.to_string(), Uuid::now_v7().to_string()]).map_err(crate::scheduler::sql)?; Ok(()) }).unwrap();
+            assert_eq!(lookup_original().unwrap()["current_outcome"], "unknown");
+            if !managed {
+                let original: String = store
+                    .connection()
+                    .query_row(
+                        "SELECT request_json FROM tasks WHERE task_id=?1",
+                        [expected.to_string()],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                store
+                    .transact(|tx| {
+                        tx.execute(
+                            "UPDATE tasks SET request_json=NULL WHERE task_id=?1",
+                            [expected.to_string()],
+                        )
+                        .unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(lookup_original().is_err());
+                store
+                    .transact(|tx| {
+                        tx.execute(
+                            "UPDATE tasks SET request_json=?2 WHERE task_id=?1",
+                            rusqlite::params![expected.to_string(), original],
+                        )
+                        .unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+                let original_ref: Option<String> = store
+                    .connection()
+                    .query_row(
+                        "SELECT external_request_ref_json FROM tasks WHERE task_id=?1",
+                        [expected.to_string()],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                store
+                    .transact(|tx| {
+                        tx.execute(
+                            "UPDATE tasks SET external_request_ref_json=NULL WHERE task_id=?1",
+                            [expected.to_string()],
+                        )
+                        .unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(lookup_original().is_err());
+                let objective: String = store
+                    .connection()
+                    .query_row(
+                        "SELECT objective_sha256 FROM tasks WHERE task_id=?1",
+                        [expected.to_string()],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                store
+                    .transact(|tx| {
+                        tx.execute(
+                            "UPDATE tasks SET objective_sha256=?2 WHERE task_id=?1",
+                            rusqlite::params![expected.to_string(), "0".repeat(64)],
+                        )
+                        .unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(lookup_original().is_err());
+                store.transact(|tx|{tx.execute("UPDATE tasks SET external_request_ref_json=?2,objective_sha256=?3 WHERE task_id=?1",rusqlite::params![expected.to_string(),original_ref,objective]).unwrap();Ok(())}).unwrap();
+            }
+            store
+                .transact(|tx| {
+                    tx.execute(
+                        "UPDATE scheduler_claims SET phase='accepted' WHERE claim_id=?1",
+                        [permit.claim.to_string()],
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            assert!(lookup_original().is_err());
+            store
+                .transact(|tx| {
+                    tx.execute(
+                        "UPDATE scheduler_claims SET phase='unknown' WHERE claim_id=?1",
+                        [permit.claim.to_string()],
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            let pinned_observer = EngagementStore::open_read_only(&fixture.database()).unwrap();
+            let pinned_tx = pinned_observer
+                .connection()
+                .unchecked_transaction()
+                .unwrap();
+            assert_eq!(
+                accepted_assignment_outcome(&pinned_observer, receipt).unwrap(),
+                "unknown"
+            );
+            // A real terminal transition wins over its old no-Turn unknown claim.
+            if managed {
+                store
+                    .transact(|tx| {
+                        crate::orchestration::terminalize_successor_task(
+                            tx,
+                            scope,
+                            expected,
+                            "TRANSPORT_FAILURE",
+                            now_ms()?,
+                        )
+                    })
+                    .unwrap();
+            } else {
+                store
+                    .cancel_external_task(
+                        scope,
+                        expected,
+                        "cancelled",
+                        "mapping terminal precedence",
+                        "mapping-cancel",
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                accepted_assignment_outcome(&pinned_observer, receipt).unwrap(),
+                "unknown"
+            );
+            drop(pinned_tx);
+            assert_eq!(
+                lookup_original().unwrap()["current_outcome"],
+                if managed { "failed" } else { "cancelled" }
+            );
+            // Reads pinned before a concurrent terminal retain coherent metadata.
+            // A fresh connection sees that terminal and never resurrects a claim.
+            let observer = EngagementStore::open_read_only(&fixture.database()).unwrap();
+            let tx = observer.connection().unchecked_transaction().unwrap();
+            let pinned = accepted_assignment_outcome(&observer, receipt).unwrap();
+            store
+                .transact(|c| {
+                    c.execute(
+                        "UPDATE scheduler_claims SET target_run_id=?2 WHERE claim_id=?1",
+                        rusqlite::params![permit.claim.to_string(), Uuid::now_v7().to_string()],
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                accepted_assignment_outcome(&observer, receipt).unwrap(),
+                pinned
+            );
+            drop(tx);
+            assert!(lookup_original().is_err());
+            store
+                .transact(|c| {
+                    c.execute(
+                        "UPDATE scheduler_claims SET target_run_id=?2 WHERE claim_id=?1",
+                        rusqlite::params![permit.claim.to_string(), member.to_string()],
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+                .unwrap();
             for receipt in accepted {
                 match store.intent_lookup(&receipt.namespace).unwrap() {
                     engagement::IntentLookup::Accepted(observed) => assert_eq!(*observed, receipt),
@@ -24350,6 +25381,101 @@ pub(crate) mod tests {
                     );
                     assert_eq!(f.database_bytes(), before);
                 }
+                #[cfg(dolgorae_native_acceptance)]
+                if !managed {
+                    let metadata = EngagementStore::open_read_only(&f.database()).unwrap();
+                    let group = merge_request["group_ref"].as_str().unwrap();
+                    let document = research_group::read_document(&metadata, group).unwrap();
+                    let group_key: String = metadata.connection().query_row("SELECT idempotency_key FROM delegation_operations WHERE operation_kind='assign_group' AND json_extract(accepted_subjects_json,'$.group_ref')=?1",[group],|r|r.get(0)).unwrap();
+                    crate::worker::native_ack_loss_write(&f.state_root, "native-ack-arm.json", &json!({
+                        "schema":"native-ack-loss/v1","scope_ref":aggregate,"manifest":document["manifest"],
+                        "accepted_task_digest":document["manifest"]["entries"][1]["accepted_task_digest"],
+                        "group_key":group_key,"until_ms":now_ms().unwrap()+60_000
+                    })).unwrap();
+                    let source = &merge_request["sources"][0];
+                    let original_task =
+                        Uuid::parse_str(source["task_ref"].as_str().unwrap()).unwrap();
+                    let text: String = metadata.connection().query_row("SELECT receipt_json FROM delegation_operations WHERE operation_kind='assign_external_specialist_task' AND json_extract(accepted_subjects_json,'$.task_ref')=?1",[original_task.to_string()],|r|r.get(0)).unwrap();
+                    let source_receipt: OperationReceipt = serde_json::from_str(&text).unwrap();
+                    source_receipt.verify_digest().unwrap();
+                    assert!(
+                        source_receipt
+                            .namespace
+                            .idempotency_key
+                            .ends_with(":0:assign")
+                    );
+                    let source_key = research_merge::dispatch_key(
+                        metadata.connection(),
+                        original_task,
+                        &source_receipt.namespace.idempotency_key,
+                    )
+                    .unwrap();
+                    assert!(
+                        native_ack_loss_binding(
+                            &f.state_root,
+                            Uuid::parse_str(source["worker_ref"].as_str().unwrap()).unwrap(),
+                            aggregate,
+                            &source_key
+                        )
+                        .unwrap()
+                        .is_none()
+                    );
+                    let synthesis_key = research_merge::dispatch_key(
+                        metadata.connection(),
+                        task_id,
+                        "synthesis-key",
+                    )
+                    .unwrap();
+                    assert_eq!(synthesis_key, format!("synthesis-task:{task_id}"));
+                    assert!(
+                        native_ack_loss_binding(&f.state_root, member, aggregate, &synthesis_key)
+                            .unwrap()
+                            .is_none()
+                    );
+                    assert!(!f.state_root.join("native-ack-held.json").exists());
+                }
+
+                {
+                    let mut projection =
+                        crate::orchestration::OrchestrationStore::open_existing(&f.state_root)
+                            .unwrap()
+                            .unwrap();
+                    projection
+                        .refresh_checked_state(&f.view.workspace_id)
+                        .unwrap();
+                    let path = f.state_root.join("orchestration/state.json");
+                    let bytes = fs::read(&path).unwrap();
+                    let state: Value = serde_json::from_slice(&bytes).unwrap();
+                    let row = state["specialist_tasks"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|row| row["task_id"] == task_id.to_string())
+                        .unwrap();
+                    assert_eq!(
+                        row["idempotency_key"],
+                        if managed {
+                            format!(
+                                "successor:{}",
+                                assigned["receipt"]["operation_ref"].as_str().unwrap()
+                            )
+                        } else {
+                            "synthesis-key".into()
+                        }
+                    );
+                    assert_eq!(row["target_run_id"], member.to_string());
+                    assert_eq!(row["aggregate_id"], aggregate.to_string());
+                    assert!(row["request_artifact_ref"].is_string());
+                    drop(projection);
+                    let mut reopened =
+                        crate::orchestration::OrchestrationStore::open_existing(&f.state_root)
+                            .unwrap()
+                            .unwrap();
+                    reopened
+                        .refresh_checked_state(&f.view.workspace_id)
+                        .unwrap();
+                    assert_eq!(fs::read(&path).unwrap(), bytes);
+                }
                 let store = EngagementStore::open_read_only(&f.database()).unwrap();
                 let (bytes, contexts, target) =
                     engagement::accepted_task_content(store.connection(), task_id)
@@ -24841,6 +25967,293 @@ pub(crate) mod tests {
             }
         }
     }
+    #[test]
+    fn task086_new_member_synthesis_retains_native_context_through_restart_claim_and_worker_binding()
+     {
+        for gap in [false, true] {
+            let (f, home, carrier, aggregate, port, merge_request, caller) =
+                task085_group_fixture(false, !gap, false, true, 2);
+            let merged =
+                research_merge::merge(&f.scope(), None, &port, &merge_request, true).unwrap();
+            let installed = f.install();
+            let hired = hire_external_specialist(
+                &f.scope(),
+                &port,
+                HireExternalSpecialist {
+                    engagement_id: aggregate,
+                    provisioning_ref: &installed.provisioning_ref,
+                    role_ref: "reviewer",
+                    agent_configuration_digest: &installed.agent_configuration_digest,
+                    idempotency_key: "new-synthesis-member",
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+            let member = Uuid::parse_str(&hired.member.member_ref).unwrap();
+            f.publish_external_member_manifest(aggregate, member);
+            let configuration = preparation_configuration(
+                &f.scope(),
+                SettlementOwner::External {
+                    engagement_id: aggregate,
+                },
+                member,
+            )
+            .unwrap();
+            let mut task = fixture_task();
+            task.purpose = "research".into();
+            task.brief = "TASK086_SYNTHESIS: retain every immutable source and conflict.".into();
+            task.expected_output = "complete_result".into();
+            task.criteria.push(crate::task_request::TaskCriterion {
+                id: "source-coverage".into(),
+                statement: "Preserve every original source and explicit gap.".into(),
+                source_context_ids: vec![task.contexts[0].id.clone()],
+            });
+            assert!(!task.contexts.is_empty());
+            let (accepted, _) = crate::successor_capture::capture_facade_task(
+                &configuration,
+                &task,
+                "read_only",
+                None,
+            )
+            .unwrap();
+            let request = json!({"schema":"dolgorae.external-specialist-request/v5","operation":"assign_synthesis","scope_kind":"external_engagement","scope_ref":aggregate,"member_ref":member,"merged_findings_digest":merged["merged_digest"],"merged_input":merged["merged_identity"]["merged_output"],"assignment":{"task_body":task,"accepted_task_identity":accepted,"deadline_seconds":60},"idempotency_key":"native-shaped-synthesis","expected_revision":null});
+            let host = crate::trusted_host::tests::Fixture::for_caller(
+                home.clone(),
+                f.view.canonical_path.to_path_buf().unwrap(),
+                &carrier,
+                SettlementOwner::External {
+                    engagement_id: aggregate,
+                },
+                crate::trusted_host::HostRoute::Codex,
+                caller.accepted().clone(),
+            );
+            host.initialize().unwrap();
+            host.ready()
+                .bind_native(
+                    crate::host_invocation::NativeEvent {
+                        session: "task086-projection".into(),
+                        turn: Some("primary-turn".into()),
+                        tool_use: "original-synthesis".into(),
+                        server: "dolgorae".into(),
+                        server_source: None,
+                        tool: "specialist".into(),
+                    },
+                    request.clone(),
+                )
+                .unwrap();
+            let call = || {
+                crate::specialist_facade::external_with_port(
+                    &home,
+                    &host.path(),
+                    "specialist",
+                    crate::specialist_facade::NativeCarrier::Codex {
+                        session: "task086-projection",
+                        call: "original-synthesis",
+                    },
+                    &request,
+                    &port,
+                )
+            };
+            let before = port.dispatched.borrow().len();
+            let assigned = call();
+            assert!(
+                crate::specialist_facade::validates(&assigned, "assign_synthesis_response"),
+                "{assigned}"
+            );
+            assert_eq!(
+                port.dispatched.borrow().len(),
+                before,
+                "acceptance must queue, never start a Turn"
+            );
+            let id = Uuid::parse_str(assigned["task"]["task_ref"].as_str().unwrap()).unwrap();
+            let owner = crate::assignment_queue::Owner::External(aggregate);
+            let mut store = EngagementStore::open(&f.database()).unwrap();
+            let path = f.state_root.join("orchestration/state.json");
+            let mut projection =
+                crate::orchestration::OrchestrationStore::open_existing(&f.state_root)
+                    .unwrap()
+                    .unwrap();
+            projection
+                .refresh_checked_state(&f.view.workspace_id)
+                .unwrap();
+            let original = fs::read(&path).unwrap();
+            let state: Value = serde_json::from_slice(&original).unwrap();
+            let row = state["specialist_tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["task_id"] == id.to_string())
+                .unwrap();
+            assert_eq!(row["idempotency_key"], "native-shaped-synthesis");
+            assert_eq!(row["target_run_id"], member.to_string());
+            let operation = assigned["receipt"]["operation_ref"].as_str().unwrap();
+            // Simulate damaged retained storage after proving the normal writer guards.
+            let frozen_triggers = {
+                let mut statement = store.connection().prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name IN ('delegation_identity_fixed','delegation_receipt_frozen') ORDER BY name").unwrap();
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            assert_eq!(frozen_triggers.len(), 2);
+            store.connection().execute_batch("DROP TRIGGER delegation_identity_fixed; DROP TRIGGER delegation_receipt_frozen;").unwrap();
+            for column in [
+                "scope_ref",
+                "controller_principal",
+                "accepted_subjects_json",
+                "receipt_json",
+            ] {
+                let query =
+                    format!("SELECT {column} FROM delegation_operations WHERE operation_ref=?1");
+                let before: String = store
+                    .connection()
+                    .query_row(&query, [operation], |r| r.get(0))
+                    .unwrap();
+                let invalid = match column {
+                    "scope_ref" => Uuid::now_v7().to_string(),
+                    "controller_principal" => "changed-controller".to_owned(),
+                    "accepted_subjects_json" => {
+                        let mut v: Value = serde_json::from_str(&before).unwrap();
+                        v["member_ref"] = json!(Uuid::now_v7());
+                        v.to_string()
+                    }
+                    _ => {
+                        let mut v: Value = serde_json::from_str(&before).unwrap();
+                        v["accepted_input_digest"] = json!(format!("sha256:{}", "f".repeat(64)));
+                        v.to_string()
+                    }
+                };
+                let update =
+                    format!("UPDATE delegation_operations SET {column}=?1 WHERE operation_ref=?2");
+                store
+                    .connection()
+                    .execute(&update, rusqlite::params![invalid, operation])
+                    .unwrap();
+                assert!(
+                    projection
+                        .refresh_checked_state(&f.view.workspace_id)
+                        .is_err(),
+                    "tampered {column} was projected"
+                );
+                assert_eq!(fs::read(&path).unwrap(), original);
+                store
+                    .connection()
+                    .execute(&update, rusqlite::params![before, operation])
+                    .unwrap();
+            }
+            let (other, subjects): (String, String) = store.connection().query_row(
+                "SELECT operation_ref,accepted_subjects_json FROM delegation_operations WHERE state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref') IS NOT NULL AND operation_ref!=?1 LIMIT 1", [operation], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+            let mut ambiguous: Value = serde_json::from_str(&subjects).unwrap();
+            ambiguous["task_ref"] = json!(id);
+            store.connection().execute("UPDATE delegation_operations SET accepted_subjects_json=?1 WHERE operation_ref=?2",rusqlite::params![ambiguous.to_string(), other]).unwrap();
+            assert!(
+                projection
+                    .refresh_checked_state(&f.view.workspace_id)
+                    .is_err()
+            );
+            assert_eq!(fs::read(&path).unwrap(), original);
+            store.connection().execute("UPDATE delegation_operations SET accepted_subjects_json=?1 WHERE operation_ref=?2",rusqlite::params![subjects, other]).unwrap();
+            projection
+                .refresh_checked_state(&f.view.workspace_id)
+                .unwrap();
+            assert_eq!(fs::read(&path).unwrap(), original);
+            for trigger in frozen_triggers {
+                store.connection().execute_batch(&trigger).unwrap();
+            }
+            drop(projection);
+            let retained = crate::scheduler::retained_assignment(
+                store.connection(),
+                owner,
+                id,
+                member,
+                &f.view.workspace_id,
+                &f.state_root,
+            )
+            .unwrap();
+            assert_eq!(retained.accepted, accepted);
+            let prompt = research_merge::task_prompt(
+                &f.state_root,
+                id,
+                retained
+                    .contents
+                    .prompt(&accepted, "read_only", 60)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                prompt.contains("TASK086_SYNTHESIS")
+                    && prompt.contains("Immutable merged findings input")
+            );
+            drop(store);
+            store = EngagementStore::open(&f.database()).unwrap();
+            let restarted = crate::scheduler::retained_assignment(
+                store.connection(),
+                owner,
+                id,
+                member,
+                &f.view.workspace_id,
+                &f.state_root,
+            )
+            .unwrap();
+            assert_eq!(restarted.key, format!("synthesis-task:{id}"));
+            assert_eq!(restarted.contents.task_body, retained.contents.task_body);
+            // No native process exists in this fixture; the resident fact precedes the production claim.
+            store
+                .connection()
+                .execute(
+                    "UPDATE members SET actor_residency='resident' WHERE specialist_run_id=?1",
+                    [member.to_string()],
+                )
+                .unwrap();
+            let now = crate::scheduler::now_ms().unwrap();
+            let permit = store
+                .transact(|tx| crate::scheduler::claim(tx, owner, member, now))
+                .unwrap()
+                .unwrap();
+            assert_eq!(permit.work, id);
+            store
+                .transact(|tx| {
+                    crate::scheduler::prepare_dispatch(tx, &permit, now)?;
+                    crate::engagement::mark_external_task_dispatching_in(tx, aggregate, id, now)?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                crate::worker::bind_successor_dispatch(
+                    &store,
+                    aggregate,
+                    member,
+                    &f.view.workspace_id,
+                    &restarted.key,
+                    false,
+                    &prompt
+                )
+                .unwrap()
+            );
+            assert!(
+                crate::worker::bind_successor_dispatch(
+                    &store,
+                    aggregate,
+                    member,
+                    &f.view.workspace_id,
+                    &restarted.key,
+                    false,
+                    &format!("{prompt} altered")
+                )
+                .is_err()
+            );
+            assert!(
+                store
+                    .transact(|tx| crate::scheduler::claim(tx, owner, member, now))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(call()["receipt"], assigned["receipt"]);
+            assert_eq!(port.dispatched.borrow().len(), before);
+        }
+    }
+
     #[test]
     fn task085_synthesis_lookup_preserves_failure_metadata_and_closed_owner_reads() {
         for managed in [false, true] {

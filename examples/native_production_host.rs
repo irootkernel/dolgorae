@@ -51,9 +51,14 @@ fn main() {
             "--task085-control-plane" => driver::task085_control_plane(root),
             "--task085-run-managed" => driver::task085_run_managed(root),
             "--task085-observe" => driver::task085_observe(root),
+            "--task086-control-plane" => driver::task086_control_plane(root),
+            "--task086-unknown" => driver::task086_unknown(root),
+            "--task086-merged" => driver::task086_merged(root),
+            "--task086-finish" => driver::task086_finish(root),
             "--assign" => driver::assign(root),
             "--observe" => driver::observe(root),
             "--cleanup" => driver::cleanup(root),
+            "--peer-read" => driver::peer_read(root),
             _ => panic!("unsupported production fixture operation"),
         };
         println!("{}", output);

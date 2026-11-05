@@ -55,7 +55,7 @@ COLLABORATION_RESULT = ("TASK027 large result prefix: 한글.\n"
 COLLABORATION_PAGE_LIMIT = 1030
 
 
-def successor_aquarium_sources(root: Path, archive: Path) -> None:
+def successor_aquarium_sources(root: Path, archive: Path, *, current_roles: bool = False) -> None:
     """Retain only the selected instruction/helper inputs; never execute on extraction."""
     archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     if archive_digest != "542a7836dee2d412b06f6c78e16712124cce8f89c14413d943c1bd3fab5454e9":
@@ -66,6 +66,8 @@ def successor_aquarium_sources(root: Path, archive: Path) -> None:
              "skills/goal-evaluator/scripts/prepare_assignment.py",
              "skills/goal-evaluator/scripts/render_dispatch.py",
              "skills/goal-evaluator/scripts/ordinary_assignment.py"]
+    if current_roles:
+        names.append("skills/goal-evaluator/SKILL.md")
     source = root / "aquarium-source"
     source.mkdir(mode=0o700)
     identities = []
@@ -81,17 +83,19 @@ def successor_aquarium_sources(root: Path, archive: Path) -> None:
             identities.append({"member": member.name, "sha256": hashlib.sha256(body).hexdigest()})
     private_file(root / "aquarium-source.json", json.dumps({
         "selection": "db132845624c24bb4d0a889503b35a2a59b2571d",
-        "archive_sha256": archive_digest, "files": identities}).encode())
+        "archive_sha256": archive_digest, "files": identities, "current_ordinary_roles": current_roles}).encode())
 
 
-def prepare_successor_consumers(root: Path) -> None:
+def prepare_successor_consumers(root: Path, *, adapter_id: str = "dolgorae.managed/1") -> None:
     """Called by the existing Rust fixture before managed assignment admission."""
     from run_native_production_host import podway_fixture
     inputs = json.loads((root / "consumer-inputs.json").read_text())
     facts = json.loads((root / "managed-consumer-setup.json").read_text())
     podway_fixture(root, Path(inputs["podway"]), inputs["podway_sha256"], facts["candidate"],
                    dict(os.environ), time.monotonic() + 30,
-                   adapter_id="dolgorae.managed/1", adapter_version=facts["adapter_version"])
+                   adapter_id=adapter_id, adapter_version=facts["adapter_version"])
+    if inputs.get("producer_only"):
+        return
     source = root / "aquarium-source"
     scripts = source / "skills/goal-evaluator/scripts"
     modules = []
@@ -138,19 +142,25 @@ def prepare_successor_consumers(root: Path) -> None:
         sys.dont_write_bytecode = previous
 
 
-def successor_public(root: Path, *args: str) -> dict:
+def successor_public(root: Path, *args: str, payload: dict | None = None, expected_error: str | None = None) -> dict:
     connection = json.loads((root / "connection.json").read_text())
     executable = Path(connection["executable"])
     if "sha256:" + hashlib.sha256(executable.read_bytes()).hexdigest() != connection["executable_sha256"]:
         raise ProbeCheckFailure("selected_podway_executable_changed")
     argv = [str(executable), "--contract-generation", "1", "--worktree", connection["worktree"], "--json", *args]
-    result = subprocess.run(argv, cwd=connection["worktree"], capture_output=True, timeout=10)
+    result = subprocess.run(argv, cwd=connection["worktree"], env=isolated_environment(root),
+                            input=json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode() if payload is not None else None,
+                            capture_output=True, timeout=10)
     with (root / "consumer-public.jsonl").open("a") as log:
         log.write(json.dumps({"argv": argv, "exit": result.returncode,
             "stdout": result.stdout.decode(), "stderr": result.stderr.decode()}) + "\n")
-    if result.returncode:
+    value = json.loads(result.stdout)
+    if expected_error is not None:
+        if result.returncode == 0 or value.get("schema") != "podway.error/v2" or value.get("code") != expected_error:
+            raise ProbeCheckFailure("selected_public_consumer_wrong_refusal", {"expected": expected_error, "actual": value})
+    elif result.returncode:
         raise ProbeCheckFailure("selected_public_consumer_read_or_completion_failed")
-    return json.loads(result.stdout)
+    return value
 
 
 def finish_successor_consumer(root: Path) -> None:
@@ -282,7 +292,7 @@ class IntegratedResponses(ScriptedResponses):
                                  "byte_length": len(self.expected or b"")}
                     name = "dolgorae_candidate_read"
                 else:
-                    arguments = {"cmd": self.command, "yield_time_ms": 10000}
+                    arguments = {"cmd": self.command, "yield_time_ms": 10000, "shell": "/bin/sh", "login": False}
                     name = "exec_command"
                 self.native_calls = [(self.call_id, name, arguments)]
                 if self.request_specialist and getattr(self, "managed_native_sources", None) is not None:
@@ -1000,6 +1010,8 @@ class SuccessorResponses(IntegratedResponses):
             calls.append((call_id, tool, body))
         self.primary_outer_call = f"primary-{self.primary_phase}-{self.posts}"
         item = code_call(self.primary_carrier_request, self.primary_outer_call, calls)
+        if any(body.get("operation") == "await_specialist_task" for _, body, _ in requests):
+            item["input"] = '// @exec: {"yield_time_ms": 65000}\n' + item["input"]
         identity = f"primary-response-{self.posts}"
         return [{"type": "response.created", "response": {"id": identity}},
                 {"type": "response.output_item.done", "item": item},
@@ -1077,7 +1089,8 @@ class SuccessorResponses(IntegratedResponses):
                     raise ProbeCheckFailure("managed_primary_captured_instructions_missing_or_ambient")
                 user = self.primary_user(request, phase)
                 original_instruction = "".join(v.get("text", "") for v in user.get("content", [])) if user else ""
-                if (self.consumer_root / "aquarium-source/references/formal-agent-orchestration-v1.md").read_text() not in original_instruction:
+                if (not getattr(self, "producer_only", False)
+                        and (self.consumer_root / "aquarium-source/references/formal-agent-orchestration-v1.md").read_text() not in original_instruction):
                     raise ProbeCheckFailure("selected_formal_primary_instruction_not_delivered")
                 self.primary_carrier_request = {"input": [v for v in request["input"] if v.get("type") == "additional_tools"]}
             for call_id, (body, page) in self.primary_pending.items():
@@ -1220,15 +1233,26 @@ class SuccessorResponses(IntegratedResponses):
             marker = markers[writer_step]
             self.prepare(marker, GENERAL, command=f"printf '{writer_step + 1} after\\n' > file.txt; printf 'written\\n'",
                          expected=b"written\n")
-            dispatch = (self.consumer_root / ("formal-dispatch.txt" if writer_step == 0 else "ordinary-dispatch.txt")).read_text()
             task = self.writer_task(request, writer_step)
-            if not any(context.get("content") == dispatch for context in task.get("contexts", [])):
-                raise ProbeCheckFailure("selected_aquarium_assignment_not_delivered")
+            if not getattr(self, "producer_only", False):
+                dispatch = (self.consumer_root / ("formal-dispatch.txt" if writer_step == 0 else "ordinary-dispatch.txt")).read_text()
+                if not any(context.get("content") == dispatch for context in task.get("contexts", [])):
+                    raise ProbeCheckFailure("selected_aquarium_assignment_not_delivered")
         private_file(self.consumer_root / f"writer-http-{writer_step}-{self.posts}.json", json.dumps(request, ensure_ascii=False).encode())
+        if writer_step == 0 and not getattr(self, "managed_input", None):
+            self.managed_input = request
         events = super().respond(request)
         if not self.pending:
             self.writer_steps = writer_step + 1
         if writer_step == 0 and not self.pending:
+            self.managed_dispatch_finished()
+            if getattr(self, "producer_only", False):
+                self.managed_original = b"Complete managed producer delivery. Native write verified; no Aquarium Role or semantic goal acceptance is claimed.\n" * 14
+                for event in events:
+                    item = event.get("item", {})
+                    if item.get("type") == "message" and item.get("role") == "assistant":
+                        item["content"][0]["text"] = self.managed_original.decode()
+                return events
             # Wait for the genuine assignment acknowledgement, never a scraped
             # task ID. The HTTP server can serve the concurrent Root request.
             if not self.assignment_seen.wait(5):
@@ -1301,9 +1325,12 @@ def assert_successor_dispatch(root: Path, fixture: SuccessorResponses) -> None:
 
 
 def successor_campaign(binary: Path, codex: Path, podway: Path | None = None,
-                       aquarium_source: Path | None = None) -> dict[str, Any]:
+                       aquarium_source: Path | None = None, *, frozen_driver: Path | None = None,
+                       frozen_driver_sha256: str | None = None, producer_only: bool = False) -> dict[str, Any]:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit integrated native opt-in required")
+    if (frozen_driver is None) != (frozen_driver_sha256 is None):
+        raise ValueError("frozen successor driver and SHA256 must be supplied together")
     if executable_identity(codex)["sha256"] != CODEX_SHA256:
         raise ValueError("successor acceptance requires the pinned executable")
     if podway is None or aquarium_source is None:
@@ -1314,39 +1341,85 @@ def successor_campaign(binary: Path, codex: Path, podway: Path | None = None,
     root.chmod(0o700)
     fixture = None
     driver = None
+    foreground = None
     environment = None
     passed = False
+
+    def stop_foreground() -> None:
+        nonlocal foreground
+        if foreground is None:
+            return
+        foreground.terminate()
+        out, err = foreground.communicate(timeout=7)
+        private_file(root / "foreground.stdout", out.encode())
+        private_file(root / "foreground.stderr", err.encode())
+        code = foreground.returncode
+        foreground = None
+        if code or out:
+            raise ProbeCheckFailure("integrated_foreground_shutdown_failed")
+
     try:
-        for name in ("home", "tmp", "config", "cache", "profile", "workspace"):
+        for name in ("home", "tmp", "config", "cache", "profile", "profile-members", "workspace"):
             (root / name).mkdir(mode=0o700)
         environment = isolated_environment(root)
         environment[OPT_IN] = "1"
+        if producer_only:
+            from run_native_production_host import admitted_native_input
+            environment["DOLGORAE_NATIVE_MANAGED_PRODUCER"] = "1"
         environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
         successor_aquarium_sources(root, aquarium_source)
         private_file(root / "consumer-inputs.json", json.dumps({
             "python": sys.executable, "scripts": str(Path(__file__).resolve().parent),
-            "podway": str(podway), "podway_sha256": "4ff3c8d3162d9ff05f434101add9c7b81abfa04dd522da7c7016a0033ac0a461"}).encode())
+            "podway": str(podway), "podway_sha256": "dece7fecd90eaf6130b330e2cb70e98532f3e6b73950227cc2ff935a8be8e5ae",
+            "producer_only": producer_only}).encode())
         checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
-        command = shlex.split(os.environ.get("CARGO", "cargo")) + [
-            "rustc", "--locked", "--release", "--example", "native_successor_pipeline", "--",
-            "--cfg", "dolgorae_native_acceptance", "--cfg", "test",
-            "-C", "debug-assertions=on", "-C", "overflow-checks=on"]
-        build = subprocess.run(command, cwd=PROTOCOL.parents[1], capture_output=True,
-                               text=True, timeout=300)
-        private_file(root / "build.stdout", build.stdout.encode())
-        private_file(root / "build.stderr", build.stderr.encode())
-        if build.returncode:
-            raise ProbeCheckFailure("successor_driver_build_failed")
         driver = root / "fixture-successor-driver"
-        shutil.copyfile(Path(os.environ.get("CARGO_TARGET_DIR",str(PROTOCOL.parents[1] / "target"))) / "release/examples/native_successor_pipeline", driver)
+        if frozen_driver is not None:
+            frozen_driver = frozen_driver.resolve(strict=True)
+            if not frozen_driver_sha256 or hashlib.sha256(frozen_driver.read_bytes()).hexdigest() != frozen_driver_sha256:
+                raise ProbeCheckFailure("frozen_successor_driver_changed")
+            shutil.copyfile(frozen_driver, driver)
+        else:
+            command = shlex.split(os.environ.get("CARGO", "cargo")) + [
+                "rustc", "--locked", "--release", "--example", "native_successor_pipeline", "--",
+                "--cfg", "dolgorae_native_acceptance", "--cfg", "test",
+                "-C", "debug-assertions=on", "-C", "overflow-checks=on"]
+            build = subprocess.run(command, cwd=PROTOCOL.parents[1], capture_output=True,
+                                   text=True, timeout=300)
+            private_file(root / "build.stdout", build.stdout.encode())
+            private_file(root / "build.stderr", build.stderr.encode())
+            if build.returncode:
+                raise ProbeCheckFailure("successor_driver_build_failed")
+            shutil.copyfile(Path(os.environ.get("CARGO_TARGET_DIR",str(PROTOCOL.parents[1] / "target"))) / "release/examples/native_successor_pipeline", driver)
         driver.chmod(0o700)
         fixture = SuccessorResponses()
+        fixture.producer_only = producer_only
         fixture.consumer_root = root
+        fixture.managed_dispatch_finished = stop_foreground
         fixture.source_check = lambda: assert_successor_dispatch(root, fixture)
         private_file(root / "profile/config.toml", b'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "low"\n'
                      + fixture_config(fixture.base_url) + b"\n[features]\nplugins = false\nshell_snapshot = false\n")
         private_file(root / "profile/AGENTS.md", (PROFILE + "\n").encode())
+        private_file(root / "profile-members/config.toml", (root / "profile/config.toml").read_bytes())
+        private_file(root / "profile-members/AGENTS.md", (root / "profile/AGENTS.md").read_bytes())
         private_file(root / "fixture-owned", b"native-successor-pipeline/v1\n")
+        subprocess.run(["/usr/bin/git", "-C", str(root / "workspace"), "init", "-q"],
+                       env=environment, check=True, capture_output=True, timeout=10)
+        initialized = subprocess.run([str(binary), "init", str(root / "workspace")],
+                                     env=environment, capture_output=True, text=True, timeout=10)
+        private_file(root / "control-plane-init.json", initialized.stdout.encode())
+        if initialized.returncode or not json.loads(initialized.stdout).get("ok"):
+            raise ProbeCheckFailure("integrated_foreground_not_ready")
+        foreground = subprocess.Popen([str(driver), "--control-plane", str(root)],
+                                      env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        import select
+        if not select.select([foreground.stdout], [], [], 10)[0]:
+            raise ProbeCheckFailure("integrated_foreground_readiness_timeout")
+        ready_line = foreground.stdout.readline()
+        private_file(root / "foreground-ready.json", ready_line.encode())
+        ready = json.loads(ready_line)
+        if not ready.get("ok") or ready.get("command") != "serve":
+            raise ProbeCheckFailure("integrated_foreground_not_ready")
         result = subprocess.run([str(driver), str(root), str(codex)], env=environment,
                                 capture_output=True, text=True, timeout=300)
         private_file(root / "driver.stdout", result.stdout.encode())
@@ -1357,13 +1430,15 @@ def successor_campaign(binary: Path, codex: Path, podway: Path | None = None,
                 "http_posts": len(fixture.input_sizes), "first_fixture_error": fixture.failure_details})
         value = json.loads(result.stdout)
         if (value.get("schema") != "dolgorae.native-successor-pipeline/v1"
-                or not value.get("passed") or fixture.steps != 5 or fixture.posts != SUCCESSOR_POSTS
-                or len(fixture.input_sizes) != SUCCESSOR_POSTS
+                or not value.get("passed") or fixture.steps != (4 if producer_only else 5)
+                or fixture.posts != SUCCESSOR_POSTS - (2 if producer_only else 0)
+                or len(fixture.input_sizes) != SUCCESSOR_POSTS - (2 if producer_only else 0)
                 or getattr(fixture, "primary_posts", 0) != 15 + SUCCESSOR_CONTINUATIONS
-                or getattr(fixture, "writer_steps", 0) != 2
-                or getattr(fixture, "dispatch_checks", 0) != 4
+                or getattr(fixture, "writer_steps", 0) != (1 if producer_only else 2)
+                or getattr(fixture, "dispatch_checks", 0) != (2 if producer_only else 4)
                 or (root / "cleanup-result").read_bytes() != b"complete\n"):
             raise ProbeCheckFailure("successor_evidence_incomplete", {"native_turns":fixture.steps,"loopback_posts":fixture.posts,"dispatch_checks":getattr(fixture,"dispatch_checks",0)})
+        stop_foreground()
         with patch.dict(os.environ, environment, clear=True):
             cleanup_removed_root(binary, root, allow_existing_root=True)
         inspected = subprocess.run([str(binary), "runtime", "orphan", "inspect",
@@ -1383,28 +1458,57 @@ def successor_campaign(binary: Path, codex: Path, podway: Path | None = None,
                          for v in json.loads((root / f"primary-{phase}-results.json").read_text())]
                          for phase in ("spawn", "assignment", "consumer")},
                      action_completion=json.loads((root / "consumer-completion.json").read_text()),
-                     ordinary_delivery=json.loads((root / "ordinary-consumed.json").read_text()),
+                     ordinary_delivery=None if producer_only else json.loads((root / "ordinary-consumed.json").read_text()),
                      external_provider_requests=0, real_account_or_credentials_used=False,
                      codex_sha256=CODEX_SHA256, owned_process_absence_verified=True)
+        if producer_only:
+            exported = json.loads((root / "managed-producer-export.json").read_text())
+            facts = {"schema": "dolgorae.native-producer-facts/v1", **exported,
+                "source_kind": "genuine managed Root production dispatch, authorized source-owner collect and original native page returns",
+                "originals": {key: body.decode() for key, body in fixture.finished_reads.items()},
+                "native_pages": fixture.primary_pages, "ordinary_aquarium_role": False, "semantic_goal_pass": False}
+            facts["native_admitted_input"] = admitted_native_input(fixture.managed_input, exported["accepted_configuration"], exported["original_task"])
+            private_file(root / "producer-facts.json", json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
+            value.update(producer_facts=str(root / "producer-facts.json"), owned_fixture_retained=str(root), current_ordinary_consumer_pending=True)
         passed = True
         return value
     finally:
-        if not passed and driver is not None and driver.is_file():
-            cleanup = subprocess.run([str(driver), "--cleanup", str(root)], env=environment,
-                                     capture_output=True, text=True, timeout=120)
-            private_file(root / "cleanup.stdout", cleanup.stdout.encode())
-            private_file(root / "cleanup.stderr", cleanup.stderr.encode())
-            private_file(root / "cleanup-status.json", json.dumps({"exit": cleanup.returncode}).encode())
-            if cleanup.returncode == 0:
-                with patch.dict(os.environ, environment, clear=True):
-                    cleanup_removed_root(binary, root, allow_existing_root=True)
-        if fixture is not None:
-            fixture.close()
-        if passed:
+        original_failure = sys.exc_info()[0] is not None
+        cleanup_errors = []
+        try:
+            stop_foreground()
+        except Exception as error:
+            passed = False
+            cleanup_errors.append({"stage":"foreground_stop", "error":type(error).__name__})
+        try:
+            if not passed and driver is not None and driver.is_file():
+                cleanup = subprocess.run([str(driver), "--cleanup", str(root)], env=environment,
+                                         capture_output=True, text=True, timeout=120)
+                private_file(root / "cleanup.stdout", cleanup.stdout.encode())
+                private_file(root / "cleanup.stderr", cleanup.stderr.encode())
+                private_file(root / "cleanup-status.json", json.dumps({"exit": cleanup.returncode}).encode())
+                if cleanup.returncode == 0:
+                    with patch.dict(os.environ, environment, clear=True):
+                        cleanup_removed_root(binary, root, allow_existing_root=True)
+                else:
+                    cleanup_errors.append({"stage":"owner_cleanup", "exit_code":cleanup.returncode})
+        except Exception as error:
+            cleanup_errors.append({"stage":"owner_cleanup", "error":type(error).__name__})
+        try:
+            if fixture is not None:
+                fixture.close()
+        except Exception as error:
+            cleanup_errors.append({"stage":"fixture_close", "error":type(error).__name__})
+        if cleanup_errors:
+            passed = False
+            private_file(root / "cleanup-errors.json", json.dumps(cleanup_errors).encode())
+        if passed and not producer_only:
             shutil.rmtree(root)
-        else:
+        elif not passed:
             print(json.dumps({"schema":"dolgorae.native-successor-pipeline-failure/v1",
                               "owned_fixture_retained":str(root)}), file=sys.stderr)
+        if cleanup_errors and not original_failure:
+            raise ProbeCheckFailure("successor_cleanup_failed", {"errors":cleanup_errors})
 
 
 class CollaborationResponses(ScriptedResponses):
@@ -2132,12 +2236,20 @@ def main() -> int:
     parser.add_argument("--default-feature-startup-only", action="store_true")
     parser.add_argument("--ordinary-close-only", action="store_true")
     parser.add_argument("--successor-only", action="store_true")
+    parser.add_argument("--managed-producer-only", action="store_true")
+    parser.add_argument("--successor-driver", type=Path)
+    parser.add_argument("--successor-driver-sha256")
     parser.add_argument("--collaboration-component-only", action="store_true")
     parser.add_argument("--successor-startup-only", action="store_true")
     parser.add_argument("--scheduler-component-only", action="store_true")
     args = parser.parse_args()
     try:
-        if args.successor_startup_only:
+        if args.managed_producer_only:
+            if args.successor_startup_only or args.scheduler_component_only or args.collaboration_component_only or args.default_feature_startup_only or args.successor_only or args.ordinary_close_only:
+                raise ValueError("managed producer export is a distinct mode")
+            result = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True), args.podway, args.aquarium_source,
+                frozen_driver=args.successor_driver, frozen_driver_sha256=args.successor_driver_sha256, producer_only=True)
+        elif args.successor_startup_only:
             if args.scheduler_component_only or args.collaboration_component_only or args.default_feature_startup_only or args.successor_only or args.ordinary_close_only:
                 raise ValueError("successor startup is a distinct component mode")
             result = successor_startup_component_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True))
@@ -2155,12 +2267,12 @@ def main() -> int:
             with patch.dict(os.environ, {caller.OPT_IN:"1"}):
                 result=caller.default_feature_campaign(args.caller_driver.resolve(strict=True),args.codex.resolve(strict=True))
         elif args.successor_only:
-            result = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True), args.podway, args.aquarium_source)
+            result = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True), args.podway, args.aquarium_source, frozen_driver=args.successor_driver, frozen_driver_sha256=args.successor_driver_sha256)
         else:
             result = campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True),
                               args.caller_driver.resolve(strict=True), ordinary_close_only=args.ordinary_close_only)
             if not args.ordinary_close_only:
-                result["successor_writer_acceptance"] = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True), args.podway, args.aquarium_source)
+                result["successor_writer_acceptance"] = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True), args.podway, args.aquarium_source, frozen_driver=args.successor_driver, frozen_driver_sha256=args.successor_driver_sha256)
     except ProbeCheckFailure as error:
         print(json.dumps({"schema": "dolgorae.native-integrated-acceptance-failure/v1",
                           "passed": False, "check": error.kind,

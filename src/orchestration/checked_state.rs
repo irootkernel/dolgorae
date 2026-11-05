@@ -1148,10 +1148,11 @@ fn externals(store: &OrchestrationStore, state: &mut State) -> Result<(), Machin
             let changed = integer(&raw, "updated")?;
             let (key, request) =
                 external_operation(c, &workspace, "hire_external_specialist", "member_ref", run)?;
-            let spawn_state = match member_state.as_str() {
-                "active" | "releasing" | "released" => "ready",
-                "provisioning" => "provisioning",
-                "degraded" => "failed",
+            let spawn_state = match (member_state.as_str(), string(&raw, "residency")?) {
+                ("active" | "degraded" | "releasing", "recovering") => "recovery_required",
+                ("active" | "releasing" | "released", _) => "ready",
+                ("provisioning", _) => "provisioning",
+                ("degraded", _) => "failed",
                 _ => return Err(integrity("external member state is unsupported")),
             };
             state.spawn_operations.push(SpawnOperation {
@@ -1300,6 +1301,47 @@ fn causal(
         _ => Err(integrity("materialized causal identity is ambiguous")),
     }
 }
+fn external_task_operation(
+    c: &Connection,
+    workspace: &str,
+    aggregate: Uuid,
+    task: Uuid,
+) -> Result<Option<String>, MachineError> {
+    if !table_present(c, "delegation_operations")? {
+        return Ok(None);
+    }
+    let accepted = rows(
+        c,
+        "SELECT workspace_ref,scope_kind,scope_ref,operation_kind FROM delegation_operations WHERE state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref')=?1",
+        [task.to_string()],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        },
+    )?;
+    match accepted.as_slice() {
+        [] => Ok(None),
+        [(owner_workspace, kind, owner, operation)]
+            if owner_workspace == workspace
+                && kind == "external_engagement"
+                && owner == &aggregate.to_string()
+                && matches!(
+                    operation.as_str(),
+                    "assign_external_specialist_task" | "assign_synthesis"
+                ) =>
+        {
+            Ok(Some(operation.clone()))
+        }
+        _ => Err(integrity(
+            "materialized external task operation is ambiguous or foreign",
+        )),
+    }
+}
+
 fn tasks(store: &OrchestrationStore, state: &mut State) -> Result<(), MachineError> {
     let c = &*store.connection;
     let managed = state
@@ -1331,15 +1373,17 @@ fn tasks(store: &OrchestrationStore, state: &mut State) -> Result<(), MachineErr
             let (key, source, source_turn, external_ref, deadline) = if is_external {
                 let reference: Value =
                     serde_json::from_str(string(&raw, "external")?).map_err(internal)?;
-                let registered=table_present(c,"delegation_operations")? && c.query_row("SELECT EXISTS(SELECT 1 FROM delegation_operations WHERE operation_kind='assign_external_specialist_task' AND state='accepted' AND json_extract(accepted_subjects_json,'$.task_ref')=?1)",[id.to_string()],|r|r.get::<_,bool>(0)).map_err(internal)?;
+                let registered = external_task_operation(c, &state.workspace_id, aggregate, id)?;
                 let (key, original_digest) = external_operation(
                     c,
                     &state.workspace_id,
-                    "assign_external_specialist_task",
+                    registered
+                        .as_deref()
+                        .unwrap_or("assign_external_specialist_task"),
                     "task_ref",
                     id,
                 )?;
-                if registered {
+                if registered.is_some() {
                     crate::scheduler::retained_assignment(
                         c,
                         crate::assignment_queue::Owner::External(aggregate),
@@ -1351,7 +1395,7 @@ fn tasks(store: &OrchestrationStore, state: &mut State) -> Result<(), MachineErr
                 } else if original_digest != sha256_hex(string(&raw, "request")?.as_bytes()) {
                     return Err(integrity("historical external request digest differs"));
                 }
-                let external = if registered {
+                let external = if registered.is_some() {
                     let accepted = crate::engagement::external_task_identity_on(c, aggregate, id)?
                         .ok_or_else(|| integrity("registered external task identity is absent"))?;
                     if reference
