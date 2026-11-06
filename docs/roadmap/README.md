@@ -25,7 +25,7 @@ integration. EPIC-018 is COMPLETE after successor requirements, checked contract
 and qualified H1 validation. EPIC-019 is COMPLETE.
 EPIC-023 is COMPLETE with Master's whole-Epic acceptance; TASK-090, TASK-091 and
 TASK-092 are COMPLETE. EPIC-020 and TASK-076 through TASK-079 are COMPLETE.
-EPIC-009 is COMPLETE; EPIC-021 is ACTIVE and EPIC-022 remains PLANNED for v0.1.4, in that
+EPIC-009 and EPIC-021 are COMPLETE; EPIC-022 remains PLANNED for v0.1.4, in that
 execution order. TASK-067 is COMPLETE;
 TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
@@ -2823,9 +2823,12 @@ mailboxes without Primary message relay.
 
 ## EPIC-021: Research Groups, Findings, and Contract Cleanup
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+Canonical Outcomes: [delegation runtime](../specs/dolgorae-v014-delegation-runtime.md),
+[method and digest contract](../specs/dolgorae-v014-method-and-digest-contract.md),
+[current consumer qualification](../specs/dolgorae-v014-current-consumer-qualification.md),
+and [architecture](../architecture/README.md).
 
 Goal: Provide provenance-preserving research fan-out and result aggregation, then settle obsolete contracts and affected development structure.
 
