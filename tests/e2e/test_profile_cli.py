@@ -59,7 +59,7 @@ def envelope(completed: subprocess.CompletedProcess[str]) -> dict[str, object]:
 def create_fake_codex(
     path: pathlib.Path, real_codex: pathlib.Path, codex_home: pathlib.Path
 ) -> None:
-    # Only schema generation uses the pinned local Codex. Bootstrap RPCs use
+    # Only schema generation uses the selected local Codex. Bootstrap RPCs use
     # the independent fixture and must not depend on a real account login.
     scenario = path.with_name("profile-probe.json")
     scenario.write_text(
@@ -99,7 +99,7 @@ args = sys.argv[1:]
 control_path = pathlib.Path(__file__).with_name("codex-mode.json")
 control = json.loads(control_path.read_text(encoding="utf-8")) if control_path.exists() else {{}}
 if args == ["--version"]:
-    print("codex-cli " + control.get("version", "0.158.0"))
+    print("codex-cli " + control.get("version", {json.dumps(native_codex.codex_version(real_codex))}))
     raise SystemExit(0)
 if "generate-json-schema" in args:
     if control.get("schema") == "command-missing":
@@ -157,9 +157,12 @@ def create_script_codex(path: pathlib.Path) -> None:
     path.chmod(0o755)
 
 
-def set_mode(path: pathlib.Path, *, version: str = "0.158.0", schema: str = "ok") -> None:
+def set_mode(path: pathlib.Path, *, version: str | None = None, schema: str = "ok") -> None:
+    mode = {"schema": schema}
+    if version is not None:
+        mode["version"] = version
     path.with_name("codex-mode.json").write_text(
-        json.dumps({"version": version, "schema": schema}), encoding="utf-8"
+        json.dumps(mode), encoding="utf-8"
     )
 
 
@@ -279,6 +282,11 @@ def write_bound_manifest(
 def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
     machine = validator(protocol_root, "dolgorae-machine-v2.schema.json")
     real_codex = native_codex.installed_codex()
+    selected_version = native_codex.codex_version(real_codex)
+    compatibility = (
+        "tested" if tuple(map(int, selected_version.split("."))) in native_codex.TESTED_CODEX_VERSIONS
+        else "unverified"
+    )
 
     with tempfile.TemporaryDirectory(prefix="dolgorae-task005-") as temporary:
         root = pathlib.Path(temporary)
@@ -442,10 +450,14 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"exact compatibility failed: {exact.stdout}")
         exact_data = exact_envelope["data"]
         assert_valid(exact_envelope, machine, "profile-doctor Machine envelope")
-        if exact_data["compatibility"] != "tested" or exact_data["codex_version"] != "0.158.0":
-            raise AssertionError(f"exact compatibility returned wrong facts: {exact.stdout}")
-        if exact_data["diagnostics"]:
-            raise AssertionError(f"tested minimum reported compatibility warnings: {exact.stdout}")
+        if exact_data["compatibility"] != compatibility or exact_data["codex_version"] != selected_version:
+            raise AssertionError(f"selected compatibility returned wrong facts: {exact.stdout}")
+        diagnostics = exact_data["diagnostics"]
+        if compatibility == "tested":
+            if diagnostics:
+                raise AssertionError(f"tested version reported compatibility warnings: {exact.stdout}")
+        elif [item["code"] for item in diagnostics] != ["CODEX_VERSION_UNVERIFIED"]:
+            raise AssertionError(f"newer version lost its qualification warning: {exact.stdout}")
         never_started_root = home / ".dolgorae" / "profiles" / exact_data["server_key"]
         never_started_verify = run(
             binary, home, "profile", "membership", "verify", "default"
@@ -476,6 +488,13 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"bare doctor capability snapshot is not closed: {bare_capabilities}")
         if any(state != "unverified" for state in bare_capabilities.values()):
             raise AssertionError(f"bare doctor fabricated a non-unverified capability: {bare_capabilities}")
+
+        if compatibility == "tested":
+            for schema in ("digest-mismatch", "experimental-digest-mismatch"):
+                set_mode(fake, schema=schema)
+                changed_bundle = envelope(run(binary, home, "profile", "doctor", "default"))["data"]
+                if changed_bundle["compatibility"] != "rejected":
+                    raise AssertionError(f"registered {selected_version} accepted altered {schema}: {changed_bundle}")
 
         set_mode(fake, version="0.158.1", schema="digest-mismatch")
         newer = run(
@@ -509,7 +528,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if older.returncode != 0 or envelope(older)["data"]["compatibility"] != "rejected":
             raise AssertionError(f"older version was not rejected: {older.stdout}")
 
-        set_mode(fake, schema="digest-mismatch")
+        set_mode(fake, version=native_codex.MINIMUM_CODEX_VERSION, schema="digest-mismatch")
         wrong_digest = run(binary, home, "profile", "doctor", "default")
         if (
             wrong_digest.returncode != 0
@@ -525,7 +544,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         ):
             raise AssertionError(f"equivalent minimum version bypassed schema digest pin: {equivalent_version.stdout}")
 
-        set_mode(fake, schema="experimental-digest-mismatch")
+        set_mode(fake, version=native_codex.MINIMUM_CODEX_VERSION, schema="experimental-digest-mismatch")
         wrong_experimental = run(binary, home, "profile", "doctor", "default")
         if (
             wrong_experimental.returncode != 0

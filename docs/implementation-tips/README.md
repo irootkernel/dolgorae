@@ -33,12 +33,30 @@ installation tree. `tools/validators/generate_public_v2.py` checks versions,
 import bytes and generated provenance; do not replace its selected producer or
 metadata to accommodate another tool arrangement.
 
+Offline E2E fixtures use `codex` from `PATH`, or the explicit
+`DOLGORAE_TEST_CODEX_BIN` override, at or above the 0.158.0 minimum. Their native
+stand-in reports that executable's version and delegates schema generation to
+that same executable. The Profile checks both pinned bundle digests for every
+registered tested release. All releases retain required-subset checks; unlisted
+newer releases report `unverified`. No older installed sibling is selected automatically. Protocol
+responses still come from the independent fake, so these cases do not qualify
+the selected release's live behavior.
+
+Codex `0.166.0` is separately registered for generic Profile compatibility after
+actual compatibility and access-safety campaigns and the Profile launch probe.
+The checks observed history, forks, interruption, unanswered-approval recovery,
+workspace and temporary-directory writes, command/file approval requests,
+handshake, account/model discovery and absent-thread errors. Registration pins
+both generated schema bundles. Caller-workspace and checked Reviewer admission
+remain tied to their separately qualified executables and configurations.
+
 The [CI workflow](../../.github/workflows/ci.yml) runs the same complete gate on
 the standard macOS arm64 runner for pushes and pull requests. It provisions
-the pinned tools, verifies downloaded asset digests and uses Codex 0.158.0 only
-as the existing offline schema generator. It uses no model account, native/live
-opt-in, installation target or release operation. Local source checks do not
-establish that the hosted job has executed successfully.
+the pinned tools, verifies downloaded asset digests and explicitly selects the
+minimum Codex release as its offline schema generator to retain baseline
+coverage. It uses no model account, native/live opt-in, installation target or
+release operation. Local source checks do not establish that the hosted job
+has executed successfully.
 
 `examples/native_ordinary_host.rs` is a non-shipped public-v2 client and
 independent observation helper. It captures inputs without registering a
@@ -429,6 +447,10 @@ packaged contract bytes with their canonical sources. Test wait, interruption,
 and unknown-outcome guidance against the production CLI and a controlled fake
 provider, using TASK-058's implemented commands after process-handle loss.
 Prose assertions alone cannot establish the behavior.
+
+The access-safety driver's `DOLGORAE_CODEX_PINNED_VERSION` override selects an
+explicit exact `codex-cli x.y.z` qualification candidate and reports its observed
+version; the default remains the original `0.158.0` campaign.
 
 The live v3 campaign uses the required defaults, the defective Hello World
 fixture and Codex `0.158.0`. Run it only

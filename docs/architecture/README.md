@@ -3897,9 +3897,14 @@ compatibility, access-safety, and review acceptance gates separately check
 history, sandbox, early-ID, server requests, and review lifecycle behavior.
 
 The checked 0.157.0 manifest remains the required-subset comparison baseline.
-Runtime versions below 0.158.0 are rejected. The exact 0.158.0 runtime is
-`tested` after its complete behavioral campaign passes and both pinned schema
-bundle digests match; newer compatible versions remain `unverified`.
+Runtime versions below 0.158.0 are rejected. The minimum's exact schemas stay
+in `pinned_runtime_schema`; `verified_runtime_schemas` records additional generic
+runtime versions after live compatibility, access-safety and Profile launch
+checks. Every registered version requires both of its exact stable and
+experimental bundle digests as well as the required subset before reporting
+`tested`. Unlisted compatible versions remain `unverified`. This registry does
+not qualify caller-workspace startup or the checked Reviewer mechanism; their
+exact executable and configuration admissions remain separate.
 The verdict is written to every run generation.
 
 Runtime code tolerates additive data but never infers lifecycle progress from

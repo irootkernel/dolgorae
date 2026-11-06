@@ -1254,7 +1254,7 @@ fn doctor(parsed: &Parsed, member_quiescer: ProfileMemberQuiescer) -> Result<Val
         diagnostics: if snapshot.compatibility_verdict == CompatibilityVerdict::Unverified {
             vec![json!({
                 "code": "CODEX_VERSION_UNVERIFIED",
-                "message": "the compatible newer Codex version is not the tested baseline",
+                "message": "the compatible Codex version is not registered as verified",
             })]
         } else {
             Vec::new()
@@ -2851,7 +2851,7 @@ fn observe_snapshot_policy(
         compare_required_subset(name, &schema_root.join("stable"))?;
         let schema_bundle_sha256 = directory_sha256(name, &schema_root.join("stable"))?;
         let verdict = version_verdict(name, &version)?;
-        verify_exact_bundle_digests(name, &schema_root, verdict, &schema_bundle_sha256)?;
+        verify_exact_bundle_digests(name, &schema_root, &version, &schema_bundle_sha256)?;
         let configuration = configuration_snapshot(name, &canonical_codex_home)?;
         snapshot_from_probes(
             context,
@@ -3597,11 +3597,38 @@ fn version_verdict(
             "Codex version is older than the supported minimum",
         ));
     }
-    Ok(if actual == minimum {
+    Ok(if tested_runtime_schema(profile_name, actual)?.is_some() {
         CompatibilityVerdict::Tested
     } else {
         CompatibilityVerdict::Unverified
     })
+}
+
+fn tested_runtime_schema(
+    profile_name: &str,
+    version: (u64, u64, u64),
+) -> Result<Option<Value>, MachineError> {
+    let manifest: Value = serde_json::from_str(MANIFEST).map_err(internal)?;
+    let minimum = &manifest["pinned_runtime_schema"];
+    if minimum["version"].as_str() != Some(MINIMUM_CODEX_VERSION) {
+        return Err(compatibility(
+            profile_name,
+            "schema_bundle_digest",
+            "pinned runtime schema version differs from the supported minimum",
+        ));
+    }
+    let verified = manifest["verified_runtime_schemas"]
+        .as_array()
+        .ok_or_else(|| internal("verified runtime schema registry is missing"))?;
+    for schema in std::iter::once(minimum).chain(verified) {
+        let registered_version = schema["version"]
+            .as_str()
+            .ok_or_else(|| internal("verified runtime schema version is missing"))?;
+        if parse_version(profile_name, registered_version)? == version {
+            return Ok(Some(schema.clone()));
+        }
+    }
+    Ok(None)
 }
 
 fn parse_version(profile_name: &str, value: &str) -> Result<(u64, u64, u64), MachineError> {
@@ -3891,21 +3918,13 @@ fn resolve_refs(
 fn verify_exact_bundle_digests(
     profile_name: &str,
     root: &Path,
-    verdict: CompatibilityVerdict,
+    version: &str,
     stable_digest: &str,
 ) -> Result<(), MachineError> {
-    if verdict != CompatibilityVerdict::Tested {
+    let Some(pinned) = tested_runtime_schema(profile_name, parse_version(profile_name, version)?)?
+    else {
         return Ok(());
-    }
-    let manifest: Value = serde_json::from_str(MANIFEST).map_err(internal)?;
-    let pinned = &manifest["pinned_runtime_schema"];
-    if pinned["version"].as_str() != Some(MINIMUM_CODEX_VERSION) {
-        return Err(compatibility(
-            profile_name,
-            "schema_bundle_digest",
-            "pinned runtime schema version differs from the supported minimum",
-        ));
-    }
+    };
     let expected_stable = pinned["stable_schema_bundle_sha256"]
         .as_str()
         .ok_or_else(|| {
@@ -8206,7 +8225,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_policy_tests_exact_minimum_and_keeps_newer_unverified() {
+    fn version_policy_separates_minimum_verified_and_unlisted_versions() {
         assert_eq!(
             version_verdict("default", "0.157.1").unwrap_err().code,
             "COMPATIBILITY_REJECTED"
@@ -8217,6 +8236,16 @@ mod tests {
         );
         assert_eq!(
             version_verdict("default", "0.158.1").unwrap(),
+            CompatibilityVerdict::Unverified
+        );
+        for version in ["0.166.0", "0.166.00"] {
+            assert_eq!(
+                version_verdict("default", version).unwrap(),
+                CompatibilityVerdict::Tested
+            );
+        }
+        assert_eq!(
+            version_verdict("default", "0.166.1").unwrap(),
             CompatibilityVerdict::Unverified
         );
         assert_eq!(

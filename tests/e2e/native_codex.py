@@ -8,12 +8,12 @@ is what the registry validates and what `wait_for_app_identity` later observes.
 
 The image answers three launches, and nothing else:
 
-* `--version` reports the pinned Codex release, so profile compatibility is a
-  fixed fact rather than whatever the machine happens to have.
-* `app-server generate-json-schema` delegates to the locally installed exact
-  Codex 0.158.0.  There is no checked schema bundle in-tree — only its digest —
-  so the bundle has to come from the real release; this is setup, and it never
-  answers a protocol call.
+* `--version` reports the selected schema producer's actual Codex release.
+* `app-server generate-json-schema` delegates to that same installed executable,
+  which must meet the Profile's 0.158.0 minimum. The Profile retains exact bundle
+  checks for every registered tested release and required-subset checks for all
+  releases. Schema
+  generation is offline setup and never answers a protocol call.
 * `app-server --listen unix://…` runs the shared fake app-server on that
   socket.  Every `model/list` page a Run resolves against therefore comes from
   the independent fixture, never from the installed release.
@@ -25,18 +25,30 @@ remain valid throughout profile lifecycle and workload-absence checks.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import sysconfig
 
-PINNED_CODEX_VERSION = "0.158.0"
-PINNED_CODEX_ENV = "DOLGORAE_TEST_CODEX_BIN"
+MINIMUM_CODEX_VERSION = "0.158.0"
+TEST_CODEX_ENV = "DOLGORAE_TEST_CODEX_BIN"
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
+_COMPATIBILITY_MANIFEST = json.loads(
+    (REPOSITORY / "docs/protocol/codex-0.157.0-required-subset.json").read_text(encoding="utf-8")
+)
+TESTED_CODEX_VERSIONS = {
+    tuple(map(int, schema["version"].split(".")))
+    for schema in [
+        _COMPATIBILITY_MANIFEST["pinned_runtime_schema"],
+        *_COMPATIBILITY_MANIFEST["verified_runtime_schemas"],
+    ]
+}
 FAKE_APP_SERVER = REPOSITORY / "tools" / "fake_app_server"
 SCENARIO_ROOT = FAKE_APP_SERVER / "scenarios"
 
@@ -127,63 +139,39 @@ def _quoted(value: object) -> str:
     return f'"{text}"'
 
 
-def installed_codex() -> pathlib.Path:
-    """The locally installed exact Codex, or a failure that names why not.
+def codex_version(executable: pathlib.Path) -> str:
+    """Read the schema producer's actual release, without starting an app-server."""
+    if not executable.is_file():
+        raise AssertionError(f"schema generator is unavailable: {executable}")
+    completed = subprocess.run(
+        [str(executable), "--version"], check=False, capture_output=True, text=True, timeout=10
+    )
+    reported = completed.stdout.strip()
+    version = re.fullmatch(r"codex-cli ([0-9]+\.[0-9]+\.[0-9]+)", reported)
+    if completed.returncode != 0 or version is None:
+        raise AssertionError(
+            f"invalid Codex --version from {executable}: "
+            f"exit {completed.returncode}, {reported!r}"
+        )
+    return version.group(1)
 
-    Schema generation is the one thing this fixture cannot fake: the profile
-    contract pins the *digest* of the exact 0.158.0 schema bundle, not its
-    contents, so a
-    bundle from any other release — or a hand-written one — is refused. The
-    prerequisite is therefore hard, and absent it the case fails rather than
-    quietly proving something weaker.
-    """
-    override = os.environ.get(PINNED_CODEX_ENV)
-    resolved = override or shutil.which("codex")
+
+def installed_codex() -> pathlib.Path:
+    """Select the current schema producer under the Profile's minimum-version rule."""
+    resolved = os.environ.get(TEST_CODEX_ENV) or shutil.which("codex")
     if not resolved:
         raise AssertionError(
-            f"Codex {PINNED_CODEX_VERSION} is required to generate the pinned "
-            "app-server schema bundle; the live app-server is faked, the bundle "
-            f"cannot be; set {PINNED_CODEX_ENV} to the exact executable"
+            f"Codex >= {MINIMUM_CODEX_VERSION} is required for offline schema "
+            f"generation; install Codex or set {TEST_CODEX_ENV}"
         )
     codex = pathlib.Path(resolved).resolve()
-
-    def reported_version(candidate: pathlib.Path) -> str:
-        if not candidate.is_file():
-            return "missing"
-        completed = subprocess.run(
-            [str(candidate), "--version"], check=False, capture_output=True, text=True, timeout=10
-        )
-        if completed.returncode != 0:
-            return f"exit {completed.returncode}"
-        return completed.stdout.strip()
-
-    expected = f"codex-cli {PINNED_CODEX_VERSION}"
-    reported = reported_version(codex)
-    if reported == expected:
-        return codex
-    if override:
+    version = codex_version(codex)
+    if tuple(map(int, version.split("."))) < tuple(map(int, MINIMUM_CODEX_VERSION.split("."))):
         raise AssertionError(
-            f"{PINNED_CODEX_ENV} must report {expected!r}, got {reported!r} from {codex}"
+            f"Codex >= {MINIMUM_CODEX_VERSION} is required for offline schema "
+            f"generation, got {version!r} from {codex}"
         )
-
-    # Codex standalone installations keep versioned releases beside the
-    # `current` target. A host upgrade may advance PATH while the test's pinned
-    # schema generator remains installed, so resolve that sibling explicitly
-    # instead of asking users to downgrade their ordinary Codex CLI.
-    release_root = codex.parent.parent.parent
-    if release_root.name == "releases":
-        pinned = sorted(
-            release_root.glob(f"{PINNED_CODEX_VERSION}-*/bin/codex")
-        )
-        for candidate in pinned:
-            candidate = candidate.resolve()
-            if reported_version(candidate) == expected:
-                return candidate
-
-    raise AssertionError(
-        f"expected {expected} for schema generation, got {reported!r} from {codex}; "
-        f"install the pinned standalone release or set {PINNED_CODEX_ENV}"
-    )
+    return codex
 
 
 def scenario_path(name: str) -> pathlib.Path:
@@ -225,7 +213,7 @@ def create_native_codex(
             codex_home=_quoted(codex_home.resolve()),
             transcript="None" if transcript is None else _quoted(transcript),
             turn_gate="None" if turn_gate is None else f"({_quoted(turn_gate[0])}, {_quoted(turn_gate[1])})",
-            version=PINNED_CODEX_VERSION,
+            version=codex_version(schema_source),
         ),
         encoding="utf-8",
     )

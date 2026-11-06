@@ -139,8 +139,9 @@ def exact_codex(candidate: Path) -> Path:
     observed = subprocess.run(
         [str(codex), "--version"], check=True, capture_output=True, text=True
     ).stdout.strip()
-    if observed != PINNED_VERSION:
-        raise ValueError(f"expected {PINNED_VERSION!r}, observed {observed!r}")
+    expected = os.environ.get("DOLGORAE_CODEX_PINNED_VERSION", PINNED_VERSION)
+    if observed != expected:
+        raise ValueError(f"expected {expected!r}, observed {observed!r}")
     return codex
 
 
@@ -181,6 +182,7 @@ def target_model(server: AppServer) -> tuple[str, str]:
 
 
 def run_acceptance(codex: Path) -> dict[str, Any]:
+    observed_version = subprocess.check_output([str(codex), "--version"], text=True).strip()
     with tempfile.TemporaryDirectory(prefix="dolgorae-live-access-") as temporary:
         root = Path(temporary)
         workspace = root / "workspace"
@@ -299,7 +301,7 @@ def run_acceptance(codex: Path) -> dict[str, Any]:
                 )
             return {
                 "schema_version": 1,
-                "codex_version": PINNED_VERSION,
+                "codex_version": observed_version,
                 "codex_home": initialized.get("codexHome"),
                 "model": model,
                 "effort": effort,

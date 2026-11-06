@@ -21,6 +21,13 @@
     "stable_schema_bundle_sha256": "26c32e39dd56061a2758ca6317eb90e7020a91a16973f944a8827e0bf6ef56dc",
     "experimental_schema_bundle_sha256": "fd8b2149485a70dd52fa89d767deeff1b7c9aab1f1e61728a16f70f0e63886aa"
   },
+  "verified_runtime_schemas": [
+    {
+      "version": "0.166.0",
+      "stable_schema_bundle_sha256": "ca83bb66f42eeb3b040f354cf3ec1b4d1e5548b2c0fb7313d367c9985b843558",
+      "experimental_schema_bundle_sha256": "bbaade8274f7db039e4cbdaee07a1a8c93cba3c631c7973750aa048f1d8be48c"
+    }
+  ],
   "experimental_thread_surfaces": {
     "required_schema_files": [
       "v2/ThreadUnsubscribeParams.json",

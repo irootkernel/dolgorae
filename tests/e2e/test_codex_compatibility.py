@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Offline checks for RPC response and terminal notification ordering."""
+"""Offline checks for Codex selection and RPC notification ordering."""
 
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
+import native_codex
+
+from run_access_safety_acceptance import exact_codex as checked_access_codex
 from run_codex_compatibility import AppServer, checked_codex, terminal
 
 
@@ -34,7 +39,70 @@ def completed(thread: str, turn: str, status: str) -> dict:
     }}
 
 
+def check_schema_producer_selection() -> None:
+    with tempfile.TemporaryDirectory(prefix="dolgorae-schema-selection-", dir="/tmp") as directory:
+        root = Path(directory).resolve()
+        codex = root / "codex"
+        override = root / "override"
+        with patch.dict(os.environ, {"PATH": str(root)}, clear=True):
+            for version, accepted in (
+                ("0.157.9", False),
+                ("0.158.0", True),
+                ("0.166.0", True),
+                ("0.158.0-dev", False),
+                ("invalid", False),
+            ):
+                codex.write_text(f"#!/bin/sh\nprintf '%s\\n' 'codex-cli {version}'\n")
+                codex.chmod(0o700)
+                try:
+                    selected = native_codex.installed_codex()
+                except AssertionError:
+                    assert not accepted, version
+                else:
+                    assert accepted and selected == codex, version
+                    assert native_codex.codex_version(selected) == version
+            codex.write_text("#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.166.0'\n")
+            override.write_text("#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.167.0'\n")
+            override.chmod(0o700)
+            os.environ[native_codex.TEST_CODEX_ENV] = str(override)
+            assert native_codex.installed_codex() == override
+            for contents in (
+                "#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.157.9'\n",
+                "#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.167.0'\nexit 1\n",
+            ):
+                override.write_text(contents)
+                try:
+                    native_codex.installed_codex()
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError("invalid override fell back to PATH")
+            override.unlink()
+            try:
+                native_codex.installed_codex()
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("missing override fell back to PATH")
+            try:
+                checked_access_codex(codex)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("access-safety default baseline changed")
+            os.environ["DOLGORAE_CODEX_PINNED_VERSION"] = "codex-cli 0.166.0"
+            assert checked_access_codex(codex) == codex
+            os.environ["DOLGORAE_CODEX_PINNED_VERSION"] = "codex-cli 0.165.0"
+            try:
+                checked_access_codex(codex)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("access-safety accepted the wrong qualification candidate")
+
+
 def main() -> int:
+    check_schema_producer_selection()
     with tempfile.TemporaryDirectory(prefix="dolgorae-codex-version-") as directory:
         codex = Path(directory) / "codex"
         for version, accepted in (
@@ -73,7 +141,7 @@ def main() -> int:
                 else:
                     assert actual == status, "accepted an unexpected terminal status"
                 assert len(server.messages) == 4
-    print("Codex compatibility notification ordering checks passed")
+    print("Codex schema selection and compatibility notification ordering checks passed")
     return 0
 
 

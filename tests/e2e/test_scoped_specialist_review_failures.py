@@ -505,7 +505,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 ).fetchall()
             if len(failed_tasks) != 1 or failed_details.get("execution") != {
                 "model": "gpt-6-sol", "effort": "high",
-                "codex_version": native_codex.PINNED_CODEX_VERSION,
+                "codex_version": native_codex.codex_version(schema_source),
                 "run_id": failed_tasks[0][0],
             }:
                 raise AssertionError("post-preparation v3 failure lost its allocated Reviewer identity")
@@ -576,7 +576,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 execution = diagnostic["execution"]
                 expected_execution = {
                     "model": "gpt-6-sol", "effort": "high",
-                    "codex_version": native_codex.PINNED_CODEX_VERSION,
+                    "codex_version": native_codex.codex_version(schema_source),
                     "run_id": execution["run_id"],
                 }
                 if details.get("execution") != expected_execution or execution != {

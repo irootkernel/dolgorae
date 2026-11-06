@@ -428,9 +428,15 @@ explicit `gpt-5.6-luna` / `low` Profile configuration.
 Codex App Server 0.158.0 is the minimum runtime version. The checked 0.157.0
 schema bundle remains the required-subset comparison baseline. The exact
 0.158.0 stable and experimental bundle digests are pinned separately in that
-manifest. The minimum version reports `tested` after its complete behavioral
-campaign qualifies it and both exact bundle digests match. Newer compatible
-versions report `unverified` until separately qualified.
+manifest. The supported minimum and the verified runtime versions are separate.
+The minimum's exact schemas remain in `pinned_runtime_schema`; additional
+verified versions are recorded in `verified_runtime_schemas`. A listed version
+reports `tested` only when the required subset and both of its exact bundle
+digests match. Registration requires the live compatibility and access-safety
+campaigns, plus the Profile launch probe, on that exact version. Specialist
+Review and caller-workspace admission retain their own qualification. Unlisted newer
+compatible versions report `unverified`. Generic `tested` status does not confer
+separate caller-workspace or production-runtime qualification.
 Background-process safety is owned by each Sticky Dedicated logical lane across its successive physical generations and
 by the macOS process census; it MUST NOT depend on a future Codex terminal-
 management API. A newer native API MAY supply additional evidence but never
@@ -5221,6 +5227,11 @@ observed version; a pass applies only to that tested candidate.
 The access-safety and Specialist Review live gates independently cover sandbox,
 approval requests, selected model/effort, result delivery, cancellation, and
 settlement. These gates are outside the default offline repository gate.
+For an explicitly selected additional generic qualification candidate, the
+access-safety driver accepts `DOLGORAE_CODEX_PINNED_VERSION` as the exact
+`codex-cli x.y.z` identity; omitting it retains its original 0.158.0 campaign.
+The driver must report the observed version, and an exact identity mismatch
+refuses the campaign before a model Turn.
 
 Missing generation support, required schema, lifecycle behavior, or identity
 causes fail-closed rejection. Unknown additive fields and notifications are

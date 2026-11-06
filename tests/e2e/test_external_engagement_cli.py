@@ -860,7 +860,7 @@ def validate(binary: pathlib.Path, interaction_terminal: str = "delayed") -> Non
             if diagnostic["execution"] != {
                 "model": hire_request["agent_configuration"]["model"],
                 "effort": hire_request["agent_configuration"]["default_effort"],
-                "codex_version": native_codex.PINNED_CODEX_VERSION,
+                "codex_version": native_codex.codex_version(schema_source),
                 "run_id": run_id,
                 "task_id": invalid_assigned["task_id"],
                 "turn_id": "turn-invalid-v3",

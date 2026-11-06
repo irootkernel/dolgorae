@@ -1840,10 +1840,10 @@ def validate_run_start_model_resolution(binary: pathlib.Path) -> None:
     the walk, its cursor chaining, and the pinned Codex 0.149 item shapes
     provable without a real app-server answering a real account.
 
-    The installed Codex 0.158.0 is used for exactly one thing: generating the
-    app-server JSON Schema bundle, whose digest the profile contract pins and
-    whose contents are not checked into the tree. That is setup — it answers no
-    protocol call, and the case fails closed when it is absent.
+    The selected installed Codex (at or above the supported minimum) generates
+    the app-server JSON Schema bundle. The native stand-in reports that same
+    release, preserving the Profile's exact registered-bundle and required-subset
+    checks. This is offline setup; protocol responses still come from the fake.
 
     Run membership is proved in the same pass. Lazy `run start` and `run fork
     --fresh` register live members without publishing workers; `profile server

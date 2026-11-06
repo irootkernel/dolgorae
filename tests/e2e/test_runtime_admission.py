@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Separate generic Profile compatibility from qualified caller admission.
 
-The Profile compatibility specification admits synthetic 0.158.x releases;
+The Profile compatibility specification admits the selected release and a synthetic next patch;
 caller-workspaces-v1 requires qualification before Run or review allocation.
 """
 from __future__ import annotations
@@ -37,7 +37,9 @@ def fixture_root(binary: Path):
 
 def validate(binary: Path) -> None:
     schema_source = native_codex.installed_codex()
-    for version in ("0.158.0", "0.158.1"):
+    selected = native_codex.codex_version(schema_source)
+    major, minor, patch = map(int, selected.split("."))
+    for version in (selected, f"{major}.{minor}.{patch + 1}"):
         with fixture_root(binary) as root:
             home, workspace, profile_home, bin_root = (root / name for name in
                                                       ("home", "workspace", "profile", "bin"))
@@ -68,7 +70,7 @@ def validate(binary: Path) -> None:
             set_mode(fake, version=version)
             call("profile", "add", "fixture", *add_arguments(profile_home, fake))
             doctor = call("profile", "doctor", "fixture")["data"]
-            assert doctor["compatibility"] == ("tested" if version == "0.158.0" else "unverified")
+            assert doctor["compatibility"] == ("tested" if tuple(map(int, version.split("."))) in native_codex.TESTED_CODEX_VERSIONS else "unverified")
             call("profile", "doctor", "fixture", "--launch-probe")
             key = doctor["server_key"]
             state_root = home / ".dolgorae/workspaces" / workspace_id
