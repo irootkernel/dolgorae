@@ -1089,6 +1089,191 @@ fn wait_for_original_settlement(
 }
 
 pub fn observe(root: &Path) -> Value {
+    observe_inner(root, false)
+}
+
+/// Independent known answers after the ordinary image has collected the Task.
+/// Never dispatch, reconcile, collect, start or close through this reader.
+pub fn ordinary_read_result(root: &Path) -> Value {
+    assert!(
+        input(root)["scenario"]
+            .as_str()
+            .unwrap()
+            .starts_with("consumer-")
+    );
+    assert!(root.join("assigned.json").is_file());
+    observe_inner(root, true)
+}
+
+pub fn ordinary_read_merge(root: &Path) -> Value {
+    input(root);
+    let home = DolgoraeHome::system().unwrap();
+    let owner = VerifiedOwner::load(&home, &host_root(root).join("owner.json")).unwrap();
+    let scope = service::DelegationScope {
+        view: &owner.view,
+        state_root: &owner.state_root,
+        controller: &owner.controller,
+        trusted_invocation: None,
+    };
+    let merged: Value =
+        serde_json::from_slice(&fs::read(root.join("ordinary-merge.json")).unwrap()).unwrap();
+    let merge = Uuid::parse_str(
+        merged["facts"]["receipt"]["accepted_subjects"]["merge_ref"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    service::research_merge::public_merged(&scope, merge).unwrap()
+}
+
+pub fn ordinary_synthesis_input(root: &Path) -> Value {
+    input(root);
+    let home = DolgoraeHome::system().unwrap();
+    let owner = VerifiedOwner::load(&home, &host_root(root).join("owner.json")).unwrap();
+    let selected: Value = serde_json::from_slice(
+        &fs::read(host_root(root).join("ordinary-synthesis-selection.json")).unwrap(),
+    )
+    .unwrap();
+    let scope = service::DelegationScope {
+        view: &owner.view,
+        state_root: &owner.state_root,
+        controller: &owner.controller,
+        trusted_invocation: None,
+    };
+    let engagement = Uuid::parse_str(selected["namespace"]["scope_ref"].as_str().unwrap()).unwrap();
+    let member = Uuid::parse_str(selected["member_ref"].as_str().unwrap()).unwrap();
+    let configuration = ordinary_configuration(
+        &scope,
+        service::SettlementOwner::External {
+            engagement_id: engagement,
+        },
+        member,
+    );
+    let task = serde_json::from_value(selected["task"].clone()).unwrap();
+    let (accepted, _) =
+        crate::successor_capture::capture_facade_task(&configuration, &task, "read_only", None)
+            .unwrap();
+    json!(accepted)
+}
+
+fn ordinary_configuration(
+    scope: &service::DelegationScope<'_>,
+    owner: service::SettlementOwner,
+    member: Uuid,
+) -> crate::run::AgentConfigurationSnapshot {
+    let store = crate::engagement::EngagementStore::open_read_only(
+        &crate::engagement::EngagementStore::workspace_database_path(scope.state_root),
+    )
+    .unwrap();
+    match owner {
+        service::SettlementOwner::External { engagement_id } => {
+            let (workspace, controller) = store.external_owner_binding(engagement_id).unwrap();
+            assert_eq!(workspace, scope.view.workspace_id);
+            assert_eq!(controller, *scope.controller);
+            store
+                .external_member_configuration(engagement_id, member)
+                .unwrap()
+                .0
+        }
+        service::SettlementOwner::Managed { session_id } => {
+            let session = crate::orchestration::OrchestrationStore::open_observer(scope.state_root)
+                .unwrap()
+                .session(session_id)
+                .unwrap();
+            let manifest = RunStore::new(SystemWorkspacePlatform, scope.state_root)
+                .load_manifest(session.root_run_id)
+                .unwrap();
+            assert_eq!(session.workspace_id, scope.view.workspace_id);
+            assert_eq!(manifest.controller, *scope.controller);
+            assert_eq!(session.root_run_id, session_id);
+            let facts =
+                crate::orchestration::successor_member(store.connection(), session_id, member)
+                    .unwrap()
+                    .unwrap();
+            let admitted = crate::engagement::successor_spawn_member(
+                store.connection(),
+                &facts.spawn_operation_id.to_string(),
+            )
+            .unwrap();
+            assert_eq!(admitted.as_deref(), Some(member.to_string().as_str()));
+            facts.agent_configuration
+        }
+    }
+}
+
+pub fn ordinary_managed_read_result(root: &Path) -> Value {
+    let config = input(root);
+    assert_eq!(config["scenario"], "managed-producer");
+    let home = DolgoraeHome::system().unwrap();
+    let owner = VerifiedOwner::load(&home, &root.join("managed-native-host/owner.json")).unwrap();
+    let crate::trusted_host::OwnerKind::Managed { session_ref } = &owner.configuration.owner else {
+        panic!("managed read requires the original managed owner")
+    };
+    let assigned: Value =
+        serde_json::from_slice(&fs::read(root.join("assigned.json")).unwrap()).unwrap();
+    assert_eq!(assigned["scope_ref"], session_ref.to_string());
+    let member = Uuid::parse_str(assigned["member_ref"].as_str().unwrap()).unwrap();
+    let task = Uuid::parse_str(assigned["task_ref"].as_str().unwrap()).unwrap();
+    let carrier = CredentialCarrier::open_path(&owner.configuration.controller_file).unwrap();
+    let port = SemanticRunSettlementPort { carrier: &carrier };
+    let scope = service::DelegationScope {
+        view: &owner.view,
+        state_root: &owner.state_root,
+        controller: &owner.controller,
+        trusted_invocation: None,
+    };
+    let context = service::ManagedCallContext {
+        session_id: *session_ref,
+        source_run_id: *session_ref,
+        source_turn_id: "native-host-turn",
+        source_tool_call_id: "native-host-tool",
+        idempotency_key: "ordinary-read-result",
+    };
+    let caller = crate::caller_scope::TrustedCallerScope::from_port(
+        &crate::trusted_host::ConfiguredCallerPort(&owner),
+    )
+    .unwrap();
+    let identity = service::get_managed_delegation_identity(
+        &scope,
+        &context,
+        &caller,
+        &port,
+        service::CollectSpecialistTask {
+            member_ref: member,
+            task_ref: task,
+            adapter_id: &owner.configuration.adapter_id,
+            adapter_version: &owner.configuration.adapter_version,
+        },
+    );
+    let identity = match identity {
+        Ok(identity) => identity,
+        Err(error) => {
+            let writer = crate::writer::WriterStore::new(
+                &owner.state_root,
+                &owner.view.workspace_id,
+                crate::darwin::DarwinSystem.current_uid(),
+            )
+            .load()
+            .unwrap();
+            return json!({"observation_error":error,"writer_observation":writer});
+        }
+    };
+    let configuration = ordinary_configuration(
+        &scope,
+        service::SettlementOwner::Managed {
+            session_id: *session_ref,
+        },
+        member,
+    );
+    let original =
+        service::original_delegation_task(&owner.state_root, &identity.identity.complete_result)
+            .unwrap();
+    json!({"complete_result":identity.identity.complete_result,"delegation_identity":{"identity":identity.identity},
+        "accepted_configuration":configuration,"original_task":{"body_utf8":String::from_utf8(original.task_body).unwrap(),
+        "contexts":original.contexts.into_iter().map(|(id,body)|json!({"id":id,"content":crate::delegation_identity::BytesRef::from_bytes(&body),"body_utf8":String::from_utf8(body).unwrap()})).collect::<Vec<_>>()}})
+}
+
+fn observe_inner(root: &Path, read_only: bool) -> Value {
     let config = input(root);
     let home = DolgoraeHome::system().unwrap();
     let owner = VerifiedOwner::load(&home, &host_root(root).join("owner.json")).unwrap();
@@ -1118,18 +1303,20 @@ pub fn observe(root: &Path) -> Value {
             controller: &owner.controller,
             trusted_invocation: None,
         };
-        let collected = service::collect_external_specialist_task(
-            &scope,
-            &port,
-            service::CollectExternalSpecialistTask {
-                engagement_id: Uuid::parse_str(a["scope_ref"].as_str().unwrap()).unwrap(),
-                member_ref: Uuid::parse_str(a["member_ref"].as_str().unwrap()).unwrap(),
-                task_ref: Uuid::parse_str(a["task_ref"].as_str().unwrap()).unwrap(),
-                adapter_id: "dolgorae.external/1",
-                adapter_version: env!("CARGO_PKG_VERSION"),
-            },
-        )
-        .unwrap();
+        let collected = (!read_only).then(|| {
+            service::collect_external_specialist_task(
+                &scope,
+                &port,
+                service::CollectExternalSpecialistTask {
+                    engagement_id: Uuid::parse_str(a["scope_ref"].as_str().unwrap()).unwrap(),
+                    member_ref: Uuid::parse_str(a["member_ref"].as_str().unwrap()).unwrap(),
+                    task_ref: Uuid::parse_str(a["task_ref"].as_str().unwrap()).unwrap(),
+                    adapter_id: "dolgorae.external/1",
+                    adapter_version: env!("CARGO_PKG_VERSION"),
+                },
+            )
+            .unwrap()
+        });
         // Close fences the Engagement itself, not its membership counter.
         result["engagement_revision"] = json!(
             service::get_external_engagement(
@@ -1139,8 +1326,10 @@ pub fn observe(root: &Path) -> Value {
             .unwrap()
             .revision
         );
-        result["task"] = json!(collected.task);
-        result["complete_result"] = json!(collected.complete_result);
+        if let Some(collected) = collected {
+            result["task"] = json!(collected.task);
+            result["complete_result"] = json!(collected.complete_result);
+        }
         if input(root)["scenario"]
             .as_str()
             .unwrap()
@@ -1161,16 +1350,40 @@ pub fn observe(root: &Path) -> Value {
                     adapter_id: "dolgorae.external/1",
                     adapter_version: env!("CARGO_PKG_VERSION"),
                 },
-            )
-            .unwrap();
-            let configuration = service::preparation_configuration(
-                &scope,
-                service::SettlementOwner::External {
-                    engagement_id: Uuid::parse_str(a["scope_ref"].as_str().unwrap()).unwrap(),
-                },
-                Uuid::parse_str(a["member_ref"].as_str().unwrap()).unwrap(),
-            )
-            .unwrap();
+            );
+            let identity = match identity {
+                Ok(identity) => identity,
+                Err(error) if read_only => {
+                    let writer = crate::writer::WriterStore::new(
+                        &owner.state_root,
+                        &owner.view.workspace_id,
+                        crate::darwin::DarwinSystem.current_uid(),
+                    )
+                    .load()
+                    .unwrap();
+                    return json!({"observation_error":error,"writer_observation":writer});
+                }
+                Err(error) => panic!("original external observation failed: {error:?}"),
+            };
+            result["complete_result"] = json!(identity.identity.complete_result);
+            let configuration = if read_only {
+                ordinary_configuration(
+                    &scope,
+                    service::SettlementOwner::External {
+                        engagement_id: Uuid::parse_str(a["scope_ref"].as_str().unwrap()).unwrap(),
+                    },
+                    Uuid::parse_str(a["member_ref"].as_str().unwrap()).unwrap(),
+                )
+            } else {
+                service::preparation_configuration(
+                    &scope,
+                    service::SettlementOwner::External {
+                        engagement_id: Uuid::parse_str(a["scope_ref"].as_str().unwrap()).unwrap(),
+                    },
+                    Uuid::parse_str(a["member_ref"].as_str().unwrap()).unwrap(),
+                )
+                .unwrap()
+            };
             assert_eq!(
                 configuration
                     .admitted_configuration

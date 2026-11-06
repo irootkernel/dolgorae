@@ -14,8 +14,8 @@ provider profile, and externally planned reusable Specialist Engagements.
 
 Resolve relative links from the installed file that contains them, regardless
 of the caller's working directory. This entrypoint's `resources/` and
-`references/` directories belong to the installed skill. The
-[resource inventory](resources/manifest.json) lists the version-matched schemas,
+`references/` directories belong to the installed skill. The installed
+`resources/manifest.json` lists the version-matched schemas,
 examples, and their byte digests. Schema `$id` URLs are registry identifiers:
 resolve `$ref` through the files in `resources/protocol/`, including transitive
 dependencies. Do not fetch a missing schema from the network or a repository
@@ -106,7 +106,7 @@ qualified runtime mechanism. No Role file or prompt grants writer authority.
 When explicitly asked to migrate, plan with `instructions migrate --workspace
 <path>` and optional `--file <legacy-policy-input>`. Read the enumerated source
 scopes, digests and collisions. Apply only explicit choices through
-`--request-stdin` using the [migration contract](resources/protocol/dolgorae-instruction-migration-v1.schema.json).
+`--request-stdin` using the [migration contract](../../docs/protocol/dolgorae-instruction-migration-v1.schema.json).
 New destinations are create-exclusive; accepted snapshots and original
 sources are preserved. After a partial publication failure, inspect new files
 and replan rather than replaying an assumed transaction. Migration does not
@@ -127,7 +127,7 @@ After protected response loss, retain the original key and read its receipt.
 Do not automatically resend secret input. A winning-key retry returns the
 opaque receipt without reopening a protected file or comparing replacement
 content. Direct Controller disconnect does not create an ownerless request.
-The [Machine v6 contract](resources/protocol/dolgorae-machine-v6.schema.json)
+The [Machine v6 contract](../../docs/protocol/dolgorae-machine-v6.schema.json)
 carries new interaction v2 and event v2 output; historical v1
 unsupported records retain their readers. Decline or interrupt acknowledgement
 requires later terminal evidence before claiming completion.
@@ -256,8 +256,8 @@ fresh process/history/writer proof; never redispatch the accepted operation.
      --format json < review-request-v4.json
    ```
 
-   Follow the packaged [v4 request example](resources/protocol/examples/specialist-review-v4-request.valid.json)
-   and [review contract](resources/protocol/dolgorae-specialist-review-tool-v4.schema.json).
+   Follow the packaged [v4 request example](../../docs/protocol/examples/specialist-review-v4-request.valid.json)
+   and [review contract](../../docs/protocol/dolgorae-specialist-review-tool-v4.schema.json).
    The request must carry
    `purpose` (`change` or `completion`) alongside the brief, contexts, criteria,
    expected output, and deadline. Keep workspace, Profile, credentials, and
@@ -365,8 +365,8 @@ abort, or recover one engagement. The external host remains the semantic
 planner; do not infer a task graph, retry unknown work, attach an existing Run,
 or let a Specialist hire or contact another Specialist.
 
-1. Read the packaged [facade v4 contract](resources/protocol/dolgorae-external-specialist-facade-v4.schema.json)
-   and [assignment example](resources/protocol/examples/external-engagement-v4-assign.valid.json).
+1. Read the packaged [facade v4 contract](../../docs/protocol/dolgorae-external-specialist-facade-v4.schema.json)
+   and [assignment example](../../docs/protocol/examples/external-engagement-v4-assign.valid.json).
    New hires select `agent_configuration.schema_version: 3`, an explicit
    Markdown `role`, and `selected_profile`; use `schema:
    dolgorae-external-specialist-facade/v4`. Supply an optional optimistic

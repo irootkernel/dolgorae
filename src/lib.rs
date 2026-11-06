@@ -36,8 +36,6 @@ pub(crate) mod interaction_payload;
 pub mod jcs;
 pub mod ledger;
 pub(crate) mod ledger_generation;
-pub mod live_transport;
-pub mod live_transport_mcp;
 pub mod machine;
 pub mod maintenance;
 pub mod markdown_policy;

@@ -40,23 +40,23 @@ dolgorae specialist review-inspect --workspace <absolute-workspace> \
   --request-ref <retained-UUIDv7> --format json
 ```
 
-Validate the complete [machine envelope](../resources/protocol/dolgorae-machine-v2.schema.json)
-and its [one-shot observation](../resources/protocol/dolgorae-one-shot-review-observation-v1.schema.json)
+Validate the complete [machine envelope](../../../docs/protocol/dolgorae-machine-v2.schema.json)
+and its [one-shot observation](../../../docs/protocol/dolgorae-one-shot-review-observation-v1.schema.json)
 using the installed local resource registry. Inspection neither migrates storage
 nor collects a result, signals a process, settles a capture, or grants mutation
 authority. Keep `observation`, `outcome`, `result`, `report`, `diagnostic`, and
 each object's lifecycle state distinct:
 
-- A [known result](../resources/protocol/examples/one-shot-review-observation-v1-known.valid.json)
+- A [known result](../../../docs/protocol/examples/one-shot-review-observation-v1-known.valid.json)
   preserves the original checked result and identities. A stored failure keeps
   its original sanitized diagnostic; do not rebuild or repair provider output.
-- An [unknown reference](../resources/protocol/examples/one-shot-review-observation-v1-unknown.valid.json)
+- An [unknown reference](../../../docs/protocol/examples/one-shot-review-observation-v1-unknown.valid.json)
   establishes no acceptance or completion. Do not retry the review.
-- [Response loss](../resources/protocol/examples/one-shot-review-observation-v1-response-lost.valid.json)
+- [Response loss](../../../docs/protocol/examples/one-shot-review-observation-v1-response-lost.valid.json)
   may leave `outcome: unknown` and `result: null` while a stored report proves
   that work finished. Cleanup can resolve object obligations without inventing
   the lost final response or changing that outcome to success.
-- A [blocked operation](../resources/protocol/examples/one-shot-review-observation-v1-blocked.valid.json)
+- A [blocked operation](../../../docs/protocol/examples/one-shot-review-observation-v1-blocked.valid.json)
   retains known identities and explicit blocked reasons. Neither an empty
   findings list nor a saved diagnostic proves lifecycle cleanup completed.
 

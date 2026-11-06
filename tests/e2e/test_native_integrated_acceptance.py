@@ -757,11 +757,84 @@ def production_source_response_barrier_offline():
             assert not peer.thread.is_alive()
 
 
+def native_group_reaping_offline():
+    import run_native_host_invocation_fixture as invocation
+    from types import SimpleNamespace
+    with tempfile.TemporaryDirectory(prefix="native-reap-", dir="/tmp") as temporary:
+        root = Path(temporary).resolve()
+        (root / "workspace").mkdir()
+        for phase, groups, absent in (("absent", "91\n92\n", True), ("retained", "91\n123\n", False),
+                                      ("empty", "", False), ("whitespace", " \n\t\n", False)):
+            process = Mock(pid=123)
+            process.wait.return_value = 0
+            with patch.object(invocation.subprocess, "Popen", return_value=process), \
+                 patch.object(invocation.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")), \
+                 patch.object(invocation.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=groups)):
+                try:
+                    invocation.run_host(["native-host"], root, {}, phase, None)
+                except PermissionError:
+                    assert not absent
+                else:
+                    assert absent
+            evidence = json.loads((root / (phase + "-group-reap.json")).read_text())
+            assert evidence["group_absent"] is absent
+
+
+def production_callback_concurrency_offline():
+    import run_native_production_host as production
+    from concurrent.futures import ThreadPoolExecutor
+    from urllib.parse import urlsplit
+    entered, released, executor_entered = threading.Event(), threading.Event(), threading.Event()
+
+    class BlockingHost(production.Responses):
+        def host_reply(self, data):
+            entered.set()
+            released.wait()
+            return self.codex_events({"type": "message", "role": "assistant", "content": []}, 1)
+
+        def executor(self, data, post_number=None):
+            executor_entered.set()
+            return self.codex_events({"type": "message", "role": "assistant", "content": []}, post_number)
+
+    with tempfile.TemporaryDirectory(prefix="native-callbacks-", dir="/tmp") as temporary:
+        root = Path(temporary).resolve()
+        (root / "input.json").write_text(json.dumps({"scenario": "consumer-group-gaps", "ordinary_unbounded": True,
+                                                    "podway_archive": "unused-offline"}))
+        fixture = BlockingHost(root, "codex")
+        address = urlsplit(fixture.base_url)
+        def post(path):
+            client = HTTPConnection(address.hostname, address.port, timeout=10)
+            try:
+                client.request("POST", path, body=b"{}", headers={"Content-Type": "application/json"})
+                response = client.getresponse()
+                response.read()
+                return response.status
+            finally:
+                client.close()
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                host_request = pool.submit(post, "/v1/responses")
+                assert entered.wait(5)
+                executor_request = pool.submit(post, "/executor/v1/responses")
+                try:
+                    assert executor_entered.wait(5), "waiting Primary callback blocked the original executor request"
+                finally:
+                    released.set()
+                assert host_request.result() == executor_request.result() == 200
+            assert fixture.failure is None
+        finally:
+            released.set()
+            fixture.server.shutdown()
+            fixture.server.server_close()
+            fixture.thread.join()
+
+
 def production_timings_offline():
     import time
     import run_native_production_host as production
     with tempfile.TemporaryDirectory(prefix="dolgorae-timing-", dir="/tmp") as temporary:
         root = Path(temporary).resolve()
+        (root / "input.json").write_text(json.dumps({"scenario": "consumer-group"}))
         (root / "deadline").write_text(str(time.monotonic()+10))
         for site in ["prepare", "assign", "observe", "validation", "backend", "first_byte", "frame", "decode", "journal", "host"]:
             production.timing(root, site, "ok", time.monotonic_ns(), 7)
@@ -775,6 +848,10 @@ def production_timings_offline():
             list(pool.map(lambda _: production.timing(root, "backend", "ok", time.monotonic_ns()), range(16)))
         concurrent_rows = [json.loads(line) for line in path.read_text().splitlines()]
         assert [r["ordinal"] for r in concurrent_rows] == list(range(1, 27))
+        (root / "input.json").write_text(json.dumps({"ordinary_unbounded": True}))
+        (root / "deadline").unlink()
+        production.timing(root, "host", "ok", time.monotonic_ns())
+        assert json.loads(path.read_text().splitlines()[-1])["remaining_ns"] is None
         before = path.read_bytes()
         try:
             production.timing(root, "secret-payload-canary", "ok", time.monotonic_ns())
@@ -1034,13 +1111,133 @@ def managed_primary_contract_scope_offline() -> None:
         value.primary_calls.assert_not_called()
 
 
+def ordinary_worker_producer_routing_offline() -> None:
+    import hashlib
+    import run_native_production_host as production
+
+    class LaunchObserved(Exception):
+        pass
+
+    with tempfile.TemporaryDirectory(prefix="ordinary-producer-", dir="/tmp") as directory:
+        root = Path(directory).resolve()
+        binary, library = root / "ordinary-product", root / "fault-library"
+        binary.write_bytes(b"selected ordinary image")
+        library.write_bytes(b"selected fault library")
+        selected = {"binary": str(binary), "ordinary_fault_library": str(library),
+                    "ordinary_fault_library_sha256": hashlib.sha256(library.read_bytes()).hexdigest()}
+        (root / "input.json").write_text(json.dumps(selected))
+        environment = {production.OPT_IN: "1", "HOME": str(root / "home")}
+        with patch.object(production.subprocess, "Popen", side_effect=LaunchObserved) as launch:
+            try:
+                production.Backend(binary, root / "owner.json", environment, root)
+            except LaunchObserved:
+                pass
+            else:
+                raise AssertionError("actual MCP producer launch was not selected")
+            assert launch.call_args.args[0][0] == str(binary)
+            launched = launch.call_args.kwargs["env"]
+            assert launched["DYLD_INSERT_LIBRARIES"] == str(library)
+            assert launched["DOLGORAE_NATIVE_FAULT_DIR"] == str(root / "fault")
+            assert "DYLD_INSERT_LIBRARIES" not in environment
+        library.write_bytes(b"changed after selection")
+        with patch.object(production.subprocess, "Popen") as launch:
+            rejected(lambda: production.Backend(binary, root / "owner.json", environment, root))
+            rejected(lambda: production.Backend(binary, root / "owner.json", {}, root))
+            launch.assert_not_called()
+
+
+def ordinary_group_then_complete_page_offline() -> None:
+    import hashlib
+    from types import SimpleNamespace
+    import run_native_ordinary_host as ordinary
+    import run_native_production_host as production
+
+    with tempfile.TemporaryDirectory(prefix="ordinary-group-page-", dir="/tmp") as directory:
+        root = Path(directory).resolve()
+        (root / "input.json").write_text(json.dumps({"scenario": "consumer-group", "podway_archive": "unused-offline"}))
+        case = SimpleNamespace(root=root, args=SimpleNamespace(host="codex"), gap=False, group=True, engagement="original-engagement")
+        responses = ordinary.Responses(case)
+        try:
+            responses.stage = 6
+            responses.group_facts = {"group_ref": "original-group"}
+            responses.latest = {"facts": {"coverage": {"group_assignment_digest": "original-manifest",
+                "sources": [{"entry_key": "source-0", "state": "completed"}, {"entry_key": "source-1", "state": "completed"}]}}}
+            assert responses.next_request()["operation"] == "merge_group_results"
+            body = b'{"original":"complete result"}'
+            responses.complete.read("complete_result", "original-selection", {"kind": "complete_result"}, body)
+            request = responses.complete.read_call()
+            metadata = {"schema": "dolgorae.consumer-control-response/v1", "ok": True, "data": {
+                "kind": "page", "encoding": "utf8", "offset": 0, "returned_length": len(body),
+                "source_length": len(body), "source_digest": "sha256:" + hashlib.sha256(body).hexdigest(), "continuation": None}}
+            texts = [json.dumps(metadata), body.decode()]
+            result = {"content": [{"type": "text", "text": text} for text in texts]}
+            (root / "tool-replies.jsonl").write_text(json.dumps({"request": request, "reply": {"result": result}}) + "\n")
+            responses.pending, responses.delivery_offset = {"original-call": request}, 0
+            with patch.object(responses, "returned_result", return_value=(texts, False)):
+                responses.verify_pending({})
+            assert responses.complete.finished["complete_result"] == body
+            assert "complete_result:start" in responses.coverage and not responses.pending
+            process = Mock()
+            case.serve = process
+            case.stop_settled_scheduler = lambda engagement: ordinary.OrdinaryCase.stop_settled_scheduler(case, engagement)
+            responses.cleanup_mode, responses.stage = True, 1
+            responses.latest = {"facts": {"engagement": {"state": "open", "revision": 7,
+                "members": [{"state": "idle"}]}}}
+            assert responses.next_request()["operation"] == "close_external_engagement"
+            process.terminate.assert_called_once()
+            process.wait.assert_called_once()
+            assert case.serve is None
+            case.serve = Mock()
+            responses.latest["facts"]["engagement"]["members"][0]["state"] = "working"
+            rejected(responses.next_request)
+            case.serve.terminate.assert_not_called()
+        finally:
+            responses.server.shutdown()
+            responses.server.server_close()
+            responses.thread.join()
+
+
+def ordinary_group_selected_host_inputs_offline() -> None:
+    from types import SimpleNamespace
+    import run_native_ordinary_host as ordinary
+
+    with tempfile.TemporaryDirectory(prefix="ordinary-host-inputs-", dir="/tmp") as directory:
+        for selected in ("codex", "claude"):
+            root = Path(directory).resolve() / selected
+            root.mkdir()
+            for name in ("codex", "claude"):
+                (root / name).mkdir()
+            (root / "input.json").write_text(json.dumps({"host": selected}))
+            (root / "package.json").write_text(json.dumps({"result": {"package": {"original": "package"}}}))
+            case = object.__new__(ordinary.OrdinaryCase)
+            case.root = root
+            case.admin = Mock()
+            def read_selected_inputs(operation):
+                assert operation == "group-inputs"
+                return [json.loads((root / selected / f"ordinary-task-{i}.json").read_bytes()) for i in range(2)]
+            case.helper = read_selected_inputs
+            hired = {"facts": {"receipt": {"namespace": {"scope_ref": "original-engagement"}},
+                               "member": {"member_ref": "original-member"}}}
+            prepared = case.group_inputs(hired)
+            assert len(prepared) == case.admin.call_count == 2
+            for i, call in enumerate(case.admin.call_args_list):
+                assert call.args[2] == root / selected / f"ordinary-task-{i}.json"
+                assert prepared[i]["member_ref"] == "original-member"
+                assert prepared[i]["namespace"]["idempotency_key"] == f"ordinary-prepare-source-{i}"
+
+
 def main() -> int:
     from test_native_task085 import run_offline
     run_offline()
     nested_podway_builders_offline()
     task086_protected_returns_offline()
     production_source_response_barrier_offline()
+    ordinary_worker_producer_routing_offline()
+    ordinary_group_then_complete_page_offline()
+    ordinary_group_selected_host_inputs_offline()
     production_timings_offline()
+    native_group_reaping_offline()
+    production_callback_concurrency_offline()
     production_procedure_offline()
     production_advertisement_offline()
     production_return_protocol_offline()

@@ -6,6 +6,7 @@ import argparse
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -33,13 +34,14 @@ class InteractionResponses(ScriptedResponses):
         self.mcp_decision = None
         self.mcp_response = None
         self.mcp_requests = 0
+        self.max_mcp_requests = max_mcp_requests
         owner = self
         class McpHandler(BaseHTTPRequestHandler):
             def log_message(self, *_args):
                 pass
             def do_POST(self):
                 owner.mcp_requests += 1
-                if max_mcp_requests is not None and owner.mcp_requests > max_mcp_requests:
+                if owner.max_mcp_requests is not None and owner.mcp_requests > owner.max_mcp_requests:
                     owner.failure = "mcp_request_budget_exceeded"
                     self.send_error(400); return
                 size = int(self.headers.get("Content-Length", "0"))
@@ -108,7 +110,7 @@ class InteractionResponses(ScriptedResponses):
         super().close()
 
 
-def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1, interactions: bool = False, mcp_only: bool = False) -> dict[str, object]:
+def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1, interactions: bool = False, mcp_only: bool = False) -> dict[str, object]:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit native caller pipeline opt-in required")
     if executable_identity(codex)["sha256"] != CODEX_SHA256:
@@ -123,6 +125,9 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, r
         (scratch / "home" / "workspace").mkdir(mode=0o700)
         environment = isolated_environment(scratch)
         environment[OPT_IN] = "1"
+        if binary is not None:
+            binary = binary.resolve(strict=True)
+            environment["DOLGORAE_NATIVE_ORDINARY_BIN"] = str(binary)
         if readonly_pool:
             environment["DOLGORAE_NATIVE_READONLY_POOL"] = "1"
             private_file(scratch / "pool-limit", str(pool_limit).encode())
@@ -162,7 +167,7 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, r
         if interactions:
             private_file(scratch / "interaction-cases", b"mcp\n" if mcp_only else b"permission,mcp\n")
         result = subprocess.run([str(driver), str(scratch), str(codex)], env=environment,
-                                capture_output=True, text=True, timeout=300)
+                                capture_output=True, text=True, timeout=None if binary is not None else 300)
         private_file(scratch / "driver.stdout", result.stdout.encode())
         private_file(scratch / "driver.stderr", result.stderr.encode())
         if interactions:
@@ -189,6 +194,8 @@ def campaign(driver: Path, codex: Path, *, default_variant: str | None = None, r
         observations.update(external_provider_requests=0, loopback_posts=fixture.posts,
                             real_account_or_credentials_used=False, executable_sha256=CODEX_SHA256,
                             codex_version=CODEX_VERSION, profile_capability_mutated=False)
+        if binary is not None:
+            observations["ordinary_product"] = {"path": str(binary), "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
         if default_variant is not None:
             observations.update(external_provider_requests=None, other_network_metered=False,
                                 scripted_model_provider_requests=fixture.posts,
@@ -303,10 +310,10 @@ def require_default_feature_observation(value, variant: str) -> None:
         raise ValueError("actual final shell_snapshot disabling unproved")
 
 
-def default_feature_campaign(driver: Path, codex: Path) -> dict[str, object]:
+def default_feature_campaign(driver: Path, codex: Path, *, binary: Path | None = None) -> dict[str, object]:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit native caller pipeline opt-in required")
-    observations=[campaign(driver,codex,default_variant=v) for v in DEFAULT_FEATURE_VARIANTS]
+    observations=[campaign(driver,codex,binary=binary,default_variant=v) for v in DEFAULT_FEATURE_VARIANTS]
     return {"schema":"dolgorae.default-feature-startup/v1","variants":observations,"passed":True,
             "external_provider_requests":None,"other_network_metered":False,
             "scripted_model_provider_requests":sum(row["loopback_posts"] for row in observations),
@@ -320,6 +327,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--driver", type=Path, required=True)
     parser.add_argument("--codex", type=Path, required=True)
+    parser.add_argument("--binary", type=Path)
     parser.add_argument("--default-feature-startup-only", action="store_true")
     parser.add_argument("--readonly-pool", action="store_true")
     parser.add_argument("--interactions", action="store_true")
@@ -331,6 +339,8 @@ def main() -> int:
         kwargs = {"readonly_pool": True, "pool_limit": args.pool_limit} if args.readonly_pool else {}
         if args.interactions or args.interactions_mcp_only:
             kwargs = {"interactions": True, "mcp_only": args.interactions_mcp_only}
+        if args.binary is not None:
+            kwargs["binary"] = args.binary
         observations = selected(args.driver.resolve(strict=True), args.codex.resolve(strict=True), **kwargs)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         print(json.dumps({"schema": "dolgorae.native-caller-pipeline-failure/v1", "passed": False}))

@@ -6,9 +6,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import posixpath
 import shutil
 from pathlib import Path
-from urllib.parse import urldefrag, urljoin
+from urllib.parse import unquote, urldefrag, urljoin
+
+from validate_markdown import LINK_RE
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILL_ROOT = ROOT / "skills" / "use-dolgorae"
@@ -140,20 +143,48 @@ def regular_files(root: Path) -> set[str]:
     return files
 
 
-def checked_package() -> dict[str, bytes]:
+def source_package() -> dict[str, bytes]:
     resources = {f"resources/{name}": content for name, content in resource_bundle().items()}
-    expected = MARKDOWN_FILES | resources.keys()
     actual = regular_files(SKILL_ROOT)
-    if actual != expected:
-        raise PackageError(f"package file set differs: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}")
-    for name, content in resources.items():
-        if (SKILL_ROOT / name).read_bytes() != content:
+    if actual != MARKDOWN_FILES:
+        raise PackageError(f"source skill file set differs: missing={sorted(MARKDOWN_FILES - actual)}, extra={sorted(actual - MARKDOWN_FILES)}")
+    files = dict(resources)
+    protocol = (ROOT / "docs/protocol").resolve()
+    for name in sorted(MARKDOWN_FILES):
+        markdown = SKILL_ROOT / name
+
+        def project(match):
+            target = match.group(1)
+            local, separator, fragment = target.partition("#")
+            if not local or local.startswith(("https://", "http://", "mailto:")):
+                return match.group(0)
+            canonical = (markdown.parent / unquote(local)).resolve()
+            if canonical.is_relative_to(protocol):
+                installed = "resources/protocol/" + canonical.relative_to(protocol).as_posix()
+                if installed not in resources:
+                    raise PackageError(f"guidance resource is outside the selected closure: {target}")
+                projected = posixpath.relpath(installed, posixpath.dirname(name) or ".")
+                return match.group(0).replace(f"({target})", f"({projected}{separator}{fragment})")
+            if not canonical.is_relative_to(SKILL_ROOT.resolve()) or canonical.relative_to(SKILL_ROOT.resolve()).as_posix() not in MARKDOWN_FILES:
+                raise PackageError(f"guidance link is outside the source package: {target}")
+            return match.group(0)
+
+        files[name] = LINK_RE.sub(project, markdown.read_text(encoding="utf-8")).encode()
+    return files
+
+
+def check_installed_package(root: Path) -> None:
+    expected = source_package()
+    actual = regular_files(root)
+    if actual != expected.keys():
+        raise PackageError(f"package file set differs: missing={sorted(expected.keys() - actual)}, extra={sorted(actual - expected.keys())}")
+    for name, content in expected.items():
+        if (root / name).read_bytes() != content:
             raise PackageError(f"package resource differs from canonical source: {name}")
-    return {**resources, **{name: (SKILL_ROOT / name).read_bytes() for name in MARKDOWN_FILES}}
 
 
 def install(destination: Path) -> None:
-    files = checked_package()
+    files = source_package()
     destination.parent.mkdir(parents=True, exist_ok=True)
     # mkdir is exclusive: even an empty existing directory must survive unchanged.
     destination.mkdir(mode=0o700)
@@ -170,26 +201,12 @@ def install(destination: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("sync", help="derive source package resources from canonical protocol files")
     installer = subparsers.add_parser("install", help="install a checked package to a new directory")
     installer.add_argument("--destination", required=True, type=Path)
     args = parser.parse_args()
     try:
-        if args.command == "sync":
-            resources = SKILL_ROOT / "resources"
-            expected = resource_bundle()
-            if resources.exists():
-                extras = regular_files(resources) - expected.keys()
-                if extras:
-                    raise PackageError(f"remove obsolete resource files explicitly before syncing: {sorted(extras)}")
-            for name, content in expected.items():
-                path = resources / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(content)
-            print(f"Derived {len(expected)} skill resource files")
-        else:
-            install(args.destination)
-            print(f"Installed use-dolgorae at {args.destination}")
+        install(args.destination)
+        print(f"Installed use-dolgorae at {args.destination}")
     except (OSError, ValueError) as error:
         parser.exit(1, f"Skill package error: {error}\n")
     return 0

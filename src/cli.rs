@@ -22,8 +22,6 @@ pub enum Command {
     Worker(WorkerArgs),
     #[command(name = "__specialist-review-mcp", hide = true)]
     SpecialistReviewMcp(SpecialistReviewMcpArgs),
-    #[command(name = "__live-transport-mcp", hide = true)]
-    LiveTransportMcp(LiveTransportMcpArgs),
     Version(VersionArgs),
     Init(InitArgs),
     Instructions {
@@ -77,7 +75,6 @@ impl Command {
         match self {
             Self::Worker(_) => "__worker",
             Self::SpecialistReviewMcp(_) => "__specialist-review-mcp",
-            Self::LiveTransportMcp(_) => "__live-transport-mcp",
             Self::Version(_) => "version",
             Self::Init(_) => "init",
             Self::Instructions {
@@ -100,11 +97,9 @@ impl Command {
     #[must_use]
     pub fn leaf_args(&self) -> Option<&LeafArgs> {
         match self {
-            Self::Worker(_)
-            | Self::SpecialistReviewMcp(_)
-            | Self::LiveTransportMcp(_)
-            | Self::Version(_)
-            | Self::Init(_) => None,
+            Self::Worker(_) | Self::SpecialistReviewMcp(_) | Self::Version(_) | Self::Init(_) => {
+                None
+            }
             Self::Runtime {
                 command: RuntimeCommand::Capabilities(args),
             } => Some(args),
@@ -205,18 +200,6 @@ pub struct SpecialistReviewMcpArgs {
     pub workspace: PathBuf,
     #[arg(long, value_name = "RUNTIME_PROFILE")]
     pub profile: String,
-}
-
-#[derive(Debug, Args)]
-pub struct LiveTransportMcpArgs {
-    #[arg(long, value_name = "UUID")]
-    pub session_id: String,
-    #[arg(long, value_name = "UUID")]
-    pub run_id: String,
-    #[arg(long, default_value_t = 1)]
-    pub generation: u64,
-    #[arg(long)]
-    pub dedicated_lane: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2010,37 +1993,6 @@ mod tests {
                 "{protected}"
             );
         }
-    }
-
-    #[test]
-    fn live_transport_mcp_binds_run_outside_tool_arguments() {
-        let cli = Cli::try_parse_from([
-            "dolgorae",
-            "__live-transport-mcp",
-            "--session-id",
-            "018f0000-0000-7000-8000-000000000001",
-            "--run-id",
-            "018f0000-0000-7000-8000-000000000002",
-            "--generation",
-            "3",
-            "--dedicated-lane",
-        ])
-        .unwrap();
-        assert_eq!(cli.command.machine_name(), "__live-transport-mcp");
-        assert!(validate_argument_contract(&cli.command).is_ok());
-        assert!(
-            Cli::try_parse_from([
-                "dolgorae",
-                "__live-transport-mcp",
-                "--session-id",
-                "018f0000-0000-7000-8000-000000000001",
-                "--run-id",
-                "018f0000-0000-7000-8000-000000000002",
-                "--source-turn-id",
-                "turn-forged",
-            ])
-            .is_err()
-        );
     }
 
     #[test]

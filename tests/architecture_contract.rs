@@ -16,20 +16,18 @@ fn rust_sources(directory: &Path) -> Vec<PathBuf> {
     files
 }
 
-// Only the admitted orchestration children extend source checks. Integration
-// test enumeration intentionally remains top-level.
-fn source_modules() -> Vec<PathBuf> {
-    let root = repository_root().join("src");
-    let mut paths = rust_sources(&root);
-    let children = rust_sources(&root.join("orchestration"));
-    assert_eq!(
-        children
-            .iter()
-            .map(|path| path.file_stem().unwrap().to_str().unwrap())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["approval", "checked_state", "policy_task"])
-    );
-    paths.extend(children);
+// Source guards are recursive; integration-test enumeration remains top-level.
+fn source_modules(root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            paths.extend(source_modules(&path));
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
     paths
 }
 
@@ -86,15 +84,31 @@ fn review_output_production_dependencies_exclude_its_callers() {
 
 #[test]
 fn orchestration_production_depends_on_the_adapter_trait() {
-    let source = fs::read_to_string(repository_root().join("src/orchestration.rs")).unwrap();
+    check_orchestration_adapter(&repository_root().join("src"));
+}
+
+fn check_orchestration_adapter(root: &Path) {
+    let source = fs::read_to_string(root.join("orchestration.rs")).unwrap();
     let (production, _) = source
         .split_once("#[cfg(test)]\npub(crate) mod tests {")
         .unwrap();
     assert!(!direct_crate_dependencies(production).contains("semantic"));
-    let defined = parent_defined_items(production);
-    for path in rust_sources(&repository_root().join("src/orchestration")) {
+    for path in source_modules(&root.join("orchestration")) {
         let source = fs::read_to_string(&path).unwrap();
         let production = source.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        let directory = path.parent().unwrap();
+        let parent = if path.file_name().unwrap() == "mod.rs" {
+            directory.parent().unwrap()
+        } else {
+            directory
+        };
+        let owner = parent.with_extension("rs");
+        let owner = if owner.is_file() {
+            owner
+        } else {
+            parent.join("mod.rs")
+        };
+        let defined = parent_defined_items(&fs::read_to_string(owner).unwrap());
         for (offset, _) in production.match_indices("super::") {
             let suffix = &production[offset + "super::".len()..];
             let names = if let Some(block) = suffix.strip_prefix('{') {
@@ -868,8 +882,6 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "specialist_facade",
             ][..],
         ),
-        ("live_transport", &["jcs", "machine", "primary_tool"][..]),
-        ("live_transport_mcp", &["live_transport", "machine"][..]),
         ("mcp_review", &[][..]),
         (
             "mcp_review_server",
@@ -900,6 +912,22 @@ fn source_module_dependencies_match_the_approved_graph() {
                 // generation-6 database through the real store.
                 "engagement",
                 "machine",
+            ][..],
+        ),
+        (
+            "delegation_service/accepted_readback",
+            &[
+                "delegation_identity",
+                "delegation_service",
+                "engagement",
+                "jcs",
+                "machine",
+                "operation",
+                "orchestration",
+                "result_component_artifact",
+                "scheduler",
+                "storage_observation",
+                "successor_capture",
             ][..],
         ),
         (
@@ -1617,15 +1645,18 @@ fn source_module_dependencies_match_the_approved_graph() {
         ),
     ]);
 
-    for path in source_modules() {
-        let relative = path
-            .strip_prefix(repository_root().join("src"))
-            .unwrap()
-            .with_extension("");
+    check_source_dependencies(&repository_root().join("src"), &approved);
+}
+
+fn check_source_dependencies(root: &Path, approved: &BTreeMap<&str, &[&str]>) {
+    let mut observed_modules = BTreeSet::new();
+    for path in source_modules(root) {
+        let relative = path.strip_prefix(root).unwrap().with_extension("");
         let module = relative.to_str().unwrap();
         if matches!(module, "lib" | "main") {
             continue;
         }
+        observed_modules.insert(module.to_owned());
         let source = fs::read_to_string(&path).unwrap();
         if module == "source_binding" {
             let (production, _) = source.split_once("#[cfg(test)]\nmod tests {").unwrap();
@@ -1659,12 +1690,21 @@ fn source_module_dependencies_match_the_approved_graph() {
             path.display()
         );
     }
+    assert_eq!(
+        observed_modules,
+        approved.keys().map(|name| (*name).to_owned()).collect(),
+        "approved architecture entries must match the recursive source inventory"
+    );
 }
 
 #[test]
 fn unsafe_implementation_remains_inside_the_darwin_adapter() {
-    for path in source_modules() {
-        if path == repository_root().join("src/darwin.rs") {
+    check_unsafe_boundary(&repository_root().join("src"));
+}
+
+fn check_unsafe_boundary(root: &Path) {
+    for path in source_modules(root) {
+        if path == root.join("darwin.rs") {
             continue;
         }
         let source = fs::read_to_string(&path).unwrap();
@@ -1676,6 +1716,81 @@ fn unsafe_implementation_remains_inside_the_darwin_adapter() {
             );
         }
     }
+}
+
+fn source_fixture(files: &[(&str, &str)], check: impl FnOnce(&Path)) {
+    struct OwnedSource(PathBuf);
+    impl Drop for OwnedSource {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let root =
+        PathBuf::from("/tmp").join(format!("dolgorae-architecture-{}", uuid::Uuid::now_v7()));
+    fs::create_dir(&root).unwrap();
+    let owned = OwnedSource(fs::canonicalize(root).unwrap());
+    for (name, content) in files {
+        let path = owned.0.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    check(&owned.0);
+}
+
+#[test]
+fn recursive_guards_reject_nested_dependency_and_unsafe_bypasses() {
+    source_fixture(
+        &[("owner/nested/leaf.rs", "use crate::jcs::canonicalize;")],
+        |root| {
+            let leaf = root.join("owner/nested/leaf.rs");
+            assert_eq!(source_modules(root), vec![leaf.clone()]);
+            let approved = BTreeMap::from([("owner/nested/leaf", &["jcs"][..])]);
+            check_source_dependencies(root, &approved);
+            assert!(
+                std::panic::catch_unwind(|| check_source_dependencies(root, &BTreeMap::new()))
+                    .is_err()
+            );
+            fs::write(&leaf, "use crate::semantic::CoreSemanticService;").unwrap();
+            assert!(
+                std::panic::catch_unwind(|| check_source_dependencies(root, &approved)).is_err()
+            );
+            check_unsafe_boundary(root);
+            fs::write(root.join("owner/nested/darwin.rs"), "unsafe fn bypass() {}").unwrap();
+            assert!(std::panic::catch_unwind(|| check_unsafe_boundary(root)).is_err());
+        },
+    );
+}
+
+#[test]
+fn recursive_orchestration_guard_preserves_parent_and_adapter_boundaries() {
+    source_fixture(
+        &[
+            (
+                "orchestration.rs",
+                "mod layer;\n#[cfg(test)]\npub(crate) mod tests {}",
+            ),
+            (
+                "orchestration/layer.rs",
+                "pub struct Owned;\nuse crate::jcs::canonicalize as Alias;\nmod nested;",
+            ),
+            ("orchestration/layer/nested.rs", "use super::Owned;"),
+        ],
+        |root| {
+            check_orchestration_adapter(root);
+            let nested = root.join("orchestration/layer/nested.rs");
+            for source in [
+                "use super::Alias;",
+                "use super::*;",
+                "use crate::semantic::CoreSemanticService;",
+            ] {
+                fs::write(&nested, source).unwrap();
+                assert!(
+                    std::panic::catch_unwind(|| check_orchestration_adapter(root)).is_err(),
+                    "{source}"
+                );
+            }
+        },
+    );
 }
 
 #[test]

@@ -148,9 +148,11 @@ def successor_public(root: Path, *args: str, payload: dict | None = None, expect
     if "sha256:" + hashlib.sha256(executable.read_bytes()).hexdigest() != connection["executable_sha256"]:
         raise ProbeCheckFailure("selected_podway_executable_changed")
     argv = [str(executable), "--contract-generation", "1", "--worktree", connection["worktree"], "--json", *args]
+    case_input = root / "input.json"
+    unbounded = case_input.exists() and json.loads(case_input.read_text()).get("ordinary_unbounded", False)
     result = subprocess.run(argv, cwd=connection["worktree"], env=isolated_environment(root),
                             input=json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode() if payload is not None else None,
-                            capture_output=True, timeout=10)
+                            capture_output=True, timeout=None if unbounded else 10)
     with (root / "consumer-public.jsonl").open("a") as log:
         log.write(json.dumps({"argv": argv, "exit": result.returncode,
             "stdout": result.stdout.decode(), "stderr": result.stderr.decode()}) + "\n")
@@ -226,8 +228,9 @@ def accepted_profile_state(root: Path, workspace_id: str, run_id: str) -> dict:
     return state
 
 
-def stop_fixture_profile(driver: Path, root: Path, environment: dict) -> None:
-    result=subprocess.run([str(driver),"--retire-profiles",str(root)],env={**environment,caller.OPT_IN:"1"},capture_output=True,text=True,timeout=30)
+def stop_fixture_profile(driver: Path, root: Path, environment: dict, *, binary: Path | None = None) -> None:
+    selected = {} if binary is None else {"DOLGORAE_NATIVE_ORDINARY_BIN": str(binary)}
+    result=subprocess.run([str(driver),"--retire-profiles",str(root)],env={**environment,caller.OPT_IN:"1",**selected},capture_output=True,text=True,timeout=None if binary is not None else 30)
     if result.returncode or json.loads(result.stdout).get("retained_profiles_retired") is not True:
         raise ProbeCheckFailure("accepted_fixture_profile_retirement_failed")
 
@@ -538,7 +541,7 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
                     raise ProbeCheckFailure("ordinary_writable_close_retained_writer")
             if fixture.posts != 0 or fixture.failure is not None:
                 raise ProbeCheckFailure("ordinary_close_started_unapproved_turn")
-            stop_fixture_profile(caller_driver, root, environment)
+            stop_fixture_profile(caller_driver, root, environment, binary=binary)
             cleanup_removed_root(binary, root, allow_existing_root=True)
             require_fixture_process_absence(call("runtime", "orphan", "inspect",
                                                 "--owner-root-under", str(root)))
@@ -842,7 +845,7 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
         if fixture.failure or fixture.pending or fixture.posts != MAX_POSTS or fixture.steps != MAX_TURNS:
             raise ProbeCheckFailure("integrated_turn_budget_mismatch")
         assert_no_source_isolation(root / "home")
-        stop_fixture_profile(caller_driver, root, environment)
+        stop_fixture_profile(caller_driver, root, environment, binary=binary)
         cleanup_removed_root(binary, root, allow_existing_root=True)
         foreground.terminate()
         out, err = foreground.communicate(timeout=7)
@@ -854,7 +857,7 @@ def campaign(binary: Path, codex: Path, caller_driver: Path, *, ordinary_close_o
                                             "--owner-root-under", str(root)))
         census_checked = True
         with patch.dict(os.environ, {caller.OPT_IN: "1"}):
-            recovery = caller.campaign(caller_driver, codex)
+            recovery = caller.campaign(caller_driver, codex, binary=binary)
         passed = True
         return {"schema": "dolgorae.native-integrated-acceptance/v1", "passed": True,
                 "codex_version": CODEX_VERSION, "executable_sha256": CODEX_SHA256,
@@ -1071,7 +1074,11 @@ class SuccessorResponses(IntegratedResponses):
         from run_native_production_host import encoded, Responses
         with self.lock:
             self.posts += 1
-            if self.posts > SUCCESSOR_POSTS:
+            if phase["phase"] == "cleanup":
+                self.cleanup_posts = getattr(self, "cleanup_posts", 0) + 1
+                if self.cleanup_posts > 2:
+                    raise ProbeCheckFailure("managed_original_release_cleanup_trace_exceeded")
+            if self.posts - getattr(self, "cleanup_posts", 0) > SUCCESSOR_POSTS:
                 raise ProbeCheckFailure("successor_exact_trace_budget_exceeded")
             self.primary_posts = getattr(self, "primary_posts", 0) + 1
             name = phase["phase"]
@@ -1131,7 +1138,10 @@ class SuccessorResponses(IntegratedResponses):
             self.primary_step += 1
             data = phase["input"]
             calls = []
-            if name == "spawn" and step == 0:
+            if name == "spawn" and step == 0 and "sources" in data:
+                calls = [(semantic, {"schema": schema, "operation": "install_provisioning",
+                    "sources": data["sources"], "idempotency_key": "native-install", "expected_revision": None}, None)]
+            elif name == "spawn" and step == (1 if "sources" in data else 0):
                 candidate = data["candidate"]
                 calls = [(semantic, {"schema": schema, "operation": "spawn_specialist", "scope_kind": "orchestrated_session",
                     "scope_ref": phase["root_run"], "provisioning_ref": candidate["provisioning_ref"], "role_ref": "general",
@@ -1145,6 +1155,14 @@ class SuccessorResponses(IntegratedResponses):
                     last = self.primary_results[-1]["header"]["facts"]
                     if last["task"]["state"] != "completed" or last["wait_timed_out"] is not False:
                         raise ProbeCheckFailure("actual_managed_task_did_not_complete")
+            elif name == "cleanup":
+                if step == 0:
+                    calls = [(semantic, {"schema": schema, "operation": "release_specialist",
+                        "scope_kind": "orchestrated_session", "scope_ref": phase["root_run"],
+                        "member_ref": data["member_ref"], "expected_revision": data["release_revision"]}, None)]
+                elif (self.primary_results[-1]["header"]["facts"]["member"]["member_ref"] != data["member_ref"]
+                      or self.primary_results[-1]["header"]["facts"]["member"]["state"] != "released"):
+                    raise ProbeCheckFailure("managed_original_release_cleanup_incomplete")
             elif name == "consumer":
                 if step == 0:
                     calls = [(semantic, {"schema": schema, "operation": "collect_specialist_task", "scope_kind": "orchestrated_session",
@@ -1203,6 +1221,16 @@ class SuccessorResponses(IntegratedResponses):
                     observed = successor_public(self.consumer_root, "delegation", "receipt", "--session", connection["session"], "--attempt", connection["attempt"])
                     if receipt["result"]["receipt"] != observed["result"]["receipt"] or observed["result"]["applicability"] != "accepted":
                         raise ProbeCheckFailure("actual_original_receipt_not_current_or_matching")
+                    if data.get("release_member"):
+                        releases = [v["header"]["facts"] for v in self.primary_results
+                                    if v["request"].get("operation") == "release_specialist"]
+                        if not releases:
+                            calls = [(semantic, {"schema": schema, "operation": "release_specialist",
+                                "scope_kind": "orchestrated_session", "scope_ref": phase["root_run"],
+                                "member_ref": data["member_ref"], "expected_revision": data["release_revision"]}, None)]
+                        elif (len(releases) != 1 or releases[0]["member"]["member_ref"] != data["member_ref"]
+                              or releases[0]["member"]["state"] != "released"):
+                            raise ProbeCheckFailure("original_managed_member_release_incomplete")
             if calls:
                 return self.primary_calls(calls)
             private_file(self.consumer_root / f"primary-{name}-results.json", encoded(self.primary_results))
@@ -2265,7 +2293,7 @@ def main() -> int:
             if args.successor_only or args.ordinary_close_only:
                 raise ValueError("default-feature startup is a distinct mode")
             with patch.dict(os.environ, {caller.OPT_IN:"1"}):
-                result=caller.default_feature_campaign(args.caller_driver.resolve(strict=True),args.codex.resolve(strict=True))
+                result=caller.default_feature_campaign(args.caller_driver.resolve(strict=True),args.codex.resolve(strict=True),binary=args.binary.resolve(strict=True))
         elif args.successor_only:
             result = successor_campaign(args.binary.resolve(strict=True), args.codex.resolve(strict=True), args.podway, args.aquarium_source, frozen_driver=args.successor_driver, frozen_driver_sha256=args.successor_driver_sha256)
         else:

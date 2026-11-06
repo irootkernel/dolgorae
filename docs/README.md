@@ -113,3 +113,6 @@ Rust tests own product semantics. Python remains limited to small independent
 repository checks and black-box executable tests. The complete gate and its
 formatting side effect are documented in the
 [implementation tips](implementation-tips/README.md).
+That guide also describes immutable H1 validation, protoc and generated-source
+reproduction, source-to-installed skill packaging and the
+[macOS CI gate](../.github/workflows/ci.yml).

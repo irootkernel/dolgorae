@@ -2334,6 +2334,12 @@ pre-effect refusal may restore Active only after unchanged original Write proof.
 Terminal/Closed cleanup remains separate and never starts a Reader or appends
 beyond the terminal seal.
 
+The `run recover` and `run reconcile` CLI entrypoints select the existing recovery
+owner from the retained manifest. They do not require a healthy effective-policy
+snapshot before entering recovery: an interrupted Writer guard is itself a
+recovery input. Controller authorization, history validation and original
+release ownership remain enforced by that recovery owner.
+
 Foreground command observation and terminal completion are recorded separately
 and never imply background-process absence. Writer release/handoff/close first
 fences new work and completes the Dedicated Lane workload cleanup protocol. A complete

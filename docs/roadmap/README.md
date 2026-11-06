@@ -30,7 +30,7 @@ execution order. TASK-067 is COMPLETE;
 TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
 TASK-084 through TASK-086 are COMPLETE.
-TASK-087 through TASK-089 remain PLANNED.
+TASK-087 is COMPLETE; TASK-088 and TASK-089 remain PLANNED.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -2872,7 +2872,7 @@ Handoff: Qualified versioned adapters, complete applicable Aquarium/Podway matri
 
 ### TASK-087: Retire Unused Contracts and Strengthen Development Checks
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: TASK-086.
 

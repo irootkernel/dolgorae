@@ -44,19 +44,6 @@ fn main() -> ExitCode {
                     Err(error) => ExitCode::from(error.exit_status()),
                 };
             }
-            cli::Command::LiveTransportMcp(args) => {
-                return match live_transport_mcp::ProbeProcessBinding::parse(
-                    &args.session_id,
-                    &args.run_id,
-                    args.generation,
-                    args.dedicated_lane,
-                )
-                .and_then(live_transport_mcp::serve_stdio)
-                {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(error) => ExitCode::from(error.exit_status()),
-                };
-            }
             _ => {}
         }
     }

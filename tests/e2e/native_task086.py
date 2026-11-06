@@ -185,10 +185,12 @@ class Responses(host.Responses):
 
     def emit(self, data, request, tool="specialist_native"):
         request = copy.deepcopy(request)
-        remaining = float((self.root / "deadline").read_text()) - time.monotonic()
-        host.require(remaining > 0, "original_task086_deadline_exhausted")
-        if "timeout_seconds" in request:
-            request["timeout_seconds"] = min(request["timeout_seconds"], int(remaining))
+        deadline = host.row_deadline(self.root)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            host.require(remaining > 0, "original_task086_deadline_exhausted")
+            if "timeout_seconds" in request:
+                request["timeout_seconds"] = min(request["timeout_seconds"], int(remaining))
         self.calls += 1
         call = ("call_native_" if self.host == "codex" else "toolu_native_") + str(self.calls)
         self.last_call, self.last_request = call, copy.deepcopy(request)

@@ -225,6 +225,12 @@ def model_request(body: bytes, encoding: str):
     return data,decoded
 
 
+def row_deadline(root: Path) -> float | None:
+    if json.loads((root / "input.json").read_text()).get("ordinary_unbounded", False):
+        return None
+    return float((root / "deadline").read_text())
+
+
 def timing(root: Path, site: str, outcome: str, started: int, byte_count: int = 0):
     require(site in {"prepare", "assign", "observe", "validation", "host", "backend", "first_byte", "frame", "decode", "journal"}
             and outcome in {"begin", "ok", "error", "timeout", "eof"}, "unknown_timing_bucket")
@@ -243,9 +249,10 @@ def timing(root: Path, site: str, outcome: str, started: int, byte_count: int = 
         ordinal = os.pread(out.fileno(), info.st_size, 0).count(b"\n") + 1
         require(ordinal <= 1024, "timing_sink_record_bound")
         now = time.monotonic_ns()
+        deadline = row_deadline(root)
         row = {"site": site, "outcome": outcome, "monotonic_ns": now,
                "elapsed_ns": max(0, now-started),
-               "remaining_ns": max(0, int(float((root / "deadline").read_text())*1_000_000_000)-now),
+               "remaining_ns": None if deadline is None else max(0, int(deadline*1_000_000_000)-now),
                "byte_count": byte_count, "ordinal": ordinal}
         record = encoded(row)+b"\n"
         require(info.st_size + len(record) <= 256 * 1024, "timing_sink_bound")
@@ -383,6 +390,20 @@ class Backend:
     """One production stdio connection. Native handshake bytes are forwarded."""
     def __init__(self, binary, owner, environment, root):
         self.root=root
+        configuration=json.loads((root / "input.json").read_text())
+        if "ordinary_fault_library" in configuration:
+            require(environment.get(OPT_IN)=="1", "ordinary_fault_requires_native_opt_in")
+            require(Path(binary).resolve(strict=True)==Path(configuration["binary"]).resolve(strict=True),
+                    "ordinary_fault_product_image_changed")
+            library=Path(configuration["ordinary_fault_library"])
+            require(library.is_absolute() and library.is_file() and not library.is_symlink()
+                    and hashlib.sha256(library.read_bytes()).hexdigest()==configuration["ordinary_fault_library_sha256"],
+                    "ordinary_fault_library_changed")
+            # Native hire/group can create Workers in this MCP process before
+            # the gateway scheduler dispatches them. Instrument that actual
+            # producer too; each fault still selects one exact PID and Run.
+            environment=dict(environment, DYLD_INSERT_LIBRARIES=str(library),
+                             DOLGORAE_NATIVE_FAULT_DIR=str(root / "fault"))
         self.process=subprocess.Popen([str(binary),"__trusted-specialist-host","host-mcp","--owner-config",str(owner)],env=environment,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         self.buffer=b""
         self.selector=selectors.DefaultSelector()
@@ -397,8 +418,8 @@ class Backend:
         if frame.get("method")=="tools/call": counter(self.root,"production_stdio")
         self.process.stdin.write(raw if raw.endswith(b"\n") else raw+b"\n");self.process.stdin.flush()
         if "id" not in frame: return None
-        deadline=float((self.root / "deadline").read_text())
-        while time.monotonic()<deadline:
+        deadline=row_deadline(self.root)
+        while deadline is None or time.monotonic()<deadline:
             if b"\n" in self.buffer:
                 line,self.buffer=self.buffer.split(b"\n",1)
                 timing(self.root, "frame", "ok", started, len(line))
@@ -410,7 +431,8 @@ class Backend:
                 require(reply["id"]==frame["id"],"production_stdio_correlation_missing")
                 timing(self.root, "backend", "ok", started, len(line))
                 return reply
-            if not self.selector.select(min(.1,max(.001,deadline-time.monotonic()))): continue
+            interval = .1 if deadline is None else min(.1,max(.001,deadline-time.monotonic()))
+            if not self.selector.select(interval): continue
             chunk=os.read(self.process.stdout.fileno(),65536)
             if not chunk:
                 timing(self.root, "backend", "eof", started)
@@ -956,6 +978,7 @@ class Responses:
         self.cursors = {}
         self.coverage = set()
         self.lock = threading.Lock()
+        self.host_lock = threading.Lock()
         row = json.loads((root / "input.json").read_text())["scenario"]
         self.budget = trace(row)
         self.complete = CompleteConsumer(root) if row in CONSUMER_ROWS else None
@@ -975,7 +998,8 @@ class Responses:
                     data,decoded=model_request(body,self.headers.get("Content-Encoding","identity"))
                     require(self.headers.get("Authorization") in (None,"Bearer sk-ant-fixture-not-a-credential") and self.headers.get("x-api-key") in (None,"sk-ant-fixture-not-a-credential"),"authentication_outside_explicit_fixture_policy")
                     with fixture.lock:
-                        require(time.monotonic() <= float((root / "deadline").read_text()), "row_deadline_exceeded")
+                        deadline = row_deadline(root)
+                        require(deadline is None or time.monotonic() <= deadline, "row_deadline_exceeded")
                         fixture.posts += 1
                         post_number = fixture.posts
                         require(fixture.posts <= (12 if json.loads((root / "input.json").read_text())["scenario"] == "TASK085" else fixture.budget["combined_post_limit"]), "combined_host_executor_count_token_budget_exceeded")
@@ -990,7 +1014,8 @@ class Responses:
                             self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(answer))); self.end_headers(); self.wfile.write(answer); return
                         require(endpoint in ("/v1/responses", "/v1/messages", "/executor/v1/responses"), "unexpected_endpoint")
                         executor = endpoint == "/executor/v1/responses"
-                        if not executor:
+                    if not executor:
+                        with fixture.host_lock:
                             events = fixture.host_reply(data)
                     if executor:
                         events = fixture.executor(data) if json.loads((root / "input.json").read_text())["scenario"] == "TASK085" else fixture.executor(data, post_number)
@@ -1050,7 +1075,8 @@ class Responses:
             require(step==1,"unknown_original_task_was_redispatched")
             private(self.root/"unknown-post-observed",b"actual original model request observed\n")
             while not (self.root/"release-source1-response").exists():
-                require(time.monotonic()<float((self.root/"deadline").read_text()),"owned_worker_fault_barrier_timeout")
+                deadline = row_deadline(self.root)
+                require(deadline is None or time.monotonic()<deadline,"owned_worker_fault_barrier_timeout")
                 time.sleep(.025)
             text=findings()
         elif step==1:
@@ -1347,7 +1373,7 @@ class Responses:
         require(not self.thread.is_alive(), "loopback_thread_not_joined")
 
 
-def run_phase(driver: Path, mode: str, root: Path, environment: dict, deadline: float) -> dict:
+def run_phase(driver: Path, mode: str, root: Path, environment: dict, deadline: float | None) -> dict:
     started = time.monotonic_ns()
     site = mode.removeprefix("--")
     measured = site in {"prepare", "assign", "observe"}
@@ -1355,7 +1381,7 @@ def run_phase(driver: Path, mode: str, root: Path, environment: dict, deadline: 
     name=site+"-"+str(started)
     try:
         completed = subprocess.run([str(driver), mode, str(root)], env=environment, capture_output=True,
-                                   timeout=max(.1, deadline - time.monotonic()))
+                                   timeout=None if deadline is None else max(.1, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as error:
         if measured: timing(root, site, "timeout", started)
         private(root / (name+".stdout"),error.stdout or b"")
@@ -1371,7 +1397,7 @@ def run_phase(driver: Path, mode: str, root: Path, environment: dict, deadline: 
     return result
 
 
-def podway_fixture(root: Path, executable: Path, digest: str, candidate: dict, environment: dict, deadline: float,
+def podway_fixture(root: Path, executable: Path, digest: str, candidate: dict, environment: dict, deadline: float | None,
                    *, adapter_id: str = "dolgorae.external/1", adapter_version: str | None = None) -> None:
     require(hashlib.sha256(executable.read_bytes()).hexdigest() == digest, "selected_podway_executable_changed")
     worktree = root / "workspace"
@@ -1382,7 +1408,8 @@ def podway_fixture(root: Path, executable: Path, digest: str, candidate: dict, e
         setup_calls += 1
         selection = [] if args[0] in ("procedure", "version", "help") else ["--worktree", str(worktree)]
         argv = [str(executable), "--contract-generation", "1", *selection, "--json", *args]
-        result = subprocess.run(argv, cwd=worktree, env=environment, capture_output=True, timeout=max(.1, deadline-time.monotonic()))
+        result = subprocess.run(argv, cwd=worktree, env=environment, capture_output=True,
+                                timeout=None if deadline is None else max(.1, deadline-time.monotonic()))
         private(root / f"podway-setup-{setup_calls}.json", encoded({"argv":argv,"exit":result.returncode,"stdout":result.stdout.decode(),"stderr":result.stderr.decode()}))
         require(result.returncode == 0, "selected_public_podway_setup_failed")
         return json.loads(result.stdout)
@@ -1788,9 +1815,14 @@ def qualify_direct_contract(args) -> dict:
     environment[OPT_IN]="1"
     private(root/"fixture-owned",b"native-production-host/v1\n")
     private(root/"input.json",encoded({"scenario":"direct-contract","host":"codex"}))
-    deadline=min(time.monotonic()+90,getattr(args,"deadline",float("inf")))
-    require(time.monotonic()<deadline,"direct_contract_deadline_exceeded")
-    product=subprocess.run([str(args.binary.resolve(strict=True)),"version","--json"],env=environment,capture_output=True,timeout=min(5,deadline-time.monotonic()))
+    requested_deadline=getattr(args,"deadline",float("inf"))
+    deadline=None if requested_deadline is None else min(time.monotonic()+90,requested_deadline)
+    def operation_timeout(cap):
+        if deadline is None:
+            return None
+        require(time.monotonic()<deadline,"direct_contract_deadline_exceeded")
+        return min(cap,deadline-time.monotonic())
+    product=subprocess.run([str(args.binary.resolve(strict=True)),"version","--json"],env=environment,capture_output=True,timeout=operation_timeout(5))
     private(root/"product-version.json",encoded({"exit":product.returncode,"stdout":product.stdout.decode(),"stderr":product.stderr.decode()}))
     require(product.returncode==0,"frozen_product_version_failed")
     adapter_version=json.loads(product.stdout)["version"].removeprefix("v")
@@ -1802,8 +1834,7 @@ def qualify_direct_contract(args) -> dict:
         selection=[] if argv[0] in ("procedure","version","help") else ["--worktree",str(workspace)]
         producer=args.unsupported_peer_producer if workspace==unsupported else args.podway
         selected=[str(producer.resolve(strict=True)),"--contract-generation",str(generation),*selection,"--json",*argv]
-        require(time.monotonic()<deadline,"direct_contract_deadline_exceeded")
-        result=subprocess.run(selected,cwd=workspace,env=environment,capture_output=True,timeout=min(10,deadline-time.monotonic()))
+        result=subprocess.run(selected,cwd=workspace,env=environment,capture_output=True,timeout=operation_timeout(10))
         private(root/f"public-{ordinal:03}.json",encoded({"argv":selected,"exit":result.returncode,"stdout":result.stdout.decode(),"stderr":result.stderr.decode()}))
         value=json.loads(result.stdout)
         if workspace!=unsupported:
@@ -1819,8 +1850,7 @@ def qualify_direct_contract(args) -> dict:
             "items":[{"id":"result","type":"text","prompt":"Direct result","required":True}]}},
         "graph":{"entry":"work","nodes":[{"id":"work","use":"work","terminal":True}]}}
     def start(workspace,generation):
-        require(time.monotonic()<deadline,"direct_contract_deadline_exceeded")
-        result=subprocess.run(["/usr/bin/git","init","-q",str(workspace)],env=environment,capture_output=True,timeout=min(5,deadline-time.monotonic()))
+        result=subprocess.run(["/usr/bin/git","init","-q",str(workspace)],env=environment,capture_output=True,timeout=operation_timeout(5))
         require(result.returncode==0,"isolated_direct_git_setup_failed")
         private(workspace/"procedure.json",encoded(document))
         command(workspace,"init","--idempotency-key","direct-init",generation=generation)
@@ -1856,7 +1886,7 @@ def qualify_direct_contract(args) -> dict:
     require(hashlib.sha256(producer.read_bytes()).hexdigest()==UNSUPPORTED_PEER_SHA256,
             "unsupported_peer_producer_changed")
     identity=subprocess.run([str(producer),"--json","version","--identity"],env=environment,
-                           capture_output=True,timeout=min(5,max(.1,deadline-time.monotonic())))
+                           capture_output=True,timeout=operation_timeout(5))
     private(root/"negative-producer-identity.json",encoded({"exit":identity.returncode,
         "stdout":identity.stdout.decode(),"stderr":identity.stderr.decode()}))
     producer_identity=json.loads(identity.stdout)
@@ -1880,7 +1910,7 @@ def qualify_direct_contract(args) -> dict:
                     "sha256":hashlib.sha256(path.read_bytes()).hexdigest() if stat.S_ISREG(info.st_mode) else None}
         return facts
     before=snapshot()
-    refused=run_phase(args.driver,"--peer-read",root,environment,min(deadline,time.monotonic()+35))
+    refused=run_phase(args.driver,"--peer-read",root,environment,None if deadline is None else min(deadline,time.monotonic()+35))
     require(snapshot()==before,"unsupported_peer_read_changed_consumer_state")
     args.contract.validate_reply(refused["compatible_public_response"])
     args.contract.validate_reply(refused["unsupported_peer"]["actual_public_response"])

@@ -148,7 +148,7 @@ class NativeConsumer:
                     endpoint = self.path.split("?", 1)[0]
                     with owner.lock:
                         owner.posts += 1
-                        require(owner.posts <= 32 and time.monotonic() < owner.deadline, "ordinary_case_budget_exceeded")
+                        require(owner.posts <= 32 and (owner.deadline is None or time.monotonic() < owner.deadline), "ordinary_case_budget_exceeded")
                         private(root / f"native-http-{owner.posts}.json", data)
                         if endpoint == "/v1/messages/count_tokens":
                             owner.counts += 1
@@ -341,7 +341,7 @@ def procedure_document():
         "graph": {"entry": "collect", "nodes": [{"id": "collect", "use": "collect", "next": "evaluate"}, {"id": "evaluate", "use": "evaluate", "next": "choose"}, {"id": "choose", "use": "choose", "evidence_from": [{"node": "collect", "required": True, "items": ["report"]}, {"node": "evaluate", "required": True, "items": ["report"]}], "routes": {"proceed": {"to": "done", "effect": "advance"}, "evidence": {"to": "evaluate", "effect": "rework"}, "superseded": {"to": "done", "effect": "advance"}}}, {"id": "done", "use": "done", "terminal": True}]}}
 
 def qualify(args, host, case):
-    deadline = time.monotonic() + 180
+    deadline = None if getattr(args, "unbounded", False) else time.monotonic() + 180
     root = Path(tempfile.mkdtemp(prefix=host[0] + "-", dir=args.scratch)).resolve(); root.chmod(0o700)
     for name in ("home", "tmp", "config", "cache", "workspace", "codex", "claude"):
         (root / name).mkdir(mode=0o700)
@@ -358,13 +358,14 @@ def qualify(args, host, case):
     def public(*argv):
         selection = [] if argv[0] in ("procedure", "version") else ["--worktree", str(root / "workspace")]
         command = [str(args.podway), "--contract-generation", "1", *selection, "--json", *argv]
-        require(time.monotonic() < deadline, "ordinary_case_deadline_exceeded")
+        require(deadline is None or time.monotonic() < deadline, "ordinary_case_deadline_exceeded")
         index = len(public_calls)
         record = {"argv": command, "exit": None, "response": None}
         public_calls.append(record)
         private(root / f"ordinary-public-{index:03d}-attempt.json", record)
         try:
-            result = subprocess.run(command, env=environment, cwd=root / "workspace", capture_output=True, timeout=min(10, deadline - time.monotonic()))
+            result = subprocess.run(command, env=environment, cwd=root / "workspace", capture_output=True,
+                                    timeout=None if deadline is None else min(10, deadline - time.monotonic()))
         except Exception as error:
             private(root / f"ordinary-public-{index:03d}-failure.json", {"error": type(error).__name__})
             raise
@@ -383,7 +384,7 @@ def qualify(args, host, case):
         s = scope(observation); revision = observation["result"]["status"]["session"]["revision"]
         return ["--if-workspace-uuid", s["workspace_ref"], "--if-session-id", s["session_ref"], "--if-session-revision", str(revision), "--if-attempt", s["attempt_ref"]]
     document = procedure_document()
-    setup = subprocess.run(["/usr/bin/git", "init", "-q", str(root / "workspace")], env=environment, capture_output=True, timeout=5)
+    setup = subprocess.run(["/usr/bin/git", "init", "-q", str(root / "workspace")], env=environment, capture_output=True, timeout=None if deadline is None else 5)
     require(setup.returncode == 0, "ordinary_fixture_git_setup_failed")
     private(root / "workspace/procedure.json", canonical(document))
     public("init", "--idempotency-key", "ordinary-init")
@@ -493,6 +494,7 @@ def main():
     parser.add_argument("--claude-model", required=True)
     parser.add_argument("--hosts", nargs="+", choices=PINS, default=list(PINS))
     parser.add_argument("--cases", nargs="+", choices=CASES, default=list(CASES))
+    parser.add_argument("--unbounded", action="store_true", help="Run without a whole-case or parent command execution timer")
     args = parser.parse_args()
     require(os.environ.get(OPT_IN) == "1", "explicit_current_native_consumer_opt_in_required")
     for name in ("codex", "claude", "podway", "podway_archive", "aquarium_archive", "task_criteria", "scratch"):

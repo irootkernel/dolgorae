@@ -24,9 +24,9 @@ from validate_agent_skills import SkillValidationError, validate_installed_resou
 
 class InstalledSkillTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="dolgorae-skill-package-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="dolgorae-skill-package-", dir="/tmp")
         self.addCleanup(self.temporary.cleanup)
-        self.root = pathlib.Path(self.temporary.name)
+        self.root = pathlib.Path(self.temporary.name).resolve()
         self.installed = self.root / "use-dolgorae"
         self.install(self.installed, succeeds=True)
 
@@ -125,9 +125,8 @@ class InstalledSkillTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_bytes())
         manifest["files"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-        with patch.object(package, "SKILL_ROOT", self.installed):
-            with self.assertRaisesRegex(package.PackageError, "canonical source"):
-                package.checked_package()
+        with self.assertRaisesRegex(package.PackageError, "canonical source"):
+            package.check_installed_package(self.installed)
 
     def test_install_preserves_existing_directory_and_symlink(self):
         before = (self.installed / "SKILL.md").read_bytes()
@@ -143,23 +142,83 @@ class InstalledSkillTests(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual((self.installed / "SKILL.md").read_bytes(), before)
 
+    def test_failed_write_removes_only_the_partial_installation(self):
+        destination = self.root / "partial"
+        sibling = self.root / "unrelated"
+        sibling.write_bytes(b"retain this file")
+        written = []
+        write_bytes = pathlib.Path.write_bytes
+
+        def fail_after_first_file(path, content):
+            if path.is_relative_to(destination) and written:
+                raise OSError("fixture write failure")
+            result = write_bytes(path, content)
+            written.append(path)
+            self.assertEqual(path.read_bytes(), content)
+            return result
+
+        with patch.object(pathlib.Path, "write_bytes", fail_after_first_file):
+            with self.assertRaisesRegex(OSError, "fixture write failure"):
+                package.install(destination)
+        self.assertEqual(len(written), 1)
+        self.assertFalse(destination.exists())
+        self.assertEqual(sibling.read_bytes(), b"retain this file")
+        validate_installed_resources(self.installed)
+
     def test_install_rejects_bad_resources_before_creating_destination(self):
         for fault in ("missing", "stale", "extra"):
             with self.subTest(fault=fault):
-                source = self.root / f"source-{fault}"
-                shutil.copytree(self.installed, source)
-                resource = source / "resources/protocol/dolgorae-specialist-review-tool-v1.schema.json"
+                source, skill = self.source(f"source-{fault}")
+                resource = source / "docs/protocol/dolgorae-specialist-review-tool-v1.schema.json"
                 if fault == "missing":
                     resource.unlink()
                 elif fault == "stale":
-                    resource.write_bytes(resource.read_bytes() + b"\n")
+                    resource.write_bytes(b"not a schema document")
                 else:
-                    (source / "resources/unexpected.json").write_text("{}")
+                    (skill / "unexpected.json").write_text("{}")
                 destination = self.root / f"destination-{fault}"
-                with patch.object(package, "SKILL_ROOT", source):
-                    with self.assertRaises(package.PackageError):
+                with patch.object(package, "ROOT", source), patch.object(package, "SKILL_ROOT", skill):
+                    with self.assertRaises(ValueError):
                         package.install(destination)
                 self.assertFalse(destination.exists())
+
+    def test_canonical_guidance_links_are_projected_without_changing_fragments(self):
+        source, skill = self.source("fragment-source")
+        guidance = skill / "references/recovery.md"
+        link = "[assignment](../../../docs/protocol/dolgorae-external-specialist-facade-v4.schema.json#/$defs/assign_request)"
+        guidance.write_text(guidance.read_text() + "\n" + link + "\n")
+        destination = self.root / "fragment-installed"
+        with patch.object(package, "ROOT", source), patch.object(package, "SKILL_ROOT", skill):
+            package.install(destination)
+        self.assertIn(
+            "[assignment](../resources/protocol/dolgorae-external-specialist-facade-v4.schema.json#/$defs/assign_request)",
+            (destination / "references/recovery.md").read_text(),
+        )
+        shutil.rmtree(source)
+        validate_installed_resources(destination)
+
+    def test_guidance_outside_selected_closure_is_rejected_before_installation(self):
+        source, skill = self.source("outside-closure-source")
+        (source / "docs/protocol/not-selected.json").write_text(
+            '{"$id":"https://example.invalid/not-selected","type":"object"}'
+        )
+        guidance = skill / "SKILL.md"
+        guidance.write_text(guidance.read_text() + "\n[unsupported](../../docs/protocol/not-selected.json)\n")
+        destination = self.root / "outside-closure-installed"
+        with patch.object(package, "ROOT", source), patch.object(package, "SKILL_ROOT", skill):
+            with self.assertRaisesRegex(package.PackageError, "outside the selected closure"):
+                package.install(destination)
+        self.assertFalse(destination.exists())
+
+    def source(self, name):
+        source = self.root / name
+        skill = source / "skills/use-dolgorae"
+        for name in package.MARKDOWN_FILES:
+            path = skill / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(package.SKILL_ROOT / name, path)
+        shutil.copytree(self.installed / "resources/protocol", source / "docs/protocol")
+        return source, skill
 
 
 if __name__ == "__main__":

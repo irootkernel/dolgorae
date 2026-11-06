@@ -837,6 +837,10 @@ invocation, because internal child acceptance has no separate native call.
 Missing or foreign proof refuses before native-history effects. Controller
 groups keep their distinct retained-origin authorization; successor native work
 never acquires legacy external provenance or a Controller-group origin.
+An already-terminal assignment does not bypass recovery of its retained pending
+Writer generation release. A completed task does not prove that this release
+finished. Failure to resume the original release remains a typed recovery
+failure; recovery never submits another task or creates a new key.
 Managed recovery reads the original accepted assignment's key,
 Root, Turn and tool-call provenance; missing or inconsistent provenance is a
 closed refusal. The semantic port reauthenticates the actual owner. For managed recovery,

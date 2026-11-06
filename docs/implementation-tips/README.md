@@ -16,6 +16,150 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r tools/validation/requirements.txt
 ```
 
+The immutable H1 contract is selected from its qualified committed revision,
+independently of the current package version. `test-prepare` runs
+`tools/validators/validate_frozen_h1.py`, which verifies that archive and executes
+all three selected H1 scripts unchanged in its extracted tree. The historical
+H1 packaging guide's default-HEAD examples describe the selected H1 source;
+they do not select H1 from current v0.1.4 inputs. Keep current Cargo, development
+checks and current generated-source validation separate from that frozen tree.
+An archive encoding/compressor mismatch fails independently of selected
+lock/member-byte equality; neither check may be weakened to accommodate it.
+
+Generated public-v2 artifacts require protoc 36.2, Buf 1.69.0,
+protoc-gen-go 1.36.11 and protoc-gen-go-grpc 1.6.1. The selected protoc executable
+must have its matching `include/google/protobuf/timestamp.proto` in the sibling
+installation tree. `tools/validators/generate_public_v2.py` checks versions,
+import bytes and generated provenance; do not replace its selected producer or
+metadata to accommodate another tool arrangement.
+
+The [CI workflow](../../.github/workflows/ci.yml) runs the same complete gate on
+the standard macOS arm64 runner for pushes and pull requests. It provisions
+the pinned tools, verifies downloaded asset digests and uses Codex 0.158.0 only
+as the existing offline schema generator. It uses no model account, native/live
+opt-in, installation target or release operation. Local source checks do not
+establish that the hosted job has executed successfully.
+
+`examples/native_ordinary_host.rs` is a non-shipped public-v2 client and
+independent observation helper. It captures inputs without registering a
+binding or starting a Profile server. Its bootstrap uses the ordinary server's
+provisioned StartRun and CloseRun RPCs; a normal bootstrap creates a Run and
+Thread without a model Turn. Public-v2 credential carriers require three
+relative components beneath `controller-carriers/`, with private owner-only
+directories. The helper stores complete protobuf responses; its JSON metadata
+is a partial view. Cleanup closes original Runs before non-interrupting
+Profile migration and stop through the ordinary CLI. A successful bootstrap
+does not qualify group execution or final H3.
+
+`tests/e2e/run_native_ordinary_host.py` exercises individual completion, feedback
+rounds, release, fences and research groups with a separately selected
+client/helper and fault library. Its product
+server, native MCP, Workers and Profile drainer use the selected ordinary
+binary. Select `--host codex` or `--host claude`; `--scenario consumer-group`
+checks the conflict/merge/synthesis path without loading the fault library,
+while `consumer-group-gaps` selects physical response loss. Both paths initialize
+the delegated consumer with the actual Podway connection through the ordinary
+`consumer-init` command before native collection. Host-state and preparation
+initialization alone do not initialize that consumer store.
+Each external case also installs a same-name Role change and a separate
+configuration change before hiring from its original candidate. Those candidates
+create no Task; accepted input and result checks retain the original digests.
+A separately pinned `--peer-reader` may run only the existing read-only
+Podway compatibility oracle; it does not initialize or operate Dolgorae on the
+ordinary binary's behalf. Keep that reader's actual image and unchanged-source
+applicability distinct from product execution.
+
+The native production fixture's `--ordinary-read-merge`,
+`--ordinary-synthesis-input`, `--ordinary-read-result` and
+`--ordinary-managed-read-result` modes supply independent
+read-only references or captured input bytes. They do not initialize, collect,
+reconcile, dispatch or retire product state. Select that reader separately with
+`--result-reader` and its digest. The ordinary image reads the referenced merged
+artifact, accepts the separate synthesis Task, returns its complete native
+result and performs the subsequent consumer Record/Accept flow. Neither reader
+supplies a native delivery or semantic acceptance.
+
+The client's `observe-images` operation records the live original member
+Workers, Profile drainer and Codex server before cleanup. It checks executable
+paths, bytes, physical identities and retained process fingerprints against the
+selected product and runtime inputs. Keep these observations separate from
+the native result pages and receipt decisions.
+
+Ordinary managed-producer qualification uses the existing interactive Root
+`run start`, `run send` and whole-session `run close` commands, with its
+orchestration policy carried by the original Controller credential. Provisioning,
+spawn, assignment and collection run through the actual Root Turn's managed
+native tools. Proto declarations for unsupported provisioning/Broker RPCs do
+not provide an alternate execution path. A private Specialist bootstrap remains
+separate from the Root's qualified Profile launch. Test-side preparation and
+owner-authorized reads supply original input and result comparisons only.
+`tests/e2e/run_native_ordinary_managed.py` selects this route with the ordinary
+`--binary`, `--helper`, pinned `--result-reader` and existing runtime/Podway
+inputs. It reads every original consumer page and completes the Action separately
+from receipt acceptance. Whole-session Close and Profile retirement must both
+finish before the case passes.
+
+These ordinary-image runners impose no whole-case or cleanup execution timer.
+Task and Send limits remain explicit native inputs; HTTP, page and byte bounds
+remain enforced. The group-gap fixture arms a separate 180-second fail-safe
+only for its injected hold, immediately before group submission. A fail-safe
+release fails the fault observation; it neither qualifies an unknown outcome
+nor ends the remaining owner cleanup. Cleanup waits for an in-flight model
+callback before changing its phase. If logical cleanup fails, retain the owned
+scheduler and report its recovery handoff instead of terminating it.
+On Darwin, a native host group signal can return `EPERM` after that group exits.
+The harness accepts cleanup only after an independent process-group inventory
+proves absence; a retained or unreadable group remains a failure.
+
+The ordinary complete-result case observes its owned MCP inventory before
+dispatch. Profile preparation may make up to 24 metadata requests across its
+native probes. Actual Task execution retains a separate eight-request bound;
+both counts remain visible. Two automatic policy declines and absence of the
+protected question from model traffic are required.
+
+For caller/default-startup, pool and interaction qualification, pass the same
+`--binary` to `tests/e2e/run_native_caller_pipeline.py`. The selected image owns
+workspace/Profile setup, caller mutations, Workers, drainers and the pool RPC
+server. The example retains its original assertions and read-only observations.
+Its replay flag is a before/after observation of the original reservation and
+receipt, because the caller CLI does not return that flag. All four startup
+variants preserve their original configuration and argv order, including omitted
+plugin settings. Without `--binary`, this script remains a fixture-engine check
+and supplies no ordinary-H3 execution evidence.
+
+Replacement Worker recovery keeps the original Run and accepted Thread while
+advancing the Worker generation. Preserve both identities; requiring the old
+generation after a restart rejects supported recovery. A concurrent ledger
+capture conflict means retry the read, not submit the Task again. Observe
+original task completion before restoring the Worker and admitting member
+release. Retry only the public API's applicable busy response on the same
+original identity. An expired execution clock does not replace the cleanup
+phase's separate clock or settle its state.
+After observing every original member idle or released, stop and join the owned
+scheduler before admitting the engagement close through the native MCP. This
+keeps a concurrent scheduler lifecycle lease out of that cleanup admission.
+An unresolved original close remains recovery work; a passing consumer phase
+does not turn its whole failed wrapper into a pass.
+
+Ordinary-artifact physical-response-loss qualification uses the explicitly
+selected, non-shipped `tests/support/native_ack_loss.c` fault library. It may
+hold one genuine Accepted send on an identity-checked Worker's original socket,
+then hold the selected serve process's next lifecycle acquisition for that Run
+after a real control-connection hangup or loss. Instrument the actual native
+MCP producer as well as `serve`, because native hire can create a Worker before
+scheduler dispatch. Verify the library's loaded witness for that exact Worker.
+The bounded fixture observes the kernel's poll hangup, EOF or connection reset
+and preserves original syscall results, bytes and errno. It does not change
+product bytes, receipts or database state. Before submission, it can hold the
+selected sender's complete request
+buffer while the typed helper verifies the real Worker generation, image and
+socket. It forwards the unchanged bytes after selection. The private harness
+must prove terminal, real unknown, public lookup,
+independent Direct progress, group gaps and original-operation recovery; loader
+success alone proves none of those. Release all three holds in cleanup, with a
+dead-harness fallback. Keep this instrumented configuration separate from normal
+qualification, which runs without the library. Never install it with Dolgorae.
+
 TASK-081 has an isolated consultation component mode in the existing integrated
 native acceptance runner: `--collaboration-component-only`. It uses the normal
 `DOLGORAE_RUN_NATIVE_INTEGRATED_ACCEPTANCE=1` opt-in and pinned Codex executable.
@@ -341,9 +485,12 @@ Run's tool registration. TASK-025 selected native `item/tool/call` on the isolat
 pin (locally installed Codex CLI 0.155.1). That historical campaign did not
 change the then-current Codex App Server 0.153.4 compatibility baseline.
 Deterministic probes and the checked selection artifact live under
-`src/live_transport.rs` and
-`docs/protocol/dolgorae-live-transport-selection-v1.json`. The hidden
-`__live-transport-mcp` entry is test-only and must not edit a shared Profile.
+`examples/support/live_transport.rs` and
+`docs/protocol/dolgorae-live-transport-selection-v1.json`. The separate
+`live_transport_probe` example owns the test-only stdio MCP entry; the ordinary
+binary exposes no `__live-transport-mcp` command. It must not edit a shared Profile.
+The optional Python live campaign creates its own Python MCP and remains
+independent of this Rust example and its historical selection evidence.
 `DOLGORAE_RUN_LIVE_TRANSPORT_PROBE=1` runs the isolated live probe against the
 local `codex` binary. The campaign creates its own Codex home and must not use
 `~/.codex` or `~/.dolgorae`. It is outside the complete repository gate.

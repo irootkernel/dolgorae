@@ -23,10 +23,9 @@ from validate_markdown import LINK_RE
 ROOT = Path(__file__).resolve().parents[2]
 from package_agent_skill import (
     MARKDOWN_FILES,
-    checked_package,
+    check_installed_package,
     references,
     regular_files,
-    resource_bundle,
     schema_index,
 )
 
@@ -170,14 +169,13 @@ def main() -> int:
             fail("skills/use-dolgorae: missing skill directory")
         validate_path(SKILL_ROOT)
 
-        expected_files = MARKDOWN_FILES | {f"resources/{name}" for name in resource_bundle()}
+        expected_files = MARKDOWN_FILES
         actual_files = source_files()
         if actual_files != expected_files:
             fail(
                 "skills/use-dolgorae: file set differs from the contract: "
                 f"expected {sorted(expected_files)}, got {sorted(actual_files)}"
             )
-        checked_package()
 
         entrypoint = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         validate_frontmatter(entrypoint)
@@ -196,13 +194,14 @@ def main() -> int:
                 [sys.executable, str(ROOT / "tools/validators/package_agent_skill.py"), "install", "--destination", str(installed)],
                 cwd=temporary, check=True, capture_output=True,
             )
+            check_installed_package(installed)
             validate_installed_resources(installed)
     except (OSError, UnicodeError, ValueError, SkillValidationError,
             SchemaError, ValidationError, Unresolvable, subprocess.CalledProcessError) as error:
         print(f"Agent skill validation failed: {error}", file=sys.stderr)
         return 1
 
-    print(f"Agent skill validation passed: {len(expected_files)} files; isolated installed resources resolved")
+    print(f"Agent skill validation passed: {len(expected_files)} source files; derived installed resources resolved")
     return 0
 
 

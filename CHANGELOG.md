@@ -9,6 +9,8 @@ development commits.
 
 ### Added
 
+- Derive installed skill resources from canonical contracts without duplicate source schemas, retaining offline resolution and integrity checks.
+
 - Add bounded native consumer cases for complete result pages, accepted rounds, settled release, group/synthesis provenance and original receipt recovery.
   Prepare genuine managed producer exports and separate same-host Aquarium ordinary-v3 collection, assessment and Primary decisions.
   Report authentic original-key accepted-assignment uncertainty without rewriting the Task phase or receipt.
@@ -69,6 +71,11 @@ development commits.
   `dolgorae.external/1` and `dolgorae.managed/1` Podway exports through protected consumer configuration.
 
 ### Fixed
+
+- Allow CLI recovery to enter the existing recovery owner when a retained Writer guard prevents a healthy policy snapshot.
+
+- Resume an owned pending Writer generation release during explicit member
+  recovery even after its Task becomes terminal; preserve release failures.
 
 - Preserve unresolved member startup and original-key lookup without promising
   Run recovery before a manifest exists; retain the original release owner.

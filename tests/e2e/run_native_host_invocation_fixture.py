@@ -278,11 +278,11 @@ sys.exit(result.returncode)
 '''
 
 
-def run_host(argv: list[str], root: Path, env: dict[str, str], phase: str, deadline: float,
+def run_host(argv: list[str], root: Path, env: dict[str, str], phase: str, deadline: float | None,
              crash_marker: Path | None = None, require_claude_journal: bool = False) -> Path:
     stdout_path, stderr_path = root / (phase + "-stdout.local"), root / (phase + "-stderr.local")
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
+    remaining = None if deadline is None else deadline - time.monotonic()
+    if remaining is not None and remaining <= 0:
         raise ProbeFailure("native_host_deadline_exceeded")
     with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
         os.chmod(stdout_path, 0o600)
@@ -292,14 +292,14 @@ def run_host(argv: list[str], root: Path, env: dict[str, str], phase: str, deadl
                                    start_new_session=True, umask=0o077)
         try:
             if crash_marker is not None:
-                while not crash_marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                while not crash_marker.exists() and process.poll() is None and (deadline is None or time.monotonic() < deadline):
                     time.sleep(0.025)
                 if not crash_marker.exists():
                     raise ProbeFailure("native_crash_point_not_reached")
                 if require_claude_journal:
                     session = native_session(stdout_path, "claude")
                     while not claude_conversation_persisted(root, session):
-                        if process.poll() is not None or time.monotonic() >= deadline:
+                        if process.poll() is not None or (deadline is not None and time.monotonic() >= deadline):
                             raise ProbeFailure("native_crash_resume_journal_unavailable")
                         time.sleep(0.025)
                 os.killpg(process.pid, signal.SIGKILL)
@@ -316,6 +316,20 @@ def run_host(argv: list[str], root: Path, env: dict[str, str], phase: str, deadl
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                # Darwin may refuse a signal after the native group exited.
+                # Verify actual absence; EPERM alone supplies no cleanup proof.
+                observed = subprocess.run(["/bin/ps", "-axo", "pgid="], capture_output=True,
+                                          text=True, timeout=None if deadline is None else 5)
+                groups = [line.strip() for line in observed.stdout.splitlines() if line.strip()]
+                absent = observed.returncode == 0 and bool(groups) and all(
+                    line.strip().isdigit() and int(line) != process.pid
+                    for line in groups)
+                evidence = {"process_group": process.pid, "signal_error": "EPERM",
+                            "ps_exit": observed.returncode, "group_absent": absent}
+                (root / (phase + "-group-reap.json")).write_text(json.dumps(evidence) + "\n")
+                if not absent:
+                    raise
             process.wait(timeout=5)
     if code:
         raise ProbeFailure("native_" + phase + "_process_failed")

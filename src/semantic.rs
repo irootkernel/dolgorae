@@ -1638,6 +1638,29 @@ impl crate::delegation_service::RunSettlementPort for SemanticRunSettlementPort<
                 None,
             )? {
                 crate::delegation_service::MemberSettlement::Terminal => {
+                    let writer = crate::writer::WriterStore::new(
+                        request.state_root,
+                        &request.view.workspace_id,
+                        DarwinSystem.current_uid(),
+                    )
+                    .load()?;
+                    if writer
+                        .pending_generation_release(request.member_ref)
+                        .is_some()
+                        || writer
+                            .acquire_retirement_recovery(request.member_ref)
+                            .is_some()
+                    {
+                        history_reconciliation_with_lifecycle(
+                            request.view,
+                            request.state_root,
+                            request.member_ref,
+                            carrier,
+                            "run.reconcile",
+                            None,
+                            None,
+                        )?;
+                    }
                     finish_settled_reconciliation_admission(
                         request.view,
                         request.state_root,
@@ -4894,9 +4917,9 @@ fn run_history_reconciliation(
     let state_root = workspace_state_root(&view)?;
     let run_id = positional_run_id(args)?;
     let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
-    let snapshot = RunSources::load(&state_root, run_id, 0)?;
-    if snapshot.manifest.schema_version == 3
-        && is_orchestrated_root(&snapshot.manifest)
+    let manifest = RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(run_id)?;
+    if manifest.schema_version == 3
+        && is_orchestrated_root(&manifest)
         && coordinate_session_close(
             &state_root,
             run_id,
@@ -35461,6 +35484,76 @@ pub(crate) mod successor_review_tests {
             resettle_member_tasks(self.state_root(), self.manifest().run_id, self.owner()).unwrap();
             assert_eq!(self.result(task), before);
             assert_eq!(self.stability_facts(), stable);
+        }
+    }
+
+    #[test]
+    fn terminal_member_recovery_does_not_skip_pending_writer_release() {
+        for managed in [false, true] {
+            let scene = Scene::writable(managed);
+            scene.prepare_worker_ledger();
+            let task = scene.accept_write_task("terminal-release-recovery");
+            scene.record_running_execution(&task, "terminal-release-recovery", true);
+            scene.publish("turn-1", "the original write completed");
+            settle_bound_successor_task(
+                scene.state_root(),
+                scene.manifest().run_id,
+                scene.owner(),
+                &scene.recorded_terminal("turn-1"),
+            )
+            .unwrap();
+            assert_eq!(scene.state(task.task_ref), "completed_not_delivered");
+            assert!(
+                successor_reconciliation_executions(scene.state_root(), scene.manifest().run_id)
+                    .unwrap()
+                    .is_empty()
+            );
+            let writer = crate::writer::WriterStore::new(
+                scene.state_root(),
+                &scene.view().workspace_id,
+                DarwinSystem.current_uid(),
+            );
+            writer
+                .transact(|record| {
+                    let transaction = Uuid::now_v7();
+                    record.prepare_release(scene.manifest().run_id, transaction)?;
+                    // This interrupted release deliberately lacks its retained
+                    // process proofs. Recovery must surface the real refusal,
+                    // rather than report success because the Task is terminal.
+                    record.prepare_generation_release(crate::writer::GenerationRelease {
+                        purpose: crate::writer::GenerationRetirementPurpose::Release,
+                        transaction_id: transaction,
+                        source: record.holder.clone().unwrap(),
+                        writer_generation: record.writer_generation,
+                        authority_revision: record.authority_revision,
+                        source_revision: 1,
+                        source_ledger_sha256: "1".repeat(64),
+                        source_runtime_sha256: "2".repeat(64),
+                        registration_sha256: "3".repeat(64),
+                        scope_sha256: None,
+                        absence_sha256: None,
+                        reader_proof_sha256: None,
+                        retired_reader_sha256: None,
+                        phase: crate::writer::GenerationReleasePhase::Prepared,
+                        successor: None,
+                    })
+                })
+                .unwrap();
+            let before = scene.stability_facts();
+            let result = scene.result(task.task_ref);
+            assert!(
+                scene.service_reconcile(task.task_ref).is_err(),
+                "terminal task hid an unfinished Writer release"
+            );
+            assert_eq!(scene.stability_facts(), before);
+            assert_eq!(scene.result(task.task_ref), result);
+            assert!(
+                writer
+                    .load()
+                    .unwrap()
+                    .pending_generation_release(scene.manifest().run_id)
+                    .is_some()
+            );
         }
     }
     fn task() -> crate::task_request::SpecialistTaskRequest {

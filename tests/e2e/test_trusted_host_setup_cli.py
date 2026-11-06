@@ -17,7 +17,9 @@ import tempfile
 def validate_member_recovery(binary: Path) -> None:
     """Run the Rust owner/history corpus with the actual cold CLI boundary."""
     selector = "worker::tests::administrative_member_recovery_"
-    candidates = sorted((binary.parent / "deps").glob("dolgorae-*"),
+    cargo_target = Path(os.environ.get("CARGO_TARGET_DIR",
+                                      str(Path(__file__).resolve().parents[2] / "target")))
+    candidates = sorted((cargo_target / "debug/deps").glob("dolgorae-*"),
                         key=lambda path: path.stat().st_mtime, reverse=True)
     harness = None
     for candidate in candidates:

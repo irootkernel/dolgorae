@@ -25,6 +25,87 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+fn ordinary_binary() -> Option<PathBuf> {
+    std::env::var_os("DOLGORAE_NATIVE_ORDINARY_BIN").map(PathBuf::from)
+}
+
+fn ordinary(root: &Path, args: &[String]) -> Result<Value, dolgorae::machine::MachineError> {
+    let binary = ordinary_binary().expect("explicit ordinary product image");
+    let output = std::process::Command::new(binary)
+        .args(args)
+        .output()
+        .unwrap();
+    let name = format!("ordinary-{}", Uuid::now_v7());
+    for (suffix, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join(format!("{name}.{suffix}")))
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+    if output.status.success() {
+        let envelope: dolgorae::machine::SuccessEnvelope =
+            serde_json::from_slice(&output.stdout).unwrap();
+        assert!(envelope.ok);
+        Ok(envelope.data)
+    } else {
+        let envelope: dolgorae::machine::FailureEnvelope =
+            serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!envelope.ok);
+        Err(envelope.error)
+    }
+}
+
+fn try_mutation(
+    view: &WorkspaceView,
+    credential: &Path,
+    run_id: Uuid,
+    operation: RunMutationOperation,
+) -> Result<RunSnapshot, dolgorae::machine::MachineError> {
+    if ordinary_binary().is_some() {
+        let verb = match operation {
+            RunMutationOperation::AcquireWriter => "acquire-write",
+            RunMutationOperation::ReleaseWriter => "release-write",
+            RunMutationOperation::Recover => "recover",
+            RunMutationOperation::Resume => "resume",
+            RunMutationOperation::Close { interrupt: false } => "close",
+            _ => panic!("ordinary caller adapter has no selector for this operation"),
+        };
+        ordinary(
+            credential.parent().unwrap(),
+            &[
+                "run".into(),
+                verb.into(),
+                run_id.to_string(),
+                "--workspace".into(),
+                view.canonical_path
+                    .to_path_buf()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .into(),
+                "--controller-file".into(),
+                credential.to_str().unwrap().into(),
+            ],
+        )?;
+        let home = DolgoraeHome::system()?;
+        return RunSnapshot::load(&home.workspace_root(&view.workspace_id), run_id, 0);
+    }
+    CoreSemanticService
+        .mutate_caller_run(RunMutationInput {
+            workspace: view.canonical_path.to_path_buf().unwrap(),
+            expected_workspace_id: view.workspace_id.clone(),
+            run_id,
+            expected_state_revision: None,
+            carrier: CredentialCarrier::open_path(credential)?,
+            operation,
+        })
+        .map(|receipt| receipt.snapshot)
+}
+
 fn record_failure(root: &Path, stage: &str, error: &dolgorae::machine::MachineError) {
     let mut bytes = serde_json::to_vec(&json!({
         "schema": "dolgorae.native-caller-pipeline-diagnostic/v1",
@@ -61,17 +142,8 @@ fn mutation(
     operation: RunMutationOperation,
     stage: &str,
 ) -> RunSnapshot {
-    CoreSemanticService
-        .mutate_caller_run(RunMutationInput {
-            workspace: view.canonical_path.to_path_buf().unwrap(),
-            expected_workspace_id: view.workspace_id.clone(),
-            run_id,
-            expected_state_revision: None,
-            carrier: CredentialCarrier::open_path(credential).unwrap(),
-            operation,
-        })
+    try_mutation(view, credential, run_id, operation)
         .unwrap_or_else(|error| fail(credential.parent().unwrap(), stage, error))
-        .snapshot
 }
 
 fn start(
@@ -81,6 +153,67 @@ fn start(
     key: &str,
     reader: bool,
 ) -> Result<dolgorae::semantic::RunStartReceipt, dolgorae::machine::MachineError> {
+    if ordinary_binary().is_some() {
+        let input = start_input(view, profile, key, reader);
+        let home = DolgoraeHome::system()?;
+        let state = home.workspace_root(&view.workspace_id);
+        let binding = dolgorae::controller::binding_from_carrier(
+            &CredentialCarrier::open_path(credential)?,
+            1,
+        )?;
+        let digest = dolgorae::run::caller_start_request_digest(
+            &input.resolve()?,
+            &view.canonical_path,
+            &binding,
+        )?;
+        let reservations =
+            dolgorae::run::StartReservationStore::new(SystemWorkspacePlatform, &state);
+        let prior = reservations.load_caller(key, &digest)?;
+        let value = ordinary(
+            credential.parent().unwrap(),
+            &[
+                "run".into(),
+                "start".into(),
+                "--workspace".into(),
+                view.canonical_path
+                    .to_path_buf()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .into(),
+                "--controller-file".into(),
+                credential.to_str().unwrap().into(),
+                "--profile".into(),
+                profile.into(),
+                "--control-mode".into(),
+                "managed-agent".into(),
+                "--access".into(),
+                if reader { "read-only" } else { "writable" }.into(),
+                "--role".into(),
+                if reader { "reviewer" } else { "general" }.into(),
+                "--purpose".into(),
+                "other".into(),
+                "--idempotency-key".into(),
+                key.into(),
+            ],
+        )?;
+        let id = Uuid::parse_str(value["run_id"].as_str().unwrap()).unwrap();
+        let accepted = reservations.load_caller(key, &digest)?.unwrap();
+        assert_eq!(accepted.run_id, id);
+        if let Some(prior) = &prior {
+            assert_eq!(prior.run_id, id);
+        }
+        let receipt = RunStore::new(SystemWorkspacePlatform, &state)
+            .load_caller_start_receipt(id, &accepted.normalized_identity_sha256)?
+            .unwrap();
+        assert_eq!(receipt.run_id, id);
+        // The CLI intentionally omits exact_replay. This is the isolated
+        // fixture's before/after reservation observation, not a CLI field.
+        return Ok(dolgorae::semantic::RunStartReceipt {
+            snapshot: RunSnapshot::load(&state, id, 0)?,
+            exact_replay: prior.is_some(),
+        });
+    }
     CoreSemanticService.start_caller_run(
         start_input(view, profile, key, reader),
         CredentialCarrier::open_path(credential).unwrap(),
@@ -375,6 +508,23 @@ fn check_policy(state_root: &Path, snapshot: &RunSnapshot, access: Access, threa
     assert!(snapshot.projection.active_turn_id.is_none());
     assert!(snapshot.projection.latest_turn_id.is_none());
     assert!(snapshot.projection.pending_requests.is_empty());
+    if let Some(binary) = ordinary_binary() {
+        let image = fs::canonicalize(binary).unwrap();
+        let record = current.runtime_record.as_ref().unwrap();
+        assert_eq!(record.identity.executable_path, image);
+        assert_eq!(
+            record.binary_sha256,
+            dolgorae::jcs::sha256_hex(&fs::read(&image).unwrap())
+        );
+        assert_eq!(
+            classify_worker_identity(record),
+            ProcessIdentityVerdict::Match
+        );
+        assert_eq!(
+            DarwinSystem.live_process_path(record.identity.pid).unwrap(),
+            image
+        );
+    }
 }
 
 fn stop_profiles(home: &DolgoraeHome, operator: &Path) -> bool {
@@ -411,6 +561,66 @@ fn stop_profiles(home: &DolgoraeHome, operator: &Path) -> bool {
         return false;
     }
     for binding in bindings.values() {
+        if ordinary_binary().is_some() {
+            let root = operator.parent().unwrap();
+            let name = &binding.selected_name;
+            let stop = |key: &str| {
+                ordinary(
+                    root,
+                    &[
+                        "profile".into(),
+                        "server".into(),
+                        "stop".into(),
+                        name.clone(),
+                        "--operator-file".into(),
+                        operator.to_str().unwrap().into(),
+                        "--confirm-server-key".into(),
+                        key.into(),
+                    ],
+                )
+            };
+            let result = match stop(&binding.server_key) {
+                Err(error)
+                    if error.code == "PROFILE_MISMATCH"
+                        && error.details["field"] == "confirm_server_key" =>
+                {
+                    ordinary(
+                        root,
+                        &[
+                            "profile".into(),
+                            "server".into(),
+                            "status".into(),
+                            name.clone(),
+                        ],
+                    )
+                    .and_then(|current| {
+                        let key = current["server_key"].as_str().unwrap();
+                        ordinary(
+                            root,
+                            &[
+                                "profile".into(),
+                                "server".into(),
+                                "migrate".into(),
+                                name.clone(),
+                                "--operator-file".into(),
+                                operator.to_str().unwrap().into(),
+                                "--confirm-old-server-key".into(),
+                                binding.server_key.clone(),
+                                "--confirm-new-server-key".into(),
+                                key.into(),
+                            ],
+                        )?;
+                        stop(key)
+                    })
+                }
+                result => result,
+            };
+            if let Err(error) = result {
+                record_failure(root, "ordinary Profile cleanup", &error);
+                clean = false;
+            }
+            continue;
+        }
         let result = CredentialCarrier::open_path(operator).and_then(|carrier| {
             dolgorae::profile::retire_qualified_global_server(binding, &carrier)
         });
@@ -625,57 +835,86 @@ fn campaign(root: &Path, codex: &Path) -> Value {
         b"native-caller-pipeline/v1\n"
     );
     let service = CoreSemanticService;
-    let SemanticResult::Workspace(view) = service
-        .execute(&SemanticCommand::Initialize {
-            path: Some(root.join("home/workspace")),
-            mode: WorkspaceMode::NonGit,
-        })
-        .unwrap()
-    else {
-        panic!("workspace initialization result");
+    let view = if ordinary_binary().is_some() {
+        ordinary(
+            root,
+            &[
+                "init".into(),
+                "--non-git".into(),
+                root.join("home/workspace").to_str().unwrap().into(),
+            ],
+        )
+        .unwrap();
+        dolgorae::workspace::WorkspaceService::system()
+            .unwrap()
+            .discover(Some(&root.join("home/workspace")))
+            .unwrap()
+    } else {
+        let SemanticResult::Workspace(view) = service
+            .execute(&SemanticCommand::Initialize {
+                path: Some(root.join("home/workspace")),
+                mode: WorkspaceMode::NonGit,
+            })
+            .unwrap()
+        else {
+            panic!("workspace initialization result");
+        };
+        view
     };
     let home = DolgoraeHome::system().unwrap();
     for name in ["fixture-a", "fixture-b"] {
-        GlobalProfileStore::new(&home)
-            .add(
-                name.to_owned(),
-                RuntimeProfile {
-                    argv: {
-                        let mut argv = vec![codex.to_str().unwrap().to_owned()];
-                        if let Ok(variant) =
-                            fs::read_to_string(root.join("default-feature-variant"))
-                        {
-                            match variant.as_str() {
-                                "argv-enable" => {
-                                    argv.extend(["--enable".into(), "shell_snapshot".into()])
-                                }
-                                "ordered-overrides" => argv.extend([
-                                    "--enable".into(),
-                                    "shell_snapshot".into(),
-                                    "--disable".into(),
-                                    "shell_snapshot".into(),
-                                    "--enable".into(),
-                                    "shell_snapshot".into(),
-                                ]),
-                                "default" | "config-enable" => {}
-                                _ => panic!("unknown default-feature variant"),
-                            }
-                        }
-                        argv
-                    },
-                    codex_home: root.join(name).to_str().unwrap().to_owned(),
-                    environment: BTreeMap::from([
-                        (
-                            "PATH".to_owned(),
-                            "/usr/bin:/bin:/usr/sbin:/sbin".to_owned(),
-                        ),
-                        ("LANG".to_owned(), "en_US.UTF-8".to_owned()),
-                        ("LC_ALL".to_owned(), "en_US.UTF-8".to_owned()),
-                    ]),
-                    native_subagents: NativeSubagents::Enabled,
-                },
-            )
-            .unwrap();
+        let definition = RuntimeProfile {
+            argv: {
+                let mut argv = vec![codex.to_str().unwrap().to_owned()];
+                if let Ok(variant) = fs::read_to_string(root.join("default-feature-variant")) {
+                    match variant.as_str() {
+                        "argv-enable" => argv.extend(["--enable".into(), "shell_snapshot".into()]),
+                        "ordered-overrides" => argv.extend([
+                            "--enable".into(),
+                            "shell_snapshot".into(),
+                            "--disable".into(),
+                            "shell_snapshot".into(),
+                            "--enable".into(),
+                            "shell_snapshot".into(),
+                        ]),
+                        "default" | "config-enable" => {}
+                        _ => panic!("unknown default-feature variant"),
+                    }
+                }
+                argv
+            },
+            codex_home: root.join(name).to_str().unwrap().to_owned(),
+            environment: BTreeMap::from([
+                (
+                    "PATH".to_owned(),
+                    "/usr/bin:/bin:/usr/sbin:/sbin".to_owned(),
+                ),
+                ("LANG".to_owned(), "en_US.UTF-8".to_owned()),
+                ("LC_ALL".to_owned(), "en_US.UTF-8".to_owned()),
+            ]),
+            native_subagents: NativeSubagents::Enabled,
+        };
+        if ordinary_binary().is_some() {
+            let mut args = vec![
+                "profile".into(),
+                "add".into(),
+                name.into(),
+                "--codex-home".into(),
+                definition.codex_home.clone(),
+                "--native-subagents".into(),
+                "enabled".into(),
+            ];
+            for (key, value) in &definition.environment {
+                args.extend(["--env".into(), format!("{key}={value}")]);
+            }
+            args.push("--".into());
+            args.extend(definition.argv);
+            ordinary(root, &args).unwrap();
+        } else {
+            GlobalProfileStore::new(&home)
+                .add(name.to_owned(), definition)
+                .unwrap();
+        }
     }
     let credential = if std::env::var("DOLGORAE_NATIVE_READONLY_POOL").as_deref() == Ok("1")
         || root.join("interaction-cases").exists()
@@ -694,18 +933,50 @@ fn campaign(root: &Path, codex: &Path) -> Value {
     } else {
         root.join("controller.json")
     };
-    create_controller_credential(
-        &credential,
-        ControllerKind::Automation,
-        "native-caller-fixture".to_owned(),
-        None,
-        None,
-    )
-    .unwrap();
-    let operator = root.join("operator.json");
-    OperatorStore::new(home.operator_root())
-        .initialize(&operator)
+    if ordinary_binary().is_some() {
+        ordinary(
+            root,
+            &[
+                "controller".into(),
+                "credential".into(),
+                "create".into(),
+                "--kind".into(),
+                "automation".into(),
+                "--instance-id".into(),
+                "native-caller-fixture".into(),
+                "--output".into(),
+                credential.to_str().unwrap().into(),
+            ],
+        )
         .unwrap();
+    } else {
+        create_controller_credential(
+            &credential,
+            ControllerKind::Automation,
+            "native-caller-fixture".to_owned(),
+            None,
+            None,
+        )
+        .unwrap();
+    }
+    let operator = root.join("operator.json");
+    if ordinary_binary().is_some() {
+        ordinary(
+            root,
+            &[
+                "operator".into(),
+                "credential".into(),
+                "initialize".into(),
+                "--output".into(),
+                operator.to_str().unwrap().into(),
+            ],
+        )
+        .unwrap();
+    } else {
+        OperatorStore::new(home.operator_root())
+            .initialize(&operator)
+            .unwrap();
+    }
     let state_root = home.workspace_root(&view.workspace_id);
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
     let result = std::panic::catch_unwind(|| {
@@ -779,17 +1050,13 @@ fn campaign(root: &Path, codex: &Path) -> Value {
             Access::Write,
             &second_thread,
         );
-        let busy = service
-            .mutate_caller_run(RunMutationInput {
-                workspace: view.canonical_path.to_path_buf().unwrap(),
-                expected_workspace_id: view.workspace_id.clone(),
-                run_id: first_id,
-                expected_state_revision: None,
-                carrier: CredentialCarrier::open_path(&credential).unwrap(),
-                operation: RunMutationOperation::AcquireWriter,
-            })
-            .err()
-            .expect("one Writer across Profiles");
+        let busy = try_mutation(
+            &view,
+            &credential,
+            first_id,
+            RunMutationOperation::AcquireWriter,
+        )
+        .expect_err("one Writer across Profiles");
         assert_eq!(busy.code, "WRITER_BUSY");
         check_policy(
             &state_root,
@@ -906,16 +1173,14 @@ fn campaign(root: &Path, codex: &Path) -> Value {
         else {
             continue;
         };
-        let close = service.mutate_caller_run(RunMutationInput {
-            workspace: view.canonical_path.to_path_buf().unwrap(),
-            expected_workspace_id: view.workspace_id.clone(),
-            run_id: id,
-            expected_state_revision: None,
-            carrier: CredentialCarrier::open_path(&credential).unwrap(),
-            operation: RunMutationOperation::Close { interrupt: false },
-        });
+        let close = try_mutation(
+            &view,
+            &credential,
+            id,
+            RunMutationOperation::Close { interrupt: false },
+        );
         match close {
-            Ok(receipt) => clean &= receipt.snapshot.projection.lifecycle == RunLifecycle::Closed,
+            Ok(snapshot) => clean &= snapshot.projection.lifecycle == RunLifecycle::Closed,
             Err(error) => {
                 record_failure(root, "Run cleanup", &error);
                 clean = false;
@@ -1082,7 +1347,7 @@ fn interaction_cases(
                 } as i32
             );
             assert!(summary.contains_protected_input);
-            let detail = interactions
+            let mut detail = interactions
                 .get_controller_interaction(pb::GetControllerInteractionRequest {
                     context: context(),
                     run: run.clone(),
@@ -1094,7 +1359,7 @@ fn interaction_cases(
                 .into_inner()
                 .interaction
                 .unwrap();
-            let answer = match detail.payload.unwrap() {
+            let answer = match detail.payload.clone().unwrap() {
                 pb::controller_interaction::Payload::Permission(p) => {
                     assert!(!p.requested_permissions.is_empty());
                     pb::InteractionAnswer {
@@ -1117,16 +1382,38 @@ fn interaction_cases(
                 }
                 _ => panic!("wrong typed payload"),
             };
-            let current = runs
-                .get_run(pb::GetRunRequest {
-                    context: context(),
-                    run: run.clone(),
-                })
-                .await
-                .unwrap()
-                .into_inner()
-                .run
-                .unwrap();
+            let current = loop {
+                let current = runs
+                    .get_run(pb::GetRunRequest {
+                        context: context(),
+                        run: run.clone(),
+                    })
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .run
+                    .unwrap();
+                let fresh = interactions
+                    .get_controller_interaction(pb::GetControllerInteractionRequest {
+                        context: context(),
+                        run: run.clone(),
+                        controller: controller.clone(),
+                        interaction_id: summary.interaction_id.clone(),
+                    })
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .interaction
+                    .unwrap();
+                assert_eq!(fresh.payload, detail.payload);
+                let coherent = current.lifecycle == pb::RunLifecycle::WaitingInteraction as i32
+                    && fresh.stamp.as_ref().unwrap().run_state_revision == current.state_revision;
+                detail = fresh;
+                if coherent {
+                    break current;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
             let thread = current.thread.unwrap();
             let request = pb::ResolveInteractionRequest {
                 context: context(),
@@ -1258,7 +1545,9 @@ fn pool_campaign(
         .write_all(&serde_json::to_vec(&config).unwrap())
         .unwrap();
     let instruct = dolgorae::instructions::InstructionSourceStore::new(home);
-    instruct.initialize_templates().unwrap();
+    if ordinary_binary().is_none() {
+        instruct.initialize_templates().unwrap();
+    }
     let carrier = CredentialCarrier::open_path(credential).unwrap();
     let identity = dolgorae::controller::binding_from_carrier(&carrier, 1)
         .unwrap()
@@ -1283,36 +1572,82 @@ fn pool_campaign(
         .build()
         .unwrap();
     let socket_path = root.join("gateway.sock");
-    let mut socket = dolgorae::gateway_socket::GatewaySocket::bind(home, &socket_path).unwrap();
-    let backend = std::sync::Arc::new(dolgorae::gateway_service::CoreGatewayBackend::new(
-        home.clone(),
-        socket.record().server_instance_id,
-    ));
-    let (stop, stopped) = tokio::sync::oneshot::channel();
     struct GatewayGuard {
         stop: Option<tokio::sync::oneshot::Sender<()>>,
         thread: Option<std::thread::JoinHandle<()>>,
+        child: Option<std::process::Child>,
     }
     impl Drop for GatewayGuard {
         fn drop(&mut self) {
-            let _ = self.stop.take().unwrap().send(());
-            self.thread.take().unwrap().join().unwrap();
+            if let Some(mut child) = self.child.take() {
+                assert!(
+                    std::process::Command::new("/bin/kill")
+                        .arg("-TERM")
+                        .arg(child.id().to_string())
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                child.wait().unwrap();
+            } else {
+                let _ = self.stop.take().unwrap().send(());
+                self.thread.take().unwrap().join().unwrap();
+            }
         }
     }
-    let _gateway = GatewayGuard {
-        stop: Some(stop),
-        thread: Some(std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime
-                .block_on(dolgorae::gateway::run_server(&mut socket, backend, async {
-                    let _ = stopped.await;
-                }))
-                .unwrap();
-            socket.cleanup().unwrap();
-        })),
+    let _gateway = if let Some(binary) = ordinary_binary() {
+        use std::io::BufRead as _;
+        let stderr = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("ordinary-serve.stderr"))
+            .unwrap();
+        let mut child = std::process::Command::new(binary)
+            .arg("serve")
+            .arg("--socket")
+            .arg(&socket_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(stderr)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        fs::write(root.join("ordinary-serve-ready.json"), &line).unwrap();
+        let ready: dolgorae::machine::SuccessEnvelope = serde_json::from_str(&line).unwrap();
+        assert!(ready.ok);
+        assert_eq!(ready.command, "serve");
+        assert_eq!(ready.data["socket_path"], socket_path.to_str().unwrap());
+        GatewayGuard {
+            stop: None,
+            thread: None,
+            child: Some(child),
+        }
+    } else {
+        let mut socket = dolgorae::gateway_socket::GatewaySocket::bind(home, &socket_path).unwrap();
+        let backend = std::sync::Arc::new(dolgorae::gateway_service::CoreGatewayBackend::new(
+            home.clone(),
+            socket.record().server_instance_id,
+        ));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        GatewayGuard {
+            stop: Some(stop),
+            child: None,
+            thread: Some(std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime
+                    .block_on(dolgorae::gateway::run_server(&mut socket, backend, async {
+                        let _ = stopped.await;
+                    }))
+                    .unwrap();
+                socket.cleanup().unwrap();
+            })),
+        }
     };
     let channel = runtime
         .block_on(
@@ -1537,15 +1872,7 @@ fn pool_campaign(
                 state["pid"].as_u64().unwrap(),
                 binding.server_key.clone(),
             ));
-            let denial = CoreSemanticService
-                .mutate_caller_run(RunMutationInput {
-                    workspace: view.canonical_path.to_path_buf().unwrap(),
-                    expected_workspace_id: view.workspace_id.clone(),
-                    run_id: id,
-                    expected_state_revision: None,
-                    carrier: CredentialCarrier::open_path(credential).unwrap(),
-                    operation: RunMutationOperation::AcquireWriter,
-                })
+            let denial = try_mutation(view, credential, id, RunMutationOperation::AcquireWriter)
                 .err()
                 .unwrap();
             assert_eq!(denial.code, "SHARED_RUN_WRITE_FORBIDDEN");
@@ -1585,17 +1912,37 @@ fn pool_campaign(
         .unwrap()
         .into_inner();
     let accepted_turn = accepted.accepted_turn.unwrap();
-    let _result = CoreSemanticService
-        .execute(&SemanticCommand::Run {
-            verb: dolgorae::semantic::RunVerb::Wait,
-            args: vec![
-                ids[0].to_string().into(),
-                accepted_turn.turn_id.into(),
+    if ordinary_binary().is_some() {
+        ordinary(
+            root,
+            &[
+                "run".into(),
+                "wait".into(),
+                ids[0].to_string(),
+                accepted_turn.turn_id.clone(),
                 "--workspace".into(),
-                view.canonical_path.to_path_buf().unwrap().into_os_string(),
+                view.canonical_path
+                    .to_path_buf()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .into(),
             ],
-        })
+        )
         .unwrap();
+    } else {
+        CoreSemanticService
+            .execute(&SemanticCommand::Run {
+                verb: dolgorae::semantic::RunVerb::Wait,
+                args: vec![
+                    ids[0].to_string().into(),
+                    accepted_turn.turn_id.into(),
+                    "--workspace".into(),
+                    view.canonical_path.to_path_buf().unwrap().into_os_string(),
+                ],
+            })
+            .unwrap();
+    }
     assert!(!root.join("home/workspace/pool-write-denied").exists());
     let original = original_operation(
         pb::OperationKind::SubmitTurn,

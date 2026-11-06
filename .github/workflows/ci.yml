@@ -1,0 +1,64 @@
+name: Repository checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+      GOTOOLCHAIN: go1.26.6
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.13"
+          architecture: arm64
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: "1.26.6"
+          cache: false
+      - name: Prepare Rust and validation dependencies
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+          python -m venv .venv
+          .venv/bin/python -m pip install -r tools/validation/requirements.txt
+      - name: Prepare pinned protocol tools and offline schema generator
+        run: |
+          tool_root="$RUNNER_TEMP/dolgorae-tools"
+          mkdir -p "$tool_root/bin" "$tool_root/protoc" "$tool_root/schema"
+          curl --fail --location --show-error \
+            https://github.com/bufbuild/buf/releases/download/v1.69.0/buf-Darwin-arm64 \
+            --output "$tool_root/bin/buf"
+          printf '%s  %s\n' 721093cd6322f776cd361bab5ec25383749bc83690dd02768d56983e49184282 "$tool_root/bin/buf" | shasum -a 256 --check
+          chmod +x "$tool_root/bin/buf"
+          curl --fail --location --show-error \
+            https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-osx-aarch_64.zip \
+            --output "$tool_root/protoc.zip"
+          printf '%s  %s\n' 9cd98a532c5c5e0c4161314de0225de27e4c8a323917b6ea7b1b714d3ae23466 "$tool_root/protoc.zip" | shasum -a 256 --check
+          unzip -q "$tool_root/protoc.zip" -d "$tool_root/protoc"
+          GOBIN="$tool_root/bin" go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          GOBIN="$tool_root/bin" go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
+          curl --fail --location --show-error \
+            https://github.com/openai/codex/releases/download/rust-v0.158.0/codex-aarch64-apple-darwin.tar.gz \
+            --output "$tool_root/codex.tgz"
+          printf '%s  %s\n' 341c4a08f9ce1935b3007376dc2a3d50a0a89112930e9a474ae61367218f6e8a "$tool_root/codex.tgz" | shasum -a 256 --check
+          tar -xzf "$tool_root/codex.tgz" -C "$tool_root/schema"
+          mv "$tool_root/schema/codex-aarch64-apple-darwin" "$tool_root/schema/codex"
+          echo "$tool_root/bin" >> "$GITHUB_PATH"
+          echo "$tool_root/protoc/bin" >> "$GITHUB_PATH"
+          echo "DOLGORAE_TEST_CODEX_BIN=$tool_root/schema/codex" >> "$GITHUB_ENV"
+      - name: Run the complete repository gate
+        run: make PYTHON_BIN=.venv/bin/python test

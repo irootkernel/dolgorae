@@ -307,9 +307,9 @@ For an upgrade, first verify and explicitly remove or relocate the exact
 installed `use-dolgorae` directory, then rerun the
 installer from the intended stable tag.
 
-After changing canonical protocol files, maintainers regenerate the derived
-resources with `python3 tools/validators/package_agent_skill.py sync` and run
-`make validate-agent-skills`. Edit canonical files, never their packaged copies.
+After changing canonical protocol files, run `make validate-agent-skills`.
+Installation derives the resources from those canonical files; the source skill
+contains only Markdown. Edit canonical files, never installed copies.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and validation guidance.
 Maintainers should start with the [documentation index](docs/README.md) before

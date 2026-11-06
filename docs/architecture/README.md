@@ -668,13 +668,16 @@ one-shot authority and existing lower-level services, with no new job framework
 or skill-owned supervisor.
 
 Skill packaging derives its schema dependency closure from checked protocol
-artifacts. Installed copies carry the same contract bytes and resolve local
-references without the source tree. The source-owned package utility derives
-`resources/protocol/` and its inventory from canonical schema IDs and reference
-closure. The inventory records roots, examples, and byte digests; it grants no
-runtime authority. Installation checks canonical equality and copies only the
-declared package files to a new destination. Installed-resource validation uses
-only the package's local registry and rejects remote retrieval.
+artifacts. The source skill contains Markdown only; it does not duplicate the
+canonical schemas. The package producer projects explicit canonical resource
+links into installed `resources/protocol/` links and derives the inventory from
+schema IDs and reference closure. Installed copies carry the same contract
+bytes and resolve local references without the source tree. The inventory
+records roots, examples, and byte digests; it grants no runtime authority.
+Source-package validation checks the derived inventory and canonical equality.
+Installation writes only those declared files to an exclusive new destination.
+Independent installed-resource validation uses only the package's local registry
+and rejects remote retrieval.
 TASK-057 and TASK-058 own the corresponding wire and CLI contracts. The Epic
 does not change public-v1 gRPC.
 
@@ -1289,8 +1292,11 @@ semantic idempotency key on retry. Preserve durable call and reuse receipts.
 Native registration is the App Server `item/tool/call` server request on a
 Run-scoped host tool advertisement, not a shared Profile edit or MCP
 `config.toml` registration. The isolated TASK-025 probe lives in
-`src/live_transport.rs` and the hidden `__live-transport-mcp` stdio entry; it
-must not be wired as the production adapter in TASK-025. TASK-047 performs
+`examples/support/live_transport.rs` and its example-owned stdio entrypoint,
+`examples/live_transport_probe.rs`; it is absent from the production CLI and
+must not be wired as the production adapter in TASK-025. The optional Python
+live campaign owns a separate Python MCP and does not consume this Rust probe.
+TASK-047 performs
 source authentication on the live request and MUST NOT treat the probe
 `TrustedBinding` helper as that proof.
 
@@ -4028,6 +4034,10 @@ publication under the artifact quota lease. That lease is released before SQL
 settlement and writer cleanup. Read-only Profile observation never starts a
 replacement server. Collect and identity do not initiate convergence, and
 member release never recursively acquires the recovery lease.
+Explicit member recovery also resumes a pending Writer generation release when
+the task is already terminal and has left the unsettled-execution set. It uses the same
+authenticated member carrier and generation-release owner; cleanup failures
+propagate before recovery reports success.
 Missing-locator history recovery borrows the already-held startup range for
 the common complete absence proof, including owner slots, the worker range
 and registrations. That path and offline admission release observer-only
@@ -4105,6 +4115,14 @@ call the host store.
 
 The [architecture contract](../../tests/architecture_contract.rs) retains the
 approved test-only references. They grant no runtime authority.
+
+Accepted delegation readback lives in the `delegation_service/accepted_readback`
+child. The parent retains mutation admission, dispatch, transaction ownership
+and test barriers; the child uses explicit imports for checked result identity,
+outcome and retained-result reads. Architecture checks enumerate all Rust source
+modules recursively and require an exact approved dependency entry for each
+path. Integration-test enumeration remains deliberately top-level. Recursive
+orchestration children retain the adapter and parent-defined import checks.
 
 The
 `delegation_service → orchestration → semantic → delegation_service`
