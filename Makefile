@@ -25,21 +25,11 @@ INT_TESTS := \
 	test-native-workspace-policy-fixture test-native-host-invocation-fixture test-native-caller-pipeline test-native-review-reader \
 	test-native-integrated-acceptance \
 	test-live-provider-acceptance test-live-independent-review \
-	format format-check lint vet architecture \
-	aquarium-dev-describe aquarium-dev-build test-aquarium-dev-producer
-
-aquarium-dev-describe:
-	@$(PYTHON_BIN) tools/dev_aquarium/producer.py describe
-
-aquarium-dev-build:
-	@$(PYTHON_BIN) tools/dev_aquarium/producer.py build
+	format format-check lint vet architecture
 
 validate-agent-skills:
 	$(PYTHON_BIN) tools/validators/validate_agent_skills.py
 	$(PYTHON_BIN) tests/e2e/test_agent_skill_package.py
-
-test-aquarium-dev-producer:
-	@$(PYTHON_BIN) tests/e2e/test_dev_aquarium_producer.py
 
 test:
 	$(MAKE) test-prepare
@@ -86,7 +76,6 @@ test-prepare:
 	cd tests/e2e/private_boundary_client && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...
 	$(PYTHON_BIN) tools/validators/validate_markdown.py
 	$(MAKE) validate-agent-skills
-	$(MAKE) test-aquarium-dev-producer
 	git --no-pager diff --check
 	@echo "[test-prepare] completed"
 

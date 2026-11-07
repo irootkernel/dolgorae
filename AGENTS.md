@@ -113,10 +113,7 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 ### Project-Specific Operating Rules
 
 - Keep `.sorage/` ignored and untracked. Mulgae uses Git ignore rules for workspace candidate selection and includes tracked files even when they match ignore patterns. It no longer processes `.mulgaeignore`; preserve existing user files. Ignore rules do not restrict provider reads.
-- Use the Aquarium development channel only for explicitly requested development builds and execution. The producer entrypoints are `make aquarium-dev-describe` and `make aquarium-dev-build AQUARIUM_DEV_OUTPUT=<absolute-empty-directory>`; the builder requires a clean local `main` and writes only to the caller-created output directory outside the repository.
-- Use `aquarium-dev diagnose --repository "$PWD"` for channel readiness, `aquarium-dev rebuild --repository "$PWD" --approve-build` for an authorized build and publication, and `aquarium-dev dolgorae ...` to execute the selected leased generation. Do not manually copy binaries into manager-owned generation or selector paths.
-- An enrolled native post-commit hook requests a background development build after local `main` commits. Verify the published generation and checksum separately from Git commit success. Development publication does not authorize a stable release, production-tool replacement, or external review.
-- `~/.aquarium-dev/` isolates development artifacts, not Dolgorae runtime state. Dolgorae still uses the fixed per-user `~/.dolgorae` home; workspace, Profile, server, and review operations retain their own authorization boundaries.
+- Dolgorae no longer provides an aquarium-dev producer. Aquarium owns retirement of the shared manager, selectors, enrollment records, and development artifacts; do not edit its managed records by hand. Preserve the fixed per-user `~/.dolgorae` home and the authorization boundaries for workspace, Profile, server, and review operations.
 
 - Dolgorae agent guidance is source-distributed at `skills/use-dolgorae/SKILL.md` and installed through the README's Agent skill procedure. The skill's presence never authorizes initialization, external review, live account use, server control, credential mutation, cancellation, settlement, or repair.
 

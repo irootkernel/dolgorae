@@ -3195,9 +3195,14 @@ owns only `architecture_contract_eligible`.
 
 Status: `COMPLETE`
 
-Canonical Outcomes: [producer Make targets](../../Makefile),
-[producer implementation](../../tools/dev_aquarium/producer.py), and
-[black-box contract tests](../../tests/e2e/test_dev_aquarium_producer.py)
+Canonical Outcomes (before producer retirement):
+[producer Make targets](https://github.com/irootkernel/dolgorae/blob/3c7cc394b2d24711010090003a16daa266cf3042/Makefile),
+[producer implementation](https://github.com/irootkernel/dolgorae/blob/3c7cc394b2d24711010090003a16daa266cf3042/tools/dev_aquarium/producer.py), and
+[black-box contract tests](https://github.com/irootkernel/dolgorae/blob/3c7cc394b2d24711010090003a16daa266cf3042/tests/e2e/test_dev_aquarium_producer.py)
+
+The producer has since been retired. This completed Epic records its historical
+implementation and acceptance; shared development-channel retirement belongs to
+Aquarium.
 
 Goal: Enroll Dolgorae as an exact executable producer for Aquarium's isolated
 development channel so downstream review activation consumes one immutable,
