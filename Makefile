@@ -132,6 +132,7 @@ test-e2e:
 		run_case tests/e2e/test_machine_cli.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_socket_ownership.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_gateway_restart.py --binary "$(DOLGORAE_BIN)"; \
+		run_case tests/e2e/test_public_v2_observation.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_slow_consumer_isolation.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_event_revision_action_barrier.py --binary "$(DOLGORAE_BIN)"; \
 		run_case tests/e2e/test_frozen_consumer_compatibility.py --binary "$(DOLGORAE_BIN)"; \

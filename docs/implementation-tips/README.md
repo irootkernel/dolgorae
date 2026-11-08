@@ -641,6 +641,11 @@ and packaging and checks/requalifies earlier TASK-077/086 results against the
 post-cleanup H3 candidate. Record source revision, binary/package checksums,
 contract digests, runtime pin and relevant configuration. Missing required
 external work blocks closeout and requires an explicit corrective schedule.
+TASK-093 owns the separately identified H3 replacement for the public-v2
+Observation gap. Compare all intervening source changes with the original H3,
+requalify affected native bindings on the exact replacement image, and retain
+unaffected evidence with its original scope and failures. Deliver a separate
+correction Handoff; do not silently rebuild, repin or overwrite H1.
 
 Gul performs Phase 4 product/qualification Epics using fixed H3, including E16-T5's
 early isolated packaging/recovery rehearsal and final requalification on its

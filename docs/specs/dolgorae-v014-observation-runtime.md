@@ -18,6 +18,49 @@ selected generation, executable or database identity invalidates relevant reuse.
 An invalid source fails through its existing typed integrity or configuration
 error; a previously valid observation cannot mask that error.
 
+## Public-v2 Observation adapter
+
+Public-v2 transport uses the existing public event projection and Controller
+timeline version 1. These versions are independent of persisted event schema
+versions and the transport's protocol version 2. Runtime capabilities advertise
+those implemented public versions. Public-v1 behavior and frozen H1 bytes remain
+unchanged. Both Observation methods require the checked v2 request context and
+return v2 typed error details, including errors after stream admission.
+
+Event sampling reuses the verified history, original historical stamps and safe
+MINIMAL/OPERATIONAL projections. Public projection version 1 describes the public
+payload even when its source record uses persisted schema 2. Streams retain the
+existing independent queue, byte, stall, heartbeat, replay and shutdown bounds.
+Dropping a stream does not alter its Run or another stream.
+
+Timeline pages revalidate the current Controller before and after reading
+protected material. Forward pages use an exclusive initial ledger cursor and
+then opaque continuation tokens bound to the Run, captured head and Controller.
+Latest requires an empty initial cursor and selects a chronological suffix at
+one captured head; independent forward backfill can start at cursor `0`.
+Unspecified direction selects forward. The default count is 100, with a maximum
+of 500. A zero byte budget selects the normal 4 MiB bound; larger budgets are
+refused. Returned continuation tokens preserve the original capture across
+appends and cannot be used for another Run or Controller binding. Controller
+replacement invalidates prior continuations independently of any change to the
+Run ledger head or aggregate stamp. Each page's Run/Writer/Interaction stamp
+comes from its fresh authoritative snapshot, independently of the retained
+timeline head. Continuations carry no aggregate
+stamp supplied by the client; event replay retains its original historical
+stamps. A workspace Writer revision is independent of the Run ledger sequence.
+
+The complete encoded response, including context, stamp, continuation and its
+own encoded-length field, fits the selected byte budget. `complete_page` means
+that the returned page is complete, not that all history has been returned.
+Public-v2 artifact reads resolve the existing immutable accepted-input storage
+when a byte-bound page uses its artifact reference, including input normally
+presented inline. Those reads require the current Controller before and after
+access, retain the complete length/hash and leave public-v1 lookup unchanged.
+Content retains its existing complete inline or immutable artifact form; reads
+do not create artifacts. A budget too small for the next complete item receives
+a typed capacity refusal without advancing its cursor. No page truncates content
+or returns a continuation that cannot make progress.
+
 ## Executable and workspace observations
 
 Checked executable and schema evidence may be reused only with unchanged file

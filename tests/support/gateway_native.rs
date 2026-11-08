@@ -45,15 +45,23 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new(scenario: &str) -> Self {
-        Self::prepare(scenario, None, false)
+        Self::prepare(scenario, None, false, false)
     }
     pub fn new_compact(scenario: &str) -> Self {
-        Self::prepare(scenario, None, true)
+        Self::prepare(scenario, None, true, false)
     }
     pub fn with_scenario(scenario: Value) -> Self {
-        Self::prepare("custom", Some(scenario), false)
+        Self::prepare("custom", Some(scenario), false, false)
     }
-    fn prepare(scenario: &str, custom: Option<Value>, compact_binary: bool) -> Self {
+    pub fn with_tmp_scenario(scenario: Value) -> Self {
+        Self::prepare("custom", Some(scenario), false, true)
+    }
+    fn prepare(
+        scenario: &str,
+        custom: Option<Value>,
+        compact_binary: bool,
+        under_tmp: bool,
+    ) -> Self {
         // A short, exclusive directory is required by Darwin's 104-byte UDS
         // bound even when the enclosing Make invocation has a long TMPDIR.
         let root_kernel = Path::new("/Volumes/RootKernel");
@@ -63,7 +71,7 @@ impl Fixture {
                     .lines()
                     .any(|line| line.contains(" on /Volumes/RootKernel ("))
         });
-        let temporary = if mounted && root_kernel.is_dir() {
+        let temporary = if !under_tmp && mounted && root_kernel.is_dir() {
             let temporary = root_kernel.join("tmp");
             fs::create_dir_all(&temporary).ok().map(|()| temporary)
         } else {

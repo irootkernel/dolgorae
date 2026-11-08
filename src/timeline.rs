@@ -59,6 +59,58 @@ pub fn list(
         ));
     }
     snapshot.authorize_current_controller(state_root, carrier, "run.timeline.list")?;
+    let mut items = items_at(
+        state_root,
+        snapshot,
+        parsed.expect("validated timeline cursor"),
+        head,
+    )?;
+    let more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_after_cursor = more.then(|| {
+        items
+            .last()
+            .expect("a page with a successor has an item")
+            .cursor
+            .clone()
+    });
+    snapshot.authorize_current_controller(state_root, carrier, "run.timeline.list")?;
+    Ok(pb::ListRunTimelineItemsResponse {
+        context: Some(context),
+        items,
+        captured_head_cursor: head.to_string(),
+        next_after_cursor,
+        stamp: Some(gateway_projection::stamp(&snapshot.stamp)),
+    })
+}
+
+pub(crate) struct TimelineEntry {
+    pub(crate) item: pb::TimelineItem,
+    /// Existing accepted-input storage can replace inline presentation under a
+    /// smaller page budget without creating or changing durable content.
+    pub(crate) artifact: Option<pb::ArtifactRef>,
+}
+
+/// Read complete timeline items at one already authorized captured history head.
+/// The caller retains fresh Controller authorization before and after use.
+pub(crate) fn items_at(
+    state_root: &Path,
+    snapshot: &RunSnapshot,
+    after: u64,
+    head: u64,
+) -> Result<Vec<pb::TimelineItem>, MachineError> {
+    Ok(entries_at(state_root, snapshot, after, head)?
+        .into_iter()
+        .map(|entry| entry.item)
+        .collect())
+}
+
+pub(crate) fn entries_at(
+    state_root: &Path,
+    snapshot: &RunSnapshot,
+    after: u64,
+    head: u64,
+) -> Result<Vec<TimelineEntry>, MachineError> {
     let records = ObservedLedger::open_run(state_root, snapshot.manifest.run_id, head)?;
     let interactions =
         crate::interaction::durable_interactions_at(state_root, snapshot.manifest.run_id, head)?
@@ -83,30 +135,39 @@ pub fn list(
                 }
             }
         }
-        if record.sequence() <= parsed.expect("validated timeline cursor") {
+        if record.sequence() <= after {
             continue;
         }
         if let Some(item) = item(state_root, snapshot, record, &intents, &interactions)? {
-            items.push(item);
+            let artifact = if record.kind().as_str() == "turn_started" {
+                let value = payload(record, "accepted input turn record")?;
+                let operation_id = value["operation_id"]
+                    .as_str()
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .ok_or_else(|| invalid("accepted input operation identity"))?;
+                intents.get(&operation_id).map(|input| {
+                    let storage = match &input.content {
+                        crate::turn::AcceptedInputContent::Inline { storage }
+                        | crate::turn::AcceptedInputContent::Artifact { storage } => storage,
+                    };
+                    artifact(crate::artifact::ArtifactReference {
+                        artifact_id: storage.artifact_id.to_string(),
+                        created_at: storage.created_at.clone(),
+                        interaction_request_id: None,
+                        kind: crate::artifact::ArtifactKind::UserInput,
+                        visibility: crate::artifact::ArtifactVisibility::ControllerOnly,
+                        media_type: "text/plain; charset=utf-8".to_owned(),
+                        byte_length: storage.byte_length,
+                        sha256: storage.sha256.clone(),
+                    })
+                })
+            } else {
+                None
+            };
+            items.push(TimelineEntry { item, artifact });
         }
     }
-    let more = items.len() > limit as usize;
-    items.truncate(limit as usize);
-    let next_after_cursor = more.then(|| {
-        items
-            .last()
-            .expect("a page with a successor has an item")
-            .cursor
-            .clone()
-    });
-    snapshot.authorize_current_controller(state_root, carrier, "run.timeline.list")?;
-    Ok(pb::ListRunTimelineItemsResponse {
-        context: Some(context),
-        items,
-        captured_head_cursor: head.to_string(),
-        next_after_cursor,
-        stamp: Some(gateway_projection::stamp(&snapshot.stamp)),
-    })
+    Ok(items)
 }
 
 fn item(

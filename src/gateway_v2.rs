@@ -37,21 +37,21 @@ fn workspace(value: &pb::WorkspaceRef) -> old::WorkspaceRef {
         expected_workspace_id: value.expected_workspace_id.clone(),
     }
 }
-fn controller(value: &pb::ControllerCarrierRef) -> old::ControllerCarrierRef {
+pub(crate) fn controller(value: &pb::ControllerCarrierRef) -> old::ControllerCarrierRef {
     old::ControllerCarrierRef {
         absolute_file_path: value.absolute_file_path.clone(),
         expected_controller_id: value.expected_controller_id.clone(),
         expected_controller_generation: value.expected_controller_generation,
     }
 }
-fn context(backend: &dyn ModernGatewayBackend) -> pb::ResponseContext {
+pub(crate) fn context(backend: &dyn ModernGatewayBackend) -> pb::ResponseContext {
     pb::ResponseContext {
         protocol_version: 2,
         server_instance_id: backend.instance_id().to_string(),
         operation_id: None,
     }
 }
-fn snapshot(
+pub(crate) fn snapshot(
     backend: &dyn ModernGatewayBackend,
     reference: &pb::RunRef,
 ) -> Result<(PathBuf, RunSnapshot, ProjectionFacts), MachineError> {
@@ -69,7 +69,7 @@ fn snapshot(
     facts.profile_cleanup_required = crate::semantic::profile_cleanup_required(&root, &snapshot);
     Ok((root, snapshot, facts))
 }
-fn protected_snapshot(
+pub(crate) fn protected_snapshot(
     backend: &dyn ModernGatewayBackend,
     reference: &pb::RunRef,
 ) -> Result<(PathBuf, RunSnapshot), MachineError> {
@@ -282,7 +282,7 @@ fn mutation(
         run: Some(get(backend, reference)?),
     })
 }
-fn checked_context(value: Option<&pb::RequestContext>) -> Result<(), MachineError> {
+pub(crate) fn checked_context(value: Option<&pb::RequestContext>) -> Result<(), MachineError> {
     let value = required(value, "context")?;
     if value.protocol_version != 2
         || value.client_request_id.is_empty()
@@ -308,7 +308,9 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         ))
         .expect("checked mutation policy")
     });
-    let mutating = policy["methods"][method]["effect_class"].as_str() != Some("R");
+    let effect_class = policy["methods"][method]["effect_class"].as_str();
+    let event_stream = effect_class == Some("E");
+    let mutating = !matches!(effect_class, Some("R" | "E"));
     let code = match mapping["code_status"][&error.code]
         .as_str()
         .unwrap_or("INTERNAL")
@@ -415,6 +417,12 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
                 | "INTERACTION_OUTCOME_UNKNOWN"
         );
     let recovery = recovery || accepted;
+    let stream_rebase = event_stream && wire_code == "RUN_STATE_CONFLICT";
+    let stream_reconnect = event_stream
+        && matches!(
+            wire_code,
+            "TRANSPORT_FAILURE" | "INTERNAL_ERROR" | "SERVER_SHUTDOWN" | "SLOW_CONSUMER"
+        );
     let detail = pb::DolgoraeErrorDetail {
         detail_version: 2,
         dolgorae_error_code: wire_code.to_owned(),
@@ -451,7 +459,11 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         } else {
             pb::FailureClassification::Rejected
         } as i32,
-        action: if unknown || accepted_submit || accepted_resolve || accepted_group {
+        action: if stream_rebase {
+            pb::RequiredClientAction::RefreshSnapshot
+        } else if stream_reconnect {
+            pb::RequiredClientAction::ReconnectFromCommittedCursor
+        } else if unknown || accepted_submit || accepted_resolve || accepted_group {
             pb::RequiredClientAction::ReconcileOperation
         } else if recovery {
             pb::RequiredClientAction::RecoverRun
@@ -461,7 +473,9 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
             pb::RequiredClientAction::FixRequest
         } as i32,
         retry_classification: pb::RetryClassification::Forbidden as i32,
-        recovery_classification: if unknown || accepted_submit || accepted_resolve {
+        recovery_classification: if stream_rebase {
+            pb::RecoveryClassification::SnapshotRequired
+        } else if unknown || accepted_submit || accepted_resolve {
             pb::RecoveryClassification::ReconcileRequired
         } else if recovery {
             pb::RecoveryClassification::SnapshotRequired
@@ -847,6 +861,8 @@ fn start_inner(
 }
 
 const METHODS: &[&str] = &[
+    "ObservationService.WatchRunEvents",
+    "ObservationService.ListRunTimelineItems",
     "GroupService.AssignGroup",
     "GroupService.AwaitGroup",
     "GroupService.CollectGroup",
@@ -897,7 +913,7 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
             }
             Ok(pb::GetCapabilitiesResponse {
                 context:Some(context(backend)),dolgorae_version:env!("CARGO_PKG_VERSION").into(),
-                protocol:Some(pb::ProtocolCapabilities {rpc_protocol_version:2,minimum_client_protocol_version:2,maximum_client_protocol_version:2,machine_protocol_version:5,event_protocol_version:2,timeline_protocol_version:2,event_projection_version:2,grpc_error_detail_version:2,projection_profiles:vec![1,2]}),
+                protocol:Some(pb::ProtocolCapabilities {rpc_protocol_version:2,minimum_client_protocol_version:2,maximum_client_protocol_version:2,machine_protocol_version:5,event_protocol_version:1,timeline_protocol_version:1,event_projection_version:1,grpc_error_detail_version:2,projection_profiles:vec![1,2]}),
                 supported_methods:METHODS.iter().map(|s|(*s).into()).collect(),
                 descriptor_sha256:crate::jcs::sha256_hex(crate::protocol::PUBLIC_V2_DESCRIPTOR),
                 contract_manifest_sha256:crate::jcs::sha256_hex(include_bytes!("../docs/protocol/dolgorae-gul-consumer-v2.json")),
@@ -1905,7 +1921,7 @@ impl pb::artifact_service_server::ArtifactService for GatewayTransport {
                 .as_ref()
                 .map(|reference| backend.controller(&controller(reference)))
                 .transpose()?;
-            let value = crate::gateway_observation::artifact_metadata(
+            let value = crate::gateway_observation::artifact_metadata_v2(
                 &root,
                 &snapshot,
                 &request.artifact_id,
@@ -1936,7 +1952,7 @@ impl pb::artifact_service_server::ArtifactService for GatewayTransport {
                     .as_ref()
                     .map(|reference| backend.controller(&controller(reference)))
                     .transpose()?;
-                let value = crate::gateway_observation::artifact_chunk(
+                let value = crate::gateway_observation::artifact_chunk_v2(
                     &root,
                     &snapshot,
                     &request.artifact_id,
@@ -2985,6 +3001,55 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&rich.details[0].value)
         );
         pb::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap()
+    }
+
+    #[test]
+    fn read_only_stream_errors_preserve_cursor_or_snapshot_recovery() {
+        for code in [
+            "TRANSPORT_FAILURE",
+            "INTERNAL_ERROR",
+            "SERVER_SHUTDOWN",
+            "SLOW_CONSUMER",
+            "RUN_STATE_CONFLICT",
+        ] {
+            let error = MachineError::new(
+                code,
+                "private observation diagnostic",
+                false,
+                serde_json::json!({}),
+            );
+            let wire = detail(
+                &error_status(&error, "ObservationService.WatchRunEvents"),
+                code,
+            );
+            assert_eq!(wire.effect, pb::EffectState::None as i32, "{code}");
+            assert_eq!(
+                wire.classification,
+                pb::FailureClassification::Rejected as i32
+            );
+            assert!(wire.operation.is_none() && wire.idempotency_key.is_none());
+            assert_eq!(
+                wire.retry_classification,
+                pb::RetryClassification::Forbidden as i32
+            );
+            assert_eq!(
+                wire.action,
+                if code == "RUN_STATE_CONFLICT" {
+                    pb::RequiredClientAction::RefreshSnapshot as i32
+                } else {
+                    pb::RequiredClientAction::ReconnectFromCommittedCursor as i32
+                }
+            );
+            assert_eq!(
+                wire.recovery_classification,
+                if code == "RUN_STATE_CONFLICT" {
+                    pb::RecoveryClassification::SnapshotRequired as i32
+                } else {
+                    pb::RecoveryClassification::None as i32
+                }
+            );
+            assert!(wire.safe_resume_cursor.is_none());
+        }
     }
 
     #[test]

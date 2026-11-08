@@ -25,12 +25,14 @@ integration. EPIC-018 is COMPLETE after successor requirements, checked contract
 and qualified H1 validation. EPIC-019 is COMPLETE.
 EPIC-023 is COMPLETE with Master's whole-Epic acceptance; TASK-090, TASK-091 and
 TASK-092 are COMPLETE. EPIC-020 and TASK-076 through TASK-079 are COMPLETE.
-EPIC-009 and EPIC-021 are COMPLETE; EPIC-022 remains PLANNED for v0.1.4, in that
-execution order. TASK-067 is COMPLETE;
+EPIC-009 is COMPLETE. EPIC-021 is ACTIVE for the TASK-093 H3 correction;
+EPIC-022 remains PLANNED for v0.1.4, in that execution order. TASK-067 is COMPLETE;
 TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
 TASK-084 through TASK-086 are COMPLETE.
 TASK-087 is COMPLETE; TASK-088 and TASK-089 remain PLANNED.
+TASK-093 is IN_REVIEW under reopened EPIC-021. Its corrected H3 handoff is
+required before Gul resumes qualification against a replacement provider.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -2823,7 +2825,14 @@ mailboxes without Primary message relay.
 
 ## EPIC-021: Research Groups, Findings, and Contract Cleanup
 
-Status: `COMPLETE`
+Status: `ACTIVE`
+
+Reopened for TASK-093 after Gul reported that the fixed H3 omitted the required
+public-v2 Observation RPCs. TASK-084 through TASK-087 retain their completed
+history. The original H3 and its evidence remain bound to their original bytes;
+they do not establish availability of these missing RPCs. The corrected H3 has
+been delivered after affected artifact qualification; Gul owns replacement
+adoption and its affected product qualification.
 
 Canonical Outcomes: [delegation runtime](../specs/dolgorae-v014-delegation-runtime.md),
 [method and digest contract](../specs/dolgorae-v014-method-and-digest-contract.md),
@@ -2883,7 +2892,40 @@ Outcome: Inventory contract consumers, migrate supported historical data before 
 
 Verification: Historical read/close/recovery and migration; package skill resolution; recursive architecture guard; no test hook in release behavior; generated-source provenance; exact version/capability admission. Complete required repository gates and applicable mandatory Aquarium/Podway final-artifact checks. Record source revision, binary/package checksums, actual Aquarium/Podway consumer and adapter implementation revisions/artifact identities used for qualification, immutable H1 contract/manifest digests, runtime/adapter pins, relevant configuration and evidence applicability. Unmet consumer prerequisites block candidate handoff.
 
-Handoff: H3, the fixed intended-version runnable Dolgorae artifact, configuration/harness contract and complete applicable Aquarium/Podway evidence for Gul's whole product Epics in Phase 4. Final Gul evidence remains pending; do not rebuild this candidate silently.
+Handoff: H3, the fixed intended-version runnable Dolgorae artifact, configuration/harness contract and complete applicable Aquarium/Podway evidence for Gul's whole product Epics in Phase 4. Final Gul evidence remains pending; do not rebuild this candidate silently. TASK-093 owns the explicit replacement for the subsequently reported public-v2 Observation gap.
+
+### TASK-093: Restore Public-v2 Observation and Deliver Corrected H3
+
+Status: `IN_REVIEW`
+
+Depends on: TASK-087. Execute this correction before Gul resumes its affected
+Phase 4 qualification and before TASK-088.
+
+Outcome: Implement and register public-v2 `ObservationService.WatchRunEvents`
+and `ObservationService.ListRunTimelineItems` under the existing immutable H1
+contract, and advertise them only with working public endpoints. Reuse existing
+semantic observation, authorization and bounded transport components. Preserve
+public-v1 behavior and the original H3 failure and qualification history.
+
+Verification: Exercise both actual public-v2 endpoints for successful event
+delivery and timeline collection. Cover safe projections, exclusive cursor
+replay and reconnect, captured-head pagination, Controller authorization and
+revalidation, version/refusal errors, byte/count limits, slow readers and stream
+cancellation/cleanup. State an adversarial attack budget and verify introduced
+external protocol behavior empirically. Check Gul's current required 24-method
+admission subset without expanding this correction to all 45 future methods.
+Complete independent read-only review and the required repository gate. Assess
+Aquarium/Podway evidence applicability to the replacement artifact and requalify
+affected mandatory cases; reuse unaffected evidence only with a stated basis.
+
+Handoff: A separately identified corrected immutable H3, bound to its exact
+committed source, intended version, binary/package checksums, unchanged H1
+identity, reproducible runtime/configuration conditions and applicable evidence.
+Deliver it to Gul through a separate H3 correction Handoff referencing the
+original H1 exchange and H3; do not replace the H1 document. Gul owns replacement
+selection/adoption and E16-T3 requalification. Task completion grants no Gul
+acceptance, H4, TASK-088/089 completion, installation or publication. Staging and
+commit require Master's explicit Git authorization.
 
 Epic acceptance: Groups, merge, synthesis, mandatory Aquarium/Podway mappings/runtime paths and justified retirements pass. Post-cleanup candidate qualification and H3 are complete. Unimplemented mandatory consumer decisions or capability gaps prevent closeout; no automatic backend activation is claimed.
 
@@ -2904,7 +2946,7 @@ membership, ordering and status.
 
 Status: `PLANNED`
 
-Depends on: completed TASK-087/EPIC-021 and H4 from Gul's completed product/qualification Epic, including the intended Gul v0.1.0 artifact and complete own campaign evidence. No concurrent active Gul Task or reopened historical Task is required.
+Depends on: completed TASK-087 and corrective TASK-093/EPIC-021, plus H4 from Gul's completed product/qualification Epic, including the intended Gul v0.1.0 artifact and complete own campaign evidence. No concurrent active Gul Task or reopened historical Task is required.
 
 Outcome: Independently validate Gul's Phase 4 campaign and reproduce necessary provider/integration cases using the completed Gul artifact and unchanged H3 Dolgorae candidate. Verify or revalidate all required Aquarium/Podway acceptance evidence on that same final Dolgorae artifact. Gate C passes only after Gul's complete producer result and Dolgorae's substantive independent acceptance; report acknowledgement is insufficient.
 

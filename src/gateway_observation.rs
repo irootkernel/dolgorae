@@ -453,6 +453,40 @@ pub fn artifact_chunk(
         sha256: value.sha256,
     })
 }
+pub(crate) fn artifact_metadata_v2(
+    state_root: &Path,
+    snapshot: &RunSnapshot,
+    id: &str,
+    carrier: Option<&CredentialCarrier>,
+    context: pb::ResponseContext,
+) -> Result<pb::GetArtifactResponse, MachineError> {
+    let value = crate::artifact::metadata_v2(state_root, snapshot, id, carrier)?;
+    Ok(pb::GetArtifactResponse {
+        context: Some(context),
+        artifact: Some(artifact_projection(value.artifact)),
+        maximum_chunk_size: value.maximum_chunk_size,
+    })
+}
+pub(crate) fn artifact_chunk_v2(
+    state_root: &Path,
+    snapshot: &RunSnapshot,
+    id: &str,
+    range: (u64, u32),
+    carrier: Option<&CredentialCarrier>,
+    context: pb::ResponseContext,
+) -> Result<pb::ReadArtifactChunkResponse, MachineError> {
+    let value = crate::artifact::chunk_v2(state_root, snapshot, id, range, carrier)?;
+    Ok(pb::ReadArtifactChunkResponse {
+        context: Some(context),
+        artifact_id: value.artifact_id,
+        offset: value.offset,
+        length: value.length,
+        data: value.data,
+        eof: value.eof,
+        total_byte_length: value.total_byte_length,
+        sha256: value.sha256,
+    })
+}
 
 pub(crate) fn broker_summary(
     binding: &crate::interaction::BrokerApprovalBinding,

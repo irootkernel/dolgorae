@@ -168,6 +168,7 @@ fn artifact_reference(
     records: &ObservedLedger,
     run_id: Uuid,
     id: Uuid,
+    include_inline_input: bool,
 ) -> Result<ArtifactReference, MachineError> {
     let mut found: Option<ArtifactReference> = None;
     let accepted_operations = records
@@ -252,7 +253,7 @@ fn artifact_reference(
                         .as_str()
                         .and_then(|value| Uuid::parse_str(value).ok());
                     if operation_id.is_some_and(|value| accepted_operations.contains(&value)) {
-                        user_input_artifact(&value, id)?
+                        user_input_artifact(&value, id, include_inline_input)?
                     } else {
                         None
                     }
@@ -319,10 +320,12 @@ fn artifact_reference(
 fn user_input_artifact(
     intent: &Value,
     id: Uuid,
+    include_inline_input: bool,
 ) -> Result<Option<ArtifactReference>, MachineError> {
     let content = &intent["accepted_input"]["content"];
     let storage = &content["storage"];
-    if content["kind"].as_str() != Some("artifact")
+    if !(content["kind"].as_str() == Some("artifact")
+        || include_inline_input && content["kind"].as_str() == Some("inline"))
         || storage["artifact_id"].as_str() != Some(id.to_string().as_str())
     {
         return Ok(None);
@@ -559,6 +562,25 @@ pub fn metadata(
     id: &str,
     carrier: Option<&CredentialCarrier>,
 ) -> Result<ArtifactMetadata, MachineError> {
+    metadata_with_projection(state_root, snapshot, id, carrier, false)
+}
+
+pub(crate) fn metadata_v2(
+    state_root: &Path,
+    snapshot: &RunSnapshot,
+    id: &str,
+    carrier: Option<&CredentialCarrier>,
+) -> Result<ArtifactMetadata, MachineError> {
+    metadata_with_projection(state_root, snapshot, id, carrier, true)
+}
+
+fn metadata_with_projection(
+    state_root: &Path,
+    snapshot: &RunSnapshot,
+    id: &str,
+    carrier: Option<&CredentialCarrier>,
+    include_inline_input: bool,
+) -> Result<ArtifactMetadata, MachineError> {
     let _content_pin = crate::orchestration::OrchestrationStore::result_reader_pin(state_root)?;
     let id = identity(id, "artifact_id")?;
     if let Some((reference, _)) = crate::result_component_artifact::read_bound(
@@ -577,6 +599,7 @@ pub fn metadata(
         &ledger(state_root, snapshot)?,
         snapshot.manifest.run_id,
         id,
+        include_inline_input,
     )?;
     authorize_artifact(state_root, snapshot, id, &reference, carrier)?;
     verified_artifact(state_root, snapshot.manifest.run_id, id, &reference)?;
@@ -593,6 +616,27 @@ pub fn chunk(
     id: &str,
     range: (u64, u32),
     carrier: Option<&CredentialCarrier>,
+) -> Result<ArtifactChunk, MachineError> {
+    chunk_with_projection(state_root, snapshot, id, range, carrier, false)
+}
+
+pub(crate) fn chunk_v2(
+    state_root: &Path,
+    snapshot: &RunSnapshot,
+    id: &str,
+    range: (u64, u32),
+    carrier: Option<&CredentialCarrier>,
+) -> Result<ArtifactChunk, MachineError> {
+    chunk_with_projection(state_root, snapshot, id, range, carrier, true)
+}
+
+fn chunk_with_projection(
+    state_root: &Path,
+    snapshot: &RunSnapshot,
+    id: &str,
+    range: (u64, u32),
+    carrier: Option<&CredentialCarrier>,
+    include_inline_input: bool,
 ) -> Result<ArtifactChunk, MachineError> {
     let _content_pin = crate::orchestration::OrchestrationStore::result_reader_pin(state_root)?;
     let id = identity(id, "artifact_id")?;
@@ -622,7 +666,13 @@ pub fn chunk(
             metadata: reference,
         });
     }
-    let reference = artifact_reference(state_root, &ledger(state_root, snapshot)?, run_id, id)?;
+    let reference = artifact_reference(
+        state_root,
+        &ledger(state_root, snapshot)?,
+        run_id,
+        id,
+        include_inline_input,
+    )?;
     authorize_artifact(state_root, snapshot, id, &reference, carrier)?;
     let (offset, _) = range;
     let data = read_artifact_range(state_root, run_id, id, &reference, range)?;
@@ -647,7 +697,13 @@ pub(crate) fn primary_task_context(
     id: Uuid,
 ) -> Result<crate::orchestration::AcceptedTaskContext, MachineError> {
     let run_id = snapshot.manifest.run_id;
-    let reference = artifact_reference(state_root, &ledger(state_root, snapshot)?, run_id, id)?;
+    let reference = artifact_reference(
+        state_root,
+        &ledger(state_root, snapshot)?,
+        run_id,
+        id,
+        false,
+    )?;
     if reference.visibility == ArtifactVisibility::ControllerOnly
         && specialist_result_reference(state_root, run_id, id)?.as_ref() != Some(&reference)
     {

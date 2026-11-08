@@ -258,6 +258,36 @@ impl GatewayTransport {
         .await
     }
 
+    pub(crate) async fn watch_v2(
+        &self,
+        request: crate::protocol::public_v2::WatchRunEventsRequest,
+        deadline: tokio::time::Instant,
+    ) -> Result<EventStream, Status> {
+        let initial = request.clone();
+        let page = self
+            .execute_in(
+                &self.stream_workers,
+                "ObservationService.WatchRunEvents",
+                deadline,
+                move |backend| {
+                    crate::gateway_observation_v2::watch_page(backend.modern()?, initial)
+                },
+                crate::gateway_v2::error_status,
+            )
+            .await?;
+        let queue = Arc::new(Mutex::new(StreamQueue {
+            map_error: crate::gateway_v2::error_status,
+            ..Default::default()
+        }));
+        tokio::spawn(produce_event_pages(
+            self.clone(),
+            EventRequest::V2(request),
+            page,
+            queue.clone(),
+        ));
+        Ok(EventStream { queue })
+    }
+
     async fn execute_in<T: Send + 'static>(
         &self,
         workers: &Arc<Semaphore>,
@@ -926,8 +956,8 @@ fn validate_context(
     Ok(())
 }
 
-#[derive(Default)]
 struct StreamQueue {
+    map_error: fn(&MachineError, &str) -> Status,
     items: VecDeque<pb::RunEventEnvelope>,
     bytes: usize,
     last_delivery: Option<Instant>,
@@ -935,6 +965,21 @@ struct StreamQueue {
     finished: bool,
     closed: bool,
     waker: Option<Waker>,
+}
+
+impl Default for StreamQueue {
+    fn default() -> Self {
+        Self {
+            map_error: error_status,
+            items: VecDeque::new(),
+            bytes: 0,
+            last_delivery: None,
+            error: None,
+            finished: false,
+            closed: false,
+            waker: None,
+        }
+    }
 }
 
 impl StreamQueue {
@@ -947,7 +992,7 @@ impl StreamQueue {
             || self.bytes.saturating_add(bytes) > STREAM_BYTES
             || self.stalled()
         {
-            self.fail(error_status(
+            self.fail((self.map_error)(
                 &transport_error("SLOW_CONSUMER"),
                 "ObservationService.WatchRunEvents",
             ));
@@ -995,7 +1040,8 @@ impl Stream for EventStream {
             .lock()
             .expect("stream queue mutex is not poisoned");
         if queue.stalled() {
-            queue.fail(error_status(
+            let map_error = queue.map_error;
+            queue.fail(map_error(
                 &transport_error("SLOW_CONSUMER"),
                 "ObservationService.WatchRunEvents",
             ));
@@ -1030,23 +1076,50 @@ impl Drop for EventStream {
 
 async fn produce_events(
     transport: GatewayTransport,
-    mut request: pb::WatchRunEventsRequest,
+    request: pb::WatchRunEventsRequest,
+    page: EventPage,
+    queue: Arc<Mutex<StreamQueue>>,
+) {
+    produce_event_pages(transport, EventRequest::V1(request), page, queue).await;
+}
+
+enum EventRequest {
+    V1(pb::WatchRunEventsRequest),
+    V2(crate::protocol::public_v2::WatchRunEventsRequest),
+}
+impl EventRequest {
+    fn run_id(&self) -> String {
+        match self {
+            Self::V1(v) => v.run.as_ref().map(|v| v.run_id.clone()).unwrap_or_default(),
+            Self::V2(v) => v.run.as_ref().map(|v| v.run_id.clone()).unwrap_or_default(),
+        }
+    }
+    fn after(&mut self, after: String) {
+        match self {
+            Self::V1(v) => v.after_cursor = after,
+            Self::V2(v) => v.after_cursor = after,
+        }
+    }
+}
+async fn produce_event_pages(
+    transport: GatewayTransport,
+    mut request: EventRequest,
     mut page: EventPage,
     queue: Arc<Mutex<StreamQueue>>,
 ) {
     let method = "ObservationService.WatchRunEvents";
-    let run_id = request
-        .run
-        .as_ref()
-        .map(|run| run.run_id.clone())
-        .unwrap_or_default();
+    let run_id = request.run_id();
+    let map_error = queue
+        .lock()
+        .expect("stream queue mutex is not poisoned")
+        .map_error;
     let initial_head = match page.durable_head_cursor.parse::<u64>() {
         Ok(head) => head,
         Err(_) => {
             queue
                 .lock()
                 .expect("stream queue mutex is not poisoned")
-                .fail(error_status(&transport_error("INTERNAL_ERROR"), method));
+                .fail(map_error(&transport_error("INTERNAL_ERROR"), method));
             return;
         }
     };
@@ -1067,13 +1140,13 @@ async fn produce_events(
                     .sum::<usize>()
                     > STREAM_BYTES
             {
-                queue.fail(error_status(&transport_error("SLOW_CONSUMER"), method));
+                queue.fail(map_error(&transport_error("SLOW_CONSUMER"), method));
                 return;
             }
             for mut event in page.events.drain(..) {
                 if let Some(pb::run_event_envelope::Item::DurableEvent(durable)) = &mut event.item {
                     let Ok(cursor) = durable.cursor.parse::<u64>() else {
-                        queue.fail(error_status(&transport_error("INTERNAL_ERROR"), method));
+                        queue.fail(map_error(&transport_error("INTERNAL_ERROR"), method));
                         return;
                     };
                     durable.replay = cursor <= initial_head;
@@ -1082,7 +1155,10 @@ async fn produce_events(
                     return;
                 }
             }
-            if page.terminal && queue.items.is_empty() {
+            if page.terminal
+                && page.next_cursor == page.durable_head_cursor
+                && queue.items.is_empty()
+            {
                 if !queue.push(stream_end(
                     &run_id,
                     &page.durable_head_cursor,
@@ -1119,13 +1195,13 @@ async fn produce_events(
                 last_heartbeat = Instant::now();
             }
         }
-        request.after_cursor = page.next_cursor.clone();
+        request.after(page.next_cursor.clone());
         tokio::select! {
             _ = shutdown.changed() => {
                 let mut queue = queue.lock().expect("stream queue mutex is not poisoned");
                 queue.items.clear(); queue.bytes = 0;
                 queue.push(stream_end(&run_id, &page.durable_head_cursor, pb::StreamEndReason::ServerShutdown));
-                queue.error = Some(error_status(&transport_error("SERVER_SHUTDOWN"), method));
+                queue.error = Some(map_error(&transport_error("SERVER_SHUTDOWN"), method));
                 queue.finished = true; queue.wake(); return;
             }
             _ = tokio::time::sleep(sample_delay) => {}
@@ -1136,21 +1212,44 @@ async fn produce_events(
                 return;
             }
             if queue.stalled() {
-                queue.fail(error_status(&transport_error("SLOW_CONSUMER"), method));
+                queue.fail(map_error(&transport_error("SLOW_CONSUMER"), method));
                 return;
             }
+            // Terminal lifecycle does not prove that bounded replay is exhausted.
+            // Drain this page before sampling its successor, including an empty
+            // sample needed to prove a trailing filtered gap.
+            if page.terminal
+                && (!queue.items.is_empty() || page.next_cursor == page.durable_head_cursor)
+            {
+                continue;
+            }
         }
-        if page.terminal {
-            continue;
-        }
-        let request = request.clone();
-        let fetched = transport
-            .execute_stream(
-                method,
-                tokio::time::Instant::now() + RPC_BUDGET,
-                move |backend| backend.watch_run_events(request),
-            )
-            .await;
+        let fetched = match &request {
+            EventRequest::V1(request) => {
+                let request = request.clone();
+                transport
+                    .execute_stream(
+                        method,
+                        tokio::time::Instant::now() + RPC_BUDGET,
+                        move |backend| backend.watch_run_events(request),
+                    )
+                    .await
+            }
+            EventRequest::V2(request) => {
+                let request = request.clone();
+                transport
+                    .execute_in(
+                        &transport.stream_workers,
+                        method,
+                        tokio::time::Instant::now() + RPC_BUDGET,
+                        move |backend| {
+                            crate::gateway_observation_v2::watch_page(backend.modern()?, request)
+                        },
+                        map_error,
+                    )
+                    .await
+            }
+        };
         match fetched {
             Ok(next) => {
                 sample_delay = if next.durable_head_cursor == page.durable_head_cursor {
@@ -1634,6 +1733,7 @@ async fn run_server_with_accept_until(
                 .max_decoding_message_size(12 * 1024 * 1024)
                 .max_encoding_message_size(12 * 1024 * 1024),
         )
+        .add_service(crate::protocol::public_v2::observation_service_server::ObservationServiceServer::new(service.clone()).max_decoding_message_size(12 * 1024 * 1024).max_encoding_message_size(12 * 1024 * 1024))
         .add_service(crate::protocol::public_v2::operation_service_server::OperationServiceServer::new(service.clone()))
         .add_service(crate::protocol::public_v2::runtime_service_server::RuntimeServiceServer::new(service.clone()))
         .add_service(crate::protocol::public_v2::run_service_server::RunServiceServer::new(service.clone()))
@@ -2172,6 +2272,245 @@ mod tests {
         healthy.lock().unwrap().push(heartbeat());
         let mut healthy = EventStream { queue: healthy };
         assert!(healthy.next().await.unwrap().is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn public_v2_watch_admission_and_response_deadlines_have_no_effect() {
+        use crate::gateway_v2::ModernGatewayBackend;
+        use crate::protocol::public_v2 as modern;
+        use modern::observation_service_server::ObservationService;
+        fn request() -> Request<modern::WatchRunEventsRequest> {
+            let mut request = Request::new(modern::WatchRunEventsRequest {
+                context: Some(modern::RequestContext {
+                    protocol_version: 2,
+                    client_request_id: Uuid::now_v7().to_string(),
+                    client_instance_id: "read-timeout".into(),
+                }),
+                run: Some(modern::RunRef {
+                    workspace: Some(modern::WorkspaceRef {
+                        absolute_path: "/unused-test-workspace".into(),
+                        expected_workspace_id: "a".repeat(64),
+                    }),
+                    run_id: Uuid::now_v7().to_string(),
+                }),
+                projection: modern::ProjectionProfile::Minimal as i32,
+                projection_version: 1,
+                ..Default::default()
+            });
+            request
+                .metadata_mut()
+                .insert("grpc-timeout", "50m".parse().unwrap());
+            request
+        }
+        fn assert_timeout(status: Status) {
+            assert_eq!(status.code(), tonic::Code::Unavailable);
+            let rich = GoogleRpcStatus::decode(status.details()).unwrap();
+            assert_eq!(
+                rich.details[0].type_url,
+                "type.googleapis.com/dolgorae.public.v2.DolgoraeErrorDetail"
+            );
+            let detail =
+                modern::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap();
+            assert_eq!(detail.dolgorae_error_code, "TRANSPORT_FAILURE");
+            assert_eq!(detail.effect, modern::EffectState::None as i32);
+            assert_eq!(
+                detail.classification,
+                modern::FailureClassification::Rejected as i32
+            );
+            assert_eq!(
+                detail.action,
+                modern::RequiredClientAction::ReconnectFromCommittedCursor as i32
+            );
+            assert_eq!(
+                detail.recovery_classification,
+                modern::RecoveryClassification::None as i32
+            );
+            assert_eq!(
+                detail.retry_classification,
+                modern::RetryClassification::Forbidden as i32
+            );
+            assert!(detail.operation.is_none() && detail.idempotency_key.is_none());
+            assert!(detail.safe_resume_cursor.is_none());
+        }
+        let (_stop, shutdown) = watch::channel(false);
+        let service = GatewayTransport::new(Arc::new(Backend), shutdown);
+        let permits = service
+            .stream_workers
+            .clone()
+            .acquire_many_owned(STREAM_WORKERS as u32)
+            .await
+            .unwrap();
+        let status = match ObservationService::watch_run_events(&service, request()).await {
+            Err(status) => status,
+            Ok(_) => panic!("saturated Watch admission did not expire"),
+        };
+        assert_timeout(status);
+        drop(permits);
+
+        struct BlockedObservation {
+            entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl GatewayBackend for BlockedObservation {
+            fn modern(&self) -> Result<&dyn ModernGatewayBackend, MachineError> {
+                Ok(self)
+            }
+        }
+        impl ModernGatewayBackend for BlockedObservation {
+            fn home(&self) -> &DolgoraeHome {
+                panic!("failed observation has no home access")
+            }
+            fn instance_id(&self) -> Uuid {
+                Uuid::nil()
+            }
+            fn workspace(
+                &self,
+                _: &pb::WorkspaceRef,
+            ) -> Result<crate::workspace::WorkspaceView, MachineError> {
+                panic!("Watch must use workspace observation")
+            }
+            fn workspace_observed(
+                &self,
+                _: &pb::WorkspaceRef,
+            ) -> Result<crate::workspace::WorkspaceView, MachineError> {
+                self.entered
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+                Err(transport_error("INTERNAL_ERROR"))
+            }
+            fn controller(
+                &self,
+                _: &pb::ControllerCarrierRef,
+            ) -> Result<crate::controller::CredentialCarrier, MachineError> {
+                panic!("event observation has no Controller read")
+            }
+            fn context(&self) -> pb::ResponseContext {
+                pb::ResponseContext::default()
+            }
+        }
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (_stop, shutdown) = watch::channel(false);
+        let service = GatewayTransport::new(
+            Arc::new(BlockedObservation {
+                entered: Mutex::new(Some(entered)),
+                release: Mutex::new(wait),
+            }),
+            shutdown,
+        );
+        let copy = service.clone();
+        let job = tokio::spawn(async move {
+            match ObservationService::watch_run_events(&copy, request()).await {
+                Err(status) => status,
+                Ok(_) => panic!("blocked Watch response did not expire"),
+            }
+        });
+        started.await.unwrap();
+        let status = job.await.unwrap();
+        // A timed-out read still owns its worker until its physical work returns.
+        assert_eq!(
+            service.stream_workers.available_permits(),
+            STREAM_WORKERS - 1
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while service.stream_workers.available_permits() != STREAM_WORKERS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_timeout(status);
+    }
+
+    #[tokio::test]
+    async fn public_v2_stream_bounds_and_shutdown_use_v2_details() {
+        use crate::protocol::public_v2 as modern;
+        let mapped = |status: &Status, code: &str| {
+            let rich = GoogleRpcStatus::decode(status.details()).unwrap();
+            assert_eq!(
+                rich.details[0].type_url,
+                "type.googleapis.com/dolgorae.public.v2.DolgoraeErrorDetail"
+            );
+            assert_eq!(
+                modern::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice())
+                    .unwrap()
+                    .dolgorae_error_code,
+                code
+            );
+        };
+        let queue = || StreamQueue {
+            map_error: crate::gateway_v2::error_status,
+            ..Default::default()
+        };
+        let mut full = queue();
+        for _ in 0..STREAM_COUNT {
+            assert!(full.push(heartbeat()));
+        }
+        assert!(!full.push(heartbeat()));
+        mapped(full.error.as_ref().unwrap(), "SLOW_CONSUMER");
+        let mut bytes = queue();
+        assert!(!bytes.push(pb::RunEventEnvelope {
+            item: Some(pb::run_event_envelope::Item::Heartbeat(
+                pb::RunEventHeartbeat {
+                    run_id: "x".repeat(STREAM_BYTES),
+                    ..Default::default()
+                }
+            ))
+        }));
+        mapped(bytes.error.as_ref().unwrap(), "SLOW_CONSUMER");
+        let stalled = Arc::new(Mutex::new(queue()));
+        {
+            let mut q = stalled.lock().unwrap();
+            q.push(heartbeat());
+            q.last_delivery = Some(Instant::now() - STREAM_STALL);
+        }
+        let mut stream = EventStream { queue: stalled };
+        mapped(&stream.next().await.unwrap().unwrap_err(), "SLOW_CONSUMER");
+        let healthy = Arc::new(Mutex::new(queue()));
+        healthy.lock().unwrap().push(heartbeat());
+        let mut stream = EventStream {
+            queue: healthy.clone(),
+        };
+        assert!(stream.next().await.unwrap().is_ok());
+        drop(stream);
+        assert!(healthy.lock().unwrap().closed);
+        let (stop, stopped) = watch::channel(false);
+        let queue = Arc::new(Mutex::new(queue()));
+        let mut stream = EventStream {
+            queue: queue.clone(),
+        };
+        let task = tokio::spawn(produce_event_pages(
+            GatewayTransport::new(Arc::new(Backend), stopped),
+            EventRequest::V2(modern::WatchRunEventsRequest::default()),
+            EventPage {
+                events: vec![],
+                next_cursor: "0".into(),
+                durable_head_cursor: "0".into(),
+                lifecycle: 0,
+                terminal: false,
+            },
+            queue,
+        ));
+        stop.send(true).unwrap();
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap().item,
+            Some(pb::run_event_envelope::Item::StreamEnd(_))
+        ));
+        mapped(
+            &stream.next().await.unwrap().unwrap_err(),
+            "SERVER_SHUTDOWN",
+        );
+        task.await.unwrap();
     }
 
     #[tokio::test]

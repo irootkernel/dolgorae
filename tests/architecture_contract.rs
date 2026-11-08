@@ -1372,6 +1372,24 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "paths",
                 "protocol",
                 "gateway_v2",
+                "gateway_observation_v2",
+                // Test-only: the deadline backend implements workspace/Controller traits.
+                "controller",
+                "workspace",
+            ][..],
+        ),
+        (
+            "gateway_observation_v2",
+            &[
+                "gateway",
+                "gateway_observation",
+                "gateway_service",
+                "gateway_v2",
+                "machine",
+                "protocol",
+                "jcs",
+                "ledger",
+                "timeline",
             ][..],
         ),
         (

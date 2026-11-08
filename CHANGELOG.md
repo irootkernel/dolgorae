@@ -74,6 +74,9 @@ development commits.
 
 ### Fixed
 
+- Serve public-v2 event streams and Controller-authorized timeline pages with
+  truthful capabilities, bounded delivery and immutable artifact fallback.
+
 - Allow CLI recovery to enter the existing recovery owner when a retained Writer guard prevents a healthy policy snapshot.
 
 - Resume an owned pending Writer generation release during explicit member

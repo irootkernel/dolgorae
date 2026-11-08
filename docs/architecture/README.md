@@ -1720,6 +1720,11 @@ The `gateway` module owns transport admission and bounded async delivery;
 `gateway_service` translates checked requests into shared semantic operations,
 including broker-originated approval observation and resolution; it does not
 open the Broker store or invoke the private Primary bridge directly.
+`gateway_observation_v2` owns version-specific Observation request validation,
+explicit typed projections and Controller-bound timeline continuation. It reuses
+`timeline`'s captured-head item selection and the gateway's bounded stream loop;
+public-v1 and v2 retain separate wire error mappers. Transport and persisted
+schema versions do not determine the public projection version.
 `machine` owns the current registered error-code vocabulary; `gateway` owns its
 gRPC status, retry, and recovery mapping.
 The `controller` module owns the descriptor-relative confined carrier walk;

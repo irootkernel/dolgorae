@@ -187,6 +187,14 @@ H3 records the exact Dolgorae candidate and actual Aquarium/Podway consumer and
 adapter implementation revisions used for this qualification; it binds these
 runtime facts to H1 without replacing H1's contract-source pins.
 
+TASK-093 owns the explicit corrected H3 after the reported public-v2 Observation
+gap. Preserve the original artifact and its qualification history. Assess the
+replacement against that original source and every intervening change, then
+requalify affected mandatory Aquarium/Podway paths on the exact replacement
+image. A separate H3 correction Handoff identifies both artifacts and unchanged
+H1; Gul owns replacement selection and affected product requalification. No
+source check, provider review or handoff acknowledgement grants Gul acceptance.
+
 Gul produces its final implementation revision, exact v0.1.0 artifact/package
 checksums and complete own campaign in Phase 4/H4, bound to unchanged H3 and H1.
 TASK-088 then independently verifies that the H3/H4 runtime combination satisfies

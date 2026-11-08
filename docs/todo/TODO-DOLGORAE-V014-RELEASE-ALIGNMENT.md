@@ -184,7 +184,7 @@ the approved release scope. No Task is marked BLOCKED or complete by this plan.
 | --- | --- | --- | --- |
 | 1: Dolgorae contract | EPIC-018: TASK-067, TASK-068 | After completed EPIC-017; qualify both required host mechanisms, pin all consumer requirements/owners and publish checked package. Close without Gul's subsequent Epic or TASK-069 | H1: qualified immutable contract package and acceptance matrix to Gul |
 | 2: Gul foundation | Gul E15 contract/foundation Epic containing permanent E15-T21 and required closeout | Consume H1; complete pin validation, corrections, scenario ownership and scoped foundation checks. Neither entry nor closeout requires TASK-069 | H2: completed consumer Epic result, validated pin and evidence to Dolgorae |
-| 3: Dolgorae implementation | EPIC-019: TASK-069, TASK-070..075; EPIC-023: TASK-090..092; EPIC-020: TASK-076..079; EPIC-009: TASK-080..083, TASK-027; EPIC-021: TASK-084..087 | Original TASK-069 consumes H2/Gate A. Before EPIC-020 resumes, EPIC-023 completes corrected H1, Gul adoption/delta H2 and independent Gate A delta. Execute the remaining provider Epics in order. Required Aquarium/Podway runtime qualification remains with its named Tasks; TASK-087 qualifies the post-cleanup artifact | H3: fixed runnable Dolgorae candidate and applicable consumer evidence to Gul |
+| 3: Dolgorae implementation | EPIC-019: TASK-069, TASK-070..075; EPIC-023: TASK-090..092; EPIC-020: TASK-076..079; EPIC-009: TASK-080..083, TASK-027; EPIC-021: TASK-084..087 and corrective TASK-093 | Original TASK-069 consumes H2/Gate A. Before EPIC-020 resumes, EPIC-023 completes corrected H1, Gul adoption/delta H2 and independent Gate A delta. Execute the remaining provider Epics in order. Required Aquarium/Podway runtime qualification remains with its named Tasks; TASK-087 qualifies the post-cleanup artifact; TASK-093 owns its explicit Observation correction and affected replacement-image qualification | H3: fixed runnable Dolgorae candidate and applicable consumer evidence to Gul |
 | 4: Gul product | Gul E16 product/qualification Epic: E16-T1..T16 inherit the complete historical E15-T5..T20 scope | Use completed provider capabilities and H3 throughout; build intended Gul v0.1.0 artifact, run own complete QA/native campaign, real-account smoke, devices/soak and final recovery rehearsal. Close on own complete acceptance without TASK-088/089 | H4: completed Gul artifact and reproducible qualification evidence to Dolgorae |
 | 5: Dolgorae final | EPIC-022: TASK-088, TASK-089 | Consume H4; independently reproduce required actual-client/provider cases and verify/revalidate Aquarium/Podway evidence against unchanged H3. Consume the complete accepted three-consumer matrix, repository gates/final QA and exact provenance | Gate D handoff to separate release workflows; no automatic publication |
 
@@ -218,6 +218,16 @@ completed consumer handoff. No Gul Task remains active while awaiting producer
 acceptance. Gul E16 still waits for complete H3. The roadmap owns the explicit
 active-slot handoff that preserves unfinished TASK-076 work at correction entry.
 
+TASK-093 is the explicit H3 correction after Gul reported missing public-v2
+Observation methods. Preserve original H3 and completed TASK-084..087 history.
+Before Gul resumes affected qualification, deliver a separate corrected artifact
+and applicable Aquarium/Podway evidence, referencing original H3 and unchanged
+H1. Gul owns replacement adoption and affected E16-T3 checks; neither the
+correction nor its delivery completes Gul, H4 or TASK-088/089. TASK-088 and
+TASK-089 must consume the selected replacement and its applicability record;
+update this correction instruction after those consumers settle the selection,
+and remove it when the remaining handoff has moved to canonical outcomes.
+
 Necessary Aquarium/Podway
 owner work is explicitly scheduled by TASK-067 in the
 [external prerequisite register](../specs/dolgorae-consumer-acceptance-v014.md#external-implementation-and-decisions).
@@ -231,7 +241,7 @@ make that work disappear or permit undocumented extra consumer dependencies.
 | H1: Phase 1 to 2 | Canonical requirements; exact contract-source/schema/descriptor revisions and digests, generated surfaces, policies/error/effect/bounds, known answers and immutable lock; two-host feasibility result and tested host/adapter versions; immutable three-consumer requirements matrix, named owners/scenarios and accepted external work plans; later runtime-record contents/owners/handoffs, with future final implementation/artifact pins explicitly pending | Gul validates the package and closes its contract/foundation Epic; Dolgorae EPIC-018 already closed. H1 requires no final artifact scheduled for later phases |
 | H2: Phase 2 to 3 | Consumer Epic closeout, exact validated package pin, completed T21 corrections/foundation checks, scenario/harness ownership, retained runtime obligations assigned to product Epics | TASK-069 validates complete output and records Gate A; partial active-Task acknowledgement is insufficient |
 | Corrected H1 / delta H2 within Phase 3 | TASK-091's new committed package/lock, unchanged external source pins, classified artifact/generator differences and qualified JSON fixtures/dependencies; completed Gul correction unit, exact selected H1 and validated Gul candidate, schema/foundation checks and later foundation-change disposition | TASK-092 independently records Gate A delta before EPIC-020 resumes; old TASK-068/069 and E15 acceptance is not rewritten |
-| H3: Phase 3 to 4 | Intended v0.1.4 artifact prepared after relevant packaging; source revision and binary/package checksums; actual Aquarium/Podway consumer and adapter implementation revisions/artifact identities used for qualification; immutable H1 contract/manifest digests, applicable host/runtime/adapter pins and relevant configuration; runnable setup/harness instructions; required repository gate and applicable Aquarium/Podway actual-path evidence after TASK-087 | Gul admits this exact isolated candidate for all product Epics; no unqualified rebuild or silent runtime/configuration change |
+| H3: Phase 3 to 4 | Intended v0.1.4 artifact prepared after relevant packaging; source revision and binary/package checksums; actual Aquarium/Podway consumer and adapter implementation revisions/artifact identities used for qualification; immutable H1 contract/manifest digests, applicable host/runtime/adapter pins and relevant configuration; runnable setup/harness instructions; required repository gate and applicable Aquarium/Podway actual-path evidence after TASK-087, or the explicit TASK-093 replacement with affected requalification | Gul admits this exact isolated candidate for all product Epics; no unqualified rebuild or silent runtime/configuration change |
 | H4: Phase 4 to 5 | Final Gul implementation revision and intended v0.1.0 artifact/package checksums bound to unchanged H3 and immutable H1; product Epic closeout and own gates/QA; reproducible actual-client native faults/load/latency/recovery, separately authorized real-account functionality, devices/soak and final packaging/recovery results | TASK-088 independently verifies H3/H4 against H1 and reproduces necessary cases; TASK-089 consumes all accepted consumer rows and final provenance |
 
 H1 freezes contract requirements and the owners/contents/delivery points of later
@@ -788,8 +798,10 @@ until TASK-068's checked package exists and Gul acknowledges it.
 
 TASK-077 and TASK-086 implement/qualify the mandatory Aquarium/Podway matrix
 within their owning scopes and consume necessary external implementation.
-TASK-087 verifies applicability after cleanup/packaging; TASK-088 independently
-checks final-artifact acceptance. Default activation remains consumer-owned;
+TASK-087 verifies applicability after cleanup/packaging; TASK-093 reassesses
+all intervening changes and requalifies affected paths for its explicit H3
+replacement. TASK-088 independently checks final-artifact acceptance. Default
+activation remains consumer-owned;
 compatibility cannot be reduced to a request for later work. Preserve actual
 native/daemon-free contracts and Podway's cursor/receipt/progression authority.
 

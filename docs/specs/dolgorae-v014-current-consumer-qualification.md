@@ -385,9 +385,18 @@ configuration, native host, original recovery keys, complete source observations
 expected failures and owned cleanup. Keep failed and inconclusive observations.
 Do not infer current runtime support from version text, a metadata catalog,
 fixture ledger or prepared digest. The existing default complete repository gate
-and explicit native authorization remain required. TASK-087 must bind H3 and
-requalify the post-cleanup packaged candidate; this source selection supplies no
-H3 or whole-Epic acceptance.
+and explicit native authorization remain required. TASK-087 owns the original
+post-cleanup H3. TASK-093 owns its explicit replacement and must assess all
+intervening source changes as well as the Observation correction before reusing
+that evidence. The accepted Profile configuration binds the entire
+required-subset compatibility manifest.
+Changes to that manifest, including another runtime's registry entry, change
+this identity even when the selected runtime version is unchanged.
+Requalify affected native launch, configuration and receipt bindings on the exact
+replacement image with the selected host/runtime/adapter pins. Retain unaffected
+evidence only with its source-specific applicability, original results and
+limits; neither the default gate nor a source comparison proves fresh native
+execution. This source selection supplies no H3 or whole-Epic acceptance.
 
 ## Native response-loss checkpoint and diagnostics
 

@@ -6666,3 +6666,997 @@ fn maintenance_recovers_every_switch_boundary_and_preserves_closed_run_history()
     ledger_maintenance::maintenance_recovers_every_switch_boundary_and_preserves_closed_run_history(
     );
 }
+
+fn observation_v2_error(status: &tonic::Status, expected: &str) {
+    use dolgorae::protocol::public_v2 as modern;
+    let rich = RichStatus::decode(status.details()).unwrap();
+    assert_eq!(rich.details.len(), 1);
+    assert_eq!(
+        rich.details[0].type_url,
+        "type.googleapis.com/dolgorae.public.v2.DolgoraeErrorDetail"
+    );
+    let detail = modern::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap();
+    assert_eq!(detail.dolgorae_error_code, expected, "{status:?}");
+}
+
+/// Prepare safe stamped history only after the real fixture Run is closed.
+/// The production reader/UDS endpoint must drain every bounded page, including a
+/// final empty sample proving that the remaining operational tail is filtered.
+async fn public_v2_terminal_replay_drains_count_and_byte_pages() {
+    use dolgorae::event::{
+        ClientEventData, DiagnosticPayload, FinalResponse, ResponseEventPayload,
+        RuntimeErrorPayload,
+    };
+    use dolgorae::ledger::{AppendDurability, Ledger, LedgerClock as _, SystemLedgerClock};
+    use dolgorae::protocol::public_v2 as modern;
+    for (label, count, bytes) in [("count", 40, 128), ("bytes", 6, 900_000)] {
+        let fixture = Fixture::with_tmp_scenario(timeline_scenario());
+        let id = fixture.start_run(&[]);
+        fixture.cli(&[
+            "run",
+            "--controller-file",
+            fixture.controller.to_str().unwrap(),
+            "close",
+            &id,
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ]);
+        println!(
+            "terminal-replay fixture {label}: {}",
+            fixture.root.display()
+        );
+        let run_id = Uuid::parse_str(&id).unwrap();
+        let root = fixture.state_root.join("runs").join(&id);
+        let mut ledger = Ledger::open(&root, run_id).unwrap();
+        let after = ledger.head().unwrap().sequence;
+        let generation = ledger.projection().unwrap().run_generation;
+        let stamped = ledger
+            .durable_records()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|record| record.client_projection())
+            .unwrap()
+            .clone();
+        let context = dolgorae::event::EventAppendContext {
+            workspace_id: stamped.record.workspace_id.clone(),
+            server_key: stamped.record.server_key.clone(),
+            server_epoch: stamped.record.server_epoch,
+            writer_state_revision: stamped.stamp.writer_state_revision,
+        };
+        let mut expected = Vec::new();
+        for index in 0..=count {
+            let mut record = stamped.record.clone();
+            record.cursor = ledger.next_sequence().to_string();
+            record.event_id = Uuid::now_v7();
+            record.timestamp = SystemLedgerClock::default().timestamp();
+            record.data = if index == count {
+                ClientEventData::DiagnosticReported(DiagnosticPayload {
+                    message: "operational tail excluded from MINIMAL".into(),
+                })
+            } else if label == "bytes" {
+                record.thread_id = Some("fixture-thread".into());
+                record.turn_id = Some("fixture-turn".into());
+                ClientEventData::ResponseFinal(ResponseEventPayload {
+                    response: FinalResponse::Inline {
+                        text: "x".repeat(bytes),
+                    },
+                })
+            } else {
+                ClientEventData::RuntimeError(RuntimeErrorPayload {
+                    error_code: "INTERNAL_ERROR".into(),
+                    message: format!("safe fixture event {index} {}", "x".repeat(bytes)),
+                })
+            };
+            if index < count {
+                expected.push(record.cursor.clone());
+            }
+            ledger
+                .with_event_context(context.clone(), |ledger| {
+                    ledger.append_client_event(record, generation, AppendDurability::Required)
+                })
+                .unwrap();
+        }
+        let head = ledger.head().unwrap().sequence;
+        drop(ledger);
+        let observed =
+            dolgorae::ledger::ObservedLedger::open_complete(&root, run_id, head).unwrap();
+        let first = observed
+            .stamped_events_after(after, dolgorae::event::EventProjection::Minimal)
+            .unwrap();
+        assert!(
+            first.len() < count,
+            "{label} history must require multiple bounded samples"
+        );
+        if label == "count" {
+            assert_eq!(first.len(), 32);
+        } else {
+            assert!(first.len() < 32);
+        }
+        assert!(expected.last().unwrap().parse::<u64>().unwrap() < head);
+        let mut gateway = fixture.start_gateway();
+        let mut observations = modern::observation_service_client::ObservationServiceClient::new(
+            gateway.channel().await,
+        );
+        let mut stream = observations
+            .watch_run_events(modern::WatchRunEventsRequest {
+                context: Some(modern::RequestContext {
+                    protocol_version: 2,
+                    client_request_id: Uuid::now_v7().to_string(),
+                    client_instance_id: "terminal-replay".into(),
+                }),
+                run: Some(modern::RunRef {
+                    workspace: Some(modern::WorkspaceRef {
+                        absolute_path: fixture.workspace.to_string_lossy().into(),
+                        expected_workspace_id: fixture.workspace_id.clone(),
+                    }),
+                    run_id: id,
+                }),
+                after_cursor: after.to_string(),
+                projection: modern::ProjectionProfile::Minimal as i32,
+                projection_version: 1,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let delivered = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut delivered = Vec::new();
+            loop {
+                let envelope = stream
+                    .message()
+                    .await
+                    .unwrap()
+                    .expect("missing normal stream end");
+                match envelope.item.unwrap() {
+                    modern::run_event_envelope::Item::DurableEvent(event) => {
+                        assert!(event.replay);
+                        delivered.push(event.cursor);
+                    }
+                    modern::run_event_envelope::Item::StreamEnd(end) => {
+                        assert_eq!(end.reason, modern::StreamEndReason::RunTerminal as i32);
+                        assert_eq!(end.durable_head_cursor, head.to_string());
+                        assert!(
+                            stream.message().await.unwrap().is_none(),
+                            "more than one terminal end"
+                        );
+                        break delivered;
+                    }
+                    modern::run_event_envelope::Item::Heartbeat(_) => {
+                        panic!("terminal replay produced a heartbeat")
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        gateway.terminate();
+        assert_eq!(
+            delivered, expected,
+            "{label} terminal replay ended before all selected events"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_v2_observation_pages_and_streams_follow_current_gul_contract() {
+    public_v2_terminal_replay_drains_count_and_byte_pages().await;
+    use dolgorae::protocol::public_v2 as modern;
+    let fixture = Fixture::with_tmp_scenario(timeline_scenario());
+    let id = fixture.start_run(&[]);
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let initial = native_snapshot(&mut runs, &fixture, &id).await;
+    let message = "private original timeline input ".repeat(256);
+    runs.submit_turn(pb::SubmitTurnRequest {
+        context: context(),
+        run: fixture.run_ref(&id),
+        controller: fixture.carrier(),
+        idempotency_key: "v2-observation-input".into(),
+        write_intent: pb::WriteIntent::Read as i32,
+        message: message.clone(),
+        images: vec![],
+        effort: None,
+        expected_state_revision: initial.state_revision,
+    })
+    .await
+    .unwrap();
+    native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
+    let ctx = || {
+        Some(modern::RequestContext {
+            protocol_version: 2,
+            client_request_id: Uuid::now_v7().to_string(),
+            client_instance_id: "current-gul-observation".into(),
+        })
+    };
+    let reference = |id: &str| {
+        Some(modern::RunRef {
+            workspace: Some(modern::WorkspaceRef {
+                absolute_path: fixture.workspace.to_string_lossy().into(),
+                expected_workspace_id: fixture.workspace_id.clone(),
+            }),
+            run_id: id.into(),
+        })
+    };
+    let carrier = || {
+        Some(modern::ControllerCarrierRef {
+            absolute_file_path: fixture.controller.to_string_lossy().into(),
+            expected_controller_id: fixture.controller_id.clone(),
+            expected_controller_generation: 1,
+        })
+    };
+    let mut runtime = modern::runtime_service_client::RuntimeServiceClient::new(channel.clone());
+    let caps = runtime
+        .get_capabilities(modern::GetCapabilitiesRequest {
+            context: ctx(),
+            minimum_protocol_version: 2,
+            maximum_protocol_version: 2,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let capture = std::env::var_os("DOLGORAE_OBSERVATION_CAPTURE").map(std::path::PathBuf::from);
+    if let Some(path) = &capture {
+        fs::write(path.join("capabilities.pb"), caps.encode_to_vec()).unwrap();
+    }
+    let protocol = caps.protocol.unwrap();
+    assert_eq!(
+        (
+            protocol.rpc_protocol_version,
+            protocol.event_projection_version,
+            protocol.timeline_protocol_version
+        ),
+        (2, 1, 1)
+    );
+    for method in [
+        "RuntimeService.GetCapabilities",
+        "RuntimeService.InspectWorkspace",
+        "RuntimeService.ListProfiles",
+        "RuntimeService.GetProfile",
+        "ProvisioningService.ValidateProvisioning",
+        "RunService.StartRun",
+        "RunService.ListRuns",
+        "RunService.GetRun",
+        "RunService.SubmitTurn",
+        "OperationService.LookupOperation",
+        "ObservationService.WatchRunEvents",
+        "ObservationService.ListRunTimelineItems",
+        "InteractionService.ListPendingInteractions",
+        "OrchestrationService.GetOrchestratedSession",
+        "ArtifactService.GetArtifact",
+        "ArtifactService.ReadArtifactChunk",
+        "ControllerService.VerifyController",
+        "InteractionService.GetControllerInteraction",
+        "InteractionService.ResolveInteraction",
+        "RunService.InterruptTurn",
+        "RunService.CloseRun",
+        "RunService.RecoverRun",
+        "RunService.ReconcileRun",
+        "WriterService.GetWorkspaceWriterStatus",
+    ] {
+        assert!(
+            caps.supported_methods.iter().any(|m| m == method),
+            "missing {method}"
+        );
+    }
+    let mut observations =
+        modern::observation_service_client::ObservationServiceClient::new(channel.clone());
+    let base = modern::ListRunTimelineItemsRequest {
+        context: ctx(),
+        run: reference(&id),
+        controller: carrier(),
+        after_cursor: "0".into(),
+        limit: 100,
+        timeline_version: 1,
+        direction: modern::TimelineDirection::Forward as i32,
+        maximum_encoded_bytes: 0,
+    };
+    let full = observations
+        .list_run_timeline_items(base.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    if let Some(path) = &capture {
+        fs::write(path.join("timeline-full.pb"), full.encode_to_vec()).unwrap();
+    }
+    assert!(full.complete_page);
+    assert_eq!(full.encoded_byte_length as usize, full.encoded_len());
+    assert!(full.items.len() >= 3);
+    assert!(full.next_after_cursor.is_none());
+    assert_eq!(
+        full.items[0].content,
+        Some(modern::timeline_item::Content::InlineText(message.clone()))
+    );
+    assert!(
+        full.items
+            .windows(2)
+            .all(|w| w[0].cursor.parse::<u64>().unwrap() < w[1].cursor.parse::<u64>().unwrap())
+    );
+    let mut one = base.clone();
+    one.limit = 1;
+    let first = observations
+        .list_run_timeline_items(one.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    let token = first.next_after_cursor.clone().unwrap();
+    if let Some(path) = &capture {
+        fs::write(path.join("timeline-first.pb"), first.encode_to_vec()).unwrap();
+    }
+
+    assert!(
+        token.parse::<u64>().is_err(),
+        "page continuation must be opaque and independent of item cursors"
+    );
+    let mut next = one.clone();
+    next.after_cursor = token.clone();
+    let state = native_snapshot(&mut runs, &fixture, &id).await;
+    runs.pause_run(pb::PauseRunRequest {
+        interrupt: false,
+        context: context(),
+        run: fixture.run_ref(&id),
+        controller: fixture.carrier(),
+        expected_state_revision: state.state_revision,
+    })
+    .await
+    .unwrap();
+    let second = observations
+        .list_run_timeline_items(next.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    if let Some(path) = &capture {
+        fs::write(path.join("timeline-second.pb"), second.encode_to_vec()).unwrap();
+    }
+    assert_eq!(second.items[0], full.items[1]);
+    assert_eq!(second.captured_head_cursor, first.captured_head_cursor);
+    let current = native_snapshot(&mut runs, &fixture, &id).await;
+    assert!(current.state_revision > first.captured_head_cursor.parse::<u64>().unwrap());
+    assert_eq!(
+        second.stamp.as_ref().unwrap().run_state_revision,
+        current.state_revision
+    );
+    assert_ne!(
+        second.stamp.as_ref().unwrap().captured_head_cursor,
+        second.captured_head_cursor
+    );
+    let mut forged = next.clone();
+    use base64::Engine as _;
+    let (payload, _) = token.split_once('.').unwrap();
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .unwrap();
+    let mut payload: Value = serde_json::from_slice(&bytes).unwrap();
+    payload["stamp"] = serde_json::json!({"run_state_revision":1,"writer_state_revision":1,"interaction_state_revision":1});
+    let payload = serde_json::to_vec(&payload).unwrap();
+    let binding: dolgorae::run::ControllerBinding = serde_json::from_slice(
+        &fs::read(
+            fixture
+                .state_root
+                .join("runs")
+                .join(&id)
+                .join("controller.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut mac = b"dolgorae-timeline-page-v1\0".to_vec();
+    mac.extend_from_slice(&payload);
+    mac.push(0);
+    mac.extend_from_slice(binding.capability_sha256.as_bytes());
+    forged.after_cursor = format!(
+        "{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&payload),
+        dolgorae::jcs::sha256_hex(&mac)
+    );
+    observation_v2_error(
+        &observations
+            .list_run_timeline_items(forged)
+            .await
+            .unwrap_err(),
+        "EVENT_CURSOR_INVALID",
+    );
+    let other = fixture.start_run(&[]);
+    let mut foreign = next.clone();
+    foreign.run = reference(&other);
+    observation_v2_error(
+        &observations
+            .list_run_timeline_items(foreign)
+            .await
+            .unwrap_err(),
+        "EVENT_CURSOR_INVALID",
+    );
+    let mut stale = next.clone();
+    stale
+        .controller
+        .as_mut()
+        .unwrap()
+        .expected_controller_generation = 2;
+    observation_v2_error(
+        &observations
+            .list_run_timeline_items(stale)
+            .await
+            .unwrap_err(),
+        "CONTROLLER_MISMATCH",
+    );
+
+    let mut latest = base.clone();
+    latest.direction = modern::TimelineDirection::Latest as i32;
+    latest.after_cursor.clear();
+    latest.limit = 2;
+    let tail = observations
+        .list_run_timeline_items(latest.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(tail.items, full.items[full.items.len() - 2..]);
+    if let Some(path) = &capture {
+        fs::write(path.join("timeline-latest.pb"), tail.encode_to_vec()).unwrap();
+        let cases = [
+            ("full", "timeline-full.pb", "0"),
+            ("first", "timeline-first.pb", "0"),
+            ("second", "timeline-second.pb", token.as_str()),
+            ("latest", "timeline-latest.pb", ""),
+        ];
+        let pages=cases.into_iter().map(|(name,file,after)|serde_json::json!({"name":name,"path":path.join(file),"run":id,"after":after})).collect::<Vec<_>>();
+        fs::write(path.join("manifest.json"),serde_json::to_vec_pretty(&serde_json::json!({"schema":"dolgorae.task093-observation-capture/v1","caps":path.join("capabilities.pb"),"pages":pages})).unwrap()).unwrap();
+    }
+
+    // A smaller byte budget recovers complete accepted input through its existing
+    // immutable Controller-only artifact, without a write during observation.
+    let before = audit(&fixture, &id);
+    let mut compact = one.clone();
+    compact.maximum_encoded_bytes = 2000;
+    let compact_page = observations
+        .list_run_timeline_items(compact.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(modern::timeline_item::Content::Artifact(content)) = &compact_page.items[0].content
+    else {
+        panic!("expected existing input artifact");
+    };
+    assert_eq!(content.byte_length, message.len() as u64);
+    assert_eq!(
+        content.sha256,
+        dolgorae::jcs::sha256_hex(message.as_bytes())
+    );
+    assert_eq!(
+        compact_page.encoded_byte_length as usize,
+        compact_page.encoded_len()
+    );
+    assert!(compact_page.encoded_byte_length <= compact.maximum_encoded_bytes);
+    if let Some(path) = &capture {
+        fs::write(
+            path.join("timeline-artifact.pb"),
+            compact_page.encode_to_vec(),
+        )
+        .unwrap();
+        let manifest_path = path.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["pages"].as_array_mut().unwrap().push(serde_json::json!({"name":"artifact-fallback","path":path.join("timeline-artifact.pb"),"run":id,"after":"0"}));
+        fs::write(manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    }
+    let mut byte_page = base.clone();
+    byte_page.maximum_encoded_bytes = compact_page.encoded_byte_length;
+    let clipped = observations
+        .list_run_timeline_items(byte_page)
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(clipped.items.len(), 1);
+    assert_eq!(clipped.items[0].cursor, full.items[0].cursor);
+    let mut byte_follow = base.clone();
+    byte_follow.after_cursor = clipped.next_after_cursor.unwrap();
+    let followed = observations
+        .list_run_timeline_items(byte_follow)
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        followed.items,
+        full.items[1..],
+        "byte clipping skipped an item"
+    );
+    let mut latest_one = latest.clone();
+    latest_one.limit = 1;
+    let newest = observations
+        .list_run_timeline_items(latest_one)
+        .await
+        .unwrap()
+        .into_inner();
+    let mut byte_tail = latest.clone();
+    byte_tail.limit = 100;
+    byte_tail.maximum_encoded_bytes = newest.encoded_byte_length;
+    let clipped_tail = observations
+        .list_run_timeline_items(byte_tail.clone())
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "latest page budget {} newest {newest:?}: {error}",
+                byte_tail.maximum_encoded_bytes
+            )
+        })
+        .into_inner();
+    assert_eq!(
+        clipped_tail.items, newest.items,
+        "latest byte clipping lost the newest suffix"
+    );
+    let mut artifacts =
+        modern::artifact_service_client::ArtifactServiceClient::new(channel.clone());
+    let chunk = artifacts
+        .read_artifact_chunk(modern::ReadArtifactChunkRequest {
+            context: ctx(),
+            run: reference(&id),
+            controller: carrier(),
+            artifact_id: content.artifact_id.clone(),
+            offset: 0,
+            length: message.len() as u32,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(chunk.data, message.as_bytes());
+    let metadata = artifacts
+        .get_artifact(modern::GetArtifactRequest {
+            context: ctx(),
+            run: reference(&id),
+            controller: carrier(),
+            artifact_id: content.artifact_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(metadata.artifact.as_ref().unwrap(), content);
+    let denied = artifacts
+        .get_artifact(modern::GetArtifactRequest {
+            context: ctx(),
+            run: reference(&id),
+            controller: None,
+            artifact_id: content.artifact_id.clone(),
+        })
+        .await
+        .unwrap_err();
+    observation_v2_error(&denied, "INTERACTION_ARTIFACT_REQUIRES_CONTROLLER");
+    let mut old_artifacts =
+        pb::artifact_service_client::ArtifactServiceClient::new(channel.clone());
+    let old_missing = old_artifacts
+        .get_artifact(pb::GetArtifactRequest {
+            context: context(),
+            run: fixture.run_ref(&id),
+            controller: fixture.carrier(),
+            artifact_id: content.artifact_id.clone(),
+        })
+        .await
+        .unwrap_err();
+    semantic_error(&old_missing, "ARTIFACT_NOT_FOUND");
+    let mut compact_next = base.clone();
+    compact_next.after_cursor = compact_page.next_after_cursor.unwrap();
+    let remaining = observations
+        .list_run_timeline_items(compact_next)
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(remaining.items, full.items[1..]);
+    assert_eq!(
+        audit(&fixture, &id),
+        before,
+        "observation changed durable history"
+    );
+    for (request, expected) in [
+        (
+            {
+                let mut r = base.clone();
+                r.context = None;
+                r
+            },
+            "INVALID_ARGUMENT",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.context.as_mut().unwrap().protocol_version = 0;
+                r
+            },
+            "INVALID_ARGUMENT",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.timeline_version = 2;
+                r
+            },
+            "UNSUPPORTED_SCHEMA_VERSION",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.limit = 501;
+                r
+            },
+            "INVALID_ARGUMENT",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.maximum_encoded_bytes = 4 * 1024 * 1024 + 1;
+                r
+            },
+            "INVALID_ARGUMENT",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.maximum_encoded_bytes = 1;
+                r
+            },
+            "SOURCE_TOO_LARGE",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.direction = 99;
+                r
+            },
+            "UNSUPPORTED_SCHEMA_VERSION",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.direction = -1;
+                r
+            },
+            "UNSUPPORTED_SCHEMA_VERSION",
+        ),
+        (
+            {
+                let mut r = latest.clone();
+                r.after_cursor = "0".into();
+                r
+            },
+            "INVALID_ARGUMENT",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.after_cursor = "-1".into();
+                r
+            },
+            "EVENT_CURSOR_INVALID",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.after_cursor = u64::MAX.to_string();
+                r
+            },
+            "EVENT_CURSOR_INVALID",
+        ),
+        (
+            {
+                let mut r = next.clone();
+                r.after_cursor.push('x');
+                r
+            },
+            "EVENT_CURSOR_INVALID",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.controller = None;
+                r
+            },
+            "INTERACTION_FULL_PAYLOAD_REQUIRES_CONTROLLER",
+        ),
+    ] {
+        observation_v2_error(
+            &observations
+                .list_run_timeline_items(request)
+                .await
+                .unwrap_err(),
+            expected,
+        );
+    }
+    let watch = modern::WatchRunEventsRequest {
+        context: ctx(),
+        run: reference(&id),
+        after_cursor: "0".into(),
+        projection: modern::ProjectionProfile::Operational as i32,
+        projection_version: 1,
+    };
+    for (request, expected) in [
+        (
+            {
+                let mut r = watch.clone();
+                r.projection_version = 2;
+                r
+            },
+            "UNSUPPORTED_SCHEMA_VERSION",
+        ),
+        (
+            {
+                let mut r = watch.clone();
+                r.after_cursor = "-1".into();
+                r
+            },
+            "EVENT_CURSOR_INVALID",
+        ),
+        (
+            {
+                let mut r = watch.clone();
+                r.projection = 9000;
+                r
+            },
+            "UNSUPPORTED_SCHEMA_VERSION",
+        ),
+        (
+            {
+                let mut r = watch.clone();
+                r.context = None;
+                r
+            },
+            "INVALID_ARGUMENT",
+        ),
+    ] {
+        let status = match observations.watch_run_events(request).await {
+            Err(e) => e,
+            Ok(v) => v.into_inner().message().await.unwrap_err(),
+        };
+        observation_v2_error(&status, expected);
+    }
+    let mut stream = observations
+        .watch_run_events(watch.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    let event = tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Some(modern::run_event_envelope::Item::DurableEvent(first_event)) = &event.item else {
+        panic!("expected event");
+    };
+    assert_eq!(first_event.projection_version, 1);
+    assert!(first_event.replay);
+    assert_eq!(
+        first_event.stamp.as_ref().unwrap().captured_head_cursor,
+        first_event.cursor
+    );
+    assert!(!format!("{event:?}").contains("private original timeline input"));
+    let cursor = first_event.cursor.clone();
+    drop(stream);
+    let mut resumed = watch.clone();
+    resumed.after_cursor = cursor.clone();
+    let mut stream = observations
+        .watch_run_events(resumed)
+        .await
+        .unwrap()
+        .into_inner();
+    let event = tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    if let Some(modern::run_event_envelope::Item::DurableEvent(event)) = event.item {
+        assert!(event.cursor.parse::<u64>().unwrap() > cursor.parse::<u64>().unwrap());
+    } else {
+        panic!("expected replay after exclusive cursor");
+    }
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        audit(&fixture, &id),
+        before,
+        "stream cancellation changed durable Run state"
+    );
+    // The existing accepted dedicated modern-manifest fixture checks read
+    // admission independently of separately qualified modern startup.
+    let modern_id = fixture.start_run(&["--execution-lane", "dedicated"]);
+    let manifest_path = fixture
+        .state_root
+        .join("runs")
+        .join(&modern_id)
+        .join("manifest.json");
+    let original_manifest = fs::read(&manifest_path).unwrap();
+    let modern_manifest = caller_fixture_manifest(&original_manifest);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec(&modern_manifest).unwrap(),
+    )
+    .unwrap();
+    let mut modern_request = base.clone();
+    modern_request.run = reference(&modern_id);
+    let modern_page = observations.list_run_timeline_items(modern_request).await;
+    let mut modern_watch = watch;
+    modern_watch.run = reference(&modern_id);
+    let modern_stream = observations.watch_run_events(modern_watch).await;
+    fs::write(&manifest_path, original_manifest).unwrap();
+    assert!(modern_page.unwrap().into_inner().items.is_empty());
+    let mut modern_stream = modern_stream.unwrap().into_inner();
+    let event = tokio::time::timeout(Duration::from_secs(5), modern_stream.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event.item,
+        Some(modern::run_event_envelope::Item::DurableEvent(_))
+    ));
+    drop(modern_stream);
+    gateway.terminate();
+    public_v2_timeline_revalidates_actual_controller_reset().await;
+}
+
+/// Change actual durable authority between pages, independently of the older
+/// fixture's Runs and their original Controller cleanup.
+async fn public_v2_timeline_revalidates_actual_controller_reset() {
+    use dolgorae::controller::{
+        CredentialCarrier, authorize_controller, load_reconciled_controller_binding,
+    };
+    use dolgorae::protocol::public_v2 as modern;
+    let mut fixture = Fixture::with_tmp_scenario(timeline_scenario());
+    let id = fixture.start_run(&[]);
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runs = pb::run_service_client::RunServiceClient::new(channel.clone());
+    let initial = native_snapshot(&mut runs, &fixture, &id).await;
+    runs.submit_turn(pb::SubmitTurnRequest {
+        context: context(),
+        run: fixture.run_ref(&id),
+        controller: fixture.carrier(),
+        idempotency_key: "v2-authority-reset-input".into(),
+        write_intent: pb::WriteIntent::Read as i32,
+        message: "Controller reset paging fixture".into(),
+        images: vec![],
+        effort: None,
+        expected_state_revision: initial.state_revision,
+    })
+    .await
+    .unwrap();
+    native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
+    let run_id = Uuid::parse_str(&id).unwrap();
+    let old_snapshot =
+        dolgorae::snapshot::RunSnapshot::load(&fixture.state_root, run_id, 0).unwrap();
+    let old_binding = old_snapshot.controller_authority().unwrap().clone();
+    let old_carrier = CredentialCarrier::open_path(&fixture.controller)
+        .unwrap()
+        .with_expected_generation(old_binding.identity.generation);
+    authorize_controller(run_id, "run.timeline.list", &old_binding, &old_carrier).unwrap();
+    let context = Some(modern::RequestContext {
+        protocol_version: 2,
+        client_request_id: Uuid::now_v7().to_string(),
+        client_instance_id: "controller-reset-paging".into(),
+    });
+    let old_reference = modern::ControllerCarrierRef {
+        absolute_file_path: fixture.controller.to_string_lossy().into(),
+        expected_controller_id: old_binding.identity.controller_id.to_string(),
+        expected_controller_generation: old_binding.identity.generation,
+    };
+    let base = modern::ListRunTimelineItemsRequest {
+        context,
+        run: Some(modern::RunRef {
+            workspace: Some(modern::WorkspaceRef {
+                absolute_path: fixture.workspace.to_string_lossy().into(),
+                expected_workspace_id: fixture.workspace_id.clone(),
+            }),
+            run_id: id.clone(),
+        }),
+        controller: Some(old_reference),
+        after_cursor: "0".into(),
+        limit: 1,
+        timeline_version: 1,
+        direction: modern::TimelineDirection::Forward as i32,
+        maximum_encoded_bytes: 0,
+    };
+    let mut observations =
+        modern::observation_service_client::ObservationServiceClient::new(channel);
+    let first = observations
+        .list_run_timeline_items(base.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(first.items.len(), 1);
+    let token = first.next_after_cursor.clone().unwrap();
+    let replacement = fixture
+        .controller
+        .parent()
+        .unwrap()
+        .join("replacement.json");
+    let created = fixture.cli(&[
+        "controller",
+        "credential",
+        "create",
+        "--kind",
+        "automation",
+        "--instance-id",
+        "gateway-native-test",
+        "--output",
+        replacement.to_str().unwrap(),
+    ]);
+    let reset = fixture.cli(&[
+        "run",
+        "controller",
+        "reset",
+        &id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--confirm",
+        &id,
+        "--operator-file",
+        fixture.operator.to_str().unwrap(),
+        "--new-controller-file",
+        replacement.to_str().unwrap(),
+    ]);
+    // This fixture has exactly one Run. Its normal cleanup must use the actual
+    // replacement carrier immediately after the committed production reset.
+    fixture.controller = replacement;
+    fixture.controller_id = created["controller"]["controller_id"]
+        .as_str()
+        .unwrap()
+        .into();
+    let generation = reset["generation"].as_u64().unwrap();
+    let current_binding = load_reconciled_controller_binding(&fixture.state_root, run_id).unwrap();
+    assert_ne!(
+        old_binding.identity.controller_id,
+        current_binding.identity.controller_id
+    );
+    assert_ne!(
+        old_binding.capability_sha256,
+        current_binding.capability_sha256
+    );
+    assert_eq!(
+        current_binding.identity.controller_id.to_string(),
+        fixture.controller_id
+    );
+    assert_eq!(current_binding.identity.generation, generation);
+    // The guard's existing fresh-binding primitive also rejects a carrier held
+    // open before the reset; an old captured snapshot is no authority afterward.
+    let stale = authorize_controller(run_id, "run.timeline.list", &current_binding, &old_carrier)
+        .unwrap_err();
+    assert_eq!(stale.code, "CONTROLLER_MISMATCH");
+    let fresh_snapshot =
+        dolgorae::snapshot::RunSnapshot::load(&fixture.state_root, run_id, 0).unwrap();
+    assert_ne!(old_snapshot.controller, fresh_snapshot.controller);
+    let mut obsolete = base.clone();
+    obsolete.after_cursor = token.clone();
+    observation_v2_error(
+        &observations
+            .list_run_timeline_items(obsolete)
+            .await
+            .unwrap_err(),
+        "CONTROLLER_MISMATCH",
+    );
+    let mut current = base;
+    current.controller = Some(modern::ControllerCarrierRef {
+        absolute_file_path: fixture.controller.to_string_lossy().into(),
+        expected_controller_id: fixture.controller_id.clone(),
+        expected_controller_generation: generation,
+    });
+    let mut obsolete_token = current.clone();
+    obsolete_token.after_cursor = token;
+    observation_v2_error(
+        &observations
+            .list_run_timeline_items(obsolete_token)
+            .await
+            .unwrap_err(),
+        "EVENT_CURSOR_INVALID",
+    );
+    let fresh = observations
+        .list_run_timeline_items(current)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(fresh.complete_page);
+    assert_eq!(fresh.items, first.items);
+
+    assert_eq!(fresh.encoded_byte_length as usize, fresh.encoded_len());
+    if let Some(path) = std::env::var_os("DOLGORAE_OBSERVATION_CAPTURE") {
+        fs::write(std::path::PathBuf::from(path).join("controller-reset.json"),serde_json::to_vec_pretty(&serde_json::json!({"schema":"dolgorae.task093-controller-reset-evidence/v1",
+            "fixture_root":fixture.root,"run_id":id,"first_page_head":first.captured_head_cursor,"old_controller_id":old_binding.identity.controller_id,"old_generation":old_binding.identity.generation,
+            "new_controller_id":current_binding.identity.controller_id,"new_generation":generation,"capability_changed":true,"production_reset_operation":reset["operation_id"],
+            "obsolete_carrier":"CONTROLLER_MISMATCH","new_carrier_old_token":"EVENT_CURSOR_INVALID","held_old_carrier_fresh_binding":"CONTROLLER_MISMATCH","fresh_authorized_page":true,"fresh_page_stamp":fresh.stamp.as_ref().unwrap().run_state_revision})).unwrap()).unwrap();
+    }
+    gateway.terminate();
+}

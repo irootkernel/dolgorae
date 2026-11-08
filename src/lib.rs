@@ -21,6 +21,7 @@ pub mod fault;
 pub mod gateway;
 pub mod gateway_event;
 pub mod gateway_observation;
+pub(crate) mod gateway_observation_v2;
 pub mod gateway_projection;
 pub mod gateway_projection_v2;
 pub mod gateway_service;
