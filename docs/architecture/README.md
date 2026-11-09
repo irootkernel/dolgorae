@@ -2068,6 +2068,24 @@ expiry before the final proof from expiry after it. The private refusal retains
 the starting budget, elapsed proof time (null when the proof did not run) and
 deadline overrun. The final strict proof and original deadline remain unchanged.
 
+Post-start caller policy proofs can admit the one resident Code Mode host of
+the exact qualified 0.164.0 executable pair under CW-WRITER. The serialized
+coordinator first proves idle state, no pending interactions and the sole
+original native Thread. Qualification covers completion/cancellation of Code
+Mode isolates, including yielded cells and unawaited work; a yielded native
+command remains workload even after its Turn completes. The process proof
+captures the pinned sibling image and direct Dedicated ancestry, then verifies
+one unchanged PID/birth/UID/parent/group/session and executable device/inode
+through five full census samples. Every other descendant still refuses.
+The coordinator applies the same policy-specific census only after binding the
+returned proof to its current authoritative Controller, Writer, runtime, socket,
+policy and original Thread/projection. This includes the final active-Writer
+reuse check; it cannot fall back to the generic empty-workload predicate for a
+qualified resident host. Generic background and generation-absence checks retain
+their strict meaning. Generation retirement
+retains the host with all descendants and proves their absence using the
+existing durable scope owner before Writer release.
+
 For a prepared writable Send or Submit that reuses an active Writer, the CLI
 wraps policy verification in the existing admitted-mutation request. The Worker
 validates the exact admission, Controller and write intent before verification;

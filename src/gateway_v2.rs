@@ -406,7 +406,22 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
             | "GroupService.MergeGroupResults"
             | "GroupService.AssignSynthesis"
     ) && error.details["public_v2_accepted"] == true;
-    let accepted = accepted_start || accepted_submit || accepted_resolve || accepted_group;
+    let retained_close = matches!(
+        method,
+        "RunService.CloseRun" | "RunService.RecoverRun" | "RunService.ReconcileRun"
+    ) && run_id.is_some()
+        && error.details["schema"] == "dolgorae-session-close-error-details/v1"
+        && error.details["operation_id"]
+            .as_str()
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+    // A live-owner refusal precedes admission of this request's interrupt
+    // choice. Its stored operation does not prove this request was accepted.
+    let close_snapshot = retained_close && wire_code == "SESSION_CLOSE_IN_PROGRESS";
+    let accepted_close = retained_close
+        && wire_code == "RECOVERY_REQUIRED"
+        && error.details["progress"] != "outcome_unknown";
+    let accepted =
+        accepted_start || accepted_submit || accepted_resolve || accepted_group || accepted_close;
     let unknown = mutating
         && (!accepted || accepted_resolve)
         && matches!(
@@ -459,7 +474,7 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         } else {
             pb::FailureClassification::Rejected
         } as i32,
-        action: if stream_rebase {
+        action: if stream_rebase || close_snapshot {
             pb::RequiredClientAction::RefreshSnapshot
         } else if stream_reconnect {
             pb::RequiredClientAction::ReconnectFromCommittedCursor
@@ -473,7 +488,7 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
             pb::RequiredClientAction::FixRequest
         } as i32,
         retry_classification: pb::RetryClassification::Forbidden as i32,
-        recovery_classification: if stream_rebase {
+        recovery_classification: if stream_rebase || close_snapshot {
             pb::RecoveryClassification::SnapshotRequired
         } else if unknown || accepted_submit || accepted_resolve {
             pb::RecoveryClassification::ReconcileRequired
@@ -3001,6 +3016,121 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&rich.details[0].value)
         );
         pb::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap()
+    }
+
+    #[test]
+    fn retained_close_recovery_preserves_effect_and_rejected_intent_boundaries() {
+        let run = uuid::Uuid::now_v7().to_string();
+        let operation = uuid::Uuid::now_v7().to_string();
+        let details = serde_json::json!({
+            "schema":"dolgorae-session-close-error-details/v1",
+            "run_id":run,"operation_id":operation,"progress":"recovery_required",
+            "interrupt":true,"required_action":"recover_run"
+        });
+        for method in [
+            "RunService.CloseRun",
+            "RunService.RecoverRun",
+            "RunService.ReconcileRun",
+        ] {
+            let error = MachineError::new(
+                "RECOVERY_REQUIRED",
+                "retained close",
+                false,
+                details.clone(),
+            );
+            let projected = detail(&error_status(&error, method), "retained-close-recovery");
+            assert_eq!(projected.effect, pb::EffectState::Accepted as i32);
+            assert_eq!(
+                projected.classification,
+                pb::FailureClassification::RecoveryNeeded as i32
+            );
+            assert_eq!(
+                projected.action,
+                pb::RequiredClientAction::RecoverRun as i32
+            );
+            assert_eq!(
+                projected.retry_classification,
+                pb::RetryClassification::Forbidden as i32
+            );
+            assert_eq!(projected.run_id.as_deref(), Some(run.as_str()));
+            // Close remains an S-method; no keyed operation is invented.
+            assert!(projected.operation.is_none());
+            assert!(projected.idempotency_key.is_none());
+        }
+        for change in 0..4 {
+            let mut missing = details.clone();
+            match change {
+                0 => missing["schema"] = serde_json::Value::Null,
+                1 => missing["operation_id"] = serde_json::Value::Null,
+                2 => missing["operation_id"] = serde_json::json!("invalid-operation"),
+                _ => missing["run_id"] = serde_json::Value::Null,
+            }
+            let error = MachineError::new("RECOVERY_REQUIRED", "unbound", false, missing);
+            assert_eq!(
+                detail(
+                    &error_status(&error, "RunService.CloseRun"),
+                    "unbound-close"
+                )
+                .effect,
+                pb::EffectState::None as i32,
+            );
+        }
+        let error = MachineError::new(
+            "RECOVERY_REQUIRED",
+            "different method",
+            false,
+            details.clone(),
+        );
+        assert_eq!(
+            detail(&error_status(&error, "RunService.PauseRun"), "not-close").effect,
+            pb::EffectState::None as i32
+        );
+        let wrong_choice = MachineError::new(
+            "RUN_STATE_CONFLICT",
+            "different interrupt",
+            false,
+            details.clone(),
+        );
+        let rejected = detail(
+            &error_status(&wrong_choice, "RunService.CloseRun"),
+            "wrong-close-choice",
+        );
+        assert_eq!(rejected.effect, pb::EffectState::None as i32);
+        assert_eq!(
+            rejected.classification,
+            pb::FailureClassification::Rejected as i32
+        );
+        assert_eq!(rejected.action, pb::RequiredClientAction::FixRequest as i32);
+        let unknown = MachineError::new("OUTCOME_UNKNOWN", "unknown close", false, details.clone());
+        let unresolved = detail(
+            &error_status(&unknown, "RunService.CloseRun"),
+            "unknown-close",
+        );
+        assert_eq!(unresolved.effect, pb::EffectState::Unresolved as i32);
+        assert_eq!(
+            unresolved.classification,
+            pb::FailureClassification::Unknown as i32
+        );
+        assert_eq!(
+            unresolved.action,
+            pb::RequiredClientAction::ReconcileOperation as i32
+        );
+        // A contending request has not had its interrupt choice admitted.
+        // Stored intent, even with a valid operation, cannot accept that request.
+        let busy = MachineError::new("SESSION_CLOSE_IN_PROGRESS", "live owner", false, details);
+        let snapshot = detail(
+            &error_status(&busy, "RunService.CloseRun"),
+            "live-close-owner",
+        );
+        assert_eq!(snapshot.effect, pb::EffectState::None as i32);
+        assert_eq!(
+            snapshot.action,
+            pb::RequiredClientAction::RefreshSnapshot as i32
+        );
+        assert_eq!(
+            snapshot.recovery_classification,
+            pb::RecoveryClassification::SnapshotRequired as i32
+        );
     }
 
     #[test]

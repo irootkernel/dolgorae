@@ -791,6 +791,22 @@ regression. Qualified fixture cleanup selects the retained
 accepted binding and uses the existing operator-authorized non-interrupting
 stop; generic name-based Profile commands retain their generic contract.
 
+## Qualified resident code-mode host
+
+Native Thread idle does not prove that background work has ended. A completed
+code-mode call can leave a native shell job running. Caller policy verification
+may distinguish only the exact qualified resident host under the
+[caller-workspace proof](../specs/caller-workspaces-v1.md); every other scoped
+process remains subject to the complete census. Generic background and process
+absence observations retain their stricter meaning.
+
+Do not stop the companion between Turns to make a Submit succeed. Close and
+Recover retain the original Controller, Run and Thread identities and the
+accepted interrupt choice. Caller-workspace generations 3 and 4 share that
+lifecycle, while generation 4 retains its delegation instructions. Writer release
+and generation retirement still require their full owned-scope proofs; host
+admission during a policy check never proves physical cleanup.
+
 ## Successor read-only pool and capacity
 
 Public-v2 clients negotiate protocol 2, the checked descriptor digest, credential

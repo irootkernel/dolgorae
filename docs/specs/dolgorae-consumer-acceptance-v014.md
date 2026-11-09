@@ -194,6 +194,10 @@ requalify affected mandatory Aquarium/Podway paths on the exact replacement
 image. A separate H3 correction Handoff identifies both artifacts and unchanged
 H1; Gul owns replacement selection and affected product requalification. No
 source check, provider review or handoff acknowledgement grants Gul acceptance.
+TASK-094 applies the same replacement and evidence-applicability rules to the
+subsequent sequential-Turn and schema-4 lifecycle correction. Its reply to the
+original Gul correction request must identify the qualified replacement and
+preserved inputs, changes and verification limits.
 
 Gul produces its final implementation revision, exact v0.1.0 artifact/package
 checksums and complete own campaign in Phase 4/H4, bound to unchanged H3 and H1.

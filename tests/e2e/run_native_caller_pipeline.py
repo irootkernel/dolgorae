@@ -110,9 +110,54 @@ class InteractionResponses(ScriptedResponses):
         super().close()
 
 
-def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1, interactions: bool = False, mcp_only: bool = False) -> dict[str, object]:
+class SessionResponses(InteractionResponses):
+    """Actual shell write, two typed interactions and an interruptible request."""
+    def respond(self, request):
+        from run_native_workspace_policy_fixture import code_call, code_results, terminal_output
+        import shlex
+        with self.lock:
+            self.posts += 1
+            if self.posts > 10 or not isinstance(request, dict):
+                raise ValueError("session fixture request bound")
+            users = [v for v in request.get("input", []) if v.get("type") == "message" and v.get("role") == "user"]
+            text = json.dumps(users[-1]) if users else ""
+            case = next((v for v in ("first-write", "background", "permission", "mcp", "interrupt") if "TASK094 " + v in text), None)
+            if case is None:
+                raise ValueError("session task correlation")
+            call_id = "task094-" + case
+            if case not in self.issued_cases:
+                self.issued_cases.add(case)
+                if case == "first-write":
+                    command = "printf task094-write > " + shlex.quote(str(self.workspace / "task094-write"))
+                    item = code_call(request, call_id, [(case, "exec_command", {"cmd": command, "yield_time_ms": 1000})])
+                elif case == "background":
+                    command = "printf '%s' \"$$\" > " + shlex.quote(str(self.workspace / "task094-background-pid")) + "; sleep 10; printf done > " + shlex.quote(str(self.workspace / "task094-background-done"))
+                    item = code_call(request, call_id, [(case, "exec_command", {"cmd": command, "yield_time_ms": 250})])
+                elif case in ("permission", "interrupt"):
+                    item = code_call(request, call_id, [(case, "request_permissions", {"permissions":{"file_system":{"read":[str(self.workspace)]}}, "reason":"Bounded session read permission"})])
+                else:
+                    item = {"type":"custom_tool_call", "call_id":call_id, "name":"exec", "namespace":"functions",
+                            "input":"text({label:'mcp',result:await tools.mcp__fixture__ask({})});"}
+            else:
+                if case == "first-write":
+                    result = code_results(request, call_id, [case])[case]
+                    if terminal_output(result)[0] != 0 or (self.workspace / "task094-write").read_bytes() != b"task094-write":
+                        raise ValueError("native first WRITE unproved")
+                if case == "background":
+                    result = code_results(request, call_id, [case])[case]
+                    if type(result.get("session_id")) is not int or (self.workspace / "task094-background-done").exists():
+                        raise ValueError("yielded child not observed")
+                self.completed_cases.add(case)
+                item = {"type":"message", "role":"assistant", "id":call_id+"-final", "content":[{"type":"output_text","text":"TASK094 "+case+" final"}]}
+            identity = "task094-response-" + str(self.posts)
+            return [{"type":"response.created","response":{"id":identity}}, {"type":"response.output_item.done","item":item}, {"type":"response.completed","response":{"id":identity,"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}]
+
+
+def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1, interactions: bool = False, mcp_only: bool = False, task094_session: bool = False) -> dict[str, object]:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit native caller pipeline opt-in required")
+    if task094_session and (binary is None or readonly_pool or interactions or default_variant is not None):
+        raise ValueError("session proof requires the ordinary binary and its own mode")
     if executable_identity(codex)["sha256"] != CODEX_SHA256:
         raise ValueError("native caller pipeline requires the exact qualified executable")
     scratch = Path(tempfile.mkdtemp(prefix="dcp-", dir=os.environ["TMPDIR"])).resolve()
@@ -132,7 +177,7 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
             environment["DOLGORAE_NATIVE_READONLY_POOL"] = "1"
             private_file(scratch / "pool-limit", str(pool_limit).encode())
         checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
-        fixture = InteractionResponses(scratch / "home/workspace") if interactions else ScriptedResponses()
+        fixture = SessionResponses(scratch / "home/workspace") if task094_session else InteractionResponses(scratch / "home/workspace") if interactions else ScriptedResponses()
         if default_variant is not None:
             if default_variant not in DEFAULT_FEATURE_VARIANTS:
                 raise ValueError("unknown default-feature variant")
@@ -142,7 +187,7 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
             if readonly_pool and name == "fixture-b":
                 config += b'model_context_window = 65536\n'
             config += fixture_config(fixture.base_url)
-            if interactions:
+            if interactions or task094_session:
                 config += (f'\n[mcp_servers.fixture]\nurl = "http://127.0.0.1:{fixture.mcp_http.server_port}/mcp"\ndefault_tools_approval_mode = "approve"\n').encode()
             config += b'\n[features]\n'
             if default_variant is None:
@@ -151,7 +196,7 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
                 config += b'shell_snapshot = true\n'
             elif default_variant is None:
                 config += b'shell_snapshot = false\n'
-                if interactions:
+                if interactions or task094_session:
                     config += b'request_permissions_tool = true\ntool_search_always_defer_mcp_tools = false\n'
             private_file(scratch / name / "config.toml", config)
             private_file(scratch / name / "AGENTS.md", b"Permitted isolated native Profile guidance.\n")
@@ -166,13 +211,15 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
             fixture.instruction_markers = {"common": "Follow the current task and the selected Role", "role": "POOL_EXPLICIT_ROLE", "profile": "Permitted isolated native Profile guidance.", "project": "Conflicting isolated project instructions.", "ancestor": "Conflicting isolated ancestor instructions."}
         if interactions:
             private_file(scratch / "interaction-cases", b"mcp\n" if mcp_only else b"permission,mcp\n")
+        if task094_session:
+            private_file(scratch / "task094-session", b"permission,mcp\n")
         result = subprocess.run([str(driver), str(scratch), str(codex)], env=environment,
                                 capture_output=True, text=True, timeout=None if binary is not None else 300)
         private_file(scratch / "driver.stdout", result.stdout.encode())
         private_file(scratch / "driver.stderr", result.stderr.encode())
-        if interactions:
+        if interactions or task094_session:
             private_file(scratch / "interaction-diagnostic.json", json.dumps({"failure":fixture.failure,"details":fixture.failure_details,"issued_cases":sorted(fixture.issued_cases),"completed_cases":sorted(fixture.completed_cases),"mcp_decision":fixture.mcp_decision,"posts":fixture.posts}).encode())
-        if result.returncode or fixture.failure or (not readonly_pool and not interactions and fixture.posts):
+        if result.returncode or fixture.failure or (not readonly_pool and not interactions and not task094_session and fixture.posts):
             raise ValueError("native caller pipeline failed; no automatic retry")
         if readonly_pool:
             if (fixture.result is None or fixture.result[0] == 0 or fixture.posts != 2
@@ -185,6 +232,21 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
         observations = json.loads(result.stdout)
         if observations.get("schema") != "dolgorae.native-caller-pipeline/v1":
             raise ValueError("native caller pipeline observation shape invalid")
+        if interactions and not mcp_only and observations.get("sequential_write_admissions_verified") is not True:
+            raise ValueError("sequential WRITE admission unproved")
+        if task094_session:
+            required = ("first_write_verified", "sequential_write_admissions_verified", "schema4_primary",
+                        "gateway_replacement_original_identity", "recover_original_identity",
+                        "healthy_recover_refused", "idle_worker_loss_verified",
+                        "idle_close_writer_released", "interrupt_close_writer_released", "owned_generations_absent",
+                        "background_work_refused", "natural_child_exit_before_next_write")
+            if (observations.get("mode") != "task094_session"
+                    or any(observations.get(k) is not True for k in required)
+                    or not {"first-write", "background", "permission", "mcp"} <= fixture.completed_cases
+                    or "interrupt" not in fixture.issued_cases or fixture.mcp_decision != "accept"
+                    or not 9 <= fixture.posts <= 10
+                    or (scratch / "home/workspace/task094-write").read_bytes() != b"task094-write"):
+                raise ValueError("schema-4 native session proof incomplete")
         if (scratch / "cleanup-result").read_bytes() != b"complete\n":
             raise ValueError("native caller pipeline cleanup incomplete")
         if default_variant is not None:
@@ -196,6 +258,9 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
                             codex_version=CODEX_VERSION, profile_capability_mutated=False)
         if binary is not None:
             observations["ordinary_product"] = {"path": str(binary), "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+        if task094_session:
+            observations["evidence_root"] = str(scratch)
+            observations["cleanup_complete"] = True
         if default_variant is not None:
             observations.update(external_provider_requests=None, other_network_metered=False,
                                 scripted_model_provider_requests=fixture.posts,
@@ -207,7 +272,10 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
             fixture.close()
         cleanup = scratch / "cleanup-result"
         if passed and cleanup.is_file() and cleanup.read_bytes() == b"complete\n":
-            shutil.rmtree(scratch)
+            if not task094_session:
+                shutil.rmtree(scratch)
+            # TASK094 retains original evidence for review and the Gul handoff.
+            # Cleanup has already settled its logical and physical resources.
         else:
             # Retain failed fixture evidence and any unresolved managed runtime.
             print(json.dumps({"schema": "dolgorae.native-caller-pipeline-failure/v1",
@@ -330,6 +398,7 @@ def main() -> int:
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--default-feature-startup-only", action="store_true")
     parser.add_argument("--readonly-pool", action="store_true")
+    parser.add_argument("--task094-session", action="store_true")
     parser.add_argument("--interactions", action="store_true")
     parser.add_argument("--interactions-mcp-only", action="store_true")
     parser.add_argument("--pool-limit", type=int, choices=(1, 4), default=1)
@@ -339,6 +408,8 @@ def main() -> int:
         kwargs = {"readonly_pool": True, "pool_limit": args.pool_limit} if args.readonly_pool else {}
         if args.interactions or args.interactions_mcp_only:
             kwargs = {"interactions": True, "mcp_only": args.interactions_mcp_only}
+        if args.task094_session:
+            kwargs["task094_session"] = True
         if args.binary is not None:
             kwargs["binary"] = args.binary
         observations = selected(args.driver.resolve(strict=True), args.codex.resolve(strict=True), **kwargs)

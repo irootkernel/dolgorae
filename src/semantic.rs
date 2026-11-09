@@ -2092,11 +2092,12 @@ fn control_closing_root(
     require_workspace_identity(&view, Some(&snapshot.manifest.workspace_id))?;
     match action {
         SessionCloseAction::Close { interrupt } => {
-            let control = if snapshot.manifest.schema_version == 3 {
-                run_control_admitted
-            } else {
-                run_control_typed
-            };
+            let control =
+                if crate::run::is_caller_workspace_generation(snapshot.manifest.schema_version) {
+                    run_control_admitted
+                } else {
+                    run_control_typed
+                };
             control(
                 &view,
                 state_root,
@@ -2109,7 +2110,7 @@ fn control_closing_root(
             )?;
         }
         SessionCloseAction::Recover { reconcile } => {
-            if snapshot.manifest.schema_version != 3 {
+            if !crate::run::is_caller_workspace_generation(snapshot.manifest.schema_version) {
                 snapshot.manifest.require_legacy_adapter()?;
             }
             history_reconciliation_with_lifecycle(
@@ -2175,7 +2176,7 @@ pub(crate) fn coordinate_session_close(
                 crate::orchestration::OrchestrationStore::open_observer(state_root)
                     .and_then(|store| store.session_close(run_id))
         {
-            if snapshot.manifest.schema_version == 3 {
+            if crate::run::is_caller_workspace_generation(snapshot.manifest.schema_version) {
                 return modern_close_error(
                     run_id,
                     action,
@@ -2221,7 +2222,7 @@ pub(crate) fn coordinate_session_close(
         return Err(error);
     }
     let snapshot = RunSources::load(state_root, run_id, 0)?;
-    if snapshot.manifest.schema_version != 3 {
+    if !crate::run::is_caller_workspace_generation(snapshot.manifest.schema_version) {
         return Err(error);
     }
     snapshot.authorize_current_controller(
@@ -2404,10 +2405,7 @@ fn coordinate_session_close_inner(
         }
     };
     if matches!(close.progress.as_str(), "completed" | "aborted") {
-        // The successful session receipt remains immutable; only its pending
-        // Profile release is retried. Observation retains any cleanup failure.
-        let _ = release_global_run_membership(state_root, &snapshot.manifest, run_id);
-        store.complete_session_close(run_id)?;
+        finish_retained_primary_close(state_root, &snapshot, lifecycle, &mut store)?;
         return Ok(Some(close.operation_id));
     }
     let mut effects = ProductionOrchestrationEffects::new(state_root);
@@ -2425,7 +2423,8 @@ fn coordinate_session_close_inner(
             json!({"run_id":run_id,"operation_id":close.operation_id,"required_action":"reconcile_run"}),
         ));
     }
-    if current.manifest.schema_version == 3 && current.projection.lifecycle != RunLifecycle::Closed
+    if crate::run::is_caller_workspace_generation(current.manifest.schema_version)
+        && current.projection.lifecycle != RunLifecycle::Closed
     {
         let workspace = current.manifest.canonical_workspace.to_path_buf()?;
         let view = WorkspaceService::system()?.discover(Some(&workspace))?;
@@ -2453,6 +2452,7 @@ fn coordinate_session_close_inner(
                         json!({"run_id":run_id,"operation_id":close.operation_id,"required_action":"reconcile_run"}),
                     ));
                 }
+                require_primary_close_terminal(&current.projection, &close)?;
             }
             if current
                 .writer
@@ -2523,8 +2523,97 @@ fn coordinate_session_close_inner(
             json!({"run_id":run_id,"operation_id":close.operation_id,"required_action":"recover_run"}),
         ));
     }
+    if crate::run::is_caller_workspace_generation(settled.manifest.schema_version) {
+        finish_closed_primary_cleanup(state_root, &settled, lifecycle)?;
+    }
     store.complete_session_close(run_id)?;
     Ok(Some(close.operation_id))
+}
+
+/// Both terminal Close receipts retain their original operation identity.
+/// A legacy root keeps its existing membership-only continuation behavior.
+fn finish_retained_primary_close(
+    state_root: &Path,
+    snapshot: &RunSources,
+    lifecycle: &crate::worker::RunLifecycleLease,
+    store: &mut crate::orchestration::OrchestrationStore,
+) -> Result<(), MachineError> {
+    let run_id = snapshot.manifest.run_id;
+    if crate::run::is_caller_workspace_generation(snapshot.manifest.schema_version) {
+        finish_closed_primary_cleanup(state_root, snapshot, lifecycle)?;
+    } else {
+        let _ = release_global_run_membership(state_root, &snapshot.manifest, run_id);
+    }
+    store.complete_session_close(run_id)?;
+    Ok(())
+}
+
+fn finish_closed_primary_cleanup(
+    state_root: &Path,
+    snapshot: &RunSources,
+    lifecycle: &crate::worker::RunLifecycleLease,
+) -> Result<(), MachineError> {
+    let run_id = snapshot.manifest.run_id;
+    if !is_orchestrated_root(&snapshot.manifest)
+        || snapshot.projection.lifecycle != RunLifecycle::Closed
+    {
+        return Err(run_state_conflict_error(
+            run_id,
+            snapshot.projection.lifecycle,
+            "run.close",
+        ));
+    }
+    lifecycle
+        .verify_scope(state_root, &snapshot.manifest.workspace_id, run_id)
+        .map_err(|error| error.machine_error(run_id, state_root))?;
+    let writer = crate::writer::WriterStore::new(
+        state_root,
+        &snapshot.manifest.workspace_id,
+        DarwinSystem.current_uid(),
+    )
+    .load()?;
+    if writer
+        .holder
+        .as_ref()
+        .is_some_and(|holder| holder.run_id == run_id)
+    {
+        return Err(MachineError::new(
+            "RECOVERY_REQUIRED",
+            "closed Primary still retains Writer authority",
+            false,
+            json!({"run_id":run_id,"required_action":"recover_run"}),
+        ));
+    }
+    verify_closed_run_runtime(
+        state_root,
+        run_id,
+        MissingLocatorRule::ProveGenerationAbsent,
+    )?;
+    release_global_run_membership(state_root, &snapshot.manifest, run_id)?;
+    closed_membership_released(state_root, &snapshot.manifest, run_id)
+}
+
+/// Interrupt acknowledgement permits observation, not early Writer release.
+fn require_primary_close_terminal(
+    projection: &crate::projection::RunStateProjection,
+    close: &crate::orchestration::SessionCloseSnapshot,
+) -> Result<(), MachineError> {
+    if projection.active_turn_id.is_some()
+        || !projection.pending_requests.is_empty()
+        || !matches!(
+            projection.lifecycle,
+            RunLifecycle::Idle | RunLifecycle::Paused | RunLifecycle::Closed
+        )
+    {
+        return Err(MachineError::new(
+            "RECOVERY_REQUIRED",
+            "Primary interruption is acknowledged; terminal state must be observed before Writer release",
+            false,
+            json!({"run_id":close.session_id,"operation_id":close.operation_id,
+                "reason":"primary_interrupt_terminal_pending","required_action":"recover_run"}),
+        ));
+    }
+    Ok(())
 }
 
 fn mutate_bound_run(input: RunMutationInput) -> Result<RunMutationReceipt, MachineError> {
@@ -2532,7 +2621,7 @@ fn mutate_bound_run(input: RunMutationInput) -> Result<RunMutationReceipt, Machi
     require_workspace_identity(&view, Some(&input.expected_workspace_id))?;
     let root = workspace_state_root(&view)?;
     let manifest = RunStore::new(SystemWorkspacePlatform, root).load_manifest(input.run_id)?;
-    if manifest.schema_version == 3 {
+    if crate::run::is_caller_workspace_generation(manifest.schema_version) {
         CoreSemanticService.mutate_caller_run(input)
     } else {
         CoreSemanticService.mutate_run(input)
@@ -2543,10 +2632,10 @@ fn modern_session_close_value(
     state_root: &Path,
     snapshot: &RunSources,
 ) -> Result<Value, MachineError> {
-    let mut value = snapshot.caller_access_value_at(projection_identity_verdict(
-        state_root,
-        snapshot.manifest.run_id,
-    ));
+    let mut value = snapshot.run_value(
+        projection_identity_verdict(state_root, snapshot.manifest.run_id),
+        Value::Null,
+    );
     if is_orchestrated_root(&snapshot.manifest) {
         let close = crate::orchestration::OrchestrationStore::open_observer(state_root)?
             .session_close(snapshot.manifest.run_id)?;
@@ -2575,6 +2664,8 @@ pub(crate) fn observed_close_progress<'a>(
             .load_manifest(run_id)
             .is_ok_and(|manifest| {
                 closed_membership_released(state_root, &manifest, run_id).is_err()
+                    || (crate::run::is_caller_workspace_generation(manifest.schema_version)
+                        && prove_closed_primary_generation_absent(state_root, run_id).is_err())
             })
     {
         return "recovery_required";
@@ -4918,7 +5009,7 @@ fn run_history_reconciliation(
     let run_id = positional_run_id(args)?;
     let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
     let manifest = RunStore::new(SystemWorkspacePlatform, &state_root).load_manifest(run_id)?;
-    if manifest.schema_version == 3
+    if crate::run::is_caller_workspace_generation(manifest.schema_version)
         && is_orchestrated_root(&manifest)
         && coordinate_session_close(
             &state_root,
@@ -5425,7 +5516,7 @@ fn history_reconciliation_with_lifecycle(
         crate::worker::read_runtime_record(&runtime_path, DarwinSystem.current_uid()).ok()
     };
     if projection.lifecycle == RunLifecycle::Idle
-        && store.load_manifest(run_id)?.schema_version == 3
+        && crate::run::is_caller_workspace_generation(store.load_manifest(run_id)?.schema_version)
         && runtime.as_ref().is_some_and(|record| {
             !record.control_recovery_required
                 && crate::worker::classify_worker_identity(record)
@@ -7465,7 +7556,7 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
     if verb == RunVerb::Close {
         let snapshot = RunSources::load(&state_root, run_id, 0)?;
         if is_orchestrated_root(&snapshot.manifest) {
-            if snapshot.manifest.schema_version == 3 {
+            if crate::run::is_caller_workspace_generation(snapshot.manifest.schema_version) {
                 let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
                 coordinate_session_close(
                     &state_root,
@@ -7586,7 +7677,7 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
             return Ok(result);
         }
         let snapshot = RunSources::load(&state_root, run_id, 0)?;
-        if snapshot.manifest.schema_version == 3
+        if crate::run::is_caller_workspace_generation(snapshot.manifest.schema_version)
             && is_orchestrated_root(&snapshot.manifest)
             && matches!(result, SemanticResult::Run(_))
         {
@@ -7799,6 +7890,30 @@ fn run_control_admitted(
             .is_ok_and(|projection| projection.lifecycle == RunLifecycle::Closed)
         && let SemanticResult::Run(value) = &mut result
     {
+        if verb == RunVerb::Close {
+            let manifest =
+                RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
+            if crate::run::is_caller_workspace_generation(manifest.schema_version) {
+                let writer = crate::writer::WriterStore::new(
+                    state_root,
+                    &manifest.workspace_id,
+                    DarwinSystem.current_uid(),
+                )
+                .load()?;
+                if writer
+                    .holder
+                    .as_ref()
+                    .is_some_and(|holder| holder.run_id == run_id)
+                {
+                    return Err(MachineError::new(
+                        "RECOVERY_REQUIRED",
+                        "closed Run retains Writer authority before Profile retirement",
+                        false,
+                        json!({"run_id":run_id,"required_action":"recover_run"}),
+                    ));
+                }
+            }
+        }
         let settled = retire_closed_profile_membership(state_root, run_id, verb);
         if settled.is_err() && value.get("state").is_none() {
             let snapshot = RunSources::load(state_root, run_id, 0)?;
@@ -8010,6 +8125,48 @@ fn run_control_admitted_with_lifecycle(
     let runtime_record =
         crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
             .map_err(|error| error.machine_error(run_id, state_root))?;
+    if verb == RunVerb::Close {
+        let store = RunStore::new(SystemWorkspacePlatform, state_root);
+        let manifest = store.load_manifest(run_id)?;
+        if crate::run::is_caller_workspace_generation(manifest.schema_version)
+            && store.load_state_projection(run_id)?.lifecycle == RunLifecycle::Closed
+        {
+            let carrier = carrier.expect("close mutation carrier");
+            let generation = store.load_state_projection(run_id)?.run_generation;
+            let owned_lifecycle = if lifecycle.is_none() {
+                Some(
+                    crate::worker::RunLifecycleLease::acquire(
+                        state_root,
+                        &manifest.workspace_id,
+                        run_id,
+                        generation,
+                    )
+                    .map_err(|error| error.machine_error(run_id, state_root))?,
+                )
+            } else {
+                None
+            };
+            lifecycle
+                .or(owned_lifecycle.as_ref())
+                .expect("close cleanup lease")
+                .verify_scope(state_root, &manifest.workspace_id, run_id)
+                .map_err(|error| error.machine_error(run_id, state_root))?;
+            require_mutation_revision(
+                state_root,
+                run_id,
+                carrier,
+                verb.operation_name(),
+                expected_state_revision,
+            )?;
+            verify_closed_run_runtime(
+                state_root,
+                run_id,
+                MissingLocatorRule::ProveGenerationAbsent,
+            )?;
+            return run_object(state_root, run_id, 0, "Absent")
+                .map(|value| (SemanticResult::Run(value), None));
+        }
+    }
     if matches!(verb, RunVerb::Pause | RunVerb::Close)
         && let Some(result) = offline_lifecycle_transition(
             state_root,
@@ -8552,6 +8709,99 @@ enum MissingLocatorRule {
     ProveGenerationAbsent,
 }
 
+/// Shared runtime-only cleanup. Caller-specific Writer authority is retained
+/// by each existing owner; this helper never borrows Specialist authority.
+fn verify_closed_run_runtime(
+    state_root: &Path,
+    run_id: Uuid,
+    missing_locator: MissingLocatorRule,
+) -> Result<(), MachineError> {
+    let projection =
+        RunStore::new(SystemWorkspacePlatform, state_root).load_state_projection(run_id)?;
+    if projection.lifecycle != RunLifecycle::Closed {
+        return Err(run_state_conflict_error(
+            run_id,
+            projection.lifecycle,
+            "run.close",
+        ));
+    }
+    let uid = DarwinSystem.current_uid();
+    let runtime_record =
+        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+    let locator_present = match missing_locator {
+        MissingLocatorRule::Skip => runtime_record.exists(),
+        MissingLocatorRule::ProveGenerationAbsent => {
+            match std::fs::symlink_metadata(&runtime_record) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => {
+                    return Err(locator_generation_unprovable(
+                        run_id,
+                        "runtime_locator_unreadable",
+                    ));
+                }
+            }
+        }
+    };
+    if locator_present {
+        let record = crate::worker::read_runtime_record(&runtime_record, uid)
+            .map_err(|error| error.machine_error(run_id, &runtime_record))?;
+        match crate::worker::classify_worker_identity(&record) {
+            crate::worker::ProcessIdentityVerdict::Match => {
+                stop_lifecycle_generation(state_root, run_id, &runtime_record)?;
+            }
+            crate::worker::ProcessIdentityVerdict::Absent => {
+                crate::worker::remove_verified_absent_runtime(&runtime_record, uid)
+                    .map_err(|error| error.machine_error(run_id, &runtime_record))?;
+            }
+            verdict => {
+                return Err(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "the closed Specialist worker cannot be safely retired",
+                    false,
+                    json!({"run_id":run_id,"generation":record.identity.run_generation,
+                    "identity_verdict":verdict.as_str(),"reason":"generation_cleanup_unverified"}),
+                ));
+            }
+        }
+    }
+    if matches!(missing_locator, MissingLocatorRule::ProveGenerationAbsent) {
+        // Revalidate the highest evidenced generation even after removing a
+        // present locator: a stale locator cannot prove a newer attempt absent.
+        // The successor settlement's strict rule (RPC:349): a
+        // lost, dangling or never-written record must not let an owned
+        // runtime generation slip past the verifier. The legacy external
+        // close callers keep HEAD's skip.
+        prove_missing_locator_generation_absent(state_root, run_id)?;
+    }
+    Ok(())
+}
+
+/// Display consumes only existing absence witnesses and inventory. A retained
+/// locator means cleanup remains due, even when its recorded PID is absent.
+fn prove_closed_primary_generation_absent(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
+    let path = crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+        .map_err(|error| error.machine_error(run_id, state_root))?;
+    if !matches!(std::fs::symlink_metadata(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Err(locator_generation_unprovable(
+            run_id,
+            "runtime_locator_retained",
+        ));
+    }
+    let lock = RunStartupLock::open_existing(state_root, run_id)?;
+    lock.acquire()?;
+    let result =
+        prove_missing_locator_generation_absent_held(state_root, run_id, &lock).map(|_| ());
+    lock.release_preserving_records();
+    result
+}
+
 /// The owned-cleanup authority one release settlement closes under.
 enum MemberReleaseCleanup<'a> {
     /// The external owner: a held writer is released through the engagement's
@@ -8592,38 +8842,8 @@ fn verify_member_owned_cleanup(
             "run.close",
         ));
     }
+    verify_closed_run_runtime(state_root, run_id, missing_locator)?;
     let uid = DarwinSystem.current_uid();
-    let runtime_record =
-        crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
-            .map_err(|error| error.machine_error(run_id, state_root))?;
-    if runtime_record.exists() {
-        let record = crate::worker::read_runtime_record(&runtime_record, uid)
-            .map_err(|error| error.machine_error(run_id, &runtime_record))?;
-        match crate::worker::classify_worker_identity(&record) {
-            crate::worker::ProcessIdentityVerdict::Match => {
-                stop_lifecycle_generation(state_root, run_id, &runtime_record)?;
-            }
-            crate::worker::ProcessIdentityVerdict::Absent => {
-                crate::worker::remove_verified_absent_runtime(&runtime_record, uid)
-                    .map_err(|error| error.machine_error(run_id, &runtime_record))?;
-            }
-            verdict => {
-                return Err(MachineError::new(
-                    "RECOVERY_REQUIRED",
-                    "the closed Specialist worker cannot be safely retired",
-                    false,
-                    json!({"run_id":run_id,"generation":record.identity.run_generation,
-                    "identity_verdict":verdict.as_str(),"reason":"generation_cleanup_unverified"}),
-                ));
-            }
-        }
-    } else if matches!(missing_locator, MissingLocatorRule::ProveGenerationAbsent) {
-        // The successor settlement's strict rule (RPC:349): a
-        // lost, dangling or never-written record must not let an owned
-        // runtime generation slip past the verifier. The legacy external
-        // close callers keep HEAD's skip.
-        prove_missing_locator_generation_absent(state_root, run_id)?;
-    }
     let writer = crate::writer::WriterStore::new(state_root, &view.workspace_id, uid).load()?;
     if writer
         .holder
@@ -12267,8 +12487,6 @@ fn validate_caller_policy_current_authorized(
         .map_err(|error| error.machine_error(run_id, state_root))?;
     let runtime = crate::worker::read_runtime_record(&path, uid)
         .map_err(|error| error.machine_error(run_id, &path))?;
-    crate::worker::prove_worker_workload_absent_with_diagnostic(state_root, &runtime)
-        .map_err(|error| error.machine_error(run_id, &path))?;
     let socket_path =
         crate::worker::dedicated_server_socket_path(uid, run_id, runtime.identity.run_generation)
             .map_err(|error| error.machine_error(run_id, &path))?;
@@ -12297,7 +12515,7 @@ fn validate_caller_policy_current_authorized(
         ));
     }
     proof
-        .validate_binding(&crate::worker::CallerPolicyExpectation {
+        .validate_binding_and_processes(&crate::worker::CallerPolicyExpectation {
             operation_id,
             manifest: &manifest,
             runtime: &runtime,
@@ -18700,6 +18918,19 @@ impl RunStartupLock {
         let _ = self.lock.unlock_startup_range_preserving_records();
     }
 
+    fn open_existing(state_root: &Path, run_id: Uuid) -> Result<Self, MachineError> {
+        let process_guard = ProcessRunStartup::acquire(state_root, run_id)?;
+        let path =
+            crate::worker::startup_lock_path(&crate::worker::runtime_root(state_root), run_id);
+        let lock = crate::worker::StartupLockFile::open_existing(&path, DarwinSystem.current_uid())
+            .map_err(|error| worker_startup_range_error(error, run_id, &path))?;
+        Ok(Self {
+            lock,
+            run_id,
+            _process_guard: process_guard,
+        })
+    }
+
     fn open(state_root: &Path, run_id: Uuid) -> Result<Self, MachineError> {
         let process_guard = ProcessRunStartup::acquire(state_root, run_id)?;
         let uid = DarwinSystem.current_uid();
@@ -21527,7 +21758,7 @@ mod tests {
     /// membership after the close, and its Status half only observes it.
     #[test]
     fn a_legacy_close_still_retires_the_profile_membership() {
-        let fixture = super::release_fixture::ClosedMemberRun::new();
+        let fixture = super::release_fixture::ClosedMemberRun::verified();
         assert!(!fixture.membership_released());
         // Status before the retirement observes the gap and reports recovery,
         // exactly as the pre-split path did (it never releases anything).
@@ -21836,7 +22067,7 @@ mod tests {
     /// close, so the retirement stays with the release owner.
     #[test]
     fn the_successor_close_leaves_the_profile_membership_to_the_release_owner() {
-        let fixture = super::release_fixture::ClosedMemberRun::new();
+        let fixture = super::release_fixture::ClosedMemberRun::verified();
         let result = successor_close_run(
             &fixture.view,
             &fixture.state_root,
@@ -21888,8 +22119,8 @@ mod tests {
         assert!(fixture.membership_released());
     }
 
-    /// The strict locator-missing proof belongs to the
-    /// successor member release settlement only. The legacy external close
+    /// The strict locator-missing proof is not borrowed by the legacy
+    /// external cleanup verifier. The legacy external close
     /// callers keep HEAD's behaviour — a missing runtime record is skipped —
     /// so a Run an older binary already cleaned (locator removed, no
     /// verified-absence marker, generation evidence present) still closes and
@@ -29116,6 +29347,20 @@ pub(crate) mod release_fixture {
 
         pub(crate) fn historical() -> Self {
             Self::with_base(super::successor_fixture::SuccessorMember::historical())
+        }
+
+        pub(crate) fn verified() -> Self {
+            let scene = Self::new();
+            crate::worker::prepare_runtime_root(
+                &crate::worker::runtime_root(&scene.state_root),
+                DarwinSystem.current_uid(),
+            )
+            .unwrap();
+            let (record, _) =
+                write_absent_worker_locator(&scene.state_root, &scene.workspace_id, scene.run_id);
+            crate::worker::remove_verified_absent_runtime(&record, DarwinSystem.current_uid())
+                .unwrap();
+            scene
         }
 
         fn with_base(base: super::successor_fixture::SuccessorMember) -> Self {
@@ -39720,6 +39965,615 @@ mod caller_lane_gate_tests {
     const VALID_REVIEW: &str = r#"{"summary":"the answer","findings":[],"criterion_assessments":[],"evidence_limits":[],"overall_assessment":"requirements_met"}"#;
     use super::*;
     use crate::delegation_service::RunSettlementPort as _;
+
+    fn closed_primary_snapshot(scene: &super::release_fixture::ReleasableMember) -> RunSources {
+        let mut snapshot = RunSources::load(&scene.state_root, scene.member_ref, 0).unwrap();
+        let binding = snapshot.manifest.aggregate_binding.as_mut().unwrap();
+        binding.member_kind = crate::run::AggregateMemberKind::Primary;
+        binding.aggregate_id = scene.member_ref;
+        snapshot
+    }
+
+    #[test]
+    fn closed_primary_cleanup_proves_current_generation_before_membership_retirement() {
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        assert_eq!(scene.verified_absence_marker().unwrap().run_generation, 1);
+        let (path, mut runtime) = scene.write_absent_worker_locator();
+        runtime.identity.run_generation = 2;
+        crate::worker::write_runtime_record(&path, &runtime).unwrap();
+        scene.rewrite_projection_generation(2);
+        scene.write_stale_slot_claim(1, 2, Some(runtime.identity.clone()));
+        let snapshot = closed_primary_snapshot(&scene);
+        let lease = crate::worker::RunLifecycleLease::acquire(
+            &scene.state_root,
+            &scene.view.workspace_id,
+            scene.member_ref,
+            2,
+        )
+        .unwrap();
+        assert!(!scene.membership_released());
+        finish_closed_primary_cleanup(&scene.state_root, &snapshot, &lease).unwrap();
+        assert!(!path.exists());
+        assert_eq!(scene.verified_absence_marker().unwrap().run_generation, 2);
+        assert!(scene.membership_released());
+        assert_eq!(
+            observed_close_progress(
+                &scene.state_root,
+                &scene.view.workspace_id,
+                scene.member_ref,
+                "completed"
+            ),
+            "completed"
+        );
+    }
+
+    #[test]
+    fn closed_primary_cleanup_missing_generation_and_membership_failure_remain_pending() {
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        scene.rewrite_projection_generation(2);
+        let snapshot = closed_primary_snapshot(&scene);
+        let lease = crate::worker::RunLifecycleLease::acquire(
+            &scene.state_root,
+            &scene.view.workspace_id,
+            scene.member_ref,
+            2,
+        )
+        .unwrap();
+        assert!(finish_closed_primary_cleanup(&scene.state_root, &snapshot, &lease).is_err());
+        assert!(!scene.membership_released());
+        assert_eq!(scene.verified_absence_marker().unwrap().run_generation, 1);
+        let before = scene.startup_lock_bytes();
+        // Even a previously retired membership cannot turn a stale physical
+        // absence marker into completed current-generation evidence.
+        release_global_run_membership(&scene.state_root, &scene.manifest, scene.member_ref)
+            .unwrap();
+        assert_eq!(
+            observed_close_progress(
+                &scene.state_root,
+                &scene.view.workspace_id,
+                scene.member_ref,
+                "completed"
+            ),
+            "recovery_required"
+        );
+        assert_eq!(
+            scene.startup_lock_bytes(),
+            before,
+            "observation changed startup evidence"
+        );
+
+        let missing = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        let snapshot = closed_primary_snapshot(&missing);
+        let lease = crate::worker::RunLifecycleLease::acquire(
+            &missing.state_root,
+            &missing.view.workspace_id,
+            missing.member_ref,
+            1,
+        )
+        .unwrap();
+        let profiles = missing
+            .state_root
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("profiles");
+        let key = &snapshot
+            .manifest
+            .global_profile_binding
+            .as_ref()
+            .unwrap()
+            .server_key;
+        std::fs::write(profiles.join(key).join("members.json"), b"invalid").unwrap();
+        assert!(finish_closed_primary_cleanup(&missing.state_root, &snapshot, &lease).is_err());
+        assert_eq!(
+            observed_close_progress(
+                &missing.state_root,
+                &missing.view.workspace_id,
+                missing.member_ref,
+                "completed"
+            ),
+            "recovery_required"
+        );
+    }
+
+    #[test]
+    fn closed_primary_cleanup_refuses_a_stale_present_locator() {
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        let (path, _) = scene.write_absent_worker_locator();
+        scene.rewrite_projection_generation(2);
+        let snapshot = closed_primary_snapshot(&scene);
+        let lease = crate::worker::RunLifecycleLease::acquire(
+            &scene.state_root,
+            &scene.view.workspace_id,
+            scene.member_ref,
+            2,
+        )
+        .unwrap();
+        assert!(finish_closed_primary_cleanup(&scene.state_root, &snapshot, &lease).is_err());
+        assert!(path.exists(), "the stale locator remains for recovery");
+        assert_eq!(scene.verified_absence_marker().unwrap().run_generation, 1);
+        assert!(
+            !scene.membership_released(),
+            "generation 2 remains unproven"
+        );
+    }
+
+    #[test]
+    fn closed_primary_cleanup_refuses_a_dangling_locator_without_effects() {
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        let path = crate::worker::runtime_record_path(
+            &crate::worker::runtime_root(&scene.state_root),
+            scene.member_ref,
+        )
+        .unwrap();
+        let snapshot = closed_primary_snapshot(&scene);
+        std::os::unix::fs::symlink(scene.state_root.join("missing"), &path).unwrap();
+        let lease = crate::worker::RunLifecycleLease::acquire(
+            &scene.state_root,
+            &scene.view.workspace_id,
+            scene.member_ref,
+            1,
+        )
+        .unwrap();
+        let marker = scene.verified_absence_marker().unwrap();
+        assert!(finish_closed_primary_cleanup(&scene.state_root, &snapshot, &lease).is_err());
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(scene.verified_absence_marker().unwrap(), marker);
+        assert!(!scene.membership_released());
+    }
+
+    #[test]
+    fn closed_primary_cleanup_preserves_a_pending_writer_guard() {
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        let writers = crate::writer::WriterStore::new(
+            &scene.state_root,
+            &scene.view.workspace_id,
+            DarwinSystem.current_uid(),
+        );
+        writers
+            .transact(|writer| {
+                let transaction = Uuid::now_v7();
+                let holder = crate::writer::WriterStore::holder(
+                    scene.member_ref,
+                    scene.manifest.profile.profile_name.clone(),
+                    &scene.manifest.controller,
+                    1,
+                    scene.manifest.profile.initial_server_key.clone(),
+                    scene.manifest.profile_capability_snapshot.server_epoch,
+                    None,
+                    RunLifecycle::Idle,
+                );
+                let (_, generation) =
+                    writer.prepare_acquire(scene.member_ref, holder, transaction)?;
+                writer.commit_acquire(transaction, generation)
+            })
+            .unwrap();
+        let snapshot = closed_primary_snapshot(&scene);
+        let before = writers.load().unwrap();
+        let lease = crate::worker::RunLifecycleLease::acquire(
+            &scene.state_root,
+            &scene.view.workspace_id,
+            scene.member_ref,
+            1,
+        )
+        .unwrap();
+        let error =
+            finish_closed_primary_cleanup(&scene.state_root, &snapshot, &lease).unwrap_err();
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(writers.load().unwrap(), before);
+        assert!(!scene.membership_released());
+    }
+
+    fn closed_scene_broker(scene: &super::release_fixture::ReleasableMember) -> CredentialCarrier {
+        crate::orchestration::BrokerCredential::load(
+            &scene.state_root.join("orchestration/broker-credentials"),
+            DarwinSystem.current_uid(),
+            scene.member_ref,
+        )
+        .unwrap()
+        .controller_carrier()
+        .unwrap()
+    }
+
+    #[test]
+    fn modern_closed_reentry_verifies_generation_before_retiring_membership() {
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        let carrier = closed_scene_broker(&scene);
+        let (path, mut runtime) = scene.write_absent_worker_locator();
+        runtime.identity.run_generation = 2;
+        crate::worker::write_runtime_record(&path, &runtime).unwrap();
+        scene.rewrite_projection_generation(2);
+        scene.write_stale_slot_claim(1, 2, Some(runtime.identity.clone()));
+        let head = durable_head(&scene.state_root, scene.member_ref).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let close = |who: &CredentialCarrier, revision| {
+            run_control_admitted(
+                &scene.view,
+                &scene.state_root,
+                scene.member_ref,
+                RunVerb::Close,
+                Some(who),
+                Prepared::Close { interrupt: false },
+                false,
+                Some(revision),
+            )
+        };
+        assert!(
+            close(&scene.carrier, head).is_err(),
+            "wrong Controller admitted"
+        );
+        assert_eq!(
+            close(&carrier, head + 1).unwrap_err().code,
+            "RUN_STATE_CONFLICT"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!scene.membership_released());
+        let (SemanticResult::Run(value), _) = close(&carrier, head).unwrap() else {
+            panic!("Close answers with the original Run");
+        };
+        assert_eq!(value["state"], "closed");
+        assert_eq!(
+            durable_head(&scene.state_root, scene.member_ref).unwrap(),
+            head
+        );
+        assert!(!path.exists());
+        assert_eq!(scene.verified_absence_marker().unwrap().run_generation, 2);
+        assert!(scene.membership_released());
+
+        let unknown = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::LostLocator,
+        );
+        let carrier = closed_scene_broker(&unknown);
+        assert!(
+            run_control_admitted(
+                &unknown.view,
+                &unknown.state_root,
+                unknown.member_ref,
+                RunVerb::Close,
+                Some(&carrier),
+                Prepared::Close { interrupt: false },
+                false,
+                None,
+            )
+            .is_err()
+        );
+        assert!(!unknown.membership_released());
+        assert!(unknown.verified_absence_marker().is_none());
+    }
+
+    #[test]
+    fn closed_primary_observation_never_creates_startup_evidence() {
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        release_global_run_membership(&scene.state_root, &scene.manifest, scene.member_ref)
+            .unwrap();
+        let path = crate::worker::startup_lock_path(
+            &crate::worker::runtime_root(&scene.state_root),
+            scene.member_ref,
+        );
+        assert!(!path.exists());
+        let marker = scene.verified_absence_marker().unwrap();
+        assert_eq!(
+            observed_close_progress(
+                &scene.state_root,
+                &scene.view.workspace_id,
+                scene.member_ref,
+                "completed",
+            ),
+            "recovery_required"
+        );
+        assert!(!path.exists(), "observation created a startup file");
+        assert_eq!(scene.verified_absence_marker().unwrap(), marker);
+        assert!(scene.membership_released());
+    }
+
+    #[test]
+    fn closed_primary_cleanup_accepts_only_actual_never_started_generation_zero() {
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let carrier = closed_scene_broker(&scene);
+        let (SemanticResult::Run(_), _) = run_control_admitted(
+            &scene.view,
+            &scene.state_root,
+            scene.member_ref,
+            RunVerb::Close,
+            Some(&carrier),
+            Prepared::Close { interrupt: false },
+            false,
+            None,
+        )
+        .unwrap() else {
+            panic!("threadless Close answers with the Run");
+        };
+        let snapshot = closed_primary_snapshot(&scene);
+        assert_eq!(snapshot.projection.lifecycle, RunLifecycle::Closed);
+        assert_eq!(snapshot.projection.run_generation, 0);
+        assert!(snapshot.projection.thread_id.is_none());
+        assert!(scene.verified_absence_marker().is_none());
+        let lease = crate::worker::RunLifecycleLease::acquire(
+            &scene.state_root,
+            &scene.view.workspace_id,
+            scene.member_ref,
+            0,
+        )
+        .unwrap();
+        finish_closed_primary_cleanup(&scene.state_root, &snapshot, &lease).unwrap();
+        assert!(scene.membership_released());
+        assert!(
+            scene.verified_absence_marker().is_none(),
+            "invented a runtime generation"
+        );
+    }
+
+    // Covers the private production completion helper and a real retained
+    // Close row; public gateway/coordinator and native qualification are separate.
+    #[test]
+    fn retained_aborted_primary_close_preserves_receipt_until_cleanup_is_proven() {
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        let crate::delegation_service::SettlementOwner::Managed { session_id: run_id } =
+            scene.owner
+        else {
+            panic!("managed scene");
+        };
+        // Retire the fixture's real Specialist first; this leaves its original
+        // Primary as a valid session root with no active successor members.
+        scene.release(scene.revision).unwrap();
+        let run_root = crate::run::run_root(&scene.state_root, run_id);
+        let mut projection = crate::projection::RunStateProjection::starting(run_id);
+        projection.lifecycle = RunLifecycle::Closed;
+        projection.run_generation = 1;
+        let encoded = serde_json::to_string(&projection).unwrap();
+        std::fs::write(
+            run_root.join("state.json"),
+            crate::jcs::canonicalize(&crate::jcs::parse(&encoded).unwrap()).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(run_root.join("audit.jsonl"), b"").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        for path in [run_root.join("state.json"), run_root.join("audit.jsonl")] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let (locator, runtime) = super::release_fixture::write_absent_worker_locator(
+            &scene.state_root,
+            &scene.view.workspace_id,
+            run_id,
+        );
+        crate::worker::remove_verified_absent_runtime(&locator, DarwinSystem.current_uid())
+            .unwrap();
+        let snapshot = RunSources::load(&scene.state_root, run_id, 0).unwrap();
+        assert!(is_orchestrated_root(&snapshot.manifest));
+        assert_eq!(snapshot.manifest.schema_version, 3);
+        let binding = snapshot.manifest.global_profile_binding.as_ref().unwrap();
+        let home = scene.state_root.parent().unwrap().parent().unwrap();
+        let membership = crate::global_runtime::GlobalMembershipStore::from_root(
+            home,
+            &binding.selected_name,
+            &binding.server_key,
+        )
+        .unwrap();
+        membership
+            .record(
+                &scene.view.workspace_id,
+                run_id,
+                crate::global_runtime::MembershipDisposition::Active,
+            )
+            .unwrap();
+        let mut store = crate::orchestration::OrchestrationStore::open(&scene.state_root).unwrap();
+        let accepted = store
+            .begin_session_close(run_id, true, 1)
+            .unwrap()
+            .0
+            .unwrap();
+        assert!(accepted.interrupt);
+        store.complete_session_close(run_id).unwrap();
+        let receipt = store.session_close(run_id).unwrap().unwrap();
+        assert_eq!(receipt.progress, "aborted");
+        assert_eq!(receipt.operation_id, accepted.operation_id);
+        let revision = store.session(run_id).unwrap().revision;
+        let lease = crate::worker::RunLifecycleLease::acquire(
+            &scene.state_root,
+            &scene.view.workspace_id,
+            run_id,
+            1,
+        )
+        .unwrap();
+        let marker = crate::worker::verified_absence_marker_path(
+            &crate::worker::runtime_root(&scene.state_root),
+            run_id,
+        );
+        std::fs::remove_file(&marker).unwrap();
+        assert!(
+            finish_retained_primary_close(&scene.state_root, &snapshot, &lease, &mut store)
+                .is_err()
+        );
+        assert_eq!(store.session_close(run_id).unwrap(), Some(receipt.clone()));
+        assert!(closed_membership_released(&scene.state_root, &snapshot.manifest, run_id).is_err());
+        assert_eq!(
+            observed_close_progress(
+                &scene.state_root,
+                &scene.view.workspace_id,
+                run_id,
+                "aborted"
+            ),
+            "recovery_required"
+        );
+        // Restore exact owned-generation evidence through its original remover.
+        crate::worker::write_runtime_record(&locator, &runtime).unwrap();
+        crate::worker::remove_verified_absent_runtime(&locator, DarwinSystem.current_uid())
+            .unwrap();
+        let members = home
+            .join("profiles")
+            .join(&binding.server_key)
+            .join("members.json");
+        let membership_bytes = std::fs::read(&members).unwrap();
+        std::fs::write(&members, b"invalid").unwrap();
+        assert!(
+            finish_retained_primary_close(&scene.state_root, &snapshot, &lease, &mut store)
+                .is_err()
+        );
+        assert_eq!(store.session_close(run_id).unwrap(), Some(receipt.clone()));
+        std::fs::write(&members, &membership_bytes).unwrap();
+        finish_retained_primary_close(&scene.state_root, &snapshot, &lease, &mut store).unwrap();
+        assert!(closed_membership_released(&scene.state_root, &snapshot.manifest, run_id).is_ok());
+        assert_eq!(store.session_close(run_id).unwrap(), Some(receipt));
+        assert_eq!(store.session(run_id).unwrap().revision, revision);
+        assert_eq!(
+            observed_close_progress(
+                &scene.state_root,
+                &scene.view.workspace_id,
+                run_id,
+                "aborted"
+            ),
+            "aborted"
+        );
+    }
+
+    // The retiring wrapper and non-retiring successor entry intentionally
+    // have different cleanup owners.
+    #[test]
+    fn modern_retiring_closed_run_keeps_membership_until_writer_settlement() {
+        let scene = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::AlreadyClosed,
+        );
+        scene.active_writer_hold();
+        let carrier = closed_scene_broker(&scene);
+        let writers = crate::writer::WriterStore::new(
+            &scene.state_root,
+            &scene.view.workspace_id,
+            DarwinSystem.current_uid(),
+        );
+        let guard = writers.load().unwrap();
+        let binding = scene.manifest.global_profile_binding.as_ref().unwrap();
+        let members = scene
+            .state_root
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("profiles")
+            .join(&binding.server_key)
+            .join("members.json");
+        let bytes = std::fs::read(&members).unwrap();
+        let error = run_control_admitted(
+            &scene.view,
+            &scene.state_root,
+            scene.member_ref,
+            RunVerb::Close,
+            Some(&carrier),
+            Prepared::Close { interrupt: false },
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(writers.load().unwrap(), guard);
+        assert_eq!(std::fs::read(&members).unwrap(), bytes);
+        assert!(!scene.membership_released());
+        let result = successor_close_run(
+            &scene.view,
+            &scene.state_root,
+            scene.member_ref,
+            &carrier,
+            false,
+        )
+        .unwrap();
+        let SemanticResult::Run(value) = result else {
+            panic!("original Closed snapshot");
+        };
+        assert_eq!(value["state"], "closed");
+        assert_eq!(writers.load().unwrap(), guard);
+        assert_eq!(std::fs::read(&members).unwrap(), bytes);
+    }
+
+    #[test]
+    fn interrupted_primary_needs_terminal_state_before_writer_release() {
+        let fixture = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let snapshot = RunSources::load(&fixture.state_root, fixture.member_ref, 0).unwrap();
+        let close = crate::orchestration::SessionCloseSnapshot {
+            operation_id: Uuid::now_v7(),
+            session_id: fixture.member_ref,
+            interrupt: true,
+            initiating_controller_generation: 1,
+            progress: "settling".into(),
+            safe_error_code: None,
+        };
+        let mut projection = snapshot.projection.clone();
+        assert!(require_primary_close_terminal(&projection, &close).is_ok());
+        projection.active_turn_id = Some("native-turn-awaiting-terminal".into());
+        let pending = require_primary_close_terminal(&projection, &close).unwrap_err();
+        assert_eq!(pending.code, "RECOVERY_REQUIRED");
+        assert_eq!(pending.details["operation_id"], json!(close.operation_id));
+        assert_eq!(pending.details["required_action"], "recover_run");
+        projection.active_turn_id = None;
+        projection.lifecycle = RunLifecycle::Running;
+        assert!(require_primary_close_terminal(&projection, &close).is_err());
+        for terminal in [
+            RunLifecycle::Idle,
+            RunLifecycle::Paused,
+            RunLifecycle::Closed,
+        ] {
+            projection.lifecycle = terminal;
+            assert!(require_primary_close_terminal(&projection, &close).is_ok());
+        }
+    }
+
+    #[test]
+    fn schema_four_session_close_projection_preserves_delegation_identity() {
+        let fixture = super::release_fixture::ReleasableMember::managed(
+            super::release_fixture::ReleaseScene::CloseSettlement,
+        );
+        let mut snapshot = RunSources::load(&fixture.state_root, fixture.member_ref, 0).unwrap();
+        assert_eq!(snapshot.manifest.schema_version, 4);
+        assert!(snapshot.manifest.instructions.caller().is_none());
+        let binding = snapshot.manifest.aggregate_binding.as_mut().unwrap();
+        binding.member_kind = crate::run::AggregateMemberKind::Primary;
+        binding.aggregate_id = snapshot.manifest.run_id;
+        assert!(is_orchestrated_root(&snapshot.manifest));
+        let value = modern_session_close_value(&fixture.state_root, &snapshot).unwrap();
+        assert_eq!(value["run_id"], json!(fixture.member_ref));
+        assert_eq!(value["lifecycle"], "idle");
+        assert_eq!(value["writer_authority"]["state"], "none");
+        assert_eq!(
+            value["instruction_contract"],
+            snapshot.manifest.instructions.contract()
+        );
+        assert!(value["session_close"].is_null());
+        // Rendering does not assert a retained Close or release the original
+        // member's Profile membership.
+        assert!(
+            crate::orchestration::OrchestrationStore::open_observer(&fixture.state_root)
+                .unwrap()
+                .session_close(fixture.member_ref)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn a_manifest_four_member_restarts_into_the_caller_workspace_lane() {

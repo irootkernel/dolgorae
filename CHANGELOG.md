@@ -74,6 +74,13 @@ development commits.
 
 ### Fixed
 
+- Permit sequential writable Turns with the qualified Codex code-mode host while
+  retaining strict refusal of background jobs and uncertain process identities.
+- Close and recover schema-4 Orchestrated Sessions through the caller-workspace
+  lifecycle, including Writer release and delegation-aware diagnostics.
+- Resume owned-generation and Profile cleanup after a Run closes, preserving
+  its original Close receipt when the response is lost.
+
 - Serve public-v2 event streams and Controller-authorized timeline pages with
   truthful capabilities, bounded delivery and immutable artifact fallback.
 

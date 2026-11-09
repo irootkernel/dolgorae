@@ -69,6 +69,17 @@ is a partial view. Cleanup closes original Runs before non-interrupting
 Profile migration and stop through the ordinary CLI. A successful bootstrap
 does not qualify group execution or final H3.
 
+A typed unresolved bootstrap Close response is retained separately from its
+original pre-close observation. Keep the owned gateway alive while bounded
+public observations check the original Run, Thread and Controller. Observed
+completion requires Closed, no active work, Writer release, complete owned
+scope absence and original Profile membership retirement. If these obligations
+remain pending, prove that the exact owned gateway executor exited before
+replacing it. Then issue at most one fresh continuation after observing the
+original ordinary Run Closed. The product must not replay its native Close.
+Original, observed-final and continuation protobuf artifacts have distinct names; a
+second unresolved result preserves the fixture instead of retrying Close.
+
 `tests/e2e/run_native_ordinary_host.py` exercises individual completion, feedback
 rounds, release, fences and research groups with a separately selected
 client/helper and fault library. Its product
@@ -138,18 +149,45 @@ protected question from model traffic are required.
 For caller/default-startup, pool and interaction qualification, pass the same
 `--binary` to `tests/e2e/run_native_caller_pipeline.py`. The selected image owns
 workspace/Profile setup, caller mutations, Workers, drainers and the pool RPC
-server. The example retains its original assertions and read-only observations.
+server. The example checks durable receipts and independent read-only observations.
 Its replay flag is a before/after observation of the original reservation and
 receipt, because the caller CLI does not return that flag. All four startup
 variants preserve their original configuration and argv order, including omitted
 plugin settings. Without `--binary`, this script remains a fixture-engine check
 and supplies no ordinary-H3 execution evidence.
 
+The `--task094-session` mode requires `--binary` and the existing
+`DOLGORAE_RUN_NATIVE_CALLER_PIPELINE=1` opt-in. It uses the pinned accountless
+Codex/companion pair with loopback Responses/MCP and an ordinary public-v2
+gateway process. Its cases cover a schema-4 Primary's actual write/final and
+subsequent writable interactions, refusal while a native background child is
+present, original identity across gateway replacement and recovery, and idle
+or interrupt-consented whole-session closure. Keep logical Writer settlement
+and physical generation absence as separate assertions. Preserve failed roots
+and report incomplete cleanup instead of replaying a failed campaign.
+
+The RPC budget remains 30 seconds. A typed unresolved transport response does
+not cancel accepted semantic work. Retain that response and keep its gateway
+executor alive during bounded public observation of the same retained Close.
+If settlement remains pending, verify that the exact gateway executor has
+exited, replace it once, then explicitly reconcile the original operation at a
+fresh revision. Gateway exit does not establish owned-generation absence or Profile
+retirement. A second unresolved result retains its executor and incomplete
+cleanup evidence; it never starts a new Close or a mutation retry loop.
+
 Replacement Worker recovery keeps the original Run and accepted Thread while
 advancing the Worker generation. Preserve both identities; requiring the old
 generation after a restart rejects supported recovery. A concurrent ledger
-capture conflict means retry the read, not submit the Task again. Observe
-original task completion before restoring the Worker and admitting member
+capture conflict requires a fresh read; it does not authorize another Task
+submission. The native session client permits at most three Watch openings
+within its existing 90-second observation window. Before dispatch it stores
+each request context with the original Run, Thread, Turn, cursor and stamp.
+It retains the actual typed `RefreshSnapshot` error and fresh observations
+separately, verifies Run and aggregate identity, then opens a new
+request context using the original exclusive event cursor. The refreshed head
+has not been consumed: advancing to it could skip the original Turn's terminal
+event. Other errors and an exhausted read window preserve the failed case.
+Observe original task completion before restoring the Worker and admitting member
 release. Retry only the public API's applicable busy response on the same
 original identity. An expired execution clock does not replace the cleanup
 phase's separate clock or settle its state.

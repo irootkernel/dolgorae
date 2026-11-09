@@ -388,7 +388,9 @@ fixture ledger or prepared digest. The existing default complete repository gate
 and explicit native authorization remain required. TASK-087 owns the original
 post-cleanup H3. TASK-093 owns its explicit replacement and must assess all
 intervening source changes as well as the Observation correction before reusing
-that evidence. The accepted Profile configuration binds the entire
+that evidence. TASK-094 carries these duties forward for the subsequent
+sequential-Turn and schema-4 lifecycle replacement. The accepted Profile
+configuration binds the entire
 required-subset compatibility manifest.
 Changes to that manifest, including another runtime's registry entry, change
 this identity even when the selected runtime version is unchanged.

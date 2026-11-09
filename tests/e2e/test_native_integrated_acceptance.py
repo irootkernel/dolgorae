@@ -1111,6 +1111,148 @@ def managed_primary_contract_scope_offline() -> None:
         value.primary_calls.assert_not_called()
 
 
+def ordinary_bootstrap_close_response_loss_offline() -> None:
+    import run_native_ordinary_host as ordinary
+    with tempfile.TemporaryDirectory(prefix="ordinary-close-routing-", dir="/tmp") as directory:
+        root=Path(directory).resolve()
+        case=object.__new__(ordinary.OrdinaryCase)
+        case.root=root
+        case.args=type("Args",(),{"helper":Path("helper")})()
+        case.bootstrap_continuation_started=False
+        complete={"complete":True,"closed":True,"no_work":True,"writer_free":True}
+        pending={**complete,"complete":False}
+        lost={"pending_close":True,"response_lost":True}
+        calls=[]
+        def invoke(_image,operation,_root):
+            calls.append(operation)
+            return complete if operation in ("bootstrap-close-observed","bootstrap-close-continuation") else lost
+        case.call=invoke
+        case.observe_bootstrap_close=lambda:complete
+        case.replace_bootstrap_gateway=Mock()
+        assert case.close_bootstrap()==complete
+        assert calls==["bootstrap-close","bootstrap-close-observed"]
+        assert not case.replace_bootstrap_gateway.called
+        calls.clear()
+        case.observe_bootstrap_close=lambda:pending
+        def invoke_continuation(_image,operation,_root):
+            calls.append(operation)
+            return pending if operation=="bootstrap-observe" else complete if operation=="bootstrap-close-continuation" else lost
+        case.call=invoke_continuation
+        assert case.close_bootstrap()==complete
+        assert calls==["bootstrap-close","bootstrap-observe","bootstrap-close-continuation"]
+        case.replace_bootstrap_gateway.assert_called_once()
+        calls.clear()
+        rejected(case.close_bootstrap)
+        assert calls==[]
+        case.bootstrap_continuation_started=False
+        case.observe_bootstrap_close=lambda:{**pending,"closed":False}
+        case.replace_bootstrap_gateway.reset_mock()
+        rejected(case.close_bootstrap)
+        assert calls==["bootstrap-close"] and not case.replace_bootstrap_gateway.called
+        calls.clear()
+        case.observe_bootstrap_close=lambda:pending
+        def unknown_again(_image,operation,_root):
+            calls.append(operation)
+            return pending if operation=="bootstrap-observe" else lost
+        case.call=unknown_again
+        rejected(case.close_bootstrap)
+        assert calls.count("bootstrap-close-continuation")==1
+        calls.clear()
+        rejected(case.close_bootstrap)
+        assert calls==[]
+
+
+def ordinary_bootstrap_gateway_queue_lifetime_offline() -> None:
+    import hashlib
+    from types import SimpleNamespace
+    import run_native_ordinary_host as ordinary
+
+    for note_exit in (True, False):
+        with tempfile.TemporaryDirectory(prefix="ordinary-gateway-queue-", dir="/tmp") as directory:
+            root = Path(directory).resolve()
+            image = root / "frozen-product"
+            image.write_bytes(b"immutable offline product")
+            (root / "workspace").mkdir()
+            socket = root / "gateway.sock"
+            socket.touch()
+            metadata = image.stat()
+            original = {"bsd": {"pid": 100, "start_tvsec": 123, "start_tvusec": 456},
+                "image": {"path": str(image), "device": metadata.st_dev, "inode": metadata.st_ino,
+                          "sha256": hashlib.sha256(image.read_bytes()).hexdigest()}}
+            events = []
+
+            class Queue:
+                def __init__(self):
+                    self.closed = 0
+
+                def control(self, changes, count, timeout):
+                    if changes is not None:
+                        assert len(changes) == 1 and changes[0].ident == 100
+                        events.append("watch")
+                        return []
+                    assert count == 1 and timeout == 15
+                    events.append("exit-observation")
+                    return [SimpleNamespace(ident=100, fflags=ordinary.select.KQ_NOTE_EXIT)] if note_exit else []
+
+                def close(self):
+                    self.closed += 1
+                    events.append("queue-close")
+
+            class Child:
+                def __init__(self, pid):
+                    self.pid = pid
+
+                def poll(self):
+                    return None
+
+                def terminate(self):
+                    assert self.pid == 100
+                    events.append("terminate-exact-owned")
+                    socket.unlink()
+
+                def wait(self, timeout):
+                    assert self.pid == 100 and timeout == 5
+                    events.append("reap")
+                    return -15
+
+            case = object.__new__(ordinary.OrdinaryCase)
+            case.root, case.env, case.gap = root, {}, False
+            case.args = SimpleNamespace(binary=image, helper=Path("helper"))
+            case.serve, case.bootstrap_gateway_identity = Child(100), original
+            queue = Queue()
+
+            def call(_helper, operation, _root):
+                if operation == "bootstrap-gateway-identity":
+                    return original if case.serve.pid == 100 else {**original, "bsd": {"pid": 200}}
+                assert operation == "bootstrap-gateway-absent"
+                assert queue.closed == 1
+                events.append("old-absence")
+                return {"pid": 100, "consecutive_absent_samples": 5}
+
+            def launch(argv, **kwargs):
+                assert argv == [str(image), "serve", "--socket", str(socket)]
+                assert kwargs["env"] == {} and kwargs["cwd"] == root / "workspace"
+                events.append("spawn-replacement")
+                socket.touch()
+                return Child(200)
+
+            case.call = call
+            with patch.object(ordinary.select, "kqueue", return_value=queue), \
+                    patch.object(ordinary.subprocess, "Popen", side_effect=launch) as spawn:
+                if note_exit:
+                    case.replace_bootstrap_gateway()
+                    assert case.serve.pid == 200 and spawn.call_count == 1
+                    assert events == ["watch", "terminate-exact-owned", "exit-observation", "reap",
+                                      "queue-close", "old-absence", "spawn-replacement"]
+                    assert json.loads((root / "bootstrap-close-old-gateway-exit.json").read_bytes())["signals_sent"] == 1
+                else:
+                    rejected(case.replace_bootstrap_gateway)
+                    assert spawn.call_count == 0
+                    assert events == ["watch", "terminate-exact-owned", "exit-observation", "queue-close"]
+                    assert not (root / "bootstrap-close-old-gateway-exit.json").exists()
+            assert queue.closed == 1
+
+
 def ordinary_worker_producer_routing_offline() -> None:
     import hashlib
     import run_native_production_host as production
@@ -1232,6 +1374,8 @@ def main() -> int:
     nested_podway_builders_offline()
     task086_protected_returns_offline()
     production_source_response_barrier_offline()
+    ordinary_bootstrap_close_response_loss_offline()
+    ordinary_bootstrap_gateway_queue_lifetime_offline()
     ordinary_worker_producer_routing_offline()
     ordinary_group_then_complete_page_offline()
     ordinary_group_selected_host_inputs_offline()

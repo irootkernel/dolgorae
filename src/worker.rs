@@ -4,6 +4,8 @@
 //! contracts.  The CLI and hidden worker share these routines, so neither side
 //! can silently relax identity, framing, or runtime-record validation.
 
+mod companion;
+
 use crate::app_server::{DuplexConnection, SolicitedSink, TransportError};
 #[cfg(target_os = "macos")]
 use crate::conformance::ConformantLedger;
@@ -1457,7 +1459,8 @@ impl QualifiedCallerRuntime {
             record_socket_refusal(diagnostic, &self.socket_identity);
             return Err(error);
         }
-        prove_group_empty_observed(&self.current_runtime()?, true, false, diagnostic).map(|_| ())
+        let runtime = self.current_runtime()?;
+        prove_caller_policy_quiescence(&runtime, diagnostic)
     }
 
     fn current_runtime(&self) -> Result<WorkerRuntimeRecord, WorkerProtocolError> {
@@ -1529,7 +1532,35 @@ impl QualifiedCallerRuntime {
     }
 }
 
+/// Caller policy proof and its authoritative revalidation share this census.
+/// Generic workload and generation-absence entry points must remain strict.
+fn prove_caller_policy_quiescence(
+    runtime: &WorkerRuntimeRecord,
+    diagnostic: Option<&mut Value>,
+) -> Result<(), WorkerProtocolError> {
+    if runtime
+        .startup_scope
+        .as_ref()
+        .is_none_or(|scope| !scope.complete)
+    {
+        return prove_group_empty_observed(runtime, true, false, diagnostic).map(|_| ());
+    }
+    let host = companion::capture(runtime)?;
+    prove_group_empty_samples_with_companion(runtime, true, false, diagnostic, None, host.as_ref())
+        .map(|_| ())
+}
+
 impl CallerPolicyProof {
+    /// Bind untrusted returned proof bytes before applying the qualified
+    /// policy-only census to the authoritative current runtime.
+    pub(crate) fn validate_binding_and_processes(
+        &self,
+        expected: &CallerPolicyExpectation<'_>,
+    ) -> Result<(), WorkerProtocolError> {
+        self.validate_binding(expected)?;
+        prove_caller_policy_quiescence(expected.runtime, None)
+    }
+
     pub fn validate_binding(
         &self,
         expected: &CallerPolicyExpectation<'_>,
@@ -3193,8 +3224,26 @@ fn prove_group_empty_samples(
     record: &WorkerRuntimeRecord,
     allow_recorded_worker: bool,
     allow_recorded_dedicated_server: bool,
+    diagnostic: Option<&mut Value>,
+    startup: Option<&mut StartupWorkload>,
+) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
+    prove_group_empty_samples_with_companion(
+        record,
+        allow_recorded_worker,
+        allow_recorded_dedicated_server,
+        diagnostic,
+        startup,
+        None,
+    )
+}
+
+fn prove_group_empty_samples_with_companion(
+    record: &WorkerRuntimeRecord,
+    allow_recorded_worker: bool,
+    allow_recorded_dedicated_server: bool,
     mut diagnostic: Option<&mut Value>,
     mut startup: Option<&mut StartupWorkload>,
+    companion: Option<&RetirementProcess>,
 ) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
     record.validate()?;
     if !allow_recorded_worker
@@ -3274,11 +3323,12 @@ fn prove_group_empty_samples(
             let scope_verified = if allow_recorded_dedicated_server {
                 dedicated_group_safe_to_signal(server)
             } else {
-                dedicated_group_has_only_expected_leader_sample(
+                dedicated_group_has_only_expected_leader_with_companion(
                     server,
                     allow_recorded_worker,
                     diagnostic.as_deref_mut(),
                     startup.as_deref_mut(),
+                    companion,
                 )?
             };
             if !scope_verified {
@@ -3352,6 +3402,7 @@ fn prove_group_empty_samples(
                 with_census_commands(group_observation(&members, &enumerated_group), &commands),
             ));
         }
+        companion::verify(companion, &census)?;
         let by_pid = census
             .iter()
             .map(|identity| (identity.pid, identity.parent_pid))
@@ -3388,6 +3439,9 @@ fn prove_group_empty_samples(
             same_scope || (!allow_recorded_worker && identity.pid == record.identity.pid)
         });
         for process in unexpected {
+            if companion::contains(companion, process) {
+                continue;
+            }
             if let (Some(wait), Some(server)) =
                 (startup.as_deref_mut(), &record.dedicated_server_identity)
                 && process_is_in_scope(
@@ -3476,6 +3530,7 @@ fn prove_group_empty_samples(
                 entry.process_group_id == child.process_group_id
                     || entry.session_id == child.session_id
             }) && entry.pid != record.identity.pid
+                && !companion::contains(companion, entry)
                 && record
                     .dedicated_server_identity
                     .as_ref()
@@ -3623,8 +3678,24 @@ fn dedicated_group_has_only_expected_leader_observed(
 fn dedicated_group_has_only_expected_leader_sample(
     server: &DedicatedServerIdentity,
     allow_leader: bool,
+    diagnostic: Option<&mut Value>,
+    startup: Option<&mut StartupWorkload>,
+) -> Result<bool, WorkerProtocolError> {
+    dedicated_group_has_only_expected_leader_with_companion(
+        server,
+        allow_leader,
+        diagnostic,
+        startup,
+        None,
+    )
+}
+
+fn dedicated_group_has_only_expected_leader_with_companion(
+    server: &DedicatedServerIdentity,
+    allow_leader: bool,
     mut diagnostic: Option<&mut Value>,
     mut startup: Option<&mut StartupWorkload>,
+    companion: Option<&RetirementProcess>,
 ) -> Result<bool, WorkerProtocolError> {
     let mut members = DarwinSystem
         .process_group_pids(server.process_group_id)
@@ -3687,6 +3758,7 @@ fn dedicated_group_has_only_expected_leader_sample(
             }
         }
     }
+    companion::verify(companion, &census)?;
     let by_pid = census
         .iter()
         .map(|identity| (identity.pid, identity.parent_pid))
@@ -3714,6 +3786,9 @@ fn dedicated_group_has_only_expected_leader_sample(
         )
     });
     for process in unexpected {
+        if companion::contains(companion, process) {
+            continue;
+        }
         if let Some(wait) = startup.as_deref_mut() {
             wait.observe_owned(
                 process,
@@ -4302,6 +4377,10 @@ impl StartupLockFile {
 
     pub fn open(path: &Path, uid: u32) -> Result<Self, WorkerProtocolError> {
         Self::open_with_create(path, uid, true)
+    }
+
+    pub(crate) fn open_existing(path: &Path, uid: u32) -> Result<Self, WorkerProtocolError> {
+        Self::open_with_create(path, uid, false)
     }
 
     fn open_with_create(path: &Path, uid: u32, create: bool) -> Result<Self, WorkerProtocolError> {
@@ -19303,6 +19382,49 @@ pub(crate) mod tests {
             );
             assert_eq!(refusal["predicate"], "dedicated_scope");
             assert_eq!(refusal["observation"]["pid"], child_pid);
+            // Exercise the policy-only census with a retained live process
+            // witness. Production creates this witness only after exact-pair
+            // admission; generic workload inspection above remains strict.
+            let census = DarwinSystem.all_process_identities().unwrap();
+            let child = *census.iter().find(|p| p.pid == child_pid).unwrap();
+            let host = retirement_process(child, vec![child]).unwrap();
+            let evidence = prove_group_empty_samples_with_companion(
+                &record,
+                true,
+                false,
+                None,
+                None,
+                Some(&host),
+            )
+            .unwrap();
+            assert_eq!(evidence.consecutive_empty_samples, 5);
+            assert!(prove_worker_workload_absent(&record).is_err());
+            let mut drifted = host.clone();
+            drifted.identity.birth = Some((0, 0));
+            assert!(
+                prove_group_empty_samples_with_companion(
+                    &record,
+                    true,
+                    false,
+                    None,
+                    None,
+                    Some(&drifted),
+                )
+                .is_err()
+            );
+            let mut reparented = host.clone();
+            reparented.identity.parent_pid += 1;
+            assert!(
+                prove_group_empty_samples_with_companion(
+                    &record,
+                    true,
+                    false,
+                    None,
+                    None,
+                    Some(&reparented),
+                )
+                .is_err()
+            );
             server
                 .stdin
                 .as_mut()
@@ -26942,6 +27064,38 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
             );
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn authoritative_caller_policy_rejects_stale_proof_before_process_census() {
+        let fixture = crate::semantic::successor_fixture::SuccessorMember::new();
+        let (runtime, socket, proof, policy) = caller_policy_fixture(&fixture.manifest);
+        // These are metadata-only runtime DTOs with no live kernel witness.
+        // The stale proof must fail binding, without entering process census.
+        for change in 0..3 {
+            let mut stale = proof.clone();
+            match change {
+                0 => stale.operation_id = Uuid::now_v7(),
+                1 => stale.thread_id = "foreign-thread".into(),
+                _ => stale.identity.run_generation += 1,
+            }
+            assert_eq!(
+                stale.validate_binding_and_processes(&CallerPolicyExpectation {
+                    phase: CallerPolicyPhase::Prepared,
+                    operation_id: proof.operation_id,
+                    manifest: &fixture.manifest,
+                    runtime: &runtime,
+                    app_server_socket_identity: &socket,
+                    original_thread_id: "original-thread",
+                    durable_policy: &policy,
+                    controller: &fixture.manifest.controller,
+                    access: crate::domain::Access::Read,
+                    writer: None,
+                }),
+                Err(WorkerProtocolError::InvalidRuntimeRecord),
+                "stale proof {change} reached process census"
+            );
+        }
     }
 
     /// The caller-policy proof accepts both caller generations and

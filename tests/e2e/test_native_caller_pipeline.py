@@ -42,6 +42,16 @@ def main() -> int:
             raise AssertionError("unqualified executable admitted")
         allocation.assert_not_called()
 
+    with patch.dict(os.environ, {probe.OPT_IN: "1"}), patch.object(probe, "executable_identity") as identity, patch.object(probe.tempfile, "mkdtemp") as allocation:
+        try:
+            probe.campaign(Path("unused-driver"), Path("unused-codex"), task094_session=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("session mode admitted without an ordinary artifact")
+        identity.assert_not_called()
+        allocation.assert_not_called()
+
     with tempfile.TemporaryDirectory(prefix="caller-pipeline-offline-", dir=os.environ["TMPDIR"]) as temporary:
         parent = Path(temporary)
         invalid_bootstrap = parent / "invalid-bootstrap.json"
@@ -93,6 +103,7 @@ def main() -> int:
 
         failure = False
         unexpected_post = False
+        sequential_verified = True
 
         def run(argv, *, env, **_kwargs):
             if argv == ["fixture-codex", "--version"]:
@@ -129,6 +140,8 @@ def main() -> int:
             (root / "cleanup-result").write_bytes(b"complete\n")
             fixtures[-1].posts = 4 if (root / "interaction-cases").exists() else int(unexpected_post)
             value = {"schema": "dolgorae.native-caller-pipeline/v1"}
+            if (root / "interaction-cases").exists():
+                value["sequential_write_admissions_verified"] = sequential_verified
             if (root / "default-feature-variant").exists():
                 launch = {"disabled_features":["shell_snapshot"], "normalized_argv":["codex","--disable","shell_snapshot"], "launch_contract_sha256":"digest", "server_key":"key"}
                 value["default_feature_startup"] = {"variant":(root / "default-feature-variant").read_text(),
@@ -238,6 +251,15 @@ def main() -> int:
             interaction = probe.campaign(Path("fixture-driver"), Path("fixture-codex"), interactions=True)
             assert len(launches) == 8 and interaction["loopback_posts"] == 4
             assert fixtures[-1].closed and not owned[-1].exists()
+            sequential_verified = False
+            with contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    probe.campaign(Path("fixture-driver"), Path("fixture-codex"), interactions=True)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("historical READ fallback helper accepted as sequential WRITE proof")
+            assert fixtures[-1].closed and owned[-1].exists()
         plugin_root = parent / "source-observation"
         git = plugin_root / "fixture-a/.tmp/plugins/.git"
         (git / "refs/heads").mkdir(parents=True)

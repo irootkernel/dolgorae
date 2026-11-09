@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import closing
 import hashlib
 import json
 import os
+import select
 from pathlib import Path
 import shlex
 import subprocess
@@ -44,6 +46,8 @@ class OrdinaryCase:
         self.stop_fault = threading.Event()
         self.prepared = None
         self.engagement = None
+        self.bootstrap_gateway_identity = None
+        self.bootstrap_continuation_started = False
 
     def call(self, image, *arguments, pass_fds=(), expected_errors=()):
         argv = [str(image), *map(str, arguments)]
@@ -68,7 +72,93 @@ class OrdinaryCase:
         return self.call(self.args.binary, *arguments, **kwargs)
 
     def helper(self, operation):
+        if operation == "bootstrap-start" and self.bootstrap_gateway_identity is None:
+            host.require(self.serve is not None and self.serve.poll() is None, "bootstrap gateway not owned")
+            path = self.root / "bootstrap-close-gateway-pid"
+            if path.exists():
+                host.require(int(path.read_text()) == self.serve.pid, "bootstrap gateway identity changed")
+            else:
+                host.private(path, str(self.serve.pid).encode())
+            self.bootstrap_gateway_identity = self.call(self.args.helper, "bootstrap-gateway-identity", self.root)
+        if operation == "bootstrap-close":
+            return self.close_bootstrap()
         return self.call(self.args.helper, operation, self.root)
+
+    def observe_bootstrap_close(self, seconds=90):
+        deadline = time.monotonic() + seconds
+        while True:
+            observed = self.call(self.args.helper, "bootstrap-observe", self.root)
+            if observed["complete"] or time.monotonic() >= deadline:
+                return observed
+            time.sleep(.1)
+
+    def replace_bootstrap_gateway(self):
+        host.require(not self.gap, "response-loss replacement not selected for injected gateway faults")
+        host.require(self.serve is not None and self.serve.poll() is None, "original gateway unavailable")
+        original = self.bootstrap_gateway_identity
+        host.require(original is not None and original["bsd"]["pid"] == self.serve.pid,
+                     "original owned gateway identity unavailable")
+        fresh = self.call(self.args.helper, "bootstrap-gateway-identity", self.root)
+        host.require(fresh == original, "gateway birth or executable identity changed")
+        image = self.args.binary.resolve(strict=True)
+        metadata = image.stat()
+        host.require(fresh["image"] == {"path": str(image), "device": metadata.st_dev,
+            "inode": metadata.st_ino, "sha256": hashlib.sha256(image.read_bytes()).hexdigest()},
+            "gateway image differs from frozen product")
+        with closing(select.kqueue()) as queue:
+            queue.control([select.kevent(self.serve.pid, filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT)], 0, 0)
+            host.require(self.call(self.args.helper, "bootstrap-gateway-identity", self.root) == original,
+                         "gateway changed before exact termination")
+            self.serve.terminate()
+            events = queue.control(None, 1, 15)
+            host.require(any(event.ident == self.serve.pid and event.fflags & select.KQ_NOTE_EXIT for event in events),
+                         "owned gateway exit not observed; no force fallback")
+            self.serve.wait(timeout=5)
+        absence = self.call(self.args.helper, "bootstrap-gateway-absent", self.root)
+        host.require(absence["pid"] == original["bsd"]["pid"] and absence["consecutive_absent_samples"] == 5,
+                     "old gateway executor absence unproved")
+        host.private(self.root / "bootstrap-close-old-gateway-exit.json", host.encoded({
+            "original": original, "kernel_exit_observed": True, "absence": absence,
+            "scope": "gateway_executor_only", "signals_sent": 1}))
+        with (self.root / "serve-close-recovery.stdout").open("xb") as stdout, (self.root / "serve-close-recovery.stderr").open("xb") as stderr:
+            self.serve = subprocess.Popen([str(self.args.binary), "serve", "--socket", str(self.root / "gateway.sock")],
+                env=self.env, cwd=self.root / "workspace", stdout=stdout, stderr=stderr)
+        deadline = time.monotonic() + 30
+        while not (self.root / "gateway.sock").exists():
+            host.require(self.serve.poll() is None and time.monotonic() < deadline, "replacement gateway not ready")
+            time.sleep(.025)
+        host.require(self.serve.poll() is None, "replacement gateway exited")
+        host.private(self.root / "bootstrap-close-replacement.pid", str(self.serve.pid).encode())
+        replacement = self.call(self.args.helper, "bootstrap-gateway-identity", self.root)
+        host.private(self.root / "bootstrap-close-replacement.json", host.encoded(replacement))
+
+    def close_bootstrap(self):
+        terminal = self.root / "ordinary-bootstrap-closed.json"
+        if terminal.exists():
+            observed = self.call(self.args.helper, "bootstrap-observe", self.root)
+            host.require(observed["complete"], "recorded bootstrap cleanup no longer proved")
+            return load(terminal)
+        host.require(not self.bootstrap_continuation_started, "single bootstrap continuation already attempted")
+        result = self.call(self.args.helper, "bootstrap-close", self.root)
+        if result.get("complete"):
+            return result
+        host.require(result.get("pending_close") is True and result.get("response_lost") is True,
+                     "bootstrap Close was not a typed unresolved response")
+        observed = self.observe_bootstrap_close()
+        if observed["complete"]:
+            return self.call(self.args.helper, "bootstrap-close-observed", self.root)
+        host.require(observed["closed"] and observed["no_work"] and observed["writer_free"],
+                     "original ordinary Run is not eligible for Closed continuation")
+        self.bootstrap_continuation_started = True
+        self.replace_bootstrap_gateway()
+        observed = self.call(self.args.helper, "bootstrap-observe", self.root)
+        host.require(observed["closed"] and observed["no_work"] and observed["writer_free"],
+                     "original Run changed after gateway replacement")
+        result = self.call(self.args.helper, "bootstrap-close-continuation", self.root)
+        host.require(result.get("complete") is True, "single Closed continuation unresolved; original fixture retained")
+        return result
 
     def admin(self, operation, *arguments):
         with (self.root / "operator").open("rb") as operator, (native_root(self.root) / "external-controller").open("rb") as controller:
@@ -352,7 +442,7 @@ class OrdinaryCase:
             host.require(self.responses.cleanup_complete, "original native engagement close incomplete")
         if (self.root / "ordinary-bootstrap.json").exists() and not (self.root / "ordinary-bootstrap-close.pb").exists():
             self.helper("bootstrap-close")
-        if (self.root / "ordinary-bootstrap-close.pb").exists():
+        if (self.root / "ordinary-bootstrap-closed.json").exists():
             self.retire_profile()
         return {"cleanup_complete": True, "route": "ordinary CLI; original tasks settled before release"}
 

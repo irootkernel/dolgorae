@@ -132,6 +132,33 @@ phase changes and later resumes MUST NOT recreate it. No task Turn or provider
 dispatch is permitted in this window. Failure MUST preserve the original or
 provisional Thread, unknown-state retry fence and Writer guard semantics.
 Policy proofs and later access transitions MUST NOT use this startup wait.
+
+After startup, a serialized caller policy proof and its authoritative
+Controller/Writer revalidation MAY distinguish one qualified resident Code Mode
+host from workload. This exception is limited to Codex
+0.164.0 executable SHA-256
+`d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf`
+and its sibling host SHA-256
+`416721e33af8822041dc650793512b3e58d43e0be4f3a5c6187eb4dfaad3148a`.
+Qualification MUST establish that completed native Turns leave no executing
+Code Mode isolate, including yielded cells and unawaited timers or promises.
+Idle Thread metadata alone is insufficient: yielded native tool commands can
+outlive their Turn. The caller MUST retain its idle/no-pending-interaction,
+exclusive original Thread, current policy and durable admission checks.
+The companion MUST have the exact sibling executable path, regular executable
+image and digest, the same UID and session, and direct ancestry to the matching
+owned Dedicated Server. A proof MUST retain the same PID, birth, parent,
+group, session and executable device/inode throughout all five samples.
+Every additional descendant and any identity or census uncertainty MUST refuse
+the proof. The coordinator MUST validate the received proof against current Controller,
+Writer, runtime, socket, policy, original Thread and committed projection before
+using this same policy-specific census. Generic workload/absence inspection and
+startup remain strict.
+Writer retirement MUST capture and stop the companion with the complete owned
+generation and prove physical absence before releasing authority. This bounded
+trusted-runtime qualification does not remove the existing between-poll escape
+limit; it grants no exception to other executable pairs or configurations.
+
 Missing instruction sources and known unsupported required capabilities MUST
 fail before Run allocation. Post-allocation failures retain the original Run
 and idempotency receipt with truthful failure or unknown state; retries MUST

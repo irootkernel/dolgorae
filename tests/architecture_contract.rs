@@ -1661,6 +1661,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "pool",
             &["darwin", "domain", "machine", "paths", "run", "workspace"][..],
         ),
+        ("worker/companion", &["darwin"][..]),
     ]);
 
     check_source_dependencies(&repository_root().join("src"), &approved);

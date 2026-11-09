@@ -25,6 +25,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+#[path = "native_caller_pipeline/session.rs"]
+mod session;
+
 fn ordinary_binary() -> Option<PathBuf> {
     std::env::var_os("DOLGORAE_NATIVE_ORDINARY_BIN").map(PathBuf::from)
 }
@@ -918,6 +921,7 @@ fn campaign(root: &Path, codex: &Path) -> Value {
     }
     let credential = if std::env::var("DOLGORAE_NATIVE_READONLY_POOL").as_deref() == Ok("1")
         || root.join("interaction-cases").exists()
+        || root.join("task094-session").exists()
     {
         let directory = home.root().join("controller-carriers");
         fs::create_dir(&directory).unwrap();
@@ -934,21 +938,26 @@ fn campaign(root: &Path, codex: &Path) -> Value {
         root.join("controller.json")
     };
     if ordinary_binary().is_some() {
-        ordinary(
-            root,
-            &[
-                "controller".into(),
-                "credential".into(),
-                "create".into(),
-                "--kind".into(),
-                "automation".into(),
-                "--instance-id".into(),
-                "native-caller-fixture".into(),
-                "--output".into(),
-                credential.to_str().unwrap().into(),
-            ],
-        )
-        .unwrap();
+        let mut args = vec![
+            "controller".into(),
+            "credential".into(),
+            "create".into(),
+            "--kind".into(),
+            if root.join("task094-session").exists() {
+                "interactive-client"
+            } else {
+                "automation"
+            }
+            .into(),
+            "--instance-id".into(),
+            "native-caller-fixture".into(),
+            "--output".into(),
+            credential.to_str().unwrap().into(),
+        ];
+        if root.join("task094-session").exists() {
+            args.extend(["--orchestration-policy".into(), "task094-session".into()]);
+        }
+        ordinary(root, &args).unwrap();
     } else {
         create_controller_credential(
             &credential,
@@ -982,6 +991,7 @@ fn campaign(root: &Path, codex: &Path) -> Value {
     let result = std::panic::catch_unwind(|| {
         if std::env::var("DOLGORAE_NATIVE_READONLY_POOL").as_deref() == Ok("1")
             || root.join("interaction-cases").exists()
+            || root.join("task094-session").exists()
         {
             return pool_campaign(root, &home, &view, &credential);
         }
@@ -1163,6 +1173,11 @@ fn campaign(root: &Path, codex: &Path) -> Value {
             "guarded_generation_recovery_reader":true,"automatic_writer_reacquisition":false,
             "native_account_environment":"platform_owned","default_feature_startup":default_features})
     });
+    if root.join("session-gateway-retained.json").exists() {
+        fs::write(root.join("cleanup-result"), "incomplete\n").unwrap();
+        result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        panic!("retained gateway requires explicit original-operation recovery");
+    }
     let mut clean = true;
     for entry in fs::read_dir(state_root.join("runs")).unwrap() {
         let entry = entry.unwrap();
@@ -1173,12 +1188,76 @@ fn campaign(root: &Path, codex: &Path) -> Value {
         else {
             continue;
         };
-        let close = try_mutation(
-            &view,
-            &credential,
-            id,
-            RunMutationOperation::Close { interrupt: false },
-        );
+        let bootstrap = root.join("session-bootstrap-controller.json");
+        let cleanup_credential = if bootstrap.exists()
+            && store
+                .load_manifest(id)
+                .unwrap()
+                .controller
+                .identity
+                .instance_id
+                == "task094-observer-bootstrap"
+        {
+            let binding = dolgorae::controller::binding_from_carrier(
+                &CredentialCarrier::open_path(&bootstrap).unwrap(),
+                1,
+            )
+            .unwrap();
+            assert_eq!(binding, store.load_manifest(id).unwrap().controller);
+            &bootstrap
+        } else {
+            &credential
+        };
+        let mut current = RunSnapshot::load(&state_root, id, 0).unwrap();
+        if current.projection.lifecycle == RunLifecycle::Closed {
+            continue;
+        }
+        let retained = current
+            .manifest
+            .aggregate_binding
+            .as_ref()
+            .filter(|binding| binding.member_kind == dolgorae::run::AggregateMemberKind::Primary)
+            .and_then(|_| {
+                dolgorae::orchestration::OrchestrationStore::open_observer(&state_root)
+                    .unwrap()
+                    .session_close(id)
+                    .unwrap()
+            });
+        let operation = if let Some(close) = retained {
+            // Cleanup continues the accepted intent; it never replaces Abort
+            // with an incompatible graceful Close or reconciles unknown work.
+            let deadline = Instant::now() + Duration::from_secs(90);
+            while close.progress != "outcome_unknown"
+                && (current.projection.active_turn_id.is_some()
+                    || !current.projection.pending_requests.is_empty())
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(50));
+                current = RunSnapshot::load(&state_root, id, 0).unwrap();
+            }
+            if close.progress == "outcome_unknown"
+                || current.projection.lifecycle != RunLifecycle::Idle
+                || current.projection.active_turn_id.is_some()
+                || !current.projection.pending_requests.is_empty()
+            {
+                record_failure(
+                    root,
+                    "Run cleanup",
+                    &dolgorae::machine::MachineError::new(
+                        "RECOVERY_REQUIRED",
+                        "retained Close is not ready for cleanup recovery",
+                        false,
+                        json!({"run_id":id,"operation_id":close.operation_id,"progress":close.progress}),
+                    ),
+                );
+                clean = false;
+                continue;
+            }
+            RunMutationOperation::Recover
+        } else {
+            RunMutationOperation::Close { interrupt: false }
+        };
+        let close = try_mutation(&view, cleanup_credential, id, operation);
         match close {
             Ok(snapshot) => clean &= snapshot.projection.lifecycle == RunLifecycle::Closed,
             Err(error) => {
@@ -1199,17 +1278,24 @@ fn campaign(root: &Path, codex: &Path) -> Value {
 
 fn interaction_cases(
     root: &Path,
-    home: &DolgoraeHome,
     view: &WorkspaceView,
     credential: &Path,
     runtime: &tokio::runtime::Runtime,
     channel: tonic::transport::Channel,
     controller: Option<dolgorae::protocol::public_v2::ControllerCarrierRef>,
+    existing_run: Option<Uuid>,
 ) -> Value {
     use dolgorae::protocol::public_v2 as pb;
-    let started = start(view, credential, "fixture-a", "interaction-run", false)
-        .unwrap_or_else(|e| fail(root, "interaction startup", e));
-    let id = started.snapshot.manifest.run_id;
+    let home = DolgoraeHome::system().unwrap();
+    let snapshot = existing_run.map_or_else(
+        || {
+            start(view, credential, "fixture-a", "interaction-run", false)
+                .unwrap_or_else(|e| fail(root, "interaction startup", e))
+                .snapshot
+        },
+        |id| RunSnapshot::load(&home.workspace_root(&view.workspace_id), id, 0).unwrap(),
+    );
+    let id = snapshot.manifest.run_id;
     let run = Some(pb::RunRef {
         workspace: Some(pb::WorkspaceRef {
             absolute_path: view
@@ -1233,7 +1319,7 @@ fn interaction_cases(
     let native_socket = dolgorae::worker::dedicated_server_socket_path(
         dolgorae::workspace::WorkspacePlatform::current_uid(&SystemWorkspacePlatform),
         id,
-        started.snapshot.projection.run_generation,
+        snapshot.projection.run_generation,
     )
     .unwrap();
     let mut native =
@@ -1241,7 +1327,7 @@ fn interaction_cases(
             .unwrap();
     native.request("initialize",json!({"clientInfo":{"name":"task079-inventory","version":"1"},"capabilities":{"experimentalApi":true}})).unwrap();
     native.notify("initialized", json!({})).unwrap();
-    let inventory=native.request("mcpServerStatus/list",json!({"threadId":started.snapshot.projection.thread_id,"serverName":"fixture","detail":"toolsAndAuthOnly"})).unwrap();
+    let inventory=native.request("mcpServerStatus/list",json!({"threadId":snapshot.projection.thread_id,"serverName":"fixture","detail":"toolsAndAuthOnly"})).unwrap();
     assert!(
         inventory["data"]
             .as_array()
@@ -1250,7 +1336,7 @@ fn interaction_cases(
             .any(|v| v["name"] == "fixture" && v["tools"].get("ask").is_some())
     );
     drop(native);
-    let identity = &started.snapshot.controller_authority().unwrap().identity;
+    let identity = &snapshot.controller_authority().unwrap().identity;
     let principal_value = json!({"controller_id":identity.controller_id,"kind":identity.kind,"instance_id":identity.instance_id,"subject_id":identity.subject_id});
     let principal = format!(
         "sha256:{}",
@@ -1267,35 +1353,14 @@ fn interaction_cases(
             pb::operation_service_client::OperationServiceClient::new(channel.clone());
         let mut interactions =
             pb::interaction_service_client::InteractionServiceClient::new(channel);
-        let selected = fs::read_to_string(root.join("interaction-cases")).unwrap();
+        let selected = fs::read_to_string(root.join(if existing_run.is_some() {
+            "task094-session"
+        } else {
+            "interaction-cases"
+        }))
+        .unwrap();
         let selected = selected.trim().split(',').collect::<Vec<_>>();
-        for (index, case) in selected.iter().copied().enumerate() {
-            let current = runs
-                .get_run(pb::GetRunRequest {
-                    context: context(),
-                    run: run.clone(),
-                })
-                .await
-                .unwrap()
-                .into_inner()
-                .run
-                .unwrap();
-            if case == "mcp" && index > 0 {
-                let busy = runs
-                    .submit_turn(pb::SubmitTurnRequest {
-                        context: context(),
-                        run: run.clone(),
-                        controller: controller.clone(),
-                        idempotency_key: "mcp-write-refused".into(),
-                        write_intent: pb::WriteIntent::Write as i32,
-                        message: "TASK079 mcp".into(),
-                        expected_state_revision: current.state_revision,
-                        ..Default::default()
-                    })
-                    .await
-                    .unwrap_err();
-                assert_eq!(busy.message(), "RUN_BUSY");
-            }
+        for case in selected.iter().copied() {
             let current = runs
                 .get_run(pb::GetRunRequest {
                     context: context(),
@@ -1311,8 +1376,15 @@ fn interaction_cases(
                 run: run.clone(),
                 controller: controller.clone(),
                 idempotency_key: case.into(),
-                write_intent: pb::WriteIntent::Read as i32,
-                message: format!("TASK079 {case}"),
+                write_intent: pb::WriteIntent::Write as i32,
+                message: format!(
+                    "{} {case}",
+                    if existing_run.is_some() {
+                        "TASK094"
+                    } else {
+                        "TASK079"
+                    }
+                ),
                 expected_state_revision: current.state_revision,
                 ..Default::default()
             })
@@ -1511,10 +1583,15 @@ fn interaction_cases(
             );
         }
     }
-    let cases = fs::read_to_string(root.join("interaction-cases")).unwrap();
+    let cases = fs::read_to_string(root.join(if existing_run.is_some() {
+        "task094-session"
+    } else {
+        "interaction-cases"
+    }))
+    .unwrap();
     let permission = cases.trim().split(',').any(|v| v == "permission");
     let mcp = cases.trim().split(',').any(|v| v == "mcp");
-    json!({"schema":"dolgorae.native-caller-pipeline/v1","mode":"interactions","public_v2_uds":true,"permission_accept":permission,"mcp_accept":mcp,"protected_receipt_replay":true,"native_turns":cases.trim().split(',').count(),"strict_write_reacquisition_refused":permission&&mcp,"pre_dispatch_admission_settled":permission&&mcp})
+    json!({"schema":"dolgorae.native-caller-pipeline/v1","mode":"interactions","public_v2_uds":true,"permission_accept":permission,"mcp_accept":mcp,"protected_receipt_replay":true,"native_turns":cases.trim().split(',').count(),"sequential_write_admissions_verified":permission&&mcp,"pre_dispatch_admission_settled":permission&&mcp})
 }
 
 fn pool_campaign(
@@ -1527,6 +1604,9 @@ fn pool_campaign(
     use dolgorae::provisioning::{
         ProvisioningAdmission, ProvisioningSources, capture_provisioning,
     };
+    if root.join("task094-session").exists() {
+        return session::campaign(root, home, view, credential);
+    }
     let pool_limit = fs::read_to_string(root.join("pool-limit"))
         .unwrap_or_else(|_| "1".into())
         .parse::<u32>()
@@ -1664,7 +1744,7 @@ fn pool_campaign(
         )
         .unwrap();
     if root.join("interaction-cases").exists() {
-        return interaction_cases(root, home, view, credential, &runtime, channel, controller);
+        return interaction_cases(root, view, credential, &runtime, channel, controller, None);
     }
     let mut transport = pb::run_service_client::RunServiceClient::new(channel.clone());
     let mut runtime_client = pb::runtime_service_client::RuntimeServiceClient::new(channel.clone());

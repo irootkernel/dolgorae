@@ -198,7 +198,158 @@ fn context() -> Option<pb::RequestContext> {
     })
 }
 
-async fn bootstrap(root: &Path, close: bool) -> Value {
+#[derive(Clone, PartialEq, prost::Message)]
+struct RichStatus {
+    #[prost(int32, tag = "1")]
+    code: i32,
+    #[prost(string, tag = "2")]
+    message: String,
+    #[prost(message, repeated, tag = "3")]
+    details: Vec<prost_types::Any>,
+}
+fn bootstrap_unresolved(status: &tonic::Status) {
+    let rich = RichStatus::decode(status.details()).unwrap();
+    assert_eq!(rich.code, status.code() as i32);
+    assert_eq!(rich.message, "TRANSPORT_FAILURE");
+    assert_eq!(rich.details.len(), 1);
+    assert_eq!(
+        rich.details[0].type_url,
+        "type.googleapis.com/dolgorae.public.v2.DolgoraeErrorDetail"
+    );
+    let detail = pb::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap();
+    assert_eq!(detail.detail_version, 2);
+    assert_eq!(detail.dolgorae_error_code, "TRANSPORT_FAILURE");
+    assert_eq!(detail.operation_kind, pb::OperationKind::CloseRun as i32);
+    assert_eq!(detail.effect, pb::EffectState::Unresolved as i32);
+    assert_eq!(
+        detail.classification,
+        pb::FailureClassification::Unknown as i32
+    );
+    assert_eq!(
+        detail.action,
+        pb::RequiredClientAction::ReconcileOperation as i32
+    );
+    assert_eq!(
+        detail.retry_classification,
+        pb::RetryClassification::Forbidden as i32
+    );
+    assert_eq!(
+        detail.recovery_classification,
+        pb::RecoveryClassification::ReconcileRequired as i32
+    );
+}
+async fn bootstrap_observation(
+    root: &Path,
+    client: &mut pb::run_service_client::RunServiceClient<tonic::transport::Channel>,
+    reference: &pb::RunRef,
+) -> (pb::GetRunResponse, Value) {
+    let original = pb::StartRunResponse::decode(
+        fs::read(root.join("ordinary-bootstrap-start.pb"))
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    let original = original.run.unwrap();
+    let observed = client
+        .get_run(pb::GetRunRequest {
+            context: context(),
+            run: Some(reference.clone()),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let run = observed.run.as_ref().unwrap();
+    assert_eq!(run.run_id, original.run_id);
+    assert_eq!(run.workspace_id, original.workspace_id);
+    assert_eq!(run.controller, original.controller);
+    assert_eq!(
+        run.thread.as_ref().map(|t| &t.thread_id),
+        original.thread.as_ref().map(|t| &t.thread_id)
+    );
+    let home = home(root);
+    let state = home.workspace_root(&run.workspace_id);
+    let id = Uuid::parse_str(&run.run_id).unwrap();
+    let snapshot = RunSnapshot::load(&state, id, 0).unwrap();
+    assert!(
+        snapshot.manifest.aggregate_binding.is_none(),
+        "ordinary bootstrap has no retained aggregate Close"
+    );
+    let scope_absent = if let Some(record) = snapshot.runtime_record.as_ref() {
+        record.identity.run_generation == snapshot.projection.run_generation
+            && worker::prove_worker_generation_absent(record).is_ok()
+    } else {
+        worker::verified_absence_marker(&worker::runtime_root(&state), id)
+            .ok()
+            .flatten()
+            .is_some_and(|marker| marker.run_generation == snapshot.projection.run_generation)
+    };
+    let binding = snapshot.manifest.global_profile_binding.as_ref().unwrap();
+    let members: Value = serde_json::from_slice(
+        &fs::read(
+            home.root()
+                .join("profiles")
+                .join(&binding.server_key)
+                .join("members.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(members["server_key"], binding.server_key);
+    let member = &members["members"][format!("{}:{id}", run.workspace_id)];
+    let membership_released = member["disposition"] == "released" && member["run_id"] == run.run_id;
+    let closed = run.lifecycle == pb::RunLifecycle::Closed as i32;
+    let no_work = run.active_turn.is_none() && run.pending_interaction_count == 0;
+    let writer_free = run.writer_authority.as_ref().unwrap().state
+        == pb::WriterAuthorityState::None as i32
+        && snapshot
+            .writer
+            .holder
+            .as_ref()
+            .is_none_or(|holder| holder.run_id != id);
+    let complete = closed && no_work && writer_free && scope_absent && membership_released;
+    let summary = json!({"run_id":run.run_id,"thread_id":run.thread.as_ref().map(|t|&t.thread_id),
+        "controller_id":run.controller.as_ref().unwrap().controller_id,
+        "controller_generation":run.controller.as_ref().unwrap().generation,
+        "state_revision":run.state_revision,"closed":closed,"no_work":no_work,
+        "writer_free":writer_free,"scope_absent":scope_absent,
+        "membership_released":membership_released,"complete":complete});
+    (observed, summary)
+}
+fn bootstrap_gateway_identity(root: &Path, absent: bool) -> Value {
+    let original = root.join("bootstrap-close-gateway-pid");
+    let current = root.join("bootstrap-close-replacement.pid");
+    let pid: u32 = fs::read_to_string(if absent || !current.exists() {
+        original
+    } else {
+        current
+    })
+    .unwrap()
+    .trim()
+    .parse()
+    .unwrap();
+    if absent {
+        for _ in 0..5 {
+            assert_eq!(
+                DarwinSystem
+                    .bsd_process_identity(pid)
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(libc::ESRCH)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return json!({"pid":pid,"consecutive_absent_samples":5});
+    }
+    let live = DarwinSystem.bsd_process_identity(pid).unwrap();
+    assert!(!live.zombie && live.uid == DarwinSystem.current_uid());
+    let image =
+        fs::canonicalize(read(&root.join("input.json"))["binary"].as_str().unwrap()).unwrap();
+    assert_eq!(DarwinSystem.live_process_path(pid).as_ref(), Some(&image));
+    let metadata = fs::metadata(&image).unwrap();
+    json!({"bsd":live,"image":{"path":image,"device":metadata.dev(),"inode":metadata.ino(),
+        "sha256":dolgorae::jcs::sha256_hex(&fs::read(&image).unwrap())}})
+}
+async fn bootstrap(root: &Path, mode: &str) -> Value {
     let home = home(root);
     let view = WorkspaceService::system()
         .unwrap()
@@ -232,7 +383,7 @@ async fn bootstrap(root: &Path, close: bool) -> Value {
         expected_controller_id: binding.identity.controller_id.to_string(),
         expected_controller_generation: 1,
     };
-    if !close {
+    if mode == "bootstrap-start" {
         let captured: RetainedSnapshot =
             serde_json::from_slice(&fs::read(root.join("ordinary-captured.json")).unwrap())
                 .unwrap();
@@ -308,39 +459,96 @@ async fn bootstrap(root: &Path, close: bool) -> Value {
             workspace: Some(workspace),
             run_id: started["run_id"].as_str().unwrap().into(),
         };
-        let observed = client
-            .get_run(pb::GetRunRequest {
-                context: context(),
-                run: Some(reference.clone()),
-            })
-            .await
-            .unwrap()
-            .into_inner();
-        private(
-            &root.join("ordinary-bootstrap-before-close.pb"),
-            &observed.encode_to_vec(),
-        );
-        let run = observed.run.unwrap();
-        assert!(run.active_turn.is_none());
-        let response = client
+        let (observed, summary) = bootstrap_observation(root, &mut client, &reference).await;
+        if mode == "bootstrap-observe" {
+            return summary;
+        }
+        if mode == "bootstrap-close-observed" {
+            assert_eq!(summary["complete"], true);
+            private(
+                &root.join("ordinary-bootstrap-close-observed.pb"),
+                &observed.encode_to_vec(),
+            );
+            let mut result = summary;
+            result["completion_evidence"] = json!("public_observation_after_response_loss");
+            result["full_response"] = json!("ordinary-bootstrap-close-observed.pb");
+            save(root, "ordinary-bootstrap-closed.json", &result);
+            return result;
+        }
+        let continuation = mode == "bootstrap-close-continuation";
+        let before = if continuation {
+            "ordinary-bootstrap-before-continuation.pb"
+        } else {
+            "ordinary-bootstrap-before-close.pb"
+        };
+        if !continuation && root.join(before).exists() {
+            // A previous attempt cannot be submitted again or overwrite its receipt.
+            let rich = RichStatus::decode(
+                fs::read(root.join("ordinary-bootstrap-close-error.pb"))
+                    .unwrap()
+                    .as_slice(),
+            )
+            .unwrap();
+            let status = tonic::Status::with_details(
+                tonic::Code::Unavailable,
+                rich.message.clone(),
+                rich.encode_to_vec().into(),
+            );
+            bootstrap_unresolved(&status);
+            return json!({"pending_close":true,"attempt":"original","response_lost":true});
+        }
+        if continuation {
+            assert_eq!(summary["closed"], true);
+            assert_eq!(summary["no_work"], true);
+            assert_eq!(summary["writer_free"], true);
+        } else {
+            assert_eq!(
+                observed.run.as_ref().unwrap().lifecycle,
+                pb::RunLifecycle::Idle as i32
+            );
+            assert_eq!(summary["no_work"], true);
+        }
+        private(&root.join(before), &observed.encode_to_vec());
+        let revision = observed.run.unwrap().state_revision;
+        let result = client
             .close_run(pb::CloseRunRequest {
                 context: context(),
-                run: Some(reference),
+                run: Some(reference.clone()),
                 controller: Some(controller),
                 interrupt: false,
-                expected_state_revision: run.state_revision,
+                expected_state_revision: revision,
             })
-            .await
-            .unwrap()
-            .into_inner();
-        private(
-            &root.join("ordinary-bootstrap-close.pb"),
-            &response.encode_to_vec(),
-        );
-        let run = response.run.unwrap();
-        assert_eq!(run.lifecycle, pb::RunLifecycle::Closed as i32);
-        json!({"run_id":run.run_id,"state_revision":run.state_revision,
-            "lifecycle":"closed","full_response":"ordinary-bootstrap-close.pb"})
+            .await;
+        let response = match result {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
+                let name = if continuation {
+                    "ordinary-bootstrap-continuation-error.pb"
+                } else {
+                    "ordinary-bootstrap-close-error.pb"
+                };
+                private(&root.join(name), status.details());
+                bootstrap_unresolved(&status);
+                return json!({"pending_close":true,"attempt":if continuation {"continuation"} else {"original"},
+                    "response_lost":true});
+            }
+        };
+        let name = if continuation {
+            "ordinary-bootstrap-close-continuation.pb"
+        } else {
+            "ordinary-bootstrap-close.pb"
+        };
+        private(&root.join(name), &response.encode_to_vec());
+        let (_, mut summary) = bootstrap_observation(root, &mut client, &reference).await;
+        assert_eq!(summary["complete"], true);
+        summary["completion_evidence"] = json!(if continuation {
+            "closed_continuation_response"
+        } else {
+            "close_response"
+        });
+        summary["full_response"] = json!(name);
+        save(root, "ordinary-bootstrap-closed.json", &summary);
+        summary
     }
 }
 
@@ -722,6 +930,46 @@ fn fault_worker(root: &Path) -> Value {
     result
 }
 
+#[cfg(test)]
+mod response_loss_tests {
+    use super::*;
+    #[test]
+    fn bootstrap_unknown_requires_original_close_reconciliation() {
+        let mut detail = pb::DolgoraeErrorDetail {
+            detail_version: 2,
+            dolgorae_error_code: "TRANSPORT_FAILURE".into(),
+            operation_kind: pb::OperationKind::CloseRun as i32,
+            effect: pb::EffectState::Unresolved as i32,
+            classification: pb::FailureClassification::Unknown as i32,
+            action: pb::RequiredClientAction::ReconcileOperation as i32,
+            retry_classification: pb::RetryClassification::Forbidden as i32,
+            recovery_classification: pb::RecoveryClassification::ReconcileRequired as i32,
+            ..Default::default()
+        };
+        let status = |detail: &pb::DolgoraeErrorDetail| {
+            let rich = RichStatus {
+                code: tonic::Code::Unavailable as i32,
+                message: "TRANSPORT_FAILURE".into(),
+                details: vec![prost_types::Any {
+                    type_url: "type.googleapis.com/dolgorae.public.v2.DolgoraeErrorDetail".into(),
+                    value: detail.encode_to_vec(),
+                }],
+            };
+            tonic::Status::with_details(
+                tonic::Code::Unavailable,
+                "TRANSPORT_FAILURE",
+                rich.encode_to_vec().into(),
+            )
+        };
+        bootstrap_unresolved(&status(&detail));
+        detail.effect = pb::EffectState::None as i32;
+        assert!(std::panic::catch_unwind(|| bootstrap_unresolved(&status(&detail))).is_err());
+        detail.effect = pb::EffectState::Unresolved as i32;
+        detail.action = pb::RequiredClientAction::FixRequest as i32;
+        assert!(std::panic::catch_unwind(|| bootstrap_unresolved(&status(&detail))).is_err());
+    }
+}
+
 #[tokio::main]
 async fn main() {
     assert_eq!(
@@ -737,8 +985,13 @@ async fn main() {
     );
     let result = match args[1].to_str().unwrap() {
         "capture" => capture(&root),
-        "bootstrap-start" => bootstrap(&root, false).await,
-        "bootstrap-close" => bootstrap(&root, true).await,
+        "bootstrap-start"
+        | "bootstrap-close"
+        | "bootstrap-observe"
+        | "bootstrap-close-observed"
+        | "bootstrap-close-continuation" => bootstrap(&root, args[1].to_str().unwrap()).await,
+        "bootstrap-gateway-identity" => bootstrap_gateway_identity(&root, false),
+        "bootstrap-gateway-absent" => bootstrap_gateway_identity(&root, true),
         "select-worker" => select_worker(&root),
         "group-inputs" => group_inputs(&root),
         "accepted-task-digest" => {

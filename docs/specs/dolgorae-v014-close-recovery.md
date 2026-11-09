@@ -20,9 +20,52 @@ a competing caller cannot replace an active owner.
 Recover/Reconcile first resolves the Primary's actual process, admission or
 outcome condition, including a lost worker on a Thread-bearing idle Run. It then
 settles children and closes the Primary at its current post-settlement revision.
-An interrupt acknowledgement does not establish terminal history. An uncertain
-effect remains fenced and is never redispatched. A coordinator that exits before
-completion retains an actionable recovery state and its cause.
+An interrupt acknowledgement does not establish terminal history. If the Primary
+still has an active Turn, pending interaction or nonterminal lifecycle after the
+acknowledgement, Close retains its original operation and reports
+`RECOVERY_REQUIRED` before attempting Writer release. The caller observes the
+terminal outcome and explicitly recovers that same Close; the coordinator does
+not wait indefinitely or create another Close. Public v2 projects this retained
+recovery as an accepted effect with recovery required. A live-owner
+`SESSION_CLOSE_IN_PROGRESS` instead requests a snapshot with no effect claimed
+for the contending request, whose interrupt choice has not been admitted.
+Changing the retained interrupt choice remains a no-effect refusal.
+An uncertain effect remains fenced and is never redispatched. A coordinator
+that exits before completion retains an actionable recovery state and its cause.
+
+Caller-workspace generations 3 and 4 use the same retained session-close
+coordinator, pre-close Writer release and Recover/Reconcile path. Generation 4
+must retain its captured delegation instruction identity when projecting close
+or recovery state; it is not a generation-3 instruction capture. The legacy
+adapter remains restricted to generations 1 and 2. A retained close reports the
+same operation and recovery diagnostics for either caller-workspace generation.
+
+For caller-workspace generations 3 and 4, a terminal Run projection does not
+finish Close cleanup. Before a retained Close becomes complete, its owner MUST
+prove the current Run generation absent, retire its original Profile membership
+and verify that retirement. Recovery of
+an already-Closed Primary performs these remaining obligations under the same
+Close operation and lifecycle lease; it does not replay a native Close or
+create a replacement generation. An absent Worker requires complete owned-scope
+absence, not a PID-only observation. A missing locator requires the existing
+generation-bound absence marker, startup witnesses and empty inventory. The
+highest actually evidenced generation governs this proof; a Run with no worker
+attempt evidence remains generation zero and requires no invented absence
+marker. Display observation opens only existing startup evidence and never
+creates a lock file, prunes inventory or records fresh absence authority.
+Both successful terminal Close receipts, `completed` and interrupt-driven
+`aborted`, remain immutable while unfinished or unverifiable cleanup is
+reported as recovery required. Legacy generation 1 and 2 continuation keeps
+its existing cleanup behavior. An aborted session without a retained Close
+intent does not create a new Close operation.
+
+For caller-workspace generations 3 and 4, an explicitly repeated Close of a
+durably Closed ordinary Run likewise finishes only owned-generation cleanup and
+Profile retirement after current Controller and revision validation. The retiring
+ordinary Close refuses Profile retirement while that Run still holds Writer
+authority; the non-retiring successor Close leaves Writer settlement with its
+existing release owner. This continuation does not redispatch the original
+native Close. Legacy generations 1 and 2 retain their existing cleanup rules.
 
 ## Explicit build handoff
 
