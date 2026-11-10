@@ -406,6 +406,17 @@ separate roadmap obligations.
 
 ## Retained Close and executable changes
 
+A pending Writer release remains fenced while public Run/Writer reads expose
+recovery and Unknown, unverified access. Use the current Controller and fresh
+Run revision with public-v2 RecoverRun/ReconcileRun, retaining the original Close
+interrupt choice and transaction. The read-side blocker
+`generation_release_prepared_scope_missing` means no preparation scope has yet
+been retained. A live original Worker can still prepare it. If that Worker is
+absent, recovery refuses with the same cause; preserve the original state.
+A prepared release with retained scope/history can resume the same operation
+after Worker loss. Check public CLOSED, released Writer authority, complete
+owned-generation absence and Profile retirement separately before teardown.
+
 Caller policy verification records a private `dolgorae.writer-census-failure/v1`
 diagnostic when the parent's final workload-absence proof fails. It uses the
 existing bounded process predicates and private Dedicated Server log. The same

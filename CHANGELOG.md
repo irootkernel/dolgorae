@@ -74,6 +74,11 @@ development commits.
 
 ### Fixed
 
+- Keep pending Writer releases observable without granting Write access. Retain
+  preparation scope for Worker-loss recovery and report missing historical
+  evidence explicitly.
+- Direct public-v2 GetRun clients to refresh the snapshot after a capture
+  conflict, preserving no-effect responses and other conflicts' guidance.
 - Permit sequential writable Turns with the qualified Codex code-mode host while
   retaining strict refusal of background jobs and uncertain process identities.
 - Close and recover schema-4 Orchestrated Sessions through the caller-workspace

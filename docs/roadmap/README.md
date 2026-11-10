@@ -2953,6 +2953,11 @@ identity drift and unverifiable ownership. Process names alone cannot admit a
 companion, and later policy checks cannot reopen the startup-only wait.
 Preserve legacy protection and the immutable H1/public contracts.
 
+The follow-up also owns fenced pending-Writer-release observation and recovery
+entry, Prepared Worker-loss continuation from retained scope/history, and typed
+blockers when original evidence is missing. Assess retained consumer-state
+recoverability separately from fresh fixture success; preserve original failures.
+
 Verification: Reproduce the reported failures in fresh isolated fixtures.
 Using pinned Codex and companion images with accountless loopback Responses/MCP,
 verify first WRITE/final followed by a second Submit, typed approval/input,

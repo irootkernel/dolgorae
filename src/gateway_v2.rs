@@ -432,6 +432,9 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
                 | "INTERACTION_OUTCOME_UNKNOWN"
         );
     let recovery = recovery || accepted;
+    let snapshot_rebase = operation_kind == pb::OperationKind::GetRun
+        && wire_code == "RUN_STATE_CONFLICT"
+        && error.details["operation"] == "capture_snapshot";
     let stream_rebase = event_stream && wire_code == "RUN_STATE_CONFLICT";
     let stream_reconnect = event_stream
         && matches!(
@@ -474,7 +477,7 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         } else {
             pb::FailureClassification::Rejected
         } as i32,
-        action: if stream_rebase || close_snapshot {
+        action: if stream_rebase || snapshot_rebase || close_snapshot {
             pb::RequiredClientAction::RefreshSnapshot
         } else if stream_reconnect {
             pb::RequiredClientAction::ReconnectFromCommittedCursor
@@ -488,7 +491,7 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
             pb::RequiredClientAction::FixRequest
         } as i32,
         retry_classification: pb::RetryClassification::Forbidden as i32,
-        recovery_classification: if stream_rebase || close_snapshot {
+        recovery_classification: if stream_rebase || snapshot_rebase || close_snapshot {
             pb::RecoveryClassification::SnapshotRequired
         } else if unknown || accepted_submit || accepted_resolve {
             pb::RecoveryClassification::ReconcileRequired
@@ -3131,6 +3134,44 @@ mod tests {
             snapshot.recovery_classification,
             pb::RecoveryClassification::SnapshotRequired as i32
         );
+    }
+
+    #[test]
+    fn get_run_capture_conflicts_request_only_a_fresh_snapshot() {
+        let run = uuid::Uuid::now_v7();
+        let error = crate::snapshot::state_conflict(
+            run,
+            crate::domain::RunLifecycle::Idle,
+            "capture_snapshot",
+        );
+        let observed = detail(&error_status(&error, "RunService.GetRun"), "capture");
+        assert_eq!(observed.run_id.as_deref(), Some(run.to_string().as_str()));
+        assert_eq!(observed.effect, pb::EffectState::None as i32);
+        assert_eq!(
+            observed.classification,
+            pb::FailureClassification::Rejected as i32
+        );
+        assert_eq!(
+            observed.action,
+            pb::RequiredClientAction::RefreshSnapshot as i32
+        );
+        assert_eq!(
+            observed.retry_classification,
+            pb::RetryClassification::Forbidden as i32
+        );
+        assert_eq!(
+            observed.recovery_classification,
+            pb::RecoveryClassification::SnapshotRequired as i32
+        );
+        let mutation = detail(&error_status(&error, "RunService.CloseRun"), "mutation");
+        assert_eq!(mutation.action, pb::RequiredClientAction::FixRequest as i32);
+        let request = crate::snapshot::state_conflict(
+            run,
+            crate::domain::RunLifecycle::Idle,
+            "other_request",
+        );
+        let rejected = detail(&error_status(&request, "RunService.GetRun"), "request");
+        assert_eq!(rejected.action, pb::RequiredClientAction::FixRequest as i32);
     }
 
     #[test]

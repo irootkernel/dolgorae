@@ -200,15 +200,54 @@ async fn get(
     runs: &mut RunServiceClient<tonic::transport::Channel>,
     run: &Option<pb::RunRef>,
 ) -> pb::RunProjection {
-    runs.get_run(pb::GetRunRequest {
-        context: context(),
-        run: run.clone(),
-    })
-    .await
-    .unwrap()
-    .into_inner()
-    .run
-    .unwrap()
+    let run_id = &run.as_ref().unwrap().run_id;
+    for attempt in 1..=WATCH_CAPTURE_ATTEMPTS {
+        match runs
+            .get_run(pb::GetRunRequest {
+                context: context(),
+                run: run.clone(),
+            })
+            .await
+        {
+            Ok(response) => return response.into_inner().run.unwrap(),
+            Err(status) => {
+                let root = PathBuf::from(std::env::var_os("HOME").unwrap());
+                preserve_response(
+                    root.parent().unwrap(),
+                    run_id,
+                    &format!("get-{}-{attempt}", Uuid::now_v7()),
+                    &status,
+                );
+                let detail = close_detail(&status);
+                assert_eq!(detail.dolgorae_error_code, "RUN_STATE_CONFLICT");
+                assert_eq!(detail.operation_kind, pb::OperationKind::GetRun as i32);
+                assert_eq!(detail.run_id.as_deref(), Some(run_id.as_str()));
+                assert_eq!(detail.effect, pb::EffectState::None as i32);
+                assert_eq!(
+                    detail.classification,
+                    pb::FailureClassification::Rejected as i32
+                );
+                assert_eq!(
+                    detail.action,
+                    pb::RequiredClientAction::RefreshSnapshot as i32
+                );
+                assert_eq!(
+                    detail.retry_classification,
+                    pb::RetryClassification::Forbidden as i32
+                );
+                assert_eq!(
+                    detail.recovery_classification,
+                    pb::RecoveryClassification::SnapshotRequired as i32
+                );
+                assert!(
+                    attempt < WATCH_CAPTURE_ATTEMPTS,
+                    "GetRun capture window exhausted"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+    unreachable!("finite GetRun capture window")
 }
 async fn submit(
     runs: &mut RunServiceClient<tonic::transport::Channel>,
@@ -918,7 +957,13 @@ async fn closed(
     )
     .unwrap();
 }
-async fn lose_idle_worker(root: &Path, home: &DolgoraeHome, view: &WorkspaceView, id: &str) -> u64 {
+async fn lose_idle_worker(
+    root: &Path,
+    home: &DolgoraeHome,
+    view: &WorkspaceView,
+    id: &str,
+    absence_budget: Duration,
+) -> u64 {
     use std::os::unix::fs::MetadataExt as _;
     let source = snapshot(home, view, id);
     assert_eq!(source.projection.lifecycle, RunLifecycle::Idle);
@@ -1005,7 +1050,7 @@ async fn lose_idle_worker(root: &Path, home: &DolgoraeHome, view: &WorkspaceView
             .unwrap()
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + absence_budget;
     let mut exited = false;
     let mut absent = 0;
     while absent < 5 {
@@ -1371,7 +1416,7 @@ pub(super) fn campaign(
         let after_refusal = snapshot(home, view, &first.run_id);
         assert_eq!(after_refusal.projection, healthy.projection);
         assert_eq!(after_refusal.writer, healthy.writer);
-        let old_generation = lose_idle_worker(root, home, view, &first.run_id).await;
+        let old_generation = lose_idle_worker(root, home, view, &first.run_id, Duration::from_secs(15)).await;
         let recoverable = get(&mut runs, &run).await;
         let recovered = runs
             .recover_run(pb::RecoverRunRequest {
@@ -1457,6 +1502,47 @@ pub(super) fn campaign(
             .await
             .unwrap_err();
         assert_eq!(refused.message(), "RUN_STATE_CONFLICT");
+        let prepared_fault = if root.join("prepared-worker-loss").exists() {
+            let fault_root = root.to_path_buf();
+            let fault_home = home.clone();
+            let fault_view = view.clone();
+            let id = second_run.as_ref().unwrap().run_id.clone();
+            let state = home.workspace_root(&view.workspace_id);
+            fs::write(state.join("native-prepared-worker-loss"), &id).unwrap();
+            Some(tokio::spawn(async move {
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while !state.join("native-prepared-worker-loss-ready").exists() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "instrumented preparation barrier was not reached"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let before = snapshot(&fault_home, &fault_view, &id);
+                let owner =
+                    serde_json::to_value(&before.writer).unwrap()["generation_release"].clone();
+                assert_eq!(owner["phase"], "prepared");
+                assert!(owner["scope_sha256"].is_string());
+                fs::copy(
+                    fault_root.join("idle-worker-loss.json"),
+                    fault_root.join("idle-worker-loss-before-prepared-fault.json"),
+                )
+                .unwrap();
+                let generation = lose_idle_worker(&fault_root, &fault_home, &fault_view, &id, Duration::from_secs(45)).await;
+                fs::remove_file(state.join("native-prepared-worker-loss")).unwrap();
+                fs::write(
+                    fault_root.join("prepared-worker-loss-receipt.json"),
+                    serde_json::to_vec(&json!({"transaction":owner["transaction_id"],
+                        "scope_sha256":owner["scope_sha256"],"source_generation":generation,
+                        "thread_id":before.projection.thread_id,"source_runtime_sha256":owner["source_runtime_sha256"],
+                        "instrumented":true,"worker_absent":true}))
+                    .unwrap(),
+                )
+                .unwrap();
+            }))
+        } else {
+            None
+        };
         closed(
             &mut runs,
             &second_run,
@@ -1474,6 +1560,23 @@ pub(super) fn campaign(
             },
         )
         .await;
+        if let Some(fault) = prepared_fault {
+            fault.await.unwrap();
+            let after = snapshot(home, view, &second_run.as_ref().unwrap().run_id);
+            let receipt: Value = serde_json::from_slice(
+                &fs::read(root.join("prepared-worker-loss-receipt.json")).unwrap(),
+            )
+            .unwrap();
+            let writer = serde_json::to_value(&after.writer).unwrap();
+            assert_eq!(
+                writer["generation_release"]["transaction_id"],
+                receipt["transaction"]
+            );
+            assert_eq!(writer["generation_release"]["phase"], "committed");
+            assert_eq!(serde_json::to_value(&after.projection.thread_id).unwrap(), receipt["thread_id"]);
+            assert_eq!(writer["generation_release"]["source_runtime_sha256"], receipt["source_runtime_sha256"]);
+            assert!(after.writer.holder.is_none());
+        }
     });
     drop(gateway);
     json!({"schema":"dolgorae.native-caller-pipeline/v1","mode":"task094_session","public_v2_uds":true,

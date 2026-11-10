@@ -2245,12 +2245,16 @@ pub(crate) fn coordinate_session_close(
     {
         return Err(error);
     }
-    Err(modern_close_error(
-        run_id,
-        action,
-        &error.code,
-        close.as_ref(),
-    ))
+    let mut projected = modern_close_error(run_id, action, &error.code, close.as_ref());
+    if let Some(reason) = error
+        .details
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|reason| reason.starts_with("generation_release_prepared_"))
+    {
+        projected.message = format!("Orchestrated Session closure is blocked: {reason}");
+    }
+    Err(projected)
 }
 
 fn modern_close_error(
@@ -11336,6 +11340,17 @@ fn release_writer_authorized_with_lifecycle(
     }
 
     if current.pending_generation_release(run_id).is_some() {
+        if external_engagement.is_none() {
+            writer.observe_locked(|_| {
+                require_mutation_revision(
+                    state_root,
+                    run_id,
+                    carrier,
+                    "run.release_write",
+                    expected_state_revision,
+                )
+            })??;
+        }
         return resume_generation_release(
             view,
             state_root,
@@ -11634,6 +11649,197 @@ fn resume_generation_release(
     result
 }
 
+/// Decide whether the same Prepared owner can use its retained scope without
+/// a live Worker. This check grants no stop or Writer mutation authority.
+#[cfg(target_os = "macos")]
+fn prepared_release_scope<'a>(
+    run_id: Uuid,
+    generation: u64,
+    original: &crate::worker::WorkerRuntimeRecord,
+    mut current: crate::worker::WorkerRuntimeRecord,
+    verdict: crate::worker::ProcessIdentityVerdict,
+    scope: Option<&'a str>,
+) -> Result<Option<&'a str>, MachineError> {
+    use crate::worker::ProcessIdentityVerdict as V;
+    if verdict == V::Absent {
+        current.control_recovery_required = original.control_recovery_required;
+    }
+    if current != *original {
+        return Err(internal("release preparation runtime changed"));
+    }
+    match verdict {
+        V::Absent => scope.map(Some).ok_or_else(|| {
+            crate::controller::recovery_required(
+                run_id,
+                generation,
+                "generation_release_prepared_scope_missing",
+            )
+        }),
+        V::Match => Ok(None),
+        _ => Err(crate::controller::recovery_required(
+            run_id,
+            generation,
+            "generation_release_prepared_worker_unverifiable",
+        )),
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) mod prepared_release_tests {
+    use super::*;
+    use crate::worker::{ProcessIdentityVerdict as V, WorkerIdentity, WorkerRuntimeRecord};
+
+    pub(crate) fn runtime() -> WorkerRuntimeRecord {
+        WorkerRuntimeRecord {
+            schema_version: 2,
+            identity: WorkerIdentity {
+                workspace_id: "prepared-scope-fixture".into(),
+                run_id: Uuid::now_v7(),
+                run_generation: 1,
+                boot_uuid: Uuid::now_v7(),
+                pid: 100,
+                process_group_id: 100,
+                session_id: 100,
+                uid: 501,
+                start_tvsec: 10,
+                start_tvusec: 20,
+                executable_path: "/fixture/dolgorae".into(),
+                executable_device: 1,
+                executable_inode: 2,
+                executable_sha256: "a".repeat(64),
+            },
+            socket_path: "/fixture/control.sock".into(),
+            socket_identity: crate::worker::SocketIdentity {
+                device: 1,
+                inode: 3,
+            },
+            control_socket_epoch: 2,
+            app_server_epoch: Some(3),
+            control_recovery_required: false,
+            startup_scope: None,
+            dedicated_server_identity: None,
+            dolgorae_version: "0.1.4".into(),
+            mutation_protocol_version: 1,
+            binary_sha256: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn prepared_release_only_absent_worker_can_normalize_diagnostic_bit() {
+        let original = runtime();
+        let digest = "b".repeat(64);
+        assert_eq!(
+            prepared_release_scope(
+                original.identity.run_id,
+                original.identity.run_generation,
+                &original,
+                original.clone(),
+                V::Match,
+                None
+            )
+            .unwrap(),
+            None
+        );
+        let mut marked = original.clone();
+        marked.control_recovery_required = true;
+        assert_eq!(
+            prepared_release_scope(
+                original.identity.run_id,
+                original.identity.run_generation,
+                &original,
+                marked.clone(),
+                V::Absent,
+                Some(&digest)
+            )
+            .unwrap(),
+            Some(digest.as_str())
+        );
+        assert_eq!(
+            prepared_release_scope(
+                original.identity.run_id,
+                original.identity.run_generation,
+                &original,
+                marked,
+                V::Match,
+                Some(&digest)
+            )
+            .unwrap_err()
+            .code,
+            "INTERNAL_ERROR"
+        );
+
+        // Exercise the policy over independent identity, locator and build domains.
+        for (pointer, changed) in [
+            ("/identity/workspace_id", json!("foreign")),
+            ("/identity/run_id", json!(Uuid::now_v7())),
+            ("/identity/run_generation", json!(2)),
+            ("/identity/pid", json!(101)),
+            ("/identity/start_tvusec", json!(21)),
+            ("/identity/executable_sha256", json!("c".repeat(64))),
+            ("/socket_path", json!("/fixture/other.sock")),
+            ("/socket_identity/inode", json!(4)),
+            ("/control_socket_epoch", json!(3)),
+            ("/app_server_epoch", json!(4)),
+            ("/binary_sha256", json!("d".repeat(64))),
+        ] {
+            let mut value = serde_json::to_value(&original).unwrap();
+            *value.pointer_mut(pointer).unwrap() = changed;
+            value["control_recovery_required"] = json!(true);
+            let current = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                prepared_release_scope(
+                    original.identity.run_id,
+                    original.identity.run_generation,
+                    &original,
+                    current,
+                    V::Absent,
+                    Some(&digest)
+                )
+                .unwrap_err()
+                .code,
+                "INTERNAL_ERROR",
+                "{pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_release_requires_original_scope_and_verified_worker_verdict() {
+        let original = runtime();
+        let digest = "b".repeat(64);
+        let error = prepared_release_scope(
+            original.identity.run_id,
+            original.identity.run_generation,
+            &original,
+            original.clone(),
+            V::Absent,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert_eq!(
+            error.details["reason"],
+            "generation_release_prepared_scope_missing"
+        );
+        for verdict in [V::Mismatch, V::Unverifiable] {
+            let error = prepared_release_scope(
+                original.identity.run_id,
+                original.identity.run_generation,
+                &original,
+                original.clone(),
+                verdict,
+                Some(&digest),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "RECOVERY_REQUIRED");
+            assert_eq!(
+                error.details["reason"],
+                "generation_release_prepared_worker_unverifiable"
+            );
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn resume_generation_release_inner(
@@ -11844,6 +12050,42 @@ fn resume_generation_release_inner(
         }
         match release.phase {
             P::Prepared => {
+                let original: crate::worker::WorkerRuntimeRecord =
+                    serde_json::from_value(crate::writer::read_release_evidence(
+                        state_root,
+                        run_id,
+                        &release.source_runtime_sha256,
+                    )?)
+                    .map_err(|_| internal("invalid release runtime"))?;
+                let runtime = crate::worker::read_runtime_record(&path, uid)
+                    .map_err(|e| e.machine_error(run_id, &path))?;
+                let worker_verdict = crate::worker::classify_worker_identity(&original);
+                if let Some(digest) = prepared_release_scope(
+                    run_id,
+                    release.source.run_generation,
+                    &original,
+                    runtime,
+                    worker_verdict,
+                    release.scope_sha256.as_deref(),
+                )? {
+                    let scope: crate::worker::GenerationScope = serde_json::from_value(
+                        crate::writer::read_release_evidence(state_root, run_id, digest)?,
+                    )
+                    .map_err(|_| internal("invalid prepared release scope"))?;
+                    scope.validate_prepared(&original, release.source.thread_id.as_deref())?;
+                    let startup = RunStartupLock::open(state_root, run_id)?;
+                    startup.acquire()?;
+                    startup
+                        .lock
+                        .require_unowned_worker_range()
+                        .map_err(|e| e.machine_error(run_id, &path))?;
+                    startup.release();
+                    authorize()?;
+                    let mut next = release.clone();
+                    next.phase = P::StopStarted;
+                    writer.transact(|record| record.advance_generation_release(&release, next))?;
+                    continue;
+                }
                 let reply = crate::worker::call_run_worker(
                     state_root,
                     run_id,
@@ -14357,7 +14599,7 @@ impl RunSources {
         })
     }
 
-    fn run_value(&self, identity_verdict: &str, last_terminal: Value) -> Value {
+    pub(crate) fn run_value(&self, identity_verdict: &str, last_terminal: Value) -> Value {
         if self.manifest.schema_version == 3 {
             return self.caller_access_value_at(identity_verdict);
         }
@@ -14391,7 +14633,13 @@ impl RunSources {
                 _ => "dedicated_reader",
             }
         };
-        let access = if !dedicated || writer_state == "none" {
+        let access = if self
+            .writer
+            .pending_generation_release(manifest.run_id)
+            .is_some()
+        {
+            "unknown"
+        } else if !dedicated || writer_state == "none" {
             "read"
         } else {
             match writer_state {
@@ -14444,6 +14692,19 @@ impl RunSources {
             recovery["unsafe_actions"] =
                 json!(["run.send", "run.submit", "run.respond", "run.interrupt"]);
         }
+        if self
+            .writer
+            .pending_generation_release(manifest.run_id)
+            .is_some()
+            && recovery["status"] == "ready"
+        {
+            recovery["status"] = json!("recovery_required");
+            recovery["reason"] = json!(self.generation_release_blocker().unwrap());
+            recovery["safe_actions"] =
+                json!(["run.status", "run.events", "run.recover", "run.reconcile"]);
+            recovery["unsafe_actions"] =
+                json!(["run.send", "run.submit", "run.respond", "run.interrupt"]);
+        }
         json!({
             "workspace_id": manifest.workspace_id,
             "run_id": manifest.run_id,
@@ -14454,7 +14715,9 @@ impl RunSources {
             "execution_lane": manifest.execution_lane.as_str(),
             "effective_policy": {
                 "access": access,
-                "verification": "verified",
+                "verification": if self.writer.pending_generation_release(manifest.run_id).is_some() {
+                    "unverified"
+                } else { "verified" },
                 "policy_epoch": self.captured_effective_policy.policy_epoch.0,
                 "thread_generation": self.captured_effective_policy.thread_generation.unwrap_or(0),
                 "server_epoch": if dedicated { json!(physical_server_epoch) } else { json!(self.server_epoch()) },
@@ -35414,7 +35677,7 @@ pub(crate) mod successor_review_tests {
                 Member::Managed(m) => m.0.mark_task_running(task, turn),
             }
         }
-        fn publish(&self, turn: &str, text: &str) {
+        pub(crate) fn publish(&self, turn: &str, text: &str) {
             match &self.member {
                 Member::External(m) => {
                     m.publish_terminal_turn(turn, "completed", text, RunLifecycle::Idle)

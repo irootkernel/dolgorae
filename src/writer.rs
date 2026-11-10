@@ -479,6 +479,30 @@ impl WriterRecord {
         Ok(())
     }
 
+    pub(crate) fn retain_prepared_scope(
+        &mut self,
+        expected: &GenerationRelease,
+        digest: String,
+    ) -> Result<(), MachineError> {
+        if self.generation_release.as_ref() != Some(expected)
+            || self.transaction_id != Some(expected.transaction_id)
+            || expected.phase != GenerationReleasePhase::Prepared
+            || expected
+                .scope_sha256
+                .as_ref()
+                .is_some_and(|old| old != &digest)
+        {
+            return Err(invariant("release preparation scope changed"));
+        }
+        let mut next = expected.clone();
+        next.scope_sha256 = Some(digest);
+        if !next.validate() {
+            return Err(invariant("release preparation scope is invalid"));
+        }
+        self.generation_release = Some(next);
+        Ok(())
+    }
+
     pub(crate) fn advance_generation_release(
         &mut self,
         expected: &GenerationRelease,
@@ -1642,6 +1666,57 @@ mod tests {
             phase: GenerationReleasePhase::Prepared,
             successor: None,
         }
+    }
+
+    #[test]
+    fn prepared_scope_survives_restart_without_approving_release() {
+        let root = root();
+        let workspace = "a".repeat(64);
+        let uid = crate::darwin::DarwinSystem.current_uid();
+        WriterStore::initialize_layout(&root, &workspace, uid).unwrap();
+        let store = WriterStore::new(&root, &workspace, uid);
+        let run = Uuid::now_v7();
+        let operation = Uuid::now_v7();
+        store
+            .transact(|record| {
+                let token = Uuid::now_v7();
+                let (_, generation) = record.prepare_acquire(run, holder(run), token)?;
+                record.commit_acquire(token, generation)?;
+                record.prepare_release(run, operation)?;
+                record.prepare_generation_release(generation_release(record, operation))
+            })
+            .unwrap();
+        let original = store.load().unwrap().generation_release.unwrap();
+        store
+            .transact(|r| r.retain_prepared_scope(&original, "4".repeat(64)))
+            .unwrap();
+        let restarted = WriterStore::new(&root, &workspace, uid);
+        let record = restarted.load().unwrap();
+        let retained = record.generation_release.clone().unwrap();
+        assert_eq!(retained.phase, GenerationReleasePhase::Prepared);
+        assert_eq!(retained.transaction_id, operation);
+        assert_eq!(retained.scope_sha256, Some("4".repeat(64)));
+        assert_eq!(record.state, WriterAuthorityState::Releasing);
+        let bytes = fs::read(store.record_path()).unwrap();
+        assert!(
+            store
+                .transact(|r| r.retain_prepared_scope(&original, "5".repeat(64)))
+                .is_err()
+        );
+        assert!(
+            store
+                .transact(|r| r.retain_prepared_scope(&retained, "5".repeat(64)))
+                .is_err()
+        );
+        assert!(store.transact(|r| r.commit_release(operation)).is_err());
+        assert_eq!(fs::read(store.record_path()).unwrap(), bytes);
+        let mut next = retained.clone();
+        next.phase = GenerationReleasePhase::StopStarted;
+        store
+            .transact(|r| r.advance_generation_release(&retained, next))
+            .unwrap();
+        assert_eq!(store.load().unwrap().transaction_id, Some(operation));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

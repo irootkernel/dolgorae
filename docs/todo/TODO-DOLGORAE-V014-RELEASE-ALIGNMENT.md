@@ -230,7 +230,9 @@ and remove it when the remaining handoff has moved to canonical outcomes.
 
 TASK-094 follows Gul's report against that replacement H3. It corrects pinned
 resident-companion admission for sequential Turns and schema-4 Primary
-Close/Recover, including related Writer and recovery guards. Preserve TASK-093's
+Close/Recover, including related Writer and recovery guards. Its pending-release
+follow-up also requires fenced observation, evidence-bound Prepared recovery,
+and a separate retained-state applicability judgment. Preserve TASK-093's
 Observation history and pending review under the roadmap's task-specific
 sequencing exception. Before Gul resumes affected E16-T3 qualification, deliver
 TASK-094's separate committed replacement, exact binary/package identities,

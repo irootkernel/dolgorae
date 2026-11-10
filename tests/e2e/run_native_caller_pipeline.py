@@ -153,7 +153,7 @@ class SessionResponses(InteractionResponses):
             return [{"type":"response.created","response":{"id":identity}}, {"type":"response.output_item.done","item":item}, {"type":"response.completed","response":{"id":identity,"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}]
 
 
-def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1, interactions: bool = False, mcp_only: bool = False, task094_session: bool = False) -> dict[str, object]:
+def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1, interactions: bool = False, mcp_only: bool = False, task094_session: bool = False, prepared_worker_loss: bool = False) -> dict[str, object]:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit native caller pipeline opt-in required")
     if task094_session and (binary is None or readonly_pool or interactions or default_variant is not None):
@@ -213,6 +213,8 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
             private_file(scratch / "interaction-cases", b"mcp\n" if mcp_only else b"permission,mcp\n")
         if task094_session:
             private_file(scratch / "task094-session", b"permission,mcp\n")
+            if prepared_worker_loss:
+                private_file(scratch / "prepared-worker-loss", b"instrumented\n")
         result = subprocess.run([str(driver), str(scratch), str(codex)], env=environment,
                                 capture_output=True, text=True, timeout=None if binary is not None else 300)
         private_file(scratch / "driver.stdout", result.stdout.encode())
@@ -257,7 +259,14 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
                             real_account_or_credentials_used=False, executable_sha256=CODEX_SHA256,
                             codex_version=CODEX_VERSION, profile_capability_mutated=False)
         if binary is not None:
-            observations["ordinary_product"] = {"path": str(binary), "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+            product_key = "fault_instrumented_product" if prepared_worker_loss else "ordinary_product"
+            observations[product_key] = {"path": str(binary), "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+        if prepared_worker_loss:
+            receipt = json.loads((scratch / "prepared-worker-loss-receipt.json").read_text())
+            if not receipt.get("instrumented") or not receipt.get("worker_absent") or not receipt.get("scope_sha256"):
+                raise ValueError("prepared Worker loss proof incomplete")
+            observations["prepared_worker_loss_verified"] = True
+            observations["evidence_class"] = "instrumented_fault_test"
         if task094_session:
             observations["evidence_root"] = str(scratch)
             observations["cleanup_complete"] = True
@@ -399,6 +408,8 @@ def main() -> int:
     parser.add_argument("--default-feature-startup-only", action="store_true")
     parser.add_argument("--readonly-pool", action="store_true")
     parser.add_argument("--task094-session", action="store_true")
+    parser.add_argument("--prepared-worker-loss", action="store_true",
+                        help="fault an instrumented product after preparation scope publication")
     parser.add_argument("--interactions", action="store_true")
     parser.add_argument("--interactions-mcp-only", action="store_true")
     parser.add_argument("--pool-limit", type=int, choices=(1, 4), default=1)
@@ -408,8 +419,11 @@ def main() -> int:
         kwargs = {"readonly_pool": True, "pool_limit": args.pool_limit} if args.readonly_pool else {}
         if args.interactions or args.interactions_mcp_only:
             kwargs = {"interactions": True, "mcp_only": args.interactions_mcp_only}
+        if args.prepared_worker_loss and not args.task094_session:
+            raise ValueError("prepared Worker loss requires task094-session")
         if args.task094_session:
             kwargs["task094_session"] = True
+            kwargs["prepared_worker_loss"] = args.prepared_worker_loss
         if args.binary is not None:
             kwargs["binary"] = args.binary
         observations = selected(args.driver.resolve(strict=True), args.codex.resolve(strict=True), **kwargs)

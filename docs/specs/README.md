@@ -2300,26 +2300,41 @@ before any stop; neither a busy census nor an unknown result selects a fallback.
 
 PREPARE authenticates the original release owner, captures the durable head,
 completed native Turn boundary and exact source generation, fences admissions,
-and fsyncs the private release transaction. Before shutdown or signalling, APPLY
-persists `stop_started` and the complete checked old process scope. It retires
-the Run-owned Worker, Dedicated Server and registered descendants, including
-children with their own process groups. Five complete empty old-scope samples
-must precede locator removal. Missing locators, leader exit, native idle and
-kernel unlock do not prove absence. The shared Profile Server is never a target.
-An already withdrawn server socket does not prevent retirement of its exact
-retained process scope. A present socket must still match its recorded identity;
-socket absence never substitutes for process identity or the five empty samples.
+and fsyncs the private release transaction. While that transaction is still
+`prepared`, the Worker captures its complete checked process scope and native
+history, or revalidates the copy an earlier attempt retained, and binds it to
+the same owner. Only then does it advance to `stop_started`, before any shutdown
+or signal. An absent Worker can continue that same owner only from the retained
+proof, as specified in
+[pending Writer release recovery](dolgorae-v014-close-recovery.md#pending-writer-release-recovery).
+APPLY then retires the Run-owned Worker, Dedicated Server and registered
+descendants, including children with their own process groups. Five complete
+empty old-scope samples must precede locator removal. Missing locators, leader
+exit, native idle and kernel unlock do not prove absence. The shared Profile
+Server is never a target. An already withdrawn server socket does not prevent
+retirement of its exact retained process scope. A present socket must still
+match its recorded identity; socket absence never substitutes for process
+identity or the five empty samples.
 
 Only during this stop, a retained actor may exit between census and executable
 lookup or disagree with its recorded group enumeration. A fresh BSD `ESRCH`, or
 a zombie with the same PID, UID, birth, group and session, invalidates that
-sample; it does not prove an empty scope. All other group, socket, identity,
-ancestry and ownership checks still apply, and any violation refuses the stop.
-An invalidated sample cannot extend or publish the retained scope or authorize
-signals. It resets the empty count and requires five new complete empty samples
-within the original stop deadline. Unknown, live, unreadable or drifting actors
-remain refusals. Capture, absence proof and fresh signal checks retain their
-strict behavior.
+census sample; it does not prove an empty scope. All other group, socket,
+identity, ancestry and ownership checks still apply, and any violation refuses
+the stop. An invalidated sample cannot extend or publish the retained scope or
+authorize signals. It resets the empty count and requires five new complete
+empty samples within the original stop deadline. Unknown, live, unreadable or
+drifting actors remain refusals. Capture and absence proof retain their strict
+behavior.
+
+Signals follow only a valid sample that still finds live retained actors, so
+the empty count is already reset. Before each signal, the target receives a
+fresh exact kernel and executable identity check against its retained scope
+entry. Any mismatch or other failure refuses the stop, and a matching zombie is
+not signalled. If that one target has vanished with `ESRCH`, either at the fresh
+kernel lookup or at the signal itself, that target is skipped. Only later full
+censuses can contribute empty samples; the vanished target itself neither
+counts as an empty sample nor proves absence.
 
 The same release owner reserves every replacement server/generation before
 spawn. Authority-free original-thread history inspection precedes thread resume.

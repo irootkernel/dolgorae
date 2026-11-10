@@ -400,6 +400,21 @@ impl MemberRunObservation {
 }
 
 impl RunSnapshot {
+    pub(crate) fn generation_release_blocker(&self) -> Option<&'static str> {
+        let release = self
+            .writer
+            .pending_generation_release(self.manifest.run_id)?;
+        Some(
+            if release.phase == crate::writer::GenerationReleasePhase::Prepared
+                && release.scope_sha256.is_none()
+            {
+                "generation_release_prepared_scope_missing"
+            } else {
+                "generation_release_pending"
+            },
+        )
+    }
+
     pub(crate) fn broker_approvals(
         &self,
     ) -> Result<&[crate::interaction::BrokerApprovalBinding], MachineError> {
@@ -1012,7 +1027,44 @@ fn durable_policy(
         .runtime_record
         .as_ref()
         .and_then(|record| record.app_server_epoch);
-    let policy = policy_at_head(&sources.projection, ledger, server_epoch)?;
+    let mut policy = policy_at_head(&sources.projection, ledger, server_epoch)?;
+    if let Some(release) = sources
+        .writer
+        .pending_generation_release(sources.manifest.run_id)
+    {
+        release.verify_ledger_prefix(
+            ledger
+                .ok_or_else(|| {
+                    state_conflict(
+                        sources.manifest.run_id,
+                        sources.projection.lifecycle,
+                        "capture_snapshot",
+                    )
+                })?
+                .records(),
+        )?;
+        let runtime_matches = sources.runtime_record.as_ref().is_none_or(|runtime| {
+            runtime.identity.workspace_id == sources.manifest.workspace_id
+                && ((runtime.identity.run_generation == release.source.run_generation
+                    && runtime.app_server_epoch == Some(release.source.profile_server_epoch))
+                    || release.successor.as_ref().is_some_and(|reader| {
+                        reader.attempt_started
+                            && runtime.identity.run_generation == reader.run_generation
+                            && runtime.app_server_epoch == Some(reader.server_epoch)
+                    }))
+        });
+        if release.source.thread_id != sources.projection.thread_id || !runtime_matches {
+            return Err(state_conflict(
+                sources.manifest.run_id,
+                sources.projection.lifecycle,
+                "capture_snapshot",
+            ));
+        }
+        policy.access = crate::domain::Access::Unknown;
+        policy.verification = crate::domain::PolicyVerification::Unverified;
+        policy.writer_generation = None;
+        return Ok(policy);
+    }
     if sources.projection.thread_id.is_none() {
         return Ok(policy);
     }
@@ -1117,6 +1169,240 @@ fn policy_from_payloads(
 mod capture_tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn pending_release_observations_are_fenced_and_reject_changed_history() {
+        use crate::semantic::successor_review_tests::Scene;
+        for managed in [false, true] {
+            let scene = Scene::writable(managed);
+            scene.prepare_worker_ledger();
+            let task = scene.accept_write_task("pending-observation");
+            scene.record_running_execution(&task, "pending-observation", true);
+            scene.publish("turn-1", "completed");
+            let run = scene.manifest().run_id;
+            let root = scene.state_root();
+            let projection = RunStore::new(SystemWorkspacePlatform, root)
+                .load_state_projection(run)
+                .unwrap();
+            let writer =
+                WriterStore::new(root, &scene.view().workspace_id, DarwinSystem.current_uid());
+            let transaction = Uuid::now_v7();
+            writer
+                .transact(|record| {
+                    record.prepare_release(run, transaction)?;
+                    record.prepare_generation_release(crate::writer::GenerationRelease {
+                        purpose: crate::writer::GenerationRetirementPurpose::Release,
+                        transaction_id: transaction,
+                        source: record.holder.clone().unwrap(),
+                        writer_generation: record.writer_generation,
+                        authority_revision: record.authority_revision,
+                        source_revision: projection.ledger_head.sequence,
+                        source_ledger_sha256: crate::jcs::sha256_hex(
+                            &serde_json::to_vec(&projection.ledger_head).unwrap(),
+                        ),
+                        source_runtime_sha256: "2".repeat(64),
+                        registration_sha256: "3".repeat(64),
+                        scope_sha256: None,
+                        absence_sha256: None,
+                        reader_proof_sha256: None,
+                        retired_reader_sha256: None,
+                        phase: crate::writer::GenerationReleasePhase::Prepared,
+                        successor: None,
+                    })
+                })
+                .unwrap();
+            let before = std::fs::read(root.join("runtime/writer.json")).unwrap();
+            for display in [false, true] {
+                let snapshot = if display {
+                    RunSnapshot::load_display(root, run, 0)
+                } else {
+                    RunSnapshot::load(root, run, 0)
+                }
+                .unwrap();
+                assert_eq!(
+                    snapshot.captured_effective_policy.access,
+                    crate::domain::Access::Unknown
+                );
+                assert_eq!(
+                    snapshot.captured_effective_policy.verification,
+                    crate::domain::PolicyVerification::Unverified
+                );
+                assert_eq!(snapshot.writer.transaction_id, Some(transaction));
+                assert!(snapshot.writer.require_no_generation_release(run).is_err());
+            }
+            assert_eq!(
+                std::fs::read(root.join("runtime/writer.json")).unwrap(),
+                before
+            );
+            let (snapshot, observation) = RunSnapshot::observe_display(root, run, 0).unwrap();
+            let facts = crate::gateway_projection::ProjectionFacts::from_observation(
+                &snapshot,
+                &observation,
+            )
+            .unwrap();
+            let machine = snapshot.run_value("Absent", serde_json::Value::Null);
+            assert_eq!(machine["effective_policy"]["access"], "unknown");
+            assert_eq!(machine["effective_policy"]["verification"], "unverified");
+            assert_eq!(machine["recovery"]["status"], "recovery_required");
+            assert_eq!(
+                machine["recovery"]["reason"],
+                "generation_release_prepared_scope_missing"
+            );
+            assert_eq!(
+                machine["writer_authority"]["transaction_id"],
+                transaction.to_string()
+            );
+            assert!(
+                machine["recovery"]["unsafe_actions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|action| action == "run.submit")
+            );
+            let public = crate::gateway_projection_v2::run_projection(&snapshot, &facts).unwrap();
+            let recovery = public.recovery.unwrap();
+            assert_eq!(
+                recovery.state,
+                crate::protocol::public_v2::RecoveryState::Required as i32
+            );
+            assert_eq!(
+                recovery.blocker_code.as_deref(),
+                Some("generation_release_prepared_scope_missing")
+            );
+            let public_writer =
+                crate::gateway_projection_v2::writer_state(&snapshot, &facts, Default::default())
+                    .unwrap();
+            assert_eq!(
+                public_writer.recovery_blocker.as_deref(),
+                Some("generation_release_prepared_scope_missing")
+            );
+            assert!(!public_writer.handoff_eligible);
+            assert_eq!(
+                public_writer.policy_verification,
+                crate::protocol::public_v2::PolicyVerification::Unverified as i32
+            );
+            let store = RunStore::new(SystemWorkspacePlatform, root);
+            let mut sources = CaptureSources::read(&store, root, run).unwrap();
+            let ledger =
+                ObservedLedger::open_run(root, run, projection.ledger_head.sequence).unwrap();
+            sources
+                .writer
+                .generation_release
+                .as_mut()
+                .unwrap()
+                .source_ledger_sha256 = "f".repeat(64);
+            assert!(durable_policy(&sources, Some(&ledger)).is_err());
+            sources = CaptureSources::read(&store, root, run).unwrap();
+            sources
+                .writer
+                .generation_release
+                .as_mut()
+                .unwrap()
+                .source
+                .thread_id = Some("foreign".into());
+            assert!(durable_policy(&sources, Some(&ledger)).is_err());
+
+            sources = CaptureSources::read(&store, root, run).unwrap();
+            let release = sources.writer.generation_release.as_ref().unwrap();
+            let source_generation = release.source.run_generation;
+            let source_epoch = release.source.profile_server_epoch;
+            let mut runtime = crate::semantic::prepared_release_tests::runtime();
+            runtime.identity.workspace_id = sources.manifest.workspace_id.clone();
+            runtime.identity.run_id = run;
+            runtime.identity.run_generation = source_generation;
+            runtime.app_server_epoch = Some(source_epoch);
+            sources.runtime_record = Some(runtime.clone());
+            assert_eq!(
+                durable_policy(&sources, Some(&ledger)).unwrap().access,
+                crate::domain::Access::Unknown
+            );
+            for field in ["workspace", "generation", "epoch"] {
+                let mut foreign = runtime.clone();
+                match field {
+                    "workspace" => foreign.identity.workspace_id = "foreign".into(),
+                    "generation" => foreign.identity.run_generation += 1,
+                    _ => foreign.app_server_epoch = Some(source_epoch + 1),
+                }
+                sources.runtime_record = Some(foreign);
+                assert!(durable_policy(&sources, Some(&ledger)).is_err(), "{field}");
+            }
+            // Reach a reserved Reader only through the checked in-memory
+            // checkpoint transitions, so the owner has a valid phase/proof shape.
+            sources = CaptureSources::read(&store, root, run).unwrap();
+            let reader = crate::writer::ReaderReservation {
+                run_generation: source_generation + 1,
+                server_epoch: source_epoch + 1,
+                control_socket_epoch: 3,
+                attempt_started: false,
+            };
+            {
+                use crate::writer::GenerationReleasePhase as P;
+                for phase in [P::StopStarted, P::OldAbsent, P::ReaderStarting] {
+                    let expected = sources.writer.generation_release.clone().unwrap();
+                    let mut next = expected.clone();
+                    next.phase = phase;
+                    match phase {
+                        P::StopStarted => next.scope_sha256 = Some("4".repeat(64)),
+                        P::OldAbsent => next.absence_sha256 = Some("5".repeat(64)),
+                        _ => next.successor = Some(reader.clone()),
+                    }
+                    sources
+                        .writer
+                        .advance_generation_release(&expected, next)
+                        .unwrap();
+                }
+            }
+            let mut successor = runtime.clone();
+            successor.identity.run_generation = reader.run_generation;
+            successor.app_server_epoch = Some(reader.server_epoch);
+            // A reserved but not started Reader admits no locator; with the
+            // old locator already retired, observation stays fenced.
+            sources.runtime_record = None;
+            assert_eq!(
+                durable_policy(&sources, Some(&ledger)).unwrap().access,
+                crate::domain::Access::Unknown
+            );
+            sources.runtime_record = Some(successor.clone());
+            assert!(durable_policy(&sources, Some(&ledger)).is_err());
+            sources
+                .writer
+                .generation_release
+                .as_mut()
+                .unwrap()
+                .successor
+                .as_mut()
+                .unwrap()
+                .attempt_started = true;
+            assert_eq!(
+                durable_policy(&sources, Some(&ledger)).unwrap().access,
+                crate::domain::Access::Unknown
+            );
+            // Generation and epoch must match as one source or Reader pair.
+            for (generation, epoch, workspace) in [
+                (reader.run_generation, source_epoch, None),
+                (source_generation, reader.server_epoch, None),
+                (reader.run_generation + 1, reader.server_epoch, None),
+                (reader.run_generation, reader.server_epoch + 1, None),
+                (reader.run_generation, reader.server_epoch, Some("foreign")),
+            ] {
+                let mut foreign = successor.clone();
+                foreign.identity.run_generation = generation;
+                foreign.app_server_epoch = Some(epoch);
+                if let Some(workspace) = workspace {
+                    foreign.identity.workspace_id = workspace.into();
+                }
+                sources.runtime_record = Some(foreign);
+                assert!(
+                    durable_policy(&sources, Some(&ledger)).is_err(),
+                    "{generation}/{epoch}/{workspace:?}"
+                );
+            }
+            assert_eq!(
+                std::fs::read(root.join("runtime/writer.json")).unwrap(),
+                before
+            );
+        }
+    }
 
     #[test]
     fn native_policy_diagnostic_uses_closed_failure_predicates() {

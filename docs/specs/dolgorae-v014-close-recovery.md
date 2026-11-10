@@ -67,6 +67,30 @@ authority; the non-retiring successor Close leaves Writer settlement with its
 existing release owner. This continuation does not redispatch the original
 native Close. Legacy generations 1 and 2 retain their existing cleanup rules.
 
+## Pending Writer release recovery
+
+A valid pending generation release is a fenced recovery observation, including
+when the last durable policy is Write and Writer authority is Releasing.
+Observation retains the Run lifecycle and original transaction, reports Unknown
+access with unverified policy, and cannot authorize an ordinary mutation.
+GetRun snapshot-capture conflicts request a fresh snapshot without accepting
+an effect; request or mutation conflicts retain their own recovery guidance.
+Close and Recover reach the retained release under current Controller, revision
+and lifecycle ownership without requiring Active Writer authority.
+
+A prepared release retains its checked process scope and native history before
+advancing to StopStarted. If its Worker disappears after that publication,
+recovery validates the immutable scope against the original runtime and ledger,
+then resumes the same transaction. A failed control call may mark the absent
+Worker's locator as requiring control recovery; that diagnostic bit does not
+change its retained generation identity or authorize another source change.
+Missing scope or history cannot be inferred from a PID's absence: return a
+specific recovery blocker and preserve the guard. If a retained child exits
+between its exact identity check and its stop signal, resume the full census;
+the signal result does not replace the five-sample absence proof.
+Historical prepared releases without this evidence remain blocked; fixture
+success does not qualify recovery of an existing consumer's retained state.
+
 ## Explicit build handoff
 
 Ordinary mutation still requires the worker's exact version, mutation protocol

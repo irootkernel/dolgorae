@@ -1031,9 +1031,10 @@ seals the original Starting Run as StartFailed under the startup lock.
 After the entire old generation is verified absent, caller Writer retirement
 reads the committed projection and audit prefix under the Writer lock. It uses
 the snapshot owner's Thread-generation and policy-epoch selection without
-requiring the guard to be Active. The public snapshot still requires Active
-authority for a Write policy. Retirement verifies the holder's generation and
-server binding, retains the guarded transaction, compares both audit-head
+requiring the guard to be Active. The public snapshot requires Active authority
+to expose verified Write access; a checked pending release exposes Unknown,
+unverified access. Retirement verifies the holder's generation and server
+binding, retains the guarded transaction, compares both audit-head
 sequence and hash, and records Unknown policy before releasing authority.
 
 `OrchestrationStore` owns durable acceptance of the prepared successor captures
@@ -3632,6 +3633,11 @@ No Writer/startup short lock spans shutdown, history or startup waits. Member
 settlement lends its existing Run lifecycle lease; direct release takes that
 lease before short Writer transactions. Pending checkpoints dominate generic
 recovery and missing-runtime cleanup, including Idle and Paused schema-3/4 Runs.
+Checked pending-release snapshots expose Unknown, unverified access without
+granting mutation authority. Preparation publishes its immutable process scope
+and native history into the existing Prepared checkpoint before StopStarted.
+An absent Worker can lend that retained scope to the lifecycle owner; missing
+scope returns a typed blocker without reconstructing ownership from PID absence.
 The committed checkpoint survives acquisitions; supersession first archives it
 write-once. A terminal Run never receives a Reader successor. Legacy handoff
 admission and the shared Profile singleton remain unchanged.

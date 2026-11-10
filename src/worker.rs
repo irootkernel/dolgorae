@@ -1796,6 +1796,28 @@ impl GenerationSample {
 }
 
 impl GenerationScope {
+    pub(crate) fn validate_prepared(
+        &self,
+        original: &WorkerRuntimeRecord,
+        thread: Option<&str>,
+    ) -> Result<(), MachineError> {
+        if self.schema_version != 1
+            || self.revision == 0
+            || self.processes.len() < 2
+            || &self.runtime != original
+            || Some(self.history.thread_id.as_str()) != thread
+        {
+            return Err(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "prepared release scope does not match its original generation",
+                false,
+                serde_json::json!({"reason":"generation_release_prepared_scope_invalid",
+                    "required_action":"restore_state"}),
+            ));
+        }
+        Ok(())
+    }
+
     fn census(&self) -> Result<Vec<crate::darwin::ProcessCensusEntry>, WorkerProtocolError> {
         self.census_observed(&mut None)
     }
@@ -2672,11 +2694,23 @@ fn stop_generation_scope_reaping(
                             libc::SIGKILL
                         };
                         site = "signal_exact_process";
-                        DarwinSystem
-                    .signal_exact_process(current, signal)
-                    .map_err(|error| proof_refusal(&mut diagnostic, "generation_signal_exact_process", serde_json::json!({
-                        "observed":scope_observation(current),"signal":signal,"os_error":error.raw_os_error(),"io_kind":format!("{:?}",error.kind()),
-                    })))?;
+                        match DarwinSystem.signal_exact_process(current, signal) {
+                            Ok(()) => {}
+                            // A retained child can exit after the fresh identity
+                            // check. The next full census must still prove five
+                            // empty samples; this result proves no absence alone.
+                            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+                            Err(error) => {
+                                return Err(proof_refusal(
+                                    &mut diagnostic,
+                                    "generation_signal_exact_process",
+                                    serde_json::json!({
+                                        "observed":scope_observation(current),"signal":signal,
+                                        "os_error":error.raw_os_error(),"io_kind":format!("{:?}",error.kind()),
+                                    }),
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -11611,6 +11645,27 @@ fn perform(
     response
 }
 
+#[cfg(dolgorae_native_acceptance)]
+fn native_prepared_release_barrier(state_root: &Path, run: Uuid) -> Result<(), MachineError> {
+    let marker = state_root.join("native-prepared-worker-loss");
+    if fs::read_to_string(&marker).ok().as_deref() != Some(run.to_string().as_str()) {
+        return Ok(());
+    }
+    fs::write(
+        state_root.join("native-prepared-worker-loss-ready"),
+        run.to_string(),
+    )
+    .map_err(|_| admission_internal("native preparation barrier publication failed"))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while marker.exists() {
+        if Instant::now() >= deadline {
+            return Err(admission_internal("native preparation barrier expired"));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
 fn prepare_generation_retirement_control(
     coordinator: &mut SessionCoordinator,
     identity: &WorkerIdentity,
@@ -11677,22 +11732,44 @@ fn prepare_generation_retirement_control(
         {
             return Err(admission_internal("release runtime changed"));
         }
-        let scope = GenerationScope::capture(runtime, history)
-            .map_err(|e| e.machine_error(identity.run_id, &runtime_path))?;
+        let scope = if let Some(digest) = release.scope_sha256.as_deref() {
+            let scope: GenerationScope = serde_json::from_value(
+                crate::writer::read_release_evidence(state_root, identity.run_id, digest)?,
+            )
+            .map_err(|_| admission_internal("invalid retained preparation scope"))?;
+            scope.validate_prepared(&runtime, release.source.thread_id.as_deref())?;
+            if scope.history != history {
+                return Err(admission_internal("release preparation history changed"));
+            }
+            let census = scope
+                .census()
+                .map_err(|e| e.machine_error(identity.run_id, &runtime_path))?;
+            scope
+                .clone()
+                .observe_owned(&census, false)
+                .map_err(|e| e.machine_error(identity.run_id, &runtime_path))?;
+            scope
+        } else {
+            GenerationScope::capture(runtime, history)
+                .map_err(|e| e.machine_error(identity.run_id, &runtime_path))?
+        };
         let digest = crate::writer::retain_release_evidence(
             state_root,
             identity.run_id,
             &serde_json::to_value(scope).map_err(|_| admission_internal("scope encoding"))?,
         )?;
-        let mut next = release.clone();
-        next.scope_sha256 = Some(digest.clone());
-        next.phase = crate::writer::GenerationReleasePhase::StopStarted;
-        writer.transact(|current| {
+        let (prepared, ()) = writer.transact(|current| {
             if current.authority_revision != writer_revision {
                 return Err(admission_internal("release revision changed"));
             }
-            current.advance_generation_release(&release, next)
+            current.retain_prepared_scope(&release, digest.clone())
         })?;
+        let prepared = prepared.generation_release.expect("retained preparation");
+        #[cfg(dolgorae_native_acceptance)]
+        native_prepared_release_barrier(state_root, identity.run_id)?;
+        let mut next = prepared.clone();
+        next.phase = crate::writer::GenerationReleasePhase::StopStarted;
+        writer.transact(|current| current.advance_generation_release(&prepared, next))?;
         Ok(digest)
     })();
     match prepared {
@@ -27363,6 +27440,17 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
             },
         )
         .unwrap();
+        scope
+            .validate_prepared(&scope.runtime, Some("original"))
+            .unwrap();
+        assert!(
+            scope
+                .validate_prepared(&scope.runtime, Some("foreign"))
+                .is_err()
+        );
+        let mut changed = scope.runtime.clone();
+        changed.identity.run_generation += 1;
+        assert!(scope.validate_prepared(&changed, Some("original")).is_err());
         if idle_parent {
             let census = scope.census().unwrap();
             let exact_worker = *census.iter().find(|p| p.pid == identity.pid).unwrap();

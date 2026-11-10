@@ -166,6 +166,13 @@ or interrupt-consented whole-session closure. Keep logical Writer settlement
 and physical generation absence as separate assertions. Preserve failed roots
 and report incomplete cleanup instead of replaying a failed campaign.
 
+The additional `--prepared-worker-loss` case requires a product compiled with
+`--cfg dolgorae_native_acceptance`. It pauses after durable scope publication
+without holding short locks. The fixture verifies and faults only its own
+Worker, then checks public recovery, the original transaction and terminal
+cleanup. This is instrumented fault evidence, separate from ordinary-H3
+qualification; the barrier is absent from ordinary builds.
+
 The RPC budget remains 30 seconds. A typed unresolved transport response does
 not cancel accepted semantic work. Retain that response and keep its gateway
 executor alive during bounded public observation of the same retained Close.

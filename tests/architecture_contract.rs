@@ -1457,6 +1457,10 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "snapshot",
             &[
+                // Test-only public projection checks use the captured observation.
+                "gateway_projection",
+                "gateway_projection_v2",
+                "protocol",
                 "interaction",
                 "orchestration",
                 "audit",

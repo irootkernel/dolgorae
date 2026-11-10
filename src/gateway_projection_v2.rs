@@ -305,13 +305,21 @@ pub fn turn_projection(
 }
 
 fn recovery(snapshot: &RunSnapshot) -> pb::RecoveryProjection {
-    recovery_for(
+    let mut recovery = recovery_for(
         snapshot.projection.lifecycle,
         snapshot
             .runtime_record
             .as_ref()
             .is_some_and(|record| record.control_recovery_required),
-    )
+    );
+    if recovery.state == pb::RecoveryState::NotRequired as i32
+        && let Some(blocker) = snapshot.generation_release_blocker()
+    {
+        recovery.state = pb::RecoveryState::Required as i32;
+        recovery.required_action = pb::RecoveryAction::RecoverRun as i32;
+        recovery.blocker_code = Some(blocker.to_owned());
+    }
+    recovery
 }
 
 fn recovery_for(
