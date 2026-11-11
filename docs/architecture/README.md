@@ -3755,7 +3755,13 @@ shutdown retires its registration after group absence is proven. A recorded
 leader still awaiting reaping may be retired only when its exact start identity
 matches and it is a zombie with no other group members. A stale registration
 with the same PID but a different start time does not block retirement of the
-current generation. The inventory is a recovery index, never a replacement for
+current generation, including after that PID disappears from the kernel.
+Retirement selects the recorded boot, owner-root device/inode, process kind and
+Run scope before checking process absence or touching a socket. Workers and
+Dedicated Servers supply their retained BSD start identity; Profile Servers and
+drainers supply the fingerprints retained by the Profile lifecycle. A live
+Dedicated Server owner also retains its original registration through shutdown.
+The inventory is a recovery index, never a replacement for
 Profile, Run, membership, or Controller authority.
 Collection skips entries retired between enumeration and open, while checking
 that the private inventory directory retains its device and inode. Missing

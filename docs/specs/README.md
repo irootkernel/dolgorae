@@ -1574,6 +1574,14 @@ MUST remain unchanged during enumeration. Existing unreadable, unsafe or corrupt
 registrations remain unverifiable. Normal retirement follows the same rule for
 unrelated registrations; cleanup retains its fresh selection digest and process
 identity checks before signals.
+Normal retirement MUST select the caller's recorded process generation and
+owner, including the boot identity, process kind and Run or Profile scope.
+An absent PID MUST NOT authorize retirement of another generation's registration.
+Worker and Dedicated Server selection includes BSD start time, UID, session and
+process group; Profile Server and drainer selection uses their retained process
+fingerprints. Unrelated valid registrations and their sockets MUST remain intact,
+including when they share the retiring PID. Selected registrations still require
+verified process-group absence and the recorded socket identity before removal.
 After a successful spawn, the launcher MUST retain a provisional registration
 until it verifies that the entire process group is absent, including on start
 failure. `cleanup` MUST require an explicit selector or `--all` and the digest

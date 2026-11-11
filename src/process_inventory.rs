@@ -167,6 +167,24 @@ impl Drop for Registration {
 }
 
 impl Registration {
+    pub fn retire(&self) -> Result<(), MachineError> {
+        let process = self
+            .record
+            .process
+            .as_ref()
+            .ok_or_else(|| unsafe_state("activated process identity is unavailable"))?;
+        retire_process(
+            &Retirement {
+                kind: &self.record.kind,
+                owner_root: &self.record.owner_root,
+                boot_uuid: Uuid::parse_str(&self.record.boot_uuid)
+                    .map_err(|error| unsafe_state(error.to_string()))?,
+                run_id: self.record.run_id,
+            },
+            process,
+        )
+    }
+
     pub fn prepare(
         kind: &str,
         owner_root: &Path,
@@ -824,11 +842,63 @@ pub fn execute(cleanup: bool, arguments: &[OsString]) -> Result<Value, MachineEr
     )
 }
 
-/// Retire only an exact recorded PID after ordinary lifecycle absence proof.
-pub fn retire_pid(pid: u32) -> Result<(), MachineError> {
-    let directory = root()?;
-    let identity = inventory_directory_identity(&directory)?;
-    for entry in fs::read_dir(&directory).map_err(|error| unsafe_state(error.to_string()))? {
+/// The lifecycle owner whose verified generation may retire registrations.
+pub struct Retirement<'a> {
+    pub kind: &'a str,
+    pub owner_root: &'a Path,
+    pub boot_uuid: Uuid,
+    pub run_id: Option<Uuid>,
+}
+
+pub fn retire_process(
+    owner: &Retirement<'_>,
+    process: &BsdProcessIdentity,
+) -> Result<(), MachineError> {
+    retire_matching(&root()?, owner, RetirementIdentity::Bsd(process))
+}
+
+pub fn retire_profile_process(
+    owner: &Retirement<'_>,
+    pid: u32,
+    fingerprint: &str,
+) -> Result<(), MachineError> {
+    retire_matching(
+        &root()?,
+        owner,
+        RetirementIdentity::Fingerprint(pid, fingerprint),
+    )
+}
+
+enum RetirementIdentity<'a> {
+    Bsd(&'a BsdProcessIdentity),
+    Fingerprint(u32, &'a str),
+}
+
+impl RetirementIdentity<'_> {
+    fn matches(&self, record: &Record) -> bool {
+        match self {
+            Self::Bsd(expected) => record
+                .process
+                .is_some_and(|recorded| same_recorded_process(&recorded, expected)),
+            Self::Fingerprint(pid, fingerprint) => {
+                record.process.is_some_and(|process| process.pid == *pid)
+                    && record.fingerprint.as_deref() == Some(*fingerprint)
+            }
+        }
+    }
+}
+
+fn retire_matching(
+    directory: &Path,
+    owner: &Retirement<'_>,
+    process_identity: RetirementIdentity<'_>,
+) -> Result<(), MachineError> {
+    let owner_root =
+        fs::canonicalize(owner.owner_root).map_err(|error| unsafe_state(error.to_string()))?;
+    let owner_metadata =
+        fs::symlink_metadata(&owner_root).map_err(|error| unsafe_state(error.to_string()))?;
+    let identity = inventory_directory_identity(directory)?;
+    for entry in fs::read_dir(directory).map_err(|error| unsafe_state(error.to_string()))? {
         let path = entry
             .map_err(|error| unsafe_state(error.to_string()))?
             .path();
@@ -838,7 +908,18 @@ pub fn retire_pid(pid: u32) -> Result<(), MachineError> {
         let Some(record) = read_record_if_present(&path)? else {
             continue;
         };
-        if let Some(process) = record.process.filter(|process| process.pid == pid) {
+        if record.kind != owner.kind
+            || record.owner_root != owner_root
+            || record.owner_device != owner_metadata.dev()
+            || record.owner_inode != owner_metadata.ino()
+            || Uuid::parse_str(&record.boot_uuid).ok() != Some(owner.boot_uuid)
+            || record.run_id != owner.run_id
+            || !process_identity.matches(&record)
+        {
+            continue;
+        }
+        if let Some(process) = record.process {
+            let pid = process.pid;
             match DarwinSystem.bsd_process_identity(pid) {
                 Ok(current) if !same_recorded_process(&current, &process) => {
                     // A previous registration may still name a PID now used
@@ -855,12 +936,12 @@ pub fn retire_pid(pid: u32) -> Result<(), MachineError> {
             if members.iter().any(|member| *member != pid) {
                 return Err(unsafe_state("cannot retire live process registration"));
             }
-            verify_inventory_directory(&directory, identity)?;
+            verify_inventory_directory(directory, identity)?;
             remove_registered_socket(&record)?;
             fs::remove_file(path).map_err(|error| unsafe_state(error.to_string()))?;
         }
     }
-    verify_inventory_directory(&directory, identity)?;
+    verify_inventory_directory(directory, identity)?;
     Ok(())
 }
 
@@ -1172,7 +1253,7 @@ mod tests {
             assert!(Instant::now() < deadline, "child did not exit");
             std::thread::sleep(Duration::from_millis(10));
         }
-        retire_pid(pid).unwrap();
+        registration.retire().unwrap();
         child.0.take().unwrap().wait().unwrap();
         fs::remove_dir(owner).unwrap();
     }
@@ -1216,7 +1297,7 @@ mod tests {
             assert!(Instant::now() < deadline, "child did not exit");
             std::thread::sleep(Duration::from_millis(10));
         }
-        retire_pid(pid).unwrap();
+        registration.retire().unwrap();
         assert!(!socket.exists());
         assert!(!registration.path.exists());
         child.0.take().unwrap().wait().unwrap();
@@ -1436,13 +1517,141 @@ mod tests {
             assert!(Instant::now() < deadline, "child did not exit");
             std::thread::sleep(Duration::from_millis(10));
         }
-        retire_pid(pid).unwrap();
-        assert!(!registration.path.exists());
-        if previous_path.exists() {
-            fs::remove_file(previous_path).unwrap();
-        }
         child.0.take().unwrap().wait().unwrap();
+        registration.retire().unwrap();
+        assert!(!registration.path.exists());
+        assert!(previous_path.exists());
+        fs::remove_file(previous_path).unwrap();
         fs::remove_dir(owner).unwrap();
+    }
+
+    #[test]
+    fn retirement_preserves_other_owners_and_generations_after_pid_disappears() {
+        let owner = fs::canonicalize("/tmp")
+            .unwrap()
+            .join(format!("dolgorae-retirement-{}", Uuid::now_v7()));
+        fs::DirBuilder::new().mode(0o700).create(&owner).unwrap();
+        let directory = owner.join("inventory");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let mut registration = Registration::prepare(
+            "profile_server",
+            &owner,
+            Path::new("/bin/sleep"),
+            "sleep 30".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = ChildCleanup(Some(DarwinSystem.spawn_detached(&mut command).unwrap()));
+        let pid = child.0.as_ref().unwrap().id();
+        registration.activate(pid).unwrap();
+        let process = registration.record.process.unwrap();
+        let target = Retirement {
+            kind: "profile_server",
+            owner_root: &owner,
+            boot_uuid: Uuid::parse_str(&registration.record.boot_uuid).unwrap(),
+            run_id: None,
+        };
+        let selected_path = directory.join(format!("{}.json", registration.record.id));
+        write_record(&selected_path, &registration.record, false).unwrap();
+        assert!(retire_matching(&directory, &target, RetirementIdentity::Bsd(&process)).is_err());
+        assert!(selected_path.exists());
+        child.0.as_mut().unwrap().kill().unwrap();
+        child.0.take().unwrap().wait().unwrap();
+        assert_eq!(
+            DarwinSystem
+                .bsd_process_identity(pid)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ESRCH)
+        );
+
+        let foreign_socket = owner.join("foreign.sock");
+        let foreign_listener = std::os::unix::net::UnixListener::bind(&foreign_socket).unwrap();
+        let socket_metadata = fs::metadata(&foreign_socket).unwrap();
+        let mut foreign_records = Vec::new();
+        for difference in ["start", "boot", "root", "inode", "kind", "run", "pid"] {
+            let mut foreign = registration.record.clone();
+            foreign.id = Uuid::now_v7();
+            match difference {
+                "start" => {
+                    foreign.process.as_mut().unwrap().start_tvusec ^= 1;
+                    foreign
+                        .fingerprint
+                        .as_mut()
+                        .unwrap()
+                        .push_str(" old-generation");
+                }
+                "boot" => foreign.boot_uuid = Uuid::now_v7().to_string(),
+                "root" => foreign.owner_root = owner.join("other-owner"),
+                "inode" => foreign.owner_inode += 1,
+                "kind" => foreign.kind = "dedicated_server".to_owned(),
+                "run" => foreign.run_id = Some(Uuid::now_v7()),
+                "pid" => {
+                    let process = foreign.process.as_mut().unwrap();
+                    process.pid += 1;
+                    process.process_group_id = process.pid;
+                    process.session_id = process.pid;
+                }
+                _ => unreachable!(),
+            }
+            foreign.socket = Some(foreign_socket.clone());
+            foreign.socket_device = Some(socket_metadata.dev());
+            foreign.socket_inode = Some(socket_metadata.ino() + 1);
+            let path = directory.join(format!("{}.json", foreign.id));
+            write_record(&path, &foreign, false).unwrap();
+            foreign_records.push((path.clone(), fs::read(path).unwrap()));
+        }
+        for fingerprint in [false, true] {
+            let socket = owner.join("selected.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let metadata = fs::metadata(&socket).unwrap();
+            let mut selected = registration.record.clone();
+            selected.socket = Some(socket.clone());
+            selected.socket_device = Some(metadata.dev());
+            selected.socket_inode = Some(metadata.ino() + 1);
+            write_record(&selected_path, &selected, true).unwrap();
+            let identity = || {
+                if fingerprint {
+                    RetirementIdentity::Fingerprint(
+                        pid,
+                        registration.record.fingerprint.as_deref().unwrap(),
+                    )
+                } else {
+                    RetirementIdentity::Bsd(&process)
+                }
+            };
+            let error = retire_matching(&directory, &target, identity()).unwrap_err();
+            assert_eq!(
+                error.details["reason"],
+                "Codex socket rendezvous identity mismatch"
+            );
+            assert!(selected_path.exists());
+            assert!(socket.exists());
+            selected.socket_inode = Some(metadata.ino());
+            write_record(&selected_path, &selected, true).unwrap();
+            retire_matching(&directory, &target, identity()).unwrap();
+            assert!(!selected_path.exists());
+            assert!(!socket.exists());
+            assert!(foreign_socket.exists());
+            for (path, original) in &foreign_records {
+                assert_eq!(fs::read(path).unwrap(), *original);
+            }
+            drop(listener);
+        }
+        registration.retire().unwrap();
+        drop(foreign_listener);
+        fs::remove_dir_all(owner).unwrap();
     }
 
     #[test]

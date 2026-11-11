@@ -5873,10 +5873,25 @@ fn commit_stop(
         ));
     }
     remove_recorded_socket(&snapshot.profile_name, &reservation.state)?;
-    crate::process_inventory::retire_pid(reservation.state.pid)
-        .map_err(|error| transport(error.message))?;
-    crate::process_inventory::retire_pid(reservation.state.drainer_pid)
-        .map_err(|error| transport(error.message))?;
+    let mut retirement = crate::process_inventory::Retirement {
+        kind: "profile_server",
+        owner_root: &paths.root,
+        boot_uuid: reservation.state.boot_session_uuid,
+        run_id: None,
+    };
+    crate::process_inventory::retire_profile_process(
+        &retirement,
+        reservation.state.pid,
+        &reservation.state.process_fingerprint,
+    )
+    .map_err(|error| transport(error.message))?;
+    retirement.kind = "profile_log_drainer";
+    crate::process_inventory::retire_profile_process(
+        &retirement,
+        reservation.state.drainer_pid,
+        &reservation.state.drainer_fingerprint,
+    )
+    .map_err(|error| transport(error.message))?;
     let membership_store = crate::global_runtime::GlobalMembershipStore::from_root(
         paths
             .root

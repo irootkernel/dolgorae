@@ -2957,6 +2957,10 @@ The follow-up also owns fenced pending-Writer-release observation and recovery
 entry, Prepared Worker-loss continuation from retained scope/history, and typed
 blockers when original evidence is missing. Assess retained consumer-state
 recoverability separately from fresh fixture success; preserve original failures.
+Generation retirement must also preserve unrelated registrations after PID reuse,
+including once the retiring PID is absent. Apply the same owner and process
+identity selection to Worker, Dedicated Server, Profile Server and drainer
+cleanup without weakening socket or process-absence checks.
 
 Verification: Reproduce the reported failures in fresh isolated fixtures.
 Using pinned Codex and companion images with accountless loopback Responses/MCP,

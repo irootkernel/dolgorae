@@ -74,6 +74,10 @@ development commits.
 
 ### Fixed
 
+- Retire process registrations only for the recorded owner and generation,
+  preserving unrelated registrations and sockets after PID reuse during Run
+  recovery and Profile Server shutdown.
+
 - Keep pending Writer releases observable without granting Write access. Retain
   preparation scope for Worker-loss recovery and report missing historical
   evidence explicitly.

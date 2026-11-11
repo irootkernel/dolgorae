@@ -440,6 +440,19 @@ pub(crate) fn observe_owned_worker_child(
 }
 
 impl WorkerIdentity {
+    fn recorded_process(&self) -> crate::darwin::BsdProcessIdentity {
+        crate::darwin::BsdProcessIdentity {
+            pid: self.pid,
+            parent_pid: 0,
+            uid: self.uid,
+            process_group_id: self.process_group_id,
+            session_id: self.session_id,
+            start_tvsec: self.start_tvsec,
+            start_tvusec: self.start_tvusec,
+            zombie: false,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), WorkerProtocolError> {
         if decode_sha256(&self.workspace_id).is_none()
             || self.run_id.get_version_num() != 7
@@ -1736,6 +1749,19 @@ impl CallerPolicyProof {
 }
 
 impl DedicatedServerIdentity {
+    fn recorded_process(&self) -> crate::darwin::BsdProcessIdentity {
+        crate::darwin::BsdProcessIdentity {
+            pid: self.pid,
+            parent_pid: 0,
+            uid: self.uid,
+            process_group_id: self.process_group_id,
+            session_id: self.session_id,
+            start_tvsec: self.start_tvsec,
+            start_tvusec: self.start_tvusec,
+            zombie: false,
+        }
+    }
+
     fn validate(&self) -> Result<(), WorkerProtocolError> {
         if self.pid == 0
             || self.process_group_id == 0
@@ -8054,6 +8080,7 @@ struct OwnedDedicatedServer {
     identity: DedicatedServerIdentity,
     socket_path: PathBuf,
     socket_identity: SocketIdentity,
+    registration: crate::process_inventory::Registration,
 }
 
 impl OwnedDedicatedServer {
@@ -9640,6 +9667,7 @@ fn start_dedicated_server(
                 }
                 return Ok(OwnedDedicatedServer {
                     child,
+                    registration,
                     identity: DedicatedServerIdentity {
                         pid: process.pid,
                         process_group_id: process.process_group_id,
@@ -9793,7 +9821,9 @@ fn stop_dedicated_server(
         server.socket_identity.inode,
     )
     .map_err(|_| WorkerProtocolError::SocketIdentityMismatch)?;
-    crate::process_inventory::retire_pid(server.identity.pid)
+    server
+        .registration
+        .retire()
         .map_err(|_| WorkerProtocolError::Io)?;
     Ok(BackgroundAbsenceEvidence {
         census_revision: server.identity.start_tvsec,
@@ -14043,10 +14073,25 @@ pub fn remove_verified_absent_runtime(
     let record = read_runtime_record(runtime_record, uid)?;
     stop_orphaned_dedicated_server(&record)?;
     prove_worker_generation_absent(&record)?;
-    crate::process_inventory::retire_pid(record.identity.pid)
+    let owner_root = runtime_record
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+    let mut owner = crate::process_inventory::Retirement {
+        kind: "worker",
+        owner_root,
+        boot_uuid: record.identity.boot_uuid,
+        run_id: Some(record.identity.run_id),
+    };
+    crate::process_inventory::retire_process(&owner, &record.identity.recorded_process())
         .map_err(|_| WorkerProtocolError::Io)?;
     if let Some(dedicated) = &record.dedicated_server_identity {
-        crate::process_inventory::retire_pid(dedicated.pid).map_err(|_| WorkerProtocolError::Io)?;
+        owner.kind = "dedicated_server";
+        crate::process_inventory::retire_process(&owner, &dedicated.recorded_process())
+            .map_err(|_| WorkerProtocolError::Io)?;
     }
     match fs::symlink_metadata(&record.socket_path) {
         Ok(metadata) => {
@@ -17486,6 +17531,16 @@ pub(crate) mod tests {
             // This tests the admission cut before physical proof, never grants it.
             let owned = OwnedDedicatedServer {
                 child,
+                registration: crate::process_inventory::Registration::prepare(
+                    "dedicated_server",
+                    scene.state_root(),
+                    Path::new("/usr/bin/true"),
+                    "app-server".to_owned(),
+                    None,
+                    None,
+                    Some(worker.run_id),
+                )
+                .unwrap(),
                 identity: DedicatedServerIdentity {
                     pid,
                     process_group_id: pid,

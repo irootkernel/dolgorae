@@ -618,6 +618,24 @@ expiry notification wiring changes.
   operation facts remain readable when a live projection refuses the gap.
   Preserve LookupSubmit's separate current-outcome observation.
 
+## DF-051: Distinguish selected-process PID reuse from identity drift
+
+- Owner: Process inventory and Profile lifecycle maintainers
+- Finding: normal retirement retains a selected registration when its PID now
+  names a different live identity. Profile shutdown can therefore leave that
+  registration after the original process group is gone. The caller receives
+  success without retirement of that record. A retained Run registration can
+  also block missing-locator absence proof after the locator is removed.
+- Reason for deferral: this existing behavior is independent of selecting an
+  unrelated registration after PID disappearance. The scoped correction
+  preserves other owners and keeps the existing live-process and socket checks.
+  Treating every identity mismatch as absence would also admit UID, session or
+  process-group drift within the same process birth.
+- Revisit condition: extending selected-generation retirement after PID reuse.
+  Distinguish a new BSD birth from same-birth identity drift, verify surviving
+  groups and socket ownership, and require an honest retained-registration
+  outcome when retirement remains unproven.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical
