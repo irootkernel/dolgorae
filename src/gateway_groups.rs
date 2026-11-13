@@ -33,7 +33,7 @@ fn bytes(value: &Value) -> Result<pb::BytesRef, MachineError> {
     })
 }
 
-fn outcome(value: &str) -> Result<i32, MachineError> {
+pub(super) fn outcome(value: &str) -> Result<i32, MachineError> {
     Ok(match value {
         "completed" => pb::TaskOutcome::Completed,
         "failed" => pb::TaskOutcome::Failed,
@@ -306,7 +306,7 @@ fn receipt(value: &Value) -> Result<pb::OperationReceipt, MachineError> {
     })
 }
 
-fn bounded<T: prost::Message>(response: T) -> Result<T, MachineError> {
+pub(super) fn bounded<T: prost::Message>(response: T) -> Result<T, MachineError> {
     if response.encoded_len() > 4 * 1024 * 1024 {
         return Err(MachineError::new(
             "ARTIFACT_CAPACITY_EXCEEDED",
@@ -426,7 +426,7 @@ fn content(value: &Value) -> Result<Option<pb::ContentRef>, MachineError> {
     }))
 }
 
-fn result_rows(value: &Value) -> Result<Vec<pb::CompleteResult>, MachineError> {
+pub(super) fn result_rows(value: &Value) -> Result<Vec<pb::CompleteResult>, MachineError> {
     value["results"]
         .as_array()
         .ok_or_else(|| projection_unavailable("results", "result page unavailable"))?

@@ -9,6 +9,9 @@ development commits.
 
 ### Added
 
+- Expose Controller-authenticated managed individual task collection through the existing public-v2 Broker contract, preserving complete result identities, artifact references and read-only observation.
+- Prepare the Codex 0.167.2 caller-workspace and companion candidate with accountless native lifecycle checks; generic tested registration and external-host qualification remain separate.
+
 - Recognize Codex 0.166.0 as a verified generic Profile runtime with version-specific schema checks while retaining the 0.158.0 minimum.
 
 - Derive installed skill resources from canonical contracts without duplicate source schemas, retaining offline resolution and integrity checks.

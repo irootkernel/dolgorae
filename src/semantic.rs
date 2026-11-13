@@ -17901,11 +17901,11 @@ fn checked_successor_v4(
         request.task_ref,
         false,
     )
-    .map_err(&invalid_state)?
+    .map_err(invalid_state)?
     .ok_or_else(|| crate::direct_review_target::provenance_invalid(request.task_ref))?;
     let response = reader
         .completed_history_response(&terminal.thread_id, &terminal.turn_id)
-        .map_err(&invalid_state)?;
+        .map_err(invalid_state)?;
     reader.check_acceptance()?;
     let bytes = match response {
         Some(crate::turn::FinalResponse::Inline { text }) => Some(text.into_bytes()),
@@ -29391,11 +29391,11 @@ mod delegated_member_start_tests {
                 sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());
         };
         resealed(&mut binding);
-        binding.launch_snapshot.codex_version = "0.164.0".to_owned();
+        binding.launch_snapshot.codex_version = crate::global_runtime::CURRENT_CODEX_VERSION.into();
         binding.launch_snapshot.executable_identity.sha256 = if unqualified {
             "0".repeat(64)
         } else {
-            "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf".to_owned()
+            crate::global_runtime::CURRENT_CODEX_SHA256.into()
         };
         resealed(&mut binding);
         binding.validate_for_recovery().unwrap();
@@ -31414,12 +31414,16 @@ pub(crate) mod successor_fixture {
                 codex_home.to_str().unwrap().to_owned();
             // The qualified caller-workspace runtime: the record must be one the
             // lane actually admits, or the gate would refuse the fixture itself.
-            profile_binding.launch_snapshot.codex_version =
-                if historical { "0.159.3" } else { "0.164.0" }.to_owned();
+            profile_binding.launch_snapshot.codex_version = if historical {
+                "0.159.3"
+            } else {
+                crate::global_runtime::CURRENT_CODEX_VERSION
+            }
+            .to_owned();
             profile_binding.launch_snapshot.executable_identity.sha256 = if historical {
                 "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878"
             } else {
-                "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
+                crate::global_runtime::CURRENT_CODEX_SHA256
             }
             .to_owned();
             if !qualified {
@@ -32873,12 +32877,16 @@ pub(crate) mod successor_fixture {
             };
             profile_binding.launch_snapshot.canonical_codex_home =
                 codex_home.to_str().unwrap().to_owned();
-            profile_binding.launch_snapshot.codex_version =
-                if historical { "0.159.3" } else { "0.164.0" }.to_owned();
+            profile_binding.launch_snapshot.codex_version = if historical {
+                "0.159.3"
+            } else {
+                crate::global_runtime::CURRENT_CODEX_VERSION
+            }
+            .to_owned();
             profile_binding.launch_snapshot.executable_identity.sha256 = if historical {
                 "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878"
             } else {
-                "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
+                crate::global_runtime::CURRENT_CODEX_SHA256
             }
             .to_owned();
             if !qualified {

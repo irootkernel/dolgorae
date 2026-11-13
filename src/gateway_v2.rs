@@ -556,6 +556,8 @@ fn enum_name<T>(value: Option<T>, field: &str) -> Result<T, MachineError> {
     value.ok_or_else(|| invalid(field, "unknown or unspecified selection"))
 }
 
+#[path = "gateway_broker.rs"]
+pub(crate) mod broker;
 #[path = "gateway_groups.rs"]
 mod groups;
 
@@ -879,6 +881,7 @@ fn start_inner(
 }
 
 const METHODS: &[&str] = &[
+    "BrokerService.CollectSpecialistTask",
     "ObservationService.WatchRunEvents",
     "ObservationService.ListRunTimelineItems",
     "GroupService.AssignGroup",

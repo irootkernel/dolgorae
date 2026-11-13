@@ -107,7 +107,7 @@ def main() -> int:
 
         def run(argv, *, env, **_kwargs):
             if argv == ["fixture-codex", "--version"]:
-                return subprocess.CompletedProcess(argv, 0, "codex-cli 0.164.0\n", "")
+                return subprocess.CompletedProcess(argv, 0, f"codex-cli {probe.CODEX_VERSION}\n", "")
             root = Path(argv[1])
             launches.append(argv)
             owned.append(root)

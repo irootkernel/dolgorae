@@ -19,8 +19,8 @@ from run_live_instruction_discovery import checked_codex, executable_identity, i
 from run_native_workspace_policy_fixture import ScriptedResponses, fixture_config
 
 OPT_IN = "DOLGORAE_RUN_NATIVE_CALLER_PIPELINE"
-CODEX_VERSION = "0.164.0"
-CODEX_SHA256 = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
+CODEX_VERSION = "0.167.2"
+CODEX_SHA256 = "97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0"
 
 
 class InteractionResponses(ScriptedResponses):
@@ -237,7 +237,7 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
         if interactions and not mcp_only and observations.get("sequential_write_admissions_verified") is not True:
             raise ValueError("sequential WRITE admission unproved")
         if task094_session:
-            required = ("first_write_verified", "sequential_write_admissions_verified", "schema4_primary",
+            required = ("public_individual_collection_route_verified", "first_write_verified", "sequential_write_admissions_verified", "schema4_primary",
                         "gateway_replacement_original_identity", "recover_original_identity",
                         "healthy_recover_refused", "idle_worker_loss_verified",
                         "idle_close_writer_released", "interrupt_close_writer_released", "owned_generations_absent",

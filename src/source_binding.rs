@@ -1120,9 +1120,10 @@ mod tests {
             let codex = f.root.join("profile-home");
             mkdir(&codex);
             binding.launch_snapshot.canonical_codex_home = codex.to_str().unwrap().to_owned();
-            binding.launch_snapshot.codex_version = "0.164.0".to_owned();
+            binding.launch_snapshot.codex_version =
+                crate::global_runtime::CURRENT_CODEX_VERSION.into();
             binding.launch_snapshot.executable_identity.sha256 =
-                "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf".to_owned();
+                crate::global_runtime::CURRENT_CODEX_SHA256.into();
             binding.launch_snapshot_sha256 =
                 crate::jcs::sha256_hex(&canonical(&binding.launch_snapshot).unwrap());
             let binding = crate::profile::qualified_test_binding(&binding);

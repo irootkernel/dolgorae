@@ -2070,7 +2070,7 @@ the starting budget, elapsed proof time (null when the proof did not run) and
 deadline overrun. The final strict proof and original deadline remain unchanged.
 
 Post-start caller policy proofs can admit the one resident Code Mode host of
-the exact qualified 0.164.0 executable pair under CW-WRITER. The serialized
+the exact current candidate pair, or its retained accepted pair, under CW-WRITER. The serialized
 coordinator first proves idle state, no pending interactions and the sole
 original native Thread. Qualification covers completion/cancellation of Code
 Mode isolates, including yielded cells and unawaited work; a yielded native
@@ -2606,15 +2606,25 @@ and capability.
 The [runtime qualification
 owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
 pins new qualified caller-workspace, instruction-discovery and checked-review
-admissions to Codex 0.164.0. The shared Profile and worker launch
+admissions to the Codex 0.167.2 candidate. The shared Profile and worker launch
 functions serve both new admissions and retained execution. Their callers
 authenticate and resolve original acceptance first, then apply the current check
 before a new qualified-mechanism acceptance or its launch. Retained execution
 validates its original binding, executable and process evidence. A member install
 or policy acceptance does not authorize a new member or task. Generic Profile
 lifecycle and binding history retain tested/unverified compatibility admission. Migration compensation retains its original snapshot
-and durable owner. Current host qualification uses Codex
-0.164.0 and Claude Code 2.1.310 with the exact executable hashes in that owner.
+and durable owner. Earlier external-host evidence uses Codex
+0.164.0 and Claude Code 2.1.310 with the exact executable hashes in that owner;
+it is not transferred to the current Profile candidate.
+
+### Public managed task collection
+
+The public Broker collection adapter resolves the managed owner through the
+existing Controller-authenticated aggregate boundary. The semantic owner resolves
+member identity from the retained task, then reuses the consistent task/result
+observation and public result-component projection. The transport does not infer
+a member from caller input, open a writable store, manufacture a native invocation
+or settle work. Unsupported Broker operations remain unadvertised.
 
 ### Durable Aggregate Store
 

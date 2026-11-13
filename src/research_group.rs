@@ -1372,6 +1372,101 @@ pub(crate) fn public_owner_binding(
 
 /// Controller-authenticated public admission and observation. Public callers do
 /// not acquire native tool provenance or a Podway Action accounting scope.
+/// Read one managed task under the root Controller, without native caller provenance.
+pub(crate) fn public_collect_managed_task(
+    home: &crate::paths::DolgoraeHome,
+    view: &WorkspaceView,
+    carrier: &crate::controller::CredentialCarrier,
+    root_primary: Uuid,
+    session_id: Uuid,
+    task_id: Uuid,
+    port: &dyn RunSettlementPort,
+) -> Result<Value, MachineError> {
+    const OPERATION: &str = "collect_specialist_task";
+    let state_root = home.workspace_root(&view.workspace_id);
+    let binding = public_owner_binding(
+        &state_root,
+        &view.workspace_id,
+        carrier,
+        "orchestrated_session",
+        session_id,
+        Some(root_primary),
+    )?;
+    let scope = DelegationScope {
+        view,
+        state_root: &state_root,
+        controller: &binding,
+        trusted_invocation: None,
+    };
+    let store =
+        EngagementStore::open_read_only(&EngagementStore::workspace_database_path(&state_root))?;
+    let task = crate::orchestration::successor_task(store.connection(), session_id, task_id)?
+        .ok_or_else(|| managed_task_not_found(OPERATION, task_id))?;
+    let member = Uuid::parse_str(&task.member_ref).map_err(|_| retained_source_invalid())?;
+    let manifest =
+        crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &state_root)
+            .load_manifest(member)?;
+    let instructions = manifest
+        .instructions
+        .delegation()
+        .ok_or_else(retained_source_invalid)?;
+    let own = SettlementOwner::Managed { session_id };
+    let ((task, accepted, disposition, rounds, result), _) = consistent_member_observation(
+        port,
+        MemberCleanupObservation {
+            view,
+            state_root: &state_root,
+            owner: own,
+            member_ref: member,
+        },
+        |source| source.matches_manifest(&manifest) && source.matches_supervisor(&binding),
+        |hold, pending, close| {
+            let tx = store
+                .connection()
+                .unchecked_transaction()
+                .map_err(|_| retained_source_invalid())?;
+            let (task, complete, accepted) =
+                collect_specialist_task_from_store(&store, &scope, session_id, member, task_id)?;
+            if accepted.role_snapshot_digest != instructions.role_snapshot_digest {
+                return Err(retained_source_invalid());
+            }
+            let rounds: u64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM brokered_task_acceptances a
+                 JOIN brokered_tasks t USING(task_id) WHERE t.session_id=?1",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(|_| retained_source_invalid())?;
+            let active = managed_active_write_count(&tx, session_id, member)?;
+            let disposition = disposition_view(
+                &tx,
+                &view.workspace_id,
+                own,
+                member,
+                task.result_digest.clone().unwrap_or_else(|| "none".into()),
+                cleanup_pending(hold, active),
+                pending,
+            )?;
+            close()?;
+            drop(tx);
+            Ok((task, accepted, disposition, rounds, complete))
+        },
+    )?;
+    let result = result
+        .as_ref()
+        .map(|r| crate::result_component_artifact::public_result(&state_root, view, r))
+        .transpose()?;
+    Ok(json!({
+        "task": task, "accepted_task": accepted,
+        "role_body": instructions.role_snapshot.role_body,
+        "role_snapshot_digest": instructions.role_snapshot_digest,
+        "instruction_identity_digest": instructions.instruction_identity_digest,
+        "disposition": disposition.state, "source_revision": disposition.membership_revision,
+        "rounds": rounds, "results": result.into_iter().collect::<Vec<_>>(),
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn public_call(
     home: &crate::paths::DolgoraeHome,

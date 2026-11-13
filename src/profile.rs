@@ -7604,7 +7604,7 @@ mod tests {
             resolved_path: definition.argv[0].clone(),
             device: 1,
             inode: 1,
-            sha256: "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf".into(),
+            sha256: crate::global_runtime::CURRENT_CODEX_SHA256.into(),
         };
         let mut phase_binding = None;
         for variant in 0..4 {
@@ -7643,7 +7643,7 @@ mod tests {
                         canonical_executable: PathBuf::from(&definition.argv[0]),
                         canonical_codex_home: definition.codex_home.clone(),
                         executable_identity: observed_identity.clone(),
-                        version: "0.164.0".into(),
+                        version: crate::global_runtime::CURRENT_CODEX_VERSION.into(),
                         schema_bundle_sha256: "a".repeat(64),
                         verdict: CompatibilityVerdict::Unverified,
                         configuration: configuration_snapshot("profile-0", &definition.codex_home)

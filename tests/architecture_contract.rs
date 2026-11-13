@@ -943,6 +943,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "specialist_facade",
                 "scheduler",
                 "worker", // Test-only production contract selection and dispatcher qualification.
+                "gateway_v2", // Test-only: managed result wire projection.
+                "protocol", // Test-only: unchanged public-v2 result messages.
                 // Native component qualification owns its test-only server group census.
                 "darwin",
                 "semantic",
@@ -1637,6 +1639,10 @@ fn source_module_dependencies_match_the_approved_graph() {
             ][..],
         ),
         (
+            "gateway_broker",
+            &["delegation_identity", "delegation_service", "semantic"][..],
+        ),
+        (
             "gateway_groups",
             &[
                 "semantic",
@@ -1665,7 +1671,7 @@ fn source_module_dependencies_match_the_approved_graph() {
             "pool",
             &["darwin", "domain", "machine", "paths", "run", "workspace"][..],
         ),
-        ("worker/companion", &["darwin"][..]),
+        ("worker/companion", &["darwin", "global_runtime"][..]),
     ]);
 
     check_source_dependencies(&repository_root().join("src"), &approved);
@@ -1681,6 +1687,16 @@ fn check_source_dependencies(root: &Path, approved: &BTreeMap<&str, &[&str]>) {
         }
         observed_modules.insert(module.to_owned());
         let source = fs::read_to_string(&path).unwrap();
+        if module == "delegation_service" {
+            let (production, _) = source.split_once("pub(crate) mod tests {").unwrap();
+            let production = direct_crate_dependencies(production);
+            for test_only in ["gateway_v2", "protocol"] {
+                assert!(
+                    !production.contains(test_only),
+                    "delegation service production depends on its wire test consumer {test_only}"
+                );
+            }
+        }
         if module == "source_binding" {
             let (production, _) = source.split_once("#[cfg(test)]\nmod tests {").unwrap();
             let production = direct_crate_dependencies(production);

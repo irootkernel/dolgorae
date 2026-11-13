@@ -9572,9 +9572,10 @@ pub(crate) mod tests {
             };
             binding.launch_snapshot.canonical_codex_home =
                 self.codex_home.to_str().unwrap().to_owned();
-            binding.launch_snapshot.codex_version = "0.164.0".to_owned();
+            binding.launch_snapshot.codex_version =
+                crate::global_runtime::CURRENT_CODEX_VERSION.into();
             binding.launch_snapshot.executable_identity.sha256 =
-                "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf".to_owned();
+                crate::global_runtime::CURRENT_CODEX_SHA256.into();
             binding.launch_snapshot_sha256 =
                 sha256_hex(&canonical_bytes(&binding.launch_snapshot).unwrap());
             ProvisioningSources {
@@ -23881,6 +23882,136 @@ pub(crate) mod tests {
             "old aggregate credential cannot read after rotation"
         );
     }
+    #[test]
+    fn public_managed_collection_preserves_results_pending_and_read_only_owner_boundary() {
+        use crate::protocol::public_v2 as pb;
+        for large in [false, true] {
+            let (f, home, carrier, session, port, source, _) =
+                task085_group_fixture(true, false, large, true, 2);
+            let rows = source["sources"].as_array().unwrap();
+            let task = Uuid::parse_str(rows[0]["task_ref"].as_str().unwrap()).unwrap();
+            let root = pb::RunRef {
+                workspace: Some(pb::WorkspaceRef {
+                    absolute_path: f
+                        .view
+                        .canonical_path
+                        .to_path_buf()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                    expected_workspace_id: f.view.workspace_id.clone(),
+                }),
+                run_id: session.to_string(),
+            };
+            let scope = pb::ManagedScope {
+                root_primary_run: Some(root),
+                session_id: session.to_string(),
+            };
+            let observe = |task, root, selected, credential| {
+                research_group::public_collect_managed_task(
+                    &home, &f.view, credential, root, selected, task, &port,
+                )
+            };
+            let before = f.database_bytes();
+            let calls = port.calls();
+            let value = observe(task, session, session, &carrier).unwrap();
+            let response = crate::gateway_v2::broker::projection(
+                scope.clone(),
+                &value,
+                pb::ResponseContext::default(),
+            )
+            .unwrap();
+            let result = response.task.as_ref().unwrap().result.as_ref().unwrap();
+            assert_eq!(
+                result
+                    .identity
+                    .as_ref()
+                    .unwrap()
+                    .source
+                    .as_ref()
+                    .unwrap()
+                    .task_ref,
+                task.to_string()
+            );
+            assert_eq!(
+                response
+                    .identity
+                    .as_ref()
+                    .unwrap()
+                    .facts
+                    .as_ref()
+                    .unwrap()
+                    .rounds,
+                2
+            );
+            if large {
+                assert!(matches!(
+                    result.final_response.as_ref().unwrap().representation,
+                    Some(pb::content_ref::Representation::Artifact(_))
+                ));
+                assert!(
+                    result
+                        .final_response
+                        .as_ref()
+                        .unwrap()
+                        .artifact_owner
+                        .is_some()
+                );
+            }
+            let pending = Uuid::parse_str(rows[1]["task_ref"].as_str().unwrap()).unwrap();
+            let value = observe(pending, session, session, &carrier).unwrap();
+            let response = crate::gateway_v2::broker::projection(
+                scope.clone(),
+                &value,
+                pb::ResponseContext::default(),
+            )
+            .unwrap();
+            assert!(response.task.as_ref().unwrap().result.is_none());
+            for (task, root, selected) in [
+                (Uuid::now_v7(), session, session),
+                (task, Uuid::now_v7(), session),
+                (task, session, Uuid::now_v7()),
+            ] {
+                assert!(observe(task, root, selected, &carrier).is_err());
+            }
+            let path = f.root.join("foreign-collection-controller");
+            crate::controller::create_controller_credential(
+                &path,
+                ControllerKind::InteractiveClient,
+                "foreign".into(),
+                Some("foreign".into()),
+                None,
+            )
+            .unwrap();
+            let foreign = crate::controller::CredentialCarrier::open_path(&path).unwrap();
+            assert!(observe(task, session, session, &foreign).is_err());
+            assert_eq!(f.database_bytes(), before);
+            assert_eq!(port.calls(), calls);
+
+            task085_publish_terminal(
+                &f,
+                true,
+                session,
+                &rows[1],
+                &json!({"failure":"retained failure"}),
+                "failed",
+            );
+            let value = observe(pending, session, session, &carrier).unwrap();
+            let response = crate::gateway_v2::broker::projection(
+                scope,
+                &value,
+                pb::ResponseContext::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                response.task.as_ref().unwrap().outcome,
+                pb::TaskOutcome::Failed as i32
+            );
+            assert!(response.task.as_ref().unwrap().result.is_some());
+        }
+    }
+
     fn task085_group_fixture(
         managed: bool,
         settle_second: bool,

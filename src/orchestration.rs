@@ -8902,9 +8902,8 @@ pub(crate) mod tests {
             serde_json::from_value(value["captures"]["profile_bindings"]["reviewer"].clone())
                 .unwrap();
         let mut launch = original.launch_snapshot.clone();
-        launch.codex_version = "0.164.0".into();
-        launch.executable_identity.sha256 =
-            "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf".into();
+        launch.codex_version = crate::global_runtime::CURRENT_CODEX_VERSION.into();
+        launch.executable_identity.sha256 = crate::global_runtime::CURRENT_CODEX_SHA256.into();
         launch
             .normalized_argv
             .extend(["--disable".into(), "shell_snapshot".into()]);

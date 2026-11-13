@@ -1184,17 +1184,28 @@ not select either server implicitly.
 
 The [delegation runtime
 qualification](dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
-selects Codex CLI `0.164.0`
-(`d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf`) for new
+selects the Codex CLI `0.167.2` candidate
+(`97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0`) for new
 qualified caller-workspace startup/policy, instruction-discovery and checked-review
 admissions. Admission precedes each new reservation, member or task acceptance
 and runtime launch. Original-key replay,
 release, closure and recovery retain the accepted binding, including qualified
-0.159.3 records. Existing snapshots are never resealed with current pins. Generic
+0.159.3 and 0.164.0 records. Existing snapshots are never resealed with current pins. Generic
 Profile lifecycle and binding-history observation retain tested/unverified
 compatibility admission, including doctor probes and migration. Exact pins
 apply at qualified-mechanism admission callers, never in shared Profile helpers.
 Runtime support still requires the selected native and compatibility evidence.
+
+### Managed individual task collection
+
+`BrokerService.CollectSpecialistTask` authenticates the root Controller and the
+exact managed Workspace/Session before resolving the requested task's original
+member. It exposes the retained accepted-task identity and complete result using
+the existing public-v2 messages. Nonterminal tasks retain their pending outcome;
+missing or inconsistent terminal content is unavailable, never an empty success.
+Collection observes committed state only. It starts no Run or task, settles no
+member, publishes no receipt and manufactures no native caller provenance.
+Public result components retain their checked artifact owner and byte digests.
 
 ## SPEC-004: Runtime and Session Identity
 

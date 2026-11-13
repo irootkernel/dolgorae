@@ -1286,6 +1286,13 @@ pub(super) fn campaign(
             capabilities.descriptor_sha256,
             dolgorae::jcs::sha256_hex(dolgorae::protocol::PUBLIC_V2_DESCRIPTOR)
         );
+        assert!(capabilities.supported_methods.iter().any(|method|
+            method == "BrokerService.CollectSpecialistTask"));
+        let status = pb::broker_service_client::BrokerServiceClient::new(connection.clone())
+            .collect_specialist_task(pb::CollectSpecialistTaskRequest {
+                context: context(), ..Default::default()
+            }).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
         let mut runs = RunServiceClient::new(connection.clone());
         let created = runs.start_run(request.clone()).await.unwrap().into_inner();
         let server_id = created.context.unwrap().server_instance_id;
@@ -1579,7 +1586,7 @@ pub(super) fn campaign(
         }
     });
     drop(gateway);
-    json!({"schema":"dolgorae.native-caller-pipeline/v1","mode":"task094_session","public_v2_uds":true,
+    json!({"schema":"dolgorae.native-caller-pipeline/v1","mode":"task094_session","public_v2_uds":true,"public_individual_collection_route_verified":true,
         "first_write_verified":true,"sequential_write_admissions_verified":true,"schema4_primary":true,
         "background_work_refused":true,"natural_child_exit_before_next_write":true,
         "gateway_replacement_original_identity":true,"recover_original_identity":true,"healthy_recover_refused":true,"idle_worker_loss_verified":true,

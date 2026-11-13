@@ -1172,6 +1172,23 @@ uncertain dispatch, not a proved non-dispatch.
 
 ## Current host and Profile runtime qualification
 
+The current Profile candidate is Codex `0.167.2`
+`97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0`
+and companion `45acdb759c3ac0a6b30a5107329b364b7ac1579f2cdf270997f03bc8d6365ef6`.
+New qualification work covers this pair. Accountless scripted-loopback checks
+establish only the mechanisms they exercise; real-account and model behavior
+remain unverified.
+Generic `tested` registration requires its own compatibility, access-safety and
+Profile launch evidence; a qualified caller candidate is not that evidence.
+The earlier results below retain their original images and applicability.
+The current candidate's ordinary schema-4 accountless session fixture passed
+first and sequential WRITE, typed permission/protected input, original Run/Thread
+recovery after idle Worker loss, gateway replacement, idle and consented interrupt
+Close, Writer release and separate owned-generation absence. It used nine
+scripted loopback POSTs and no external provider or account credentials. This
+mechanism evidence does not register a generic tested runtime or qualify the
+external Codex host, Gul browser creation or a final replacement H3.
+
 Status: the selected runtime and individual-task paths have the scoped native
 results below. Repository verification and Task acceptance are recorded by their
 delivery owners.

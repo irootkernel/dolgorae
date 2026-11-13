@@ -25,8 +25,8 @@ from run_live_instruction_discovery import (
 from run_native_workspace_policy_fixture import ScriptedResponses, code_call, code_results, fixture_config, terminal_output
 
 OPT_IN = "DOLGORAE_RUN_NATIVE_REVIEW_READER"
-CODEX_VERSION = "0.164.0"
-CODEX_SHA256 = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
+CODEX_VERSION = "0.167.2"
+CODEX_SHA256 = "97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0"
 
 
 class ReaderResponses(ScriptedResponses):

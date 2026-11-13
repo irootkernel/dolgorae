@@ -2935,6 +2935,14 @@ commit require Master's explicit Git authorization.
 
 Status: `ACTIVE`
 
+Master approved a bounded Gul integration follow-up: connect the existing
+managed individual-result collection to public-v2, qualify the current Codex
+0.167.2/companion candidate with accountless fixtures, and coordinate Gul's
+pre-dispatch Close error classification with its owner. Real-account/model
+checks, original native07 mutation, acceptance, commit and publication remain
+outside this follow-up's execution grant. Preserve pending earlier reviews and
+original failures; incomplete qualification must remain explicit.
+
 Depends on: the delivered TASK-093 H3. Execute this correction before Gul
 resumes the affected Phase 4 qualification and before TASK-088. Master's approved
 TASK-094 plan explicitly preserves TASK-093's pending review while implementing

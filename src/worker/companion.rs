@@ -3,13 +3,21 @@
 
 use super::*;
 
-const CODEX_SHA256: &str = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf";
-const HOST_SHA256: &str = "416721e33af8822041dc650793512b3e58d43e0be4f3a5c6187eb4dfaad3148a";
+fn companion_sha256(codex: &str) -> Option<&'static str> {
+    match codex {
+        crate::global_runtime::CURRENT_CODEX_SHA256 => {
+            Some(crate::global_runtime::CURRENT_COMPANION_SHA256)
+        }
+        "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf" => {
+            Some("416721e33af8822041dc650793512b3e58d43e0be4f3a5c6187eb4dfaad3148a")
+        }
+        _ => None,
+    }
+}
 
 fn admitted(server: &DedicatedServerIdentity, host: &RetirementProcess) -> bool {
     let identity = &host.identity;
-    server.executable_sha256 == CODEX_SHA256
-        && host.sha256 == HOST_SHA256
+    companion_sha256(&server.executable_sha256).is_some_and(|digest| host.sha256 == digest)
         && host.executable
             == server
                 .executable_path
@@ -30,7 +38,7 @@ pub(super) fn capture(
     let Some(server) = runtime.dedicated_server_identity.as_ref() else {
         return Err(WorkerProtocolError::InvalidRuntimeRecord);
     };
-    if server.executable_sha256 != CODEX_SHA256 {
+    if companion_sha256(&server.executable_sha256).is_none() {
         return Ok(None);
     }
     let census = DarwinSystem
@@ -120,7 +128,7 @@ mod tests {
             executable_path: PathBuf::from("/private/owned/codex"),
             executable_device: 1,
             executable_inode: 2,
-            executable_sha256: CODEX_SHA256.into(),
+            executable_sha256: crate::global_runtime::CURRENT_CODEX_SHA256.into(),
         };
         let host = RetirementProcess {
             identity: crate::darwin::ProcessCensusEntry {
@@ -136,7 +144,7 @@ mod tests {
             executable: PathBuf::from("/private/owned/codex-code-mode-host"),
             device: 1,
             inode: 3,
-            sha256: HOST_SHA256.into(),
+            sha256: crate::global_runtime::CURRENT_COMPANION_SHA256.into(),
         };
         assert!(admitted(&server, &host));
         let mut changed_server = server.clone();

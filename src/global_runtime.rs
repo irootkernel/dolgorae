@@ -20,6 +20,12 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+pub(crate) const CURRENT_CODEX_VERSION: &str = "0.167.2";
+pub(crate) const CURRENT_CODEX_SHA256: &str =
+    "97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0";
+pub(crate) const CURRENT_COMPANION_SHA256: &str =
+    "45acdb759c3ac0a6b30a5107329b364b7ac1579f2cdf270997f03bc8d6365ef6";
+
 const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_MEMBERSHIP_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_MEMBERSHIP_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
@@ -394,15 +400,18 @@ impl GlobalProfileBinding {
 
     fn accepted_current_executable(&self) -> bool {
         self.validate_for_recovery().is_ok()
-            && self.launch_snapshot.codex_version == "0.164.0"
-            && self.launch_snapshot.executable_identity.sha256
-                == "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
+            && self.launch_snapshot.codex_version == CURRENT_CODEX_VERSION
+            && self.launch_snapshot.executable_identity.sha256 == CURRENT_CODEX_SHA256
     }
 
     /// Retained execution uses its immutable accepted binding, without resolving
     /// the current registry or transferring qualification between executables.
     pub(crate) fn accepted_caller_workspace_supported(&self) -> bool {
         self.accepted_current_executable()
+            || (self.validate_for_recovery().is_ok()
+                && self.launch_snapshot.codex_version == "0.164.0"
+                && self.launch_snapshot.executable_identity.sha256
+                    == "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf")
             || (self.validate_for_recovery().is_ok()
                 && self.launch_snapshot.codex_version == "0.159.3"
                 && self.launch_snapshot.executable_identity.sha256
@@ -2404,9 +2413,16 @@ mod tests {
         let (parent, _) = home();
         let definition = definition(&parent);
         let old = "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878";
-        let current = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf";
-        for version in ["0.158.0", "0.159.3", "0.164.0", "0.164.1"] {
-            for sha in [old, current, &"0".repeat(64)] {
+        let previous = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf";
+        let current = CURRENT_CODEX_SHA256;
+        for version in [
+            "0.158.0",
+            "0.159.3",
+            "0.164.0",
+            CURRENT_CODEX_VERSION,
+            "0.167.3",
+        ] {
+            for sha in [old, previous, current, &"0".repeat(64)] {
                 let mut snapshot = snapshot("reviewer", &definition, &"a".repeat(64));
                 snapshot.codex_version = version.to_owned();
                 snapshot.executable_identity.sha256 = sha.to_owned();
@@ -2423,7 +2439,8 @@ mod tests {
                     "expected_output":"structured_review_v4","deadline_seconds":60,"role":null
                 })).unwrap();
                 let admission = false; // Generic construction is never qualified admission.
-                let accepted = (version == "0.164.0" && sha == current)
+                let accepted = (version == CURRENT_CODEX_VERSION && sha == current)
+                    || (version == "0.164.0" && sha == previous)
                     || (version == "0.159.3" && sha == old);
                 assert_eq!(
                     binding.caller_workspace_supported(),
@@ -2471,7 +2488,7 @@ mod tests {
                 }
                 let qualified = crate::profile::qualified_test_binding(&binding);
                 assert!(qualified.uses_qualified_launch_policy());
-                let current_pin = version == "0.164.0" && sha == current;
+                let current_pin = version == CURRENT_CODEX_VERSION && sha == current;
                 assert_eq!(qualified.caller_workspace_supported(), current_pin);
                 assert_eq!(review.admit_profile(&qualified).is_ok(), current_pin);
                 assert_ne!(qualified.server_key, binding.server_key);
