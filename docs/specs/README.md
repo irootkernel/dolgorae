@@ -3765,7 +3765,13 @@ view or a successful resolution receipt. Its complete Interaction revision
 therefore remains an actual Run-ledger sequence. A missing or stale binding
 refuses observation or resolution with a recovery requirement; a read MUST NOT
 publish or repair it. SQL and Run-ledger publication are separate recoverable
-steps, never one cross-store transaction.
+steps, never one cross-store transaction. If a protected approval is definitively
+refused with `SPECIALIST_POLICY_DENIED` before reservation, the owning Worker
+may release that original intent only after checking that its spawn is still
+awaiting approval, has no child, and has no SQL resolution. It holds the Broker
+write lock while recording the private release marker. A later answer can then
+make a new intent. Accepted or uncertain outcomes retain their original intent
+and recovery requirement; no release marker represents a successful decision.
 
 Resolution retains the existing Controller, Run and complete-Interaction
 revision checks and typed answer. For a Broker approval, expected_turn_id is the

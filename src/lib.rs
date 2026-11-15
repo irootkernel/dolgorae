@@ -103,6 +103,7 @@ pub(crate) mod managed_specialist;
 pub(crate) mod consumer_bridge;
 #[allow(dead_code)]
 pub(crate) mod native_consumer;
+pub(crate) mod native_preparation;
 #[allow(dead_code)]
 pub(crate) mod podway_client;
 

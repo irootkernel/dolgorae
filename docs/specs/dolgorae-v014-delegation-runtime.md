@@ -13,6 +13,105 @@ the runtime checks this document records are the ones the
 [release-proof dossier](../todo/TODO-DOLGORAE-RELEASE-PROOF-CORRECTION.md)
 (RPD:299-307) assigns to the shared runtime.
 
+## Public Primary native specialist preparation
+
+New public caller-workspace Orchestrated Primaries initialize a protected
+native-only specialist owner before starting their first Worker. The owner
+binds the actual Root, current Controller and accepted Profile executable;
+external MCP host qualification remains a separate authority. Bootstrap
+accepts no Specialist or Task and creates no Podway caller scope. Existing
+explicit managed connections take precedence and must validate; an invalid
+connection never falls back to native-only. Accepted Threads retain their
+original catalog. A Root with prior Worker or Thread evidence and no native owner
+is not bootstrapped on replay. Repeating an unfinished original creation resumes
+completed initialization steps, while conflicting or corrupt retained state fails closed.
+
+The managed native tool adds private `prepare_provisioning` and
+`prepare_assignment` operations for automatic native-only owners. Explicitly
+connected delegated owners retain their existing preparation route. Inputs contain a policy role reference, the
+eventual operation key and, for assignment, member and task content. The
+producer derives all paths, scope, Controller and Profile fields. These
+operations return the source or AcceptedTask identity used by the existing
+install, spawn and assign operations. Preparation accepts no Task, consumes no
+assignment round and dispatches no work. Original-key lookup and retained
+preparation precede fresh capture; changed input under the same key conflicts.
+
+Context status succeeds in native-only mode and returns the actual managed
+scope plus requestable read-only roles from the accepted policy. This bounded
+catalog allows 8 KiB of native metadata for up to 64 role references; other
+native metadata retains its 4 KiB limit. Private preparation replies allow
+256 KiB of identity metadata so legal context vectors and original-key lookup
+receipts remain complete. They contain no original result bodies.
+Eligibility requires fully delegated
+approval, Primary request permission, automatic approval, activation other than never,
+and read-only access. Disabled roles remain unavailable. Automatic native
+owners enforce the same role and access conditions on install, spawn and
+assignment, including policy instance/session limits. Every non-retired member
+counts toward those limits, including provisioning, degraded and retiring members.
+The Primary's legacy `request_specialist` path shares this count with native
+spawn, and checks it again inside member reservation, including approved requests.
+Legacy member views and reuse remain separate from native membership.
+A fresh approval resolution commits with its member reservation; a capacity
+refusal leaves the decision pending so it can still be rejected.
+Ordinary Policy refusals carry `fix_request` and no effect; definitive refusals
+inside acceptance resolve the original key as not accepted. Uncertain failures
+retain their recovery floor. Existing delegated/external context-status replies
+keep their original shape. Native-only accepted tasks
+retain an authenticated Root/Controller origin, independent of Podway round
+accounting. Delegated owners retain their original accounting and proof rules.
+
+The [private managed preparation schema](../protocol/dolgorae-managed-preparation-v1.schema.json)
+preserves a root object with an operation discriminator. Preparation replies use
+`dolgorae.managed-preparation-response/v1`, including refusals; a private
+preparation operation never claims the frozen external facade-v5 response
+schema, including refusals before dispatch. A malformed or missing private operation
+is reported as `operation:null`; successful replies always name one of the two
+private operations. External facade-v5, H1 and public-v2 descriptors are
+unchanged. Public Broker collection remains the complete-result owner. Native
+JSON string presentation must be decoded before interpreting its result;
+diagnostic campaign failures are not qualification passes.
+
+### Supported public procedure
+
+Create the Primary with the public-v2 StartRun provisioning and its accepted
+Markdown Specialist Policy. No owner file or administrative specialist setup
+is part of this procedure. Inside that Primary:
+
+1. Call `dolgorae_specialist_consumer` with
+   `{"schema":"dolgorae.consumer-control/v1","action":"status","target":{"kind":"context"}}`.
+   Read `data.scope` and `data.allowed_role_refs`. An empty list means the
+   accepted policy authorizes no native read-only role.
+2. Call `dolgorae_specialists_native` with
+   `{"schema":"dolgorae.managed-preparation/v1","operation":"prepare_provisioning","role_ref":"reviewer","idempotency_key":"install-1"}`.
+   Use the returned `sources` in facade-v5 `install_provisioning`, with the
+   same key and `expected_revision:null`.
+3. Use the installed candidate's provisioning reference and configuration
+   digest in facade-v5 `spawn_specialist`. Copy the returned managed scope
+   from status/preparation, supply the admitted role and a distinct spawn key.
+4. Call private `prepare_assignment` with `member_ref`, `task_body`,
+   `deadline_seconds` and the eventual assignment key. Use its
+   `accepted_task_identity` with the identical task, deadline and key in
+   facade-v5 `assign_specialist_task`.
+5. Await and collect through the native tool. The Controller can independently
+   collect the same task through public-v2 BrokerService.CollectSpecialistTask.
+   Read artifact representations through ArtifactService using their returned
+   owner reference; check complete bytes, byte length and SHA-256.
+6. Release the member with its current membership revision before Root Close.
+   A result or successful Close does not itself prove physical cleanup.
+
+Code-mode tool results can be JSON strings. Decode the correlated original
+result before reading its fields; do not infer success from presentation alone.
+An accepted or unresolved original-key lookup is recovery information, never
+permission to issue a fresh key. These private preparation operations are not
+available on the external MCP facade.
+
+The accountless native fixture is opt-in: after runtime authorization, set
+`DOLGORAE_RUN_NATIVE_CALLER_PIPELINE=1` and `DOLGORAE_CODEX_BIN` to the selected
+qualified Codex executable, then run `make test-native-primary-specialists`.
+It runs the allowed and disabled Policy cases separately, asserting the exact
+conflict/refusal contract and native release plus member retirement. The default
+repository gate exercises only offline checks and does not start this runtime.
+
 ## Master decisions
 
 Two bounds are Master decisions recorded verbatim from the accepted TASK-076

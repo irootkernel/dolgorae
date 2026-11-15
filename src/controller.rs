@@ -1066,6 +1066,32 @@ impl CredentialCarrier {
         unreachable!()
     }
 
+    /// Retain an already authenticated Controller for this Root's native tools.
+    /// The destination is producer-derived private state, never model input.
+    pub(crate) fn retain_managed(
+        &self,
+        directory: &crate::trusted_host::PrivateDirectory,
+        binding: &crate::run::ControllerBinding,
+    ) -> Result<(), MachineError> {
+        authorize_controller(Uuid::nil(), "native_bootstrap", binding, self)?;
+        let bytes = self.reread()?;
+        let path = directory.path.join("controller");
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                let retained = Self::open_path(&path)?;
+                if retained.reread()?.as_slice() != bytes.as_slice() {
+                    return Err(crate::trusted_host::refusal());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                directory.publish("controller", &bytes)?;
+            }
+            Err(_) => return Err(crate::trusted_host::refusal()),
+        }
+        directory.open_file(&path)?;
+        Ok(())
+    }
+
     pub fn duplicate_fd(fd: RawFd) -> Result<Self, MachineError> {
         let owned = DarwinSystem.duplicate_fd_cloexec(fd).map_err(|_| {
             credential_invalid(

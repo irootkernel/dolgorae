@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/managed-preparation/v1",
+  "title": "Private managed Primary preparation",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "dolgorae.managed-preparation/v1"
+    },
+    "operation": {
+      "enum": [
+        "prepare_provisioning",
+        "prepare_assignment"
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "operation"
+  ],
+  "dependentSchemas": {
+    "operation": {
+      "oneOf": [
+        {
+          "$ref": "https://dolgorae.local/schema/managed-preparation/v1#/$defs/prepare_provisioning_request"
+        },
+        {
+          "$ref": "https://dolgorae.local/schema/managed-preparation/v1#/$defs/prepare_assignment_request"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "prepare_provisioning_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation",
+        "role_ref",
+        "idempotency_key"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.managed-preparation/v1"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "operation": {
+          "const": "prepare_provisioning"
+        },
+        "role_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "prepare_assignment_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation",
+        "member_ref",
+        "task_body",
+        "deadline_seconds",
+        "idempotency_key"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.managed-preparation/v1"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "operation": {
+          "const": "prepare_assignment"
+        },
+        "member_ref": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+        },
+        "task_body": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/task_body"
+        },
+        "deadline_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "operation",
+        "ok"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.managed-preparation-response/v1"
+        },
+        "operation": {
+          "enum": [
+            "prepare_provisioning",
+            "prepare_assignment",
+            null
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope_kind",
+            "scope_ref"
+          ],
+          "properties": {
+            "scope_kind": {
+              "const": "orchestrated_session"
+            },
+            "scope_ref": {
+              "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/uuid7"
+            }
+          }
+        },
+        "sources": {
+          "$ref": "https://dolgorae.local/schema/external-specialist-facade/v5#/$defs/provisioning_sources"
+        },
+        "accepted_task_identity": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/accepted_task"
+        },
+        "lookup": {
+          "type": "object"
+        },
+        "error": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/error"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "ok": {
+              "const": false
+            }
+          },
+          "required": [
+            "error"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "sources"
+                ]
+              },
+              {
+                "required": [
+                  "accepted_task_identity"
+                ]
+              },
+              {
+                "required": [
+                  "lookup"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "operation": {
+              "enum": ["prepare_provisioning", "prepare_assignment"]
+            }
+          },
+          "required": [
+            "scope"
+          ],
+          "anyOf": [
+            {
+              "required": [
+                "sources"
+              ]
+            },
+            {
+              "required": [
+                "accepted_task_identity"
+              ]
+            },
+            {
+              "required": [
+                "lookup"
+              ]
+            }
+          ],
+          "not": {
+            "required": [
+              "error"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

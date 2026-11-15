@@ -77,6 +77,7 @@ pub struct PrimaryToolConfig {
 struct PendingPrimaryToolCall {
     tool_name: String,
     control_correlation: Option<crate::native_consumer::ControlCorrelation>,
+    preparation_correlation: Option<crate::native_preparation::Correlation>,
     successor_operation: Option<String>,
     payload_sha256: String,
     request_ids: Vec<u64>,
@@ -4914,6 +4915,8 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             .cloned()
             .ok_or(TurnError::CorrelationMismatch)?;
         let native_tool = successor.then_some(tool);
+        let preparation_correlation =
+            crate::native_preparation::Correlation::from_request(tool, &payload);
         let successor_operation = successor.then(|| {
             payload["operation"]
                 .as_str()
@@ -4946,6 +4949,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 successor_operation.as_deref(),
                 native_tool,
                 control_correlation.as_ref(),
+                preparation_correlation.as_ref(),
             );
         }
         let payload_sha256 = sha256_hex(
@@ -4970,6 +4974,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                     successor_operation.as_deref(),
                     native_tool,
                     control_correlation.as_ref(),
+                    preparation_correlation.as_ref(),
                 );
             }
             pending.request_ids.push(request_id);
@@ -4987,6 +4992,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 successor_operation.as_deref(),
                 native_tool,
                 control_correlation.as_ref(),
+                preparation_correlation.as_ref(),
             );
         }
         let idempotency_key = sha256_hex(
@@ -5015,6 +5021,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             PendingPrimaryToolCall {
                 tool_name: tool.into(),
                 control_correlation: control_correlation.clone(),
+                preparation_correlation: preparation_correlation.clone(),
                 successor_operation: successor_operation.clone(),
                 payload_sha256: format!("{tool}:{payload_sha256}"),
                 request_ids: vec![request_id],
@@ -5028,6 +5035,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 successor_operation.as_deref(),
                 native_tool,
                 control_correlation.as_ref(),
+                preparation_correlation.as_ref(),
             );
         }
         Ok(())
@@ -5068,6 +5076,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 pending.successor_operation.as_deref(),
                 Some(&pending.tool_name),
                 pending.control_correlation.as_ref(),
+                pending.preparation_correlation.as_ref(),
             )?;
         }
         Ok(())
@@ -5080,14 +5089,16 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         successor_operation: Option<&str>,
         native_tool: Option<&str>,
         control_correlation: Option<&crate::native_consumer::ControlCorrelation>,
+        preparation_correlation: Option<&crate::native_preparation::Correlation>,
     ) -> Result<(), TurnError> {
         if let Some(tool) = native_tool.filter(|tool| crate::native_consumer::is_native(tool)) {
-            let body = match result {
-                Ok(value) => value,
-                Err(error) if crate::native_consumer::is_control(tool) => {
+            let body = match (result, preparation_correlation) {
+                (Ok(value), _) => value,
+                (Err(error), Some(correlation)) => correlation.failure(&error),
+                (Err(error), None) if crate::native_consumer::is_control(tool) => {
                     crate::specialist_facade::control_failure_for(control_correlation, &error)
                 }
-                Err(error) => crate::consumer_bridge::semantic_presentation(
+                (Err(error), None) => crate::consumer_bridge::semantic_presentation(
                     &crate::specialist_facade::failure(
                         successor_operation.unwrap_or("lookup_operation"),
                         &error,
@@ -8010,6 +8021,164 @@ pub(crate) mod tests {
             panic!("first durable record is not the Turn intent");
         };
         assert!(intent.accepted_input.is_none());
+    }
+
+    #[test]
+    fn private_preparation_refusals_keep_their_contract_at_every_turn_boundary() {
+        let make = || {
+            let dispatcher = Arc::new(RecordingPrimaryDispatcher::default());
+            let session = Uuid::now_v7();
+            let mut server = FakeServer::default();
+            server
+                .replies
+                .push_back(Ok(serde_json::json!({"thread":{"id":"thread-1"}})));
+            server
+                .replies
+                .push_back(Ok(serde_json::json!({"turn":{"id":"turn-1"}})));
+            let mut coordinator = coordinator_in_with_primary(
+                server,
+                ThreadAttach::Start,
+                Box::new(RecordingDiagnostics::default()),
+                SessionSafetyPolicy::Standard,
+                Some(PrimaryToolConfig {
+                    session_id: session,
+                    contract: PrimaryToolContract::load().unwrap().with_specialists(),
+                    dispatcher: dispatcher.clone(),
+                }),
+            );
+            coordinator.run_id = session;
+            coordinator
+                .start_turn(request("private-preparation", DeliveryMode::Submit))
+                .unwrap();
+            (coordinator, dispatcher)
+        };
+        let payload = serde_json::json!({"schema":crate::native_preparation::SCHEMA,
+            "operation":"prepare_provisioning","role_ref":"reviewer","idempotency_key":"install"});
+        let frame = |id, call: &str, payload: Value| {
+            serde_json::json!({"id":id,"method":"item/tool/call","params":{
+            "threadId":"thread-1","turnId":"turn-1","callId":call,"tool":crate::native_consumer::MANAGED_NATIVE,"arguments":payload}})
+        };
+        let check = |server: &FakeServer, id, operation: Value, code: &str| {
+            let reply = &server
+                .responses
+                .iter()
+                .find(|(key, _)| *key == id)
+                .unwrap()
+                .1;
+            assert_eq!(reply["success"], false);
+            let body: Value =
+                serde_json::from_str(reply["contentItems"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                body["schema"],
+                crate::native_preparation::RESPONSE_SCHEMA,
+                "{body}"
+            );
+            assert_eq!(body["operation"], operation);
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["effect"], "none");
+            let schemas = crate::host_invocation::request_schemas();
+            assert!(
+                crate::host_invocation::schema_matches(
+                    &body,
+                    &schemas[4]["$defs"]["response"],
+                    &schemas[4],
+                    0
+                ),
+                "{body}"
+            );
+        };
+        for invalid in 0..4 {
+            let (mut coordinator, dispatcher) = make();
+            let mut broken = payload.clone();
+            match invalid {
+                0 => broken["controller"] = serde_json::json!("forged"),
+                1 => broken["role_ref"] = serde_json::json!("r".repeat(65)),
+                2 => {
+                    broken.as_object_mut().unwrap().remove("operation");
+                }
+                _ => broken["operation"] = serde_json::json!("unknown"),
+            }
+            coordinator.ingest(frame(100, "invalid", broken)).unwrap();
+            check(
+                &coordinator.server,
+                100,
+                if invalid < 2 {
+                    serde_json::json!("prepare_provisioning")
+                } else {
+                    Value::Null
+                },
+                "INVALID_REQUEST",
+            );
+            assert!(dispatcher.calls.lock().unwrap().is_empty());
+        }
+        let (mut coordinator, dispatcher) = make();
+        for index in 0..MAX_PENDING_PRIMARY_TOOLS {
+            coordinator
+                .ingest(frame(
+                    index as u64 + 1,
+                    &format!("call-{index}"),
+                    payload.clone(),
+                ))
+                .unwrap();
+        }
+        let mut changed = payload.clone();
+        changed["idempotency_key"] = serde_json::json!("changed");
+        coordinator.ingest(frame(1000, "call-0", changed)).unwrap();
+        check(
+            &coordinator.server,
+            1000,
+            serde_json::json!("prepare_provisioning"),
+            "IDEMPOTENCY_CONFLICT",
+        );
+        coordinator
+            .ingest(frame(1001, "overflow", payload.clone()))
+            .unwrap();
+        check(
+            &coordinator.server,
+            1001,
+            serde_json::json!("prepare_provisioning"),
+            "RUN_BUSY",
+        );
+        assert_eq!(
+            dispatcher.calls.lock().unwrap().len(),
+            MAX_PENDING_PRIMARY_TOOLS
+        );
+        coordinator
+            .complete_primary_tool(PrimaryToolCompletion {
+                run_generation: coordinator.run_generation,
+                source_tool_call_id: "call-0".into(),
+                request_id: 1,
+                result: Err(crate::native_preparation::invalid_request()),
+            })
+            .unwrap();
+        check(
+            &coordinator.server,
+            1,
+            serde_json::json!("prepare_provisioning"),
+            "INVALID_REQUEST",
+        );
+        struct Refusing;
+        impl PrimaryToolDispatcher for Refusing {
+            fn dispatch(&self, _: PrimaryToolCall) -> Result<(), MachineError> {
+                Err(MachineError::new(
+                    "RUN_BUSY",
+                    "reservation refused",
+                    true,
+                    serde_json::json!({}),
+                ))
+            }
+        }
+        let (mut coordinator, _) = make();
+        coordinator.primary_tool.as_mut().unwrap().dispatcher = Arc::new(Refusing);
+        coordinator
+            .ingest(frame(1002, "reserved", payload))
+            .unwrap();
+        check(
+            &coordinator.server,
+            1002,
+            serde_json::json!("prepare_provisioning"),
+            "RUN_BUSY",
+        );
     }
 
     #[test]

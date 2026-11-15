@@ -520,7 +520,7 @@ struct Setup {
     owner: String,
     birth: Uuid,
     generation: u64,
-    caller: crate::delegation_identity::CallerScope,
+    caller: Option<crate::delegation_identity::CallerScope>,
     mode: Mode,
 }
 impl Setup {

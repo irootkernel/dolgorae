@@ -3483,7 +3483,7 @@ pub fn campaign(root: &Path, codex: &Path) -> Value {
         json!({
         "member_ref":member,"task_ref":task_id,"originals":originals,
         "candidate":candidate,"assignment_receipt":receipt,"result_digest":complete.digest().unwrap(),
-        "execution":{"binding_ref":consumer_owner.configuration.caller_scope.binding_ref,
+        "execution":{"binding_ref":consumer_owner.configuration.caller_scope.as_ref().unwrap().binding_ref,
         "adapter_id":"dolgorae.managed/1","adapter_version":env!("CARGO_PKG_VERSION"),
         "primary_host":"managed","scope_kind":"orchestrated_session","scope_ref":primary,
         "supervisor_ref":format!("controller:{}",primary_binding.identity.controller_id),"worker_ref":member,"task_ref":task_id,

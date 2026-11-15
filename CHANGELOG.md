@@ -9,6 +9,8 @@ development commits.
 
 ### Added
 
+- Initialize public Primary native-only specialist access and derive read-only preparation from accepted Policy and Profile authority, preserving external host qualification and public contracts.
+
 - Expose Controller-authenticated managed individual task collection through the existing public-v2 Broker contract, preserving complete result identities, artifact references and read-only observation.
 - Prepare the Codex 0.167.2 caller-workspace and companion candidate with accountless native lifecycle checks; generic tested registration and external-host qualification remain separate.
 

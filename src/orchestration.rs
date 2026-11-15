@@ -200,6 +200,11 @@ pub struct BrokerApprovalResolution {
     pub resolution_receipt_id: Uuid,
 }
 
+struct PendingApprovalResolution<'a> {
+    idempotency_key: &'a str,
+    receipt: Uuid,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpecialistTaskSnapshot {
@@ -2546,26 +2551,7 @@ impl OrchestrationStore {
                 member.spawn_operation_id,
             );
         }
-        let active_total = session
-            .members
-            .iter()
-            .filter(|member| member.membership_state != "retired")
-            .count();
-        let active_role = session
-            .members
-            .iter()
-            .filter(|member| {
-                member.membership_state != "retired" && member.role_ref == request.role_ref
-            })
-            .count();
-        if active_total >= session.specialist_policy.max_active_specialists() as usize
-            || active_role >= role.max_active_instances() as usize
-        {
-            return Err(policy_denied(
-                &request.role_ref,
-                "active Specialist limit is reached",
-            ));
-        }
+        require_specialist_capacity(&self.connection, context.session_id, &request.role_ref)?;
         let automatic = session.approval_policy == "fully_delegated";
         if automatic && !role.auto_approve_when_fully_delegated() {
             return Err(policy_denied(
@@ -2600,6 +2586,7 @@ impl OrchestrationStore {
             request,
             &role,
             operation_id,
+            None,
             None,
             &request_sha256,
             adapter,
@@ -2711,6 +2698,7 @@ impl OrchestrationStore {
             &role,
             operation_id,
             operation.approval_request_id,
+            None,
             &request_sha256,
             adapter,
         )
@@ -2835,24 +2823,48 @@ impl OrchestrationStore {
                     &session.specialist_policy,
                     &interaction.request.role_ref,
                 )?;
+                require_specialist_capacity(
+                    &self.connection,
+                    session_id,
+                    &interaction.request.role_ref,
+                )?;
+                let receipt = new_uuid_v7();
+                let request_sha256: String = self.connection.query_row(
+                    "SELECT request_sha256 FROM brokered_spawn_operations WHERE operation_id=?1 AND session_id=?2",
+                    params![interaction.operation_id.to_string(), session_id.to_string()],
+                    |row| row.get(0),
+                ).map_err(internal)?;
+                let role = session
+                    .specialist_policy
+                    .role(&interaction.request.role_ref)?;
+                let operation = self.provision_specialist(
+                    &context,
+                    &interaction.request,
+                    &role,
+                    interaction.operation_id,
+                    Some(approval_request_id),
+                    Some(PendingApprovalResolution {
+                        idempotency_key,
+                        receipt,
+                    }),
+                    &request_sha256,
+                    adapter,
+                )?;
+                return Ok(BrokerApprovalResolution {
+                    operation,
+                    resolution_receipt_id: receipt,
+                });
             }
             let receipt = new_uuid_v7();
-            self.connection
-                .execute(
-                    "INSERT INTO brokered_approval_resolutions(
-                       approval_request_id,operation_id,decision,idempotency_key,
-                       resolution_receipt_id,resolved_at_ms
-                     ) VALUES(?1,?2,?3,?4,?5,?6)",
-                    params![
-                        approval_request_id.to_string(),
-                        interaction.operation_id.to_string(),
-                        decision,
-                        idempotency_key,
-                        receipt.to_string(),
-                        self.now_ms()?
-                    ],
-                )
-                .map_err(internal)?;
+            insert_approval_resolution(
+                &self.connection,
+                approval_request_id,
+                interaction.operation_id,
+                decision,
+                idempotency_key,
+                receipt,
+                self.now_ms()?,
+            )?;
             receipt
         };
         let operation =
@@ -3058,6 +3070,7 @@ impl OrchestrationStore {
         role: &SessionRoleSnapshot,
         operation_id: Uuid,
         approval_request_id: Option<Uuid>,
+        resolution: Option<PendingApprovalResolution<'_>>,
         request_sha256: &str,
         adapter: &mut A,
     ) -> Result<SpecialistOperationSnapshot, MachineError> {
@@ -3067,54 +3080,67 @@ impl OrchestrationStore {
         self.faults
             .check(OrchestrationBarrier::BeforeSpawnReservation)?;
         let credential = BrokerCredential::create(&self.credential_root, self.uid, run_id)?;
-        let reserved = if approval_request_id.is_some() {
-            let now = self.now_ms()?;
-            let transaction = self.transaction()?;
-            let changed = transaction
-                .execute(
-                    "UPDATE brokered_spawn_operations SET child_run_id=?2,state='requested',
+        let reserved = (|| {
+            if let Some(approval_request_id) = approval_request_id {
+                let now = self.now_ms()?;
+                let transaction = self.transaction()?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE brokered_spawn_operations SET child_run_id=?2,state='requested',
                      updated_at_ms=?3 WHERE operation_id=?1 AND state='awaiting_approval'",
-                    params![operation_id.to_string(), run_id.to_string(), now],
-                )
-                .map_err(internal)?;
-            if changed != 1 {
-                return Err(session_conflict(
+                        params![operation_id.to_string(), run_id.to_string(), now],
+                    )
+                    .map_err(internal)?;
+                if changed != 1 {
+                    return Err(session_conflict(
+                        context.session_id,
+                        "approval operation changed before provisioning",
+                    ));
+                }
+                insert_member(
+                    &transaction,
+                    context,
+                    request,
+                    role,
+                    operation_id,
+                    run_id,
+                    &credential.binding,
+                    now,
+                )?;
+                if let Some(resolution) = resolution {
+                    insert_approval_resolution(
+                        &transaction,
+                        approval_request_id,
+                        operation_id,
+                        "approve",
+                        resolution.idempotency_key,
+                        resolution.receipt,
+                        now,
+                    )?;
+                }
+                append_event(
+                    &transaction,
                     context.session_id,
-                    "approval operation changed before provisioning",
-                ));
+                    "specialist_approved",
+                    request_sha256,
+                    now,
+                )?;
+                crate::storage_observation::commit(transaction).map_err(internal)?;
+                Ok(())
+            } else {
+                self.insert_spawn(
+                    context,
+                    request,
+                    operation_id,
+                    Some(run_id),
+                    None,
+                    "requested",
+                    request_sha256,
+                    Some(role),
+                    Some(&credential.binding),
+                )
             }
-            insert_member(
-                &transaction,
-                context,
-                request,
-                role,
-                operation_id,
-                run_id,
-                &credential.binding,
-                now,
-            )?;
-            append_event(
-                &transaction,
-                context.session_id,
-                "specialist_approved",
-                request_sha256,
-                now,
-            )?;
-            crate::storage_observation::commit(transaction).map_err(internal)?;
-            Ok(())
-        } else {
-            self.insert_spawn(
-                context,
-                request,
-                operation_id,
-                Some(run_id),
-                None,
-                "requested",
-                request_sha256,
-                Some(role),
-                Some(&credential.binding),
-            )
-        };
+        })();
         if let Err(error) = reserved {
             let _ = credential.remove();
             return Err(error);
@@ -6619,6 +6645,67 @@ pub(crate) fn append_event(
     Ok(())
 }
 
+fn insert_approval_resolution(
+    connection: &Connection,
+    approval_request_id: Uuid,
+    operation_id: Uuid,
+    decision: &str,
+    idempotency_key: &str,
+    receipt: Uuid,
+    now: i64,
+) -> Result<(), MachineError> {
+    connection
+        .execute(
+            "INSERT INTO brokered_approval_resolutions(
+           approval_request_id,operation_id,decision,idempotency_key,
+           resolution_receipt_id,resolved_at_ms
+         ) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                approval_request_id.to_string(),
+                operation_id.to_string(),
+                decision,
+                idempotency_key,
+                receipt.to_string(),
+                now
+            ],
+        )
+        .map_err(internal)?;
+    Ok(())
+}
+
+/// Policy admission counts all members, while legacy views and reuse exclude
+/// successors. Repeat this check under the reservation's IMMEDIATE transaction.
+fn require_specialist_capacity(
+    connection: &Connection,
+    session_id: Uuid,
+    role_ref: &str,
+) -> Result<(), MachineError> {
+    let policy_json: String = connection
+        .query_row(
+            "SELECT policy_json FROM orchestrated_sessions WHERE session_id=?1",
+            [session_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    let policy: SessionPolicySnapshot = serde_json::from_str(&policy_json).map_err(internal)?;
+    let role = policy.role(role_ref)?;
+    let (total, matching): (u32, u32) = connection
+        .query_row(
+            "SELECT COUNT(*),COALESCE(SUM(role_ref=?2),0) FROM brokered_members
+             WHERE session_id=?1 AND membership_state<>'retired'",
+            params![session_id.to_string(), role_ref],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(internal)?;
+    if total >= policy.max_active_specialists() || matching >= role.max_active_instances() {
+        return Err(policy_denied(
+            role_ref,
+            "active Specialist limit is reached",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn insert_member(
     transaction: &Transaction<'_>,
@@ -6630,6 +6717,7 @@ fn insert_member(
     controller: &ControllerBinding,
     now: i64,
 ) -> Result<(), MachineError> {
+    require_specialist_capacity(transaction, context.session_id, role.role_ref())?;
     transaction
         .execute(
             "INSERT INTO brokered_members(
@@ -9215,6 +9303,17 @@ pub(crate) mod tests {
         Uuid,
         crate::interaction::BrokerApprovalResponse,
     ) {
+        prepared_broker_response_fixture_with_decision(false)
+    }
+
+    pub(crate) fn prepared_broker_response_fixture_with_decision(
+        approved: bool,
+    ) -> (
+        PathBuf,
+        PathBuf,
+        Uuid,
+        crate::interaction::BrokerApprovalResponse,
+    ) {
         let (root, store, session, _, _) = caller_policy_fixture("user_approval_required", false);
         let run = session.root_run_id;
         let mut ledger =
@@ -9239,7 +9338,7 @@ pub(crate) mod tests {
             &snapshot,
             snapshot.broker_approvals().unwrap()[0].approval_id,
             "async-answer",
-            false,
+            approved,
         );
         ledger
             .with_event_context(event, |ledger| {
@@ -9250,6 +9349,331 @@ pub(crate) mod tests {
         let state = store.state_root.clone();
         drop(store);
         (root, state, run, response)
+    }
+
+    #[test]
+    fn broker_completion_releases_only_proven_refusals_and_preserves_later_publication() {
+        for protected_reject in [false, true] {
+            let (root, state, run, response) = prepared_broker_response_fixture_with_decision(true);
+            let mut store = OrchestrationStore::open(&state).unwrap();
+            let session = store.session(run).unwrap();
+            let limit = session.specialist_policy.max_active_specialists().min(
+                session
+                    .specialist_policy
+                    .role("reviewer")
+                    .unwrap()
+                    .max_active_instances(),
+            );
+            // Capacity moves after the Worker's original intent was prepared.
+            for _ in 0..limit {
+                admit_successor_member(&mut store, run, new_uuid_v7());
+            }
+            let mut adapter = FakeAdapter::default();
+            let refused = store.resolve_specialist_approval(
+                run,
+                response.approval_id,
+                true,
+                &response.idempotency_key,
+                &mut adapter,
+            );
+            assert_eq!(
+                refused.as_ref().unwrap_err().code,
+                "SPECIALIST_POLICY_DENIED"
+            );
+            let manifest =
+                crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &state)
+                    .load_manifest(run)
+                    .unwrap();
+            let controller = manifest.controller.identity.clone();
+            let event = crate::ledger::EventAppendContext {
+                workspace_id: session.workspace_id,
+                server_key: manifest.profile.initial_server_key,
+                server_epoch: 1,
+                writer_state_revision: 0,
+            };
+            let mut ledger =
+                crate::ledger::Ledger::open(crate::run::run_root(&state, run), run).unwrap();
+            let original =
+                crate::interaction::broker_intents(ledger.durable_records().unwrap(), run)
+                    .unwrap()
+                    .remove(&response.approval_id)
+                    .unwrap();
+            let before_invalid = ledger.head().unwrap();
+            let before_release = crate::snapshot::RunSnapshot::load(&state, run, 0)
+                .unwrap()
+                .stamp;
+            for field in ["key", "intent", "binding", "resolved", "stale"] {
+                let mut forged = original.clone();
+                forged.phase = "released".into();
+                match field {
+                    "key" => {
+                        forged.namespace.as_mut().unwrap().idempotency_key = "foreign-key".into()
+                    }
+                    "intent" => {
+                        forged.intent.as_mut().unwrap().body.answers[0].selected_labels =
+                            vec!["reject".into()]
+                    }
+                    "binding" => forged.binding.source_call_id = "foreign-call".into(),
+                    "resolved" => forged.binding.status = "resolved".into(),
+                    "stale" => forged.binding.status = "stale".into(),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    ledger
+                        .with_event_context(event.clone(), |ledger| {
+                            ledger
+                                .append_required_payload(
+                                    crate::audit::AuditKind::TurnIntent,
+                                    &forged,
+                                    1,
+                                )
+                                .map_err(internal)
+                        })
+                        .is_err(),
+                    "forged release {field}"
+                );
+                assert_eq!(ledger.head().unwrap(), before_invalid);
+            }
+            ledger
+                .with_event_context(event.clone(), |ledger| {
+                    assert_eq!(
+                        approval::complete_response(
+                            &state,
+                            run,
+                            &response,
+                            &controller,
+                            &refused,
+                            ledger,
+                            1,
+                        )
+                        .unwrap_err()
+                        .code,
+                        "SPECIALIST_POLICY_DENIED"
+                    );
+                    Ok::<_, MachineError>(())
+                })
+                .unwrap();
+            assert!(
+                crate::interaction::broker_intents(ledger.durable_records().unwrap(), run)
+                    .unwrap()
+                    .is_empty()
+            );
+            let released_head = ledger.head().unwrap();
+            let released = ledger
+                .durable_records()
+                .unwrap()
+                .iter()
+                .filter_map(|record| crate::interaction::broker_record(record).transpose())
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .into_iter()
+                .find(|marker| marker.phase == "released")
+                .unwrap();
+            assert!(
+                ledger
+                    .with_event_context(event.clone(), |ledger| {
+                        ledger
+                            .append_required_payload(
+                                crate::audit::AuditKind::TurnIntent,
+                                &released,
+                                1,
+                            )
+                            .map_err(internal)
+                    })
+                    .is_err(),
+                "a released intent cannot be released twice"
+            );
+            assert_eq!(ledger.head().unwrap(), released_head);
+            ledger.close().unwrap();
+            let mut ledger =
+                crate::ledger::Ledger::open(crate::run::run_root(&state, run), run).unwrap();
+            ledger
+                .with_event_context(event.clone(), |ledger| {
+                    assert_eq!(
+                        approval::complete_response(
+                            &state,
+                            run,
+                            &response,
+                            &controller,
+                            &refused,
+                            ledger,
+                            1,
+                        )
+                        .unwrap_err()
+                        .code,
+                        "SPECIALIST_POLICY_DENIED"
+                    );
+                    Ok::<_, MachineError>(())
+                })
+                .unwrap();
+            assert_eq!(ledger.head().unwrap(), released_head);
+            let snapshot = crate::snapshot::RunSnapshot::load(&state, run, 0).unwrap();
+            assert_eq!(snapshot.broker_approvals().unwrap()[0].status, "pending");
+            assert!(snapshot.stamp.run_state_revision > before_release.run_state_revision);
+            assert_eq!(
+                snapshot.stamp.interaction_state_revision,
+                before_release.interaction_state_revision
+            );
+            let mut rejected = caller_broker_response(
+                &snapshot,
+                response.approval_id,
+                "reject-after-refusal",
+                false,
+            );
+            // Refresh the Run head while retaining the last public Interaction
+            // revision; an internal release must not invalidate that view.
+            rejected.expected_interaction_revision = before_release.interaction_state_revision;
+            if protected_reject {
+                ledger
+                    .with_event_context(event.clone(), |ledger| {
+                        approval::prepare_response(&state, run, &rejected, ledger, 1)
+                    })
+                    .unwrap();
+            }
+            let denied = store
+                .resolve_specialist_approval(
+                    run,
+                    response.approval_id,
+                    false,
+                    &rejected.idempotency_key,
+                    &mut adapter,
+                )
+                .unwrap();
+            assert_eq!(denied.operation.state, "denied");
+            ledger
+                .with_event_context(event, |ledger| {
+                    if protected_reject {
+                        assert_eq!(
+                            approval::complete_response(
+                                &state,
+                                run,
+                                &rejected,
+                                &controller,
+                                &Ok(denied.clone()),
+                                ledger,
+                                1,
+                            )
+                            .unwrap(),
+                            denied.resolution_receipt_id
+                        );
+                    } else {
+                        // A direct/public-v1 rejection must not conflict with the
+                        // released protected intent when Close/Reconcile publishes.
+                        approval::publish(&state, run, ledger, 1)?;
+                    }
+                    Ok::<_, MachineError>(())
+                })
+                .unwrap();
+            assert_eq!(
+                crate::snapshot::RunSnapshot::load(&state, run, 0)
+                    .unwrap()
+                    .broker_approvals()
+                    .unwrap()[0]
+                    .status,
+                "resolved"
+            );
+            let opened = ledger
+                .events_after(0, crate::event::EventProjection::Operational, false)
+                .unwrap()
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.record.data,
+                        crate::event::ClientEventData::InteractionOpened(_)
+                    )
+                })
+                .count();
+            assert_eq!(opened, 1);
+            ledger.close().unwrap();
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn broker_completion_keeps_uncertainty_and_accepted_decisions_bound_to_their_intent() {
+        for accepted in [false, true] {
+            let (root, state, run, response) = prepared_broker_response_fixture_with_decision(true);
+            let mut store = OrchestrationStore::open(&state).unwrap();
+            let mut adapter = FakeAdapter::default();
+            let receipt = accepted.then(|| {
+                store
+                    .resolve_specialist_approval(
+                        run,
+                        response.approval_id,
+                        true,
+                        &response.idempotency_key,
+                        &mut adapter,
+                    )
+                    .unwrap()
+                    .resolution_receipt_id
+            });
+            let manifest =
+                crate::run::RunStore::new(crate::workspace::SystemWorkspacePlatform, &state)
+                    .load_manifest(run)
+                    .unwrap();
+            let error = if accepted {
+                policy_denied(
+                    "reviewer",
+                    "a late reported failure must not release accepted work",
+                )
+            } else {
+                approval::recovery()
+            };
+            let mut ledger =
+                crate::ledger::Ledger::open(crate::run::run_root(&state, run), run).unwrap();
+            let result = ledger.with_event_context(
+                crate::ledger::EventAppendContext {
+                    workspace_id: manifest.workspace_id.clone(),
+                    server_key: manifest.profile.initial_server_key,
+                    server_epoch: 1,
+                    writer_state_revision: 0,
+                },
+                |ledger| {
+                    approval::complete_response(
+                        &state,
+                        run,
+                        &response,
+                        &manifest.controller.identity,
+                        &Err(error),
+                        ledger,
+                        1,
+                    )
+                },
+            );
+            if let Some(receipt) = receipt {
+                assert_eq!(result.unwrap(), receipt);
+            } else {
+                assert_eq!(result.unwrap_err().code, "RECOVERY_REQUIRED");
+                let snapshot = crate::snapshot::RunSnapshot::load(&state, run, 0).unwrap();
+                let reject = caller_broker_response(
+                    &snapshot,
+                    response.approval_id,
+                    "uncertain-reject",
+                    false,
+                );
+                assert_eq!(
+                    approval::prepare_response(&state, run, &reject, &mut ledger, 1)
+                        .unwrap_err()
+                        .code,
+                    "INTERACTION_ALREADY_RESOLVED"
+                );
+            }
+            assert!(
+                ledger
+                    .durable_records()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|r| crate::interaction::broker_record(r).transpose())
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.phase != "released")
+            );
+            ledger.close().unwrap();
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -15487,6 +15911,349 @@ pub(crate) mod tests {
         .unwrap();
         crate::storage_observation::commit(transaction).unwrap();
         spawn_ref
+    }
+
+    #[test]
+    fn legacy_requests_share_native_role_and_session_limits_without_adopting_members() {
+        for session_limit in [false, true] {
+            for state in ["provisioning", "active", "degraded", "retiring", "retired"] {
+                let root = root();
+                let mut policy = policy("fully_delegated");
+                if session_limit {
+                    policy.max_active_specialists = 1;
+                } else {
+                    policy.roles[0].max_active_instances = 1;
+                }
+                let (mut store, session) = active_session_with_policy(&root, policy);
+                let member = new_uuid_v7();
+                admit_successor_member(&mut store, session.session_id, member);
+                store
+                    .connection
+                    .execute(
+                        "UPDATE brokered_members SET membership_state=?2 WHERE run_id=?1",
+                        params![member.to_string(), state],
+                    )
+                    .unwrap();
+                assert!(store.members(session.session_id).unwrap().is_empty());
+                let mut adapter = FakeAdapter::default();
+                let call = context(session.session_id, "legacy-after-native");
+                let result = store.request_specialist(&call, &request("read_only"), &mut adapter);
+                if state == "retired" {
+                    let accepted = result.unwrap();
+                    assert_eq!(accepted.state, "ready");
+                    assert_eq!(
+                        store
+                            .request_specialist(&call, &request("read_only"), &mut adapter)
+                            .unwrap(),
+                        accepted
+                    );
+                    assert_eq!(store.members(session.session_id).unwrap().len(), 1);
+                } else {
+                    assert_eq!(result.unwrap_err().code, "SPECIALIST_POLICY_DENIED");
+                    assert!(adapter.calls.is_empty());
+                    assert!(
+                        store
+                            .load_spawn_by_key(session.session_id, &call.idempotency_key)
+                            .unwrap()
+                            .is_none()
+                    );
+                    assert!(store.members(session.session_id).unwrap().is_empty());
+                }
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_reservation_rechecks_capacity_after_preflight_and_before_approved_spawn() {
+        struct FillSlot {
+            root: PathBuf,
+            session: Uuid,
+            fired: Mutex<bool>,
+        }
+        impl OrchestrationFaultInjector for FillSlot {
+            fn check(&self, barrier: OrchestrationBarrier) -> Result<(), MachineError> {
+                let mut fired = self.fired.lock().unwrap();
+                if barrier == OrchestrationBarrier::BeforeSpawnReservation && !*fired {
+                    *fired = true;
+                    let mut winner = OrchestrationStore::open(&self.root).unwrap();
+                    admit_successor_member(&mut winner, self.session, new_uuid_v7());
+                }
+                Ok(())
+            }
+        }
+        for approval in ["fully_delegated", "user_approval_required"] {
+            let root = root();
+            let mut policy = policy(approval);
+            policy.max_active_specialists = 1;
+            let (store, session) = active_session_with_policy(&root, policy);
+            drop(store);
+            let mut store = OrchestrationStore::open_with_faults(
+                &root,
+                Arc::new(FillSlot {
+                    root: root.clone(),
+                    session: session.session_id,
+                    fired: Mutex::new(false),
+                }),
+            )
+            .unwrap();
+            let mut adapter = FakeAdapter::default();
+            let call = context(session.session_id, "racing-legacy");
+            let error = if approval == "fully_delegated" {
+                store
+                    .request_specialist(&call, &request("read_only"), &mut adapter)
+                    .unwrap_err()
+            } else {
+                let pending = store
+                    .request_specialist(&call, &request("read_only"), &mut adapter)
+                    .unwrap();
+                assert_eq!(pending.state, "awaiting_approval");
+                adapter.calls.clear();
+                let approval_id = pending.approval_request_id.unwrap();
+                let error = store
+                    .resolve_specialist_approval(
+                        session.session_id,
+                        approval_id,
+                        true,
+                        "approve-racing",
+                        &mut adapter,
+                    )
+                    .unwrap_err();
+                assert_eq!(store.spawn(pending.operation_id).unwrap(), pending);
+                assert!(
+                    store
+                        .approval_interaction(session.session_id, approval_id)
+                        .unwrap()
+                        .unwrap()
+                        .decision
+                        .is_none()
+                );
+                assert_eq!(store.connection.query_row(
+                    "SELECT COUNT(*) FROM brokered_approval_resolutions WHERE approval_request_id=?1",
+                    [approval_id.to_string()], |row| row.get::<_, u32>(0)
+                ).unwrap(), 0);
+                let denied = store
+                    .resolve_specialist_approval(
+                        session.session_id,
+                        approval_id,
+                        false,
+                        "reject-racing",
+                        &mut adapter,
+                    )
+                    .unwrap();
+                assert_eq!(denied.operation.state, "denied");
+                error
+            };
+            assert_eq!(error.code, "SPECIALIST_POLICY_DENIED");
+            assert!(adapter.calls.is_empty());
+            assert!(store.members(session.session_id).unwrap().is_empty());
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM brokered_members WHERE session_id=?1",
+                        [session.session_id.to_string()],
+                        |row| row.get::<_, u32>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            if approval == "fully_delegated" {
+                assert!(
+                    store
+                        .load_spawn_by_key(session.session_id, &call.idempotency_key)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            assert!(
+                std::fs::read_dir(&store.credential_root)
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn capacity_refusal_through_approval_resolution_leaves_the_request_rejectable() {
+        for session_limit in [false, true] {
+            let root = root();
+            let mut policy = policy("user_approval_required");
+            if session_limit {
+                policy.max_active_specialists = 1;
+            } else {
+                policy.roles[0].max_active_instances = 1;
+            }
+            let (mut store, session) = active_session_with_policy(&root, policy);
+            let mut adapter = FakeAdapter::default();
+            let first = store
+                .request_specialist(
+                    &context(session.session_id, "first"),
+                    &request("read_only"),
+                    &mut adapter,
+                )
+                .unwrap();
+            let second = store
+                .request_specialist(
+                    &context(session.session_id, "second"),
+                    &request("read_only"),
+                    &mut adapter,
+                )
+                .unwrap();
+            let first_approval = first.approval_request_id.unwrap();
+            let accepted = store
+                .resolve_specialist_approval(
+                    session.session_id,
+                    first_approval,
+                    true,
+                    "approve-first",
+                    &mut adapter,
+                )
+                .unwrap();
+            assert_eq!(accepted.operation.state, "ready");
+            adapter.calls.clear();
+            assert_eq!(
+                store
+                    .resolve_specialist_approval(
+                        session.session_id,
+                        first_approval,
+                        true,
+                        "approve-first",
+                        &mut adapter,
+                    )
+                    .unwrap(),
+                accepted
+            );
+            assert!(adapter.calls.is_empty());
+
+            let approval_id = second.approval_request_id.unwrap();
+            let error = store
+                .resolve_specialist_approval(
+                    session.session_id,
+                    approval_id,
+                    true,
+                    "approve-second",
+                    &mut adapter,
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "SPECIALIST_POLICY_DENIED");
+            assert_eq!(store.spawn(second.operation_id).unwrap(), second);
+            assert!(
+                store
+                    .approval_interaction(session.session_id, approval_id)
+                    .unwrap()
+                    .unwrap()
+                    .decision
+                    .is_none()
+            );
+            assert_eq!(store.connection.query_row(
+                "SELECT COUNT(*) FROM brokered_approval_resolutions WHERE approval_request_id=?1",
+                [approval_id.to_string()], |row| row.get::<_, u32>(0)
+            ).unwrap(), 0);
+            assert_eq!(
+                std::fs::read_dir(&store.credential_root).unwrap().count(),
+                1
+            );
+            assert!(adapter.calls.is_empty());
+            let denied = store
+                .resolve_specialist_approval(
+                    session.session_id,
+                    approval_id,
+                    false,
+                    "reject-second",
+                    &mut adapter,
+                )
+                .unwrap();
+            assert_eq!(denied.operation.state, "denied");
+            assert_eq!(
+                store
+                    .resolve_specialist_approval(
+                        session.session_id,
+                        approval_id,
+                        false,
+                        "reject-second",
+                        &mut adapter,
+                    )
+                    .unwrap(),
+                denied
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn fresh_approval_receipt_survives_accepted_reservation_and_replays_publication() {
+        let root = root();
+        let (store, session) = active_session(&root, "user_approval_required");
+        drop(store);
+        let mut store = OrchestrationStore::open_with_faults(
+            &root,
+            Arc::new(OneFault {
+                barrier: OrchestrationBarrier::AfterSpawnReservation,
+                fired: Mutex::new(false),
+            }),
+        )
+        .unwrap();
+        let mut adapter = FakeAdapter::default();
+        let pending = store
+            .request_specialist(
+                &context(session.session_id, "interrupted-approval"),
+                &request("read_only"),
+                &mut adapter,
+            )
+            .unwrap();
+        adapter.calls.clear();
+        let approval_id = pending.approval_request_id.unwrap();
+        assert!(
+            store
+                .resolve_specialist_approval(
+                    session.session_id,
+                    approval_id,
+                    true,
+                    "approve-original",
+                    &mut adapter,
+                )
+                .is_err()
+        );
+        assert!(adapter.calls.is_empty());
+        let interaction = store
+            .approval_interaction(session.session_id, approval_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(interaction.decision.as_deref(), Some("approve"));
+        assert_eq!(interaction.operation_state, "requested");
+        let receipt = interaction.resolution_receipt_id.unwrap();
+        drop(store);
+        let mut store = OrchestrationStore::open(&root).unwrap();
+        let recovered = store
+            .resolve_specialist_approval(
+                session.session_id,
+                approval_id,
+                true,
+                "approve-original",
+                &mut adapter,
+            )
+            .unwrap();
+        assert_eq!(recovered.resolution_receipt_id, receipt);
+        assert_eq!(recovered.operation.state, "ready");
+        assert_eq!(store.members(session.session_id).unwrap().len(), 1);
+        adapter.calls.clear();
+        assert_eq!(
+            store
+                .resolve_specialist_approval(
+                    session.session_id,
+                    approval_id,
+                    true,
+                    "approve-original",
+                    &mut adapter,
+                )
+                .unwrap(),
+            recovered
+        );
+        assert!(adapter.calls.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// One successor task row for a successor member.

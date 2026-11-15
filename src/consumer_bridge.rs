@@ -867,7 +867,16 @@ impl Bridge<'_> {
             Action::Status {
                 target: StatusTarget::Context,
             } => match self.store.connection() {
-                Err(_) => Ok(json!({"kind":"context","mode":"native_only","context_ref":null})),
+                Err(_) => {
+                    let mut data =
+                        json!({"kind":"context","mode":"native_only","context_ref":null});
+                    if self.source.owner.configuration.caller_scope.is_none() {
+                        data["allowed_role_refs"] =
+                            json!(crate::native_preparation::roles(self.source.owner)?);
+                        data["scope"] = crate::native_preparation::managed_scope(self.source.owner);
+                    }
+                    Ok(data)
+                }
                 Ok(c) => {
                     podway::validate_connection(self.source.owner, c)?;
                     let (o, p) = snapshot(client, c)?;
@@ -1556,7 +1565,25 @@ pub(crate) fn native_content(value: &Value, managed: bool) -> Result<Value, Mach
             }
         }
     }
-    if ascii.len() > 4096 {
+    let catalog = value["schema"] == "dolgorae.consumer-control-response/v1"
+        && value["action"] == "status"
+        && value["data"]["mode"] == "native_only"
+        && value["data"]["allowed_role_refs"]
+            .as_array()
+            .is_some_and(|roles| {
+                roles.len() <= 64
+                    && roles
+                        .iter()
+                        .all(|role| role.as_str().is_some_and(|role| role.len() <= 64))
+            });
+    let maximum = if value["schema"] == crate::native_preparation::RESPONSE_SCHEMA {
+        256 * 1024
+    } else if catalog {
+        8192
+    } else {
+        4096
+    };
+    if ascii.len() > maximum {
         return Err(error(
             "presentation_unavailable",
             "metadata",
@@ -1727,7 +1754,13 @@ impl Bridge<'_> {
         let (_, package) = snapshot(client, c)?;
         self.consume_package_evidence(client, c, &package)?;
         let expected = &package["result"]["package"];
-        let caller = &self.source.owner.configuration.caller_scope;
+        let caller = self
+            .source
+            .owner
+            .configuration
+            .caller_scope
+            .as_ref()
+            .ok_or_else(refusal)?;
         if expected["delegation"]["binding_ref"] != caller.binding_ref
             || expected["workspace_uuid"] != caller.podway_workspace_ref
             || expected["session_id"] != caller.podway_session_ref

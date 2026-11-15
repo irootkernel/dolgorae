@@ -973,6 +973,20 @@ pub(crate) fn normalize_tool_request(tool: &str, value: &Value) -> Result<Value,
         }
         crate::native_consumer::Control::parse(&crate::native_consumer::encode(value)?)?;
         Ok(value.clone())
+    } else if tool == crate::native_consumer::MANAGED_NATIVE
+        && value["schema"] == crate::native_preparation::SCHEMA
+    {
+        let operation = value["operation"]
+            .as_str()
+            .ok_or_else(crate::native_preparation::invalid_request)?;
+        let schema = &request_schemas()[4];
+        let rule = schema["$defs"]
+            .get(format!("{operation}_request"))
+            .ok_or_else(crate::native_preparation::invalid_request)?;
+        if canonical(value)?.len() > MAX_REQUEST || !schema_matches(value, rule, schema, 0) {
+            return Err(crate::native_preparation::invalid_request());
+        }
+        Ok(value.clone())
     } else {
         normalize_public_request(value)
     }
@@ -1015,8 +1029,8 @@ fn normalize_public_request(value: &Value) -> Result<Value, MachineError> {
     Ok(value)
 }
 
-pub(crate) fn request_schemas() -> &'static [Value; 4] {
-    static SCHEMAS: std::sync::OnceLock<[Value; 4]> = std::sync::OnceLock::new();
+pub(crate) fn request_schemas() -> &'static [Value; 5] {
+    static SCHEMAS: std::sync::OnceLock<[Value; 5]> = std::sync::OnceLock::new();
     SCHEMAS.get_or_init(|| {
         [
             serde_json::from_str(include_str!(
@@ -1035,6 +1049,10 @@ pub(crate) fn request_schemas() -> &'static [Value; 4] {
                 "../docs/protocol/dolgorae-review-target-v2.schema.json"
             ))
             .expect("checked change path schema"),
+            serde_json::from_str(include_str!(
+                "../docs/protocol/dolgorae-managed-preparation-v1.schema.json"
+            ))
+            .expect("checked managed preparation schema"),
         ]
     })
 }

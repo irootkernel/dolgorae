@@ -11558,28 +11558,15 @@ fn perform(
     }
     if let SessionCommand::BrokerComplete { request, result } = &mutation.command {
         let completed = coordinator.journal().with_ledger_authority(|ledger| {
-            crate::orchestration::approval::publish(
-                &authority.state_root,
-                identity.run_id,
-                ledger,
-                identity.run_generation,
-            )?;
-            let id = match crate::orchestration::approval::replay_response(
+            let id = crate::orchestration::approval::complete_response(
                 &authority.state_root,
                 identity.run_id,
                 request,
                 &controller,
+                result,
                 ledger,
-            )? {
-                Some(id) => id,
-                None => {
-                    return Err(result
-                        .as_ref()
-                        .err()
-                        .cloned()
-                        .unwrap_or_else(crate::orchestration::approval::recovery));
-                }
-            };
+                identity.run_generation,
+            )?;
             if let Some(admission) = admission_completion {
                 complete_mutation_admission(ledger, admission)?;
             }

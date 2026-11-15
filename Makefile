@@ -22,7 +22,7 @@ INT_TESTS := \
 	test-live-specialist-review test-live-scoped-specialist-review test-live-access-safety \
 	test-live-codex-compatibility test-live-transport-probe test-live-primary-bridge \
 	test-live-instruction-discovery test-live-workspace-startup test-live-workspace-policy \
-	test-native-workspace-policy-fixture test-native-host-invocation-fixture test-native-caller-pipeline test-native-review-reader \
+	test-native-workspace-policy-fixture test-native-host-invocation-fixture test-native-caller-pipeline test-native-primary-specialists test-native-review-reader \
 	test-native-integrated-acceptance \
 	test-live-provider-acceptance test-live-independent-review \
 	format format-check lint vet architecture
@@ -277,6 +277,21 @@ test-native-caller-pipeline:
 	$(PYTHON_BIN) tests/e2e/run_native_caller_pipeline.py \
 		--driver "$(CARGO_OUTPUT_ROOT)/debug/examples/native_caller_pipeline" \
 		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}"
+
+test-native-primary-specialists:
+	@test "$${DOLGORAE_RUN_NATIVE_CALLER_PIPELINE:-}" = 1 || { \
+		echo "DOLGORAE_RUN_NATIVE_CALLER_PIPELINE=1 is required" >&2; \
+		exit 2; \
+	}
+	$(CARGO) build --locked --bin dolgorae --example native_caller_pipeline
+	$(PYTHON_BIN) tests/e2e/run_native_caller_pipeline.py \
+		--driver "$(CARGO_OUTPUT_ROOT)/debug/examples/native_caller_pipeline" \
+		--binary "$(DOLGORAE_BIN)" \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" --native-specialist
+	$(PYTHON_BIN) tests/e2e/run_native_caller_pipeline.py \
+		--driver "$(CARGO_OUTPUT_ROOT)/debug/examples/native_caller_pipeline" \
+		--binary "$(DOLGORAE_BIN)" \
+		--codex "$${DOLGORAE_CODEX_BIN:-$(HOME)/.local/bin/codex}" --native-specialist --specialist-disabled
 
 test-native-review-reader:
 	@test "$${DOLGORAE_RUN_NATIVE_REVIEW_READER:-}" = 1 || { \

@@ -108,7 +108,8 @@ pub struct OwnerDraft {
     pub native_host_root: PathBuf,
     pub allowed_scopes: Vec<AllowedScope>,
     pub tools: Vec<String>,
-    pub caller_scope: CallerScope,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub caller_scope: Option<CallerScope>,
     pub adapter_id: String,
     pub adapter_version: String,
 }
@@ -426,7 +427,11 @@ fn validate_draft(
     view: &WorkspaceView,
     draft: &OwnerDraft,
 ) -> Result<(), MachineError> {
-    draft.caller_scope.validate().map_err(|_| refusal())?;
+    if let Some(caller) = &draft.caller_scope {
+        caller.validate().map_err(|_| refusal())?;
+    } else if !matches!(draft.owner, OwnerKind::Managed { .. }) {
+        return Err(refusal());
+    }
     let expected = match draft.route {
         HostRoute::Codex => (
             "0.164.0",
@@ -441,8 +446,8 @@ fn validate_draft(
     if root.path.starts_with(&workspace)
         || workspace.starts_with(&root.path)
         || !draft.executable.path.is_absolute()
-        || draft.executable.version != expected.0
-        || draft.executable.sha256 != expected.1
+        || (draft.caller_scope.is_some()
+            && (draft.executable.version != expected.0 || draft.executable.sha256 != expected.1))
         || !(1..=9_007_199_254_740_991).contains(&draft.controller_generation)
         || draft.adapter_id
             != match draft.owner {
@@ -524,6 +529,30 @@ pub(crate) fn authenticate_owner(
             || session.root_run_id != session_ref
         {
             return Err(refusal());
+        }
+        if draft.caller_scope.is_none() {
+            let runtime = manifest
+                .global_profile_binding
+                .as_ref()
+                .ok_or_else(refusal)?;
+            let expected_root =
+                crate::run::run_root(state_root, session_ref).join("native-specialist");
+            if !runtime.caller_workspace_supported()
+                || draft.route != HostRoute::Codex
+                || draft.executable.path
+                    != Path::new(&runtime.launch_snapshot.executable_identity.resolved_path)
+                || draft.executable.version != runtime.launch_snapshot.codex_version
+                || draft.executable.sha256 != runtime.launch_snapshot.executable_identity.sha256
+                || draft.controller_file != expected_root.join("controller")
+                || draft.native_host_root != expected_root.join("native")
+                || draft.tools
+                    != [
+                        crate::native_consumer::MANAGED_NATIVE,
+                        crate::native_consumer::MANAGED_CONTROL,
+                    ]
+            {
+                return Err(refusal());
+            }
         }
         if !manifest
             .aggregate_binding
@@ -619,7 +648,7 @@ impl VerifiedOwner {
     }
 }
 
-fn create_owner(
+pub(crate) fn create_owner(
     home: &DolgoraeHome,
     workspace: &Path,
     path: &Path,
@@ -956,7 +985,12 @@ pub(crate) struct ConfiguredCallerPort<'a>(pub &'a VerifiedOwner);
 impl crate::caller_scope::sealed::Sealed for ConfiguredCallerPort<'_> {}
 impl crate::caller_scope::TrustedCallerPort for ConfiguredCallerPort<'_> {
     fn load(&self) -> Result<([String; 5], u64), MachineError> {
-        let s = &self.0.configuration.caller_scope;
+        let s = self
+            .0
+            .configuration
+            .caller_scope
+            .as_ref()
+            .ok_or_else(refusal)?;
         Ok((
             [
                 s.binding_ref.clone(),
@@ -1067,14 +1101,14 @@ pub(crate) mod tests {
                     },
                 ],
                 tools: vec!["specialist".to_owned()],
-                caller_scope: CallerScope {
+                caller_scope: Some(CallerScope {
                     binding_ref: "binding".to_owned(),
                     podway_workspace_ref: "pw-workspace".to_owned(),
                     podway_session_ref: "pw-session".to_owned(),
                     podway_attempt_ref: "pw-attempt".to_owned(),
                     delegated_placement_ref: "placement".to_owned(),
                     max_rounds: 4,
-                },
+                }),
                 adapter_id: "dolgorae.external/1".to_owned(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_owned(),
             };
@@ -1180,7 +1214,7 @@ pub(crate) mod tests {
                         reference: Some(owner.scope_ref().to_string()),
                     }],
                     tools: vec!["specialist".into()],
-                    caller_scope,
+                    caller_scope: Some(caller_scope),
                     adapter_id: if managed {
                         "dolgorae.managed/1"
                     } else {
@@ -1460,8 +1494,12 @@ pub(crate) mod tests {
             }
             let owner = admin.owner();
             let mut changed: OwnerRecord = serde_json::from_slice(&original_config).unwrap();
-            changed.configuration.caller_scope.podway_attempt_ref =
-                "changed-after-original-capture".into();
+            changed
+                .configuration
+                .caller_scope
+                .as_mut()
+                .unwrap()
+                .podway_attempt_ref = "changed-after-original-capture".into();
             fs::write(admin.path(), canonical(&changed).unwrap()).unwrap();
             let error = administrative_member_recover(
                 &owner,
@@ -1982,7 +2020,7 @@ pub(crate) mod tests {
             let store = fixture.ready();
             assert_eq!(
                 store.caller_scope().unwrap().accepted(),
-                &fixture.draft.caller_scope
+                fixture.draft.caller_scope.as_ref().unwrap()
             );
             assert!(store.launch_recipe().is_err()); // No native executable is launched by setup.
             drop(store);
@@ -2095,14 +2133,14 @@ pub(crate) mod tests {
 
     #[test]
     fn owner_configuration_mutation_corpus_refuses_before_publication() {
-        for case in 0..26 {
+        for case in 0..27 {
             let mut f = Fixture::new(HostRoute::Codex);
             match case {
                 0 => f.draft.executable.version = "0.160.0".to_owned(),
                 1 => f.draft.executable.sha256 = "0".repeat(64),
                 2 => f.draft.executable.path = PathBuf::from("relative"),
                 3 => f.draft.controller_generation = 0,
-                4 => f.draft.caller_scope.max_rounds = 0,
+                4 => f.draft.caller_scope.as_mut().unwrap().max_rounds = 0,
                 5 => f.draft.adapter_id = "dolgorae.managed/1".to_owned(),
                 6 => f.draft.adapter_version = "foreign".to_owned(),
                 7 => f.draft.tools.clear(),
@@ -2124,10 +2162,11 @@ pub(crate) mod tests {
                 19 => f.draft.allowed_scopes = vec![f.draft.allowed_scopes[0].clone(); 65],
                 20 => f.draft.allowed_scopes[1].reference = Some("".into()),
                 21 => f.draft.allowed_scopes[1].reference = Some("x".repeat(513)),
-                22 => f.draft.caller_scope.binding_ref.clear(),
+                22 => f.draft.caller_scope.as_mut().unwrap().binding_ref.clear(),
                 23 => f.draft.tools[0] = "bad\nname".into(),
                 24 => f.draft.native_host_root = f.root.join("outside"),
                 25 => f.draft.allowed_scopes[0].reference = None,
+                26 => f.draft.caller_scope = None,
                 _ => unreachable!(),
             }
             assert!(f.create().is_err(), "owner mutation {case}");
@@ -2225,7 +2264,7 @@ pub(crate) mod tests {
             let state_root = f.owner().state_root;
             match case {
                 0 => {
-                    f.draft.caller_scope.max_rounds += 1;
+                    f.draft.caller_scope.as_mut().unwrap().max_rounds += 1;
                     assert_eq!(f.create().unwrap_err().code, "IDEMPOTENCY_CONFLICT");
                 }
                 1 => {

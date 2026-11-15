@@ -153,9 +153,11 @@ class SessionResponses(InteractionResponses):
             return [{"type":"response.created","response":{"id":identity}}, {"type":"response.output_item.done","item":item}, {"type":"response.completed","response":{"id":identity,"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}]
 
 
-def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1, interactions: bool = False, mcp_only: bool = False, task094_session: bool = False, prepared_worker_loss: bool = False) -> dict[str, object]:
+def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1, interactions: bool = False, mcp_only: bool = False, task094_session: bool = False, prepared_worker_loss: bool = False, native_specialist: bool = False, specialist_disabled: bool = False) -> dict[str, object]:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit native caller pipeline opt-in required")
+    if native_specialist:
+        task094_session = True
     if task094_session and (binary is None or readonly_pool or interactions or default_variant is not None):
         raise ValueError("session proof requires the ordinary binary and its own mode")
     if executable_identity(codex)["sha256"] != CODEX_SHA256:
@@ -177,7 +179,11 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
             environment["DOLGORAE_NATIVE_READONLY_POOL"] = "1"
             private_file(scratch / "pool-limit", str(pool_limit).encode())
         checked_codex(codex, f"codex-cli {CODEX_VERSION}", environment)
-        fixture = SessionResponses(scratch / "home/workspace") if task094_session else InteractionResponses(scratch / "home/workspace") if interactions else ScriptedResponses()
+        if native_specialist:
+            from native_specialist_responses import SpecialistResponses
+            fixture = SpecialistResponses(scratch, specialist_disabled)
+        else:
+            fixture = SessionResponses(scratch / "home/workspace") if task094_session else InteractionResponses(scratch / "home/workspace") if interactions else ScriptedResponses()
         if default_variant is not None:
             if default_variant not in DEFAULT_FEATURE_VARIANTS:
                 raise ValueError("unknown default-feature variant")
@@ -187,7 +193,7 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
             if readonly_pool and name == "fixture-b":
                 config += b'model_context_window = 65536\n'
             config += fixture_config(fixture.base_url)
-            if interactions or task094_session:
+            if interactions or (task094_session and not native_specialist):
                 config += (f'\n[mcp_servers.fixture]\nurl = "http://127.0.0.1:{fixture.mcp_http.server_port}/mcp"\ndefault_tools_approval_mode = "approve"\n').encode()
             config += b'\n[features]\n'
             if default_variant is None:
@@ -196,7 +202,7 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
                 config += b'shell_snapshot = true\n'
             elif default_variant is None:
                 config += b'shell_snapshot = false\n'
-                if interactions or task094_session:
+                if interactions or (task094_session and not native_specialist):
                     config += b'request_permissions_tool = true\ntool_search_always_defer_mcp_tools = false\n'
             private_file(scratch / name / "config.toml", config)
             private_file(scratch / name / "AGENTS.md", b"Permitted isolated native Profile guidance.\n")
@@ -211,6 +217,10 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
             fixture.instruction_markers = {"common": "Follow the current task and the selected Role", "role": "POOL_EXPLICIT_ROLE", "profile": "Permitted isolated native Profile guidance.", "project": "Conflicting isolated project instructions.", "ancestor": "Conflicting isolated ancestor instructions."}
         if interactions:
             private_file(scratch / "interaction-cases", b"mcp\n" if mcp_only else b"permission,mcp\n")
+        if native_specialist:
+            private_file(scratch / "native-specialist", b"public-native\n")
+            if specialist_disabled:
+                private_file(scratch / "specialist-disabled", b"disabled\n")
         if task094_session:
             private_file(scratch / "task094-session", b"permission,mcp\n")
             if prepared_worker_loss:
@@ -219,7 +229,7 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
                                 capture_output=True, text=True, timeout=None if binary is not None else 300)
         private_file(scratch / "driver.stdout", result.stdout.encode())
         private_file(scratch / "driver.stderr", result.stderr.encode())
-        if interactions or task094_session:
+        if interactions or (task094_session and not native_specialist):
             private_file(scratch / "interaction-diagnostic.json", json.dumps({"failure":fixture.failure,"details":fixture.failure_details,"issued_cases":sorted(fixture.issued_cases),"completed_cases":sorted(fixture.completed_cases),"mcp_decision":fixture.mcp_decision,"posts":fixture.posts}).encode())
         if result.returncode or fixture.failure or (not readonly_pool and not interactions and not task094_session and fixture.posts):
             raise ValueError("native caller pipeline failed; no automatic retry")
@@ -236,7 +246,28 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
             raise ValueError("native caller pipeline observation shape invalid")
         if interactions and not mcp_only and observations.get("sequential_write_admissions_verified") is not True:
             raise ValueError("sequential WRITE admission unproved")
-        if task094_session:
+        if native_specialist:
+            import sqlite3
+            databases = list((scratch / "home/.dolgorae/workspaces").glob("*/orchestration/orchestration.sqlite3"))
+            if len(databases) != 1:
+                raise ValueError("native specialist workspace database identity")
+            with sqlite3.connect(databases[0].as_uri() + "?mode=ro", uri=True) as connection:
+                counts = {
+                    "tasks": connection.execute("SELECT COUNT(*) FROM brokered_tasks").fetchone()[0],
+                    "members": connection.execute("SELECT COUNT(*) FROM brokered_members").fetchone()[0],
+                    "retired_members": connection.execute("SELECT COUNT(*) FROM brokered_members WHERE membership_state='retired'").fetchone()[0],
+                    "podway_rounds": connection.execute("SELECT COUNT(*) FROM caller_scope_assignments").fetchone()[0],
+                    "native_origins": connection.execute("SELECT COUNT(*) FROM result_content_refs WHERE owner_kind='native_primary_task' AND representation='origin'").fetchone()[0],
+                }
+            expected = {"tasks": 0, "members": 0, "retired_members": 0, "podway_rounds": 0, "native_origins": 0} if specialist_disabled else {"tasks": 2, "members": 1, "retired_members": 1, "podway_rounds": 0, "native_origins": 2}
+            if counts != expected or fixture.specialist_turns != (0 if specialist_disabled else 2):
+                raise ValueError("native preparation or replay created additional work")
+            observations["accepted_work_counts"] = counts
+            if (observations.get("mode") != "native_specialist" or observations.get("disabled_policy") != specialist_disabled
+                    or observations.get("native_turns", 100) > 12 or fixture.posts > 32
+                    or fixture.completed_cases != ({"disabled"} if specialist_disabled else {"inline", "artifact"})):
+                raise ValueError("public native specialist proof incomplete")
+        if task094_session and not native_specialist:
             required = ("public_individual_collection_route_verified", "first_write_verified", "sequential_write_admissions_verified", "schema4_primary",
                         "gateway_replacement_original_identity", "recover_original_identity",
                         "healthy_recover_refused", "idle_worker_loss_verified",
@@ -408,6 +439,8 @@ def main() -> int:
     parser.add_argument("--default-feature-startup-only", action="store_true")
     parser.add_argument("--readonly-pool", action="store_true")
     parser.add_argument("--task094-session", action="store_true")
+    parser.add_argument("--native-specialist", action="store_true")
+    parser.add_argument("--specialist-disabled", action="store_true")
     parser.add_argument("--prepared-worker-loss", action="store_true",
                         help="fault an instrumented product after preparation scope publication")
     parser.add_argument("--interactions", action="store_true")
@@ -424,6 +457,11 @@ def main() -> int:
         if args.task094_session:
             kwargs["task094_session"] = True
             kwargs["prepared_worker_loss"] = args.prepared_worker_loss
+        if args.specialist_disabled and not args.native_specialist:
+            raise ValueError("disabled specialist case requires native-specialist")
+        if args.native_specialist:
+            kwargs["native_specialist"] = True
+            kwargs["specialist_disabled"] = args.specialist_disabled
         if args.binary is not None:
             kwargs["binary"] = args.binary
         observations = selected(args.driver.resolve(strict=True), args.codex.resolve(strict=True), **kwargs)

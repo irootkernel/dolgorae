@@ -3,6 +3,8 @@ use super::*;
 use dolgorae::protocol::public_v2 as pb;
 use dolgorae::provisioning::{ProvisioningAdmission, ProvisioningSources, capture_provisioning};
 use pb::run_service_client::RunServiceClient;
+#[path = "specialist.rs"]
+mod specialist;
 
 struct Gateway {
     child: std::process::Child,
@@ -1100,6 +1102,15 @@ async fn lose_idle_worker(
     record.identity.run_generation
 }
 
+pub(super) fn cleanup_specialist(
+    root: &Path,
+    home: &DolgoraeHome,
+    view: &WorkspaceView,
+    credential: &Path,
+) -> Result<(), dolgorae::machine::MachineError> {
+    specialist::cleanup(root, home, view, credential)
+}
+
 fn primary_admission() -> ProvisioningAdmission {
     ProvisioningAdmission {
         model: "gpt-5.6-luna".into(),
@@ -1162,7 +1173,15 @@ pub(super) fn campaign(
     ))
     .unwrap();
     policy["policy_name"] = json!("task094-session");
-    policy["approval_policy"] = json!("fully_delegated");
+    policy["approval_policy"] = json!(if root.join("specialist-disabled").exists() {
+        "user_approval_required"
+    } else {
+        "fully_delegated"
+    });
+    if root.join("specialist-disabled").exists() {
+        policy["roles"][0]["activation_policy"] = json!("never");
+        policy["roles"][0]["primary_may_request"] = json!(false);
+    }
     let config = policy["roles"][0]["agent_configuration"]
         .as_object_mut()
         .unwrap();
@@ -1203,6 +1222,10 @@ pub(super) fn campaign(
         .unwrap()
         .prepare_specialist(home, true)
         .unwrap();
+    let mut admission = primary_admission();
+    if root.join("native-specialist").exists() {
+        admission.requested_access = "read_only".into();
+    }
     let captured = capture_provisioning(&ProvisioningSources {
         instruct: &instruct,
         role_name: "general",
@@ -1212,7 +1235,7 @@ pub(super) fn campaign(
         dependencies: vec![],
         selected_guidance: vec![],
         profile_binding: binding,
-        admission: primary_admission(),
+        admission,
     })
     .unwrap();
     let (instructions, _) = captured.admitted_configuration().unwrap();
@@ -1254,7 +1277,11 @@ pub(super) fn campaign(
             ),
             agent_configuration_digest: captured.admitted.digest().unwrap(),
         }),
-        requested_mode: pb::CreationMode::Writable as i32,
+        requested_mode: if root.join("native-specialist").exists() {
+            pb::CreationMode::ReadOnly as i32
+        } else {
+            pb::CreationMode::Writable as i32
+        },
         execution_lane: pb::ExecutionLane::Dedicated as i32,
         purpose: pb::PurposeKind::Interactive as i32,
         required_assurance: pb::AssuranceLevel::BestEffortPersonalAlpha as i32,
@@ -1263,6 +1290,9 @@ pub(super) fn campaign(
         )),
         ..Default::default()
     };
+    if root.join("native-specialist").exists() {
+        return specialist::campaign(root, home, view, credential, request);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

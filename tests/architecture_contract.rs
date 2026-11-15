@@ -302,6 +302,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "specialist_facade",
             &[
+                "native_preparation",
                 "consumer_bridge",
                 "native_consumer",
                 "podway_client",
@@ -323,6 +324,8 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "managed_specialist",
             &[
+                "projection",
+                "native_preparation",
                 "consumer_bridge",
                 "native_consumer",
                 "podway_client",
@@ -401,6 +404,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "host_invocation",
             &[
+                "native_preparation",
                 "caller_scope",
                 "darwin",
                 "delegation_identity",
@@ -467,6 +471,40 @@ fn source_module_dependencies_match_the_approved_graph() {
         // Protected native consumer setup/claims, source composition and the
         // pinned public child invocation are separate owned boundaries.
         (
+            "native_preparation",
+            &[
+                "turn",
+                "worker",
+                "semantic",
+                "projection",
+                "caller_scope",
+                "consumer_bridge",
+                "controller",
+                "delegation_identity",
+                "delegation_service",
+                "domain",
+                "engagement",
+                "host_invocation",
+                "instructions",
+                "jcs",
+                "machine",
+                "managed_specialist",
+                "markdown_policy",
+                "native_consumer",
+                "operation",
+                "orchestration",
+                "paths",
+                "primary_tool",
+                "provisioning",
+                "run",
+                "source_binding",
+                "specialist_facade",
+                "storage_observation",
+                "trusted_host",
+                "workspace",
+            ][..],
+        ),
+        (
             "native_consumer",
             &[
                 "specialist_facade",
@@ -488,6 +526,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "consumer_bridge",
             &[
+                "native_preparation",
                 "host_invocation",
                 "specialist_facade",
                 "caller_scope",
@@ -567,6 +606,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "controller",
             &[
+                "trusted_host",
                 "scheduler",
                 "darwin",
                 "domain",
@@ -906,6 +946,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "caller_scope",
             &[
+                "native_preparation",
                 "delegation_identity",
                 "delegation_service", // Standalone Controller group accounting proof.
                 // `engagement` is test-only: the accounting fixture opens one
@@ -933,6 +974,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "delegation_service",
             &[
+                "native_preparation",
                 "controller",
                 // Test-only: native group/merge/synthesis binding and managed Worker authority.
                 "host_invocation",
@@ -1127,6 +1169,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "semantic",
             &[
+                "native_preparation",
                 "result_component_artifact",
                 "collaboration",
                 "scheduler",
@@ -1238,6 +1281,7 @@ fn source_module_dependencies_match_the_approved_graph() {
         (
             "turn",
             &[
+                "native_preparation",
                 "run",
                 "collaboration",
                 "public_resolution",

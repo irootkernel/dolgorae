@@ -222,6 +222,7 @@ pub(crate) fn publish(
     };
     store.connection.check_identity()?;
     let old = crate::interaction::broker_bindings(&records, run)?;
+    let intents = crate::interaction::broker_intents(&records, run)?;
     if old
         .keys()
         .any(|id| !wanted.iter().any(|b| b.approval_id == *id))
@@ -232,13 +233,7 @@ pub(crate) fn publish(
         if old.get(&binding.approval_id) == Some(&binding) {
             continue;
         }
-        let intent = records
-            .iter()
-            .rev()
-            .filter_map(|r| crate::interaction::broker_record(r).transpose())
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .find(|r| r.phase == "intent" && r.binding.approval_id == binding.approval_id);
+        let intent = intents.get(&binding.approval_id).cloned();
         let (phase, intent, namespace, public_resolution) =
             if let (Some(receipt), Some(key), Some(prior)) = (
                 binding.resolution_receipt_id,
@@ -374,6 +369,85 @@ pub(crate) fn replay_response(
     Ok(None)
 }
 
+/// Complete the owning Worker's original response without releasing uncertain
+/// or accepted work. SQL reservation and ledger publication remain separate.
+pub(crate) fn complete_response(
+    state_root: &Path,
+    run: Uuid,
+    request: &crate::interaction::BrokerApprovalResponse,
+    controller: &crate::domain::ControllerIdentity,
+    result: &Result<super::BrokerApprovalResolution, MachineError>,
+    ledger: &mut crate::ledger::Ledger,
+    generation: u64,
+) -> Result<Uuid, MachineError> {
+    if let Err(error) = result {
+        release_refused_response(
+            state_root, run, request, controller, error, ledger, generation,
+        )?;
+    }
+    publish(state_root, run, ledger, generation)?;
+    replay_response(state_root, run, request, controller, ledger)?
+        .ok_or_else(|| result.as_ref().err().cloned().unwrap_or_else(recovery))
+}
+
+fn release_refused_response(
+    state_root: &Path,
+    run: Uuid,
+    request: &crate::interaction::BrokerApprovalResponse,
+    controller: &crate::domain::ControllerIdentity,
+    error: &MachineError,
+    ledger: &mut crate::ledger::Ledger,
+    generation: u64,
+) -> Result<(), MachineError> {
+    if !request.approved || error.code != "SPECIALIST_POLICY_DENIED" {
+        return Ok(());
+    }
+    validate_response(request, run)?;
+    let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run)?;
+    if !caller_root(&manifest) {
+        return Ok(());
+    }
+    let mut intents =
+        crate::interaction::broker_intents(ledger.durable_records().map_err(internal)?, run)?;
+    let Some(mut marker) = intents.remove(&request.approval_id) else {
+        return Ok(());
+    };
+    let namespace = crate::operation::Namespace::delegation(
+        controller,
+        &manifest.workspace_id,
+        Some(("run", &run.to_string())),
+        "resolve_interaction",
+        &request.idempotency_key,
+    )
+    .map_err(|_| integrity("approval refusal namespace"))?;
+    if marker.intent.as_ref() != Some(&request.intent)
+        || marker.namespace.as_ref() != Some(&namespace)
+    {
+        return Err(recovery());
+    }
+    let mut store = OrchestrationStore::open(state_root)?;
+    store.authorize_primary(&store.spawn_context(marker.binding.operation_id)?)?;
+    // Hold the Broker writer fence until the release is durable. A direct
+    // resolver must not accept this approval between the proof and the marker.
+    let transaction = store.transaction()?;
+    let (state, child, decided): (String, Option<String>, bool) = transaction.query_row(
+        "SELECT s.state,s.child_run_id,EXISTS(
+           SELECT 1 FROM brokered_approval_resolutions r WHERE r.approval_request_id=s.approval_request_id)
+         FROM brokered_spawn_operations s WHERE s.operation_id=?1 AND s.session_id=?2
+           AND s.approval_request_id=?3",
+        rusqlite::params![marker.binding.operation_id.to_string(), run.to_string(), request.approval_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(internal)?;
+    if state == "awaiting_approval" && child.is_none() && !decided {
+        marker.phase = "released".into();
+        marker.validate(run)?;
+        ledger
+            .append_required_payload(crate::audit::AuditKind::TurnIntent, &marker, generation)
+            .map_err(internal)?;
+    }
+    Ok(())
+}
+
 /// Runs on the owning drain after its unchanged Controller/Run admission checks.
 pub(crate) fn prepare_response(
     state_root: &Path,
@@ -428,19 +502,16 @@ pub(crate) fn prepare_response(
     let store = OrchestrationStore::open_observer(state_root)?;
     store.authorize_primary(&store.spawn_context(binding.operation_id)?)?;
     let namespace = response_namespace(&snapshot, &request.idempotency_key)?;
-    for record in ledger.durable_records().map_err(internal)? {
-        if let Some(marker) = crate::interaction::broker_record(record)?
-            && marker.phase == "intent"
-            && marker.binding.approval_id == request.approval_id
+    let intents =
+        crate::interaction::broker_intents(ledger.durable_records().map_err(internal)?, run)?;
+    if let Some(marker) = intents.get(&request.approval_id) {
+        if marker.namespace.as_ref() != Some(&namespace)
+            || marker.intent.as_ref() != Some(&request.intent)
         {
-            if marker.namespace.as_ref() != Some(&namespace)
-                || marker.intent.as_ref() != Some(&request.intent)
-            {
-                return Err(interaction_already_resolved(run, request.approval_id));
-            }
-            // A reserved response with no positive original decision cannot be replayed as a new effect.
-            return Err(recovery());
+            return Err(interaction_already_resolved(run, request.approval_id));
         }
+        // An unresolved response cannot be replayed as a new effect.
+        return Err(recovery());
     }
     let marker = BrokerApprovalRecord {
         schema: BROKER_APPROVAL_SCHEMA.into(),

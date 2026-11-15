@@ -1295,6 +1295,28 @@ pub(crate) fn assign_managed_with_source(
     )
 }
 
+pub(crate) fn assign_primary_with_source(
+    scope: &DelegationScope<'_>,
+    context: &ManagedCallContext<'_>,
+    origin: &crate::native_preparation::Origin,
+    port: &dyn RunSettlementPort,
+    request: AssignSpecialistTask<'_>,
+    source: &dyn AssignmentSource,
+) -> Result<(DelegationTaskObservation, OperationReceipt), MachineError> {
+    boundary(
+        "assign_specialist_task",
+        assign_specialist_task_in(
+            scope,
+            context,
+            AssignmentAccounting::Primary(origin),
+            port,
+            request,
+            Some(source),
+            Some(1),
+        ),
+    )
+}
+
 /// Explicit administrative preparation obtains actual owned member configuration.
 /// It does not allocate a task, round, intent, reader or Run.
 pub(crate) fn preparation_configuration(
@@ -2754,7 +2776,20 @@ pub fn spawn_specialist(
 ) -> Result<MemberAdmissionView, MachineError> {
     boundary(
         "spawn_specialist",
-        spawn_specialist_in(scope, caller, port, request, None),
+        spawn_specialist_in(scope, caller, port, request, None, None),
+    )
+}
+
+pub(crate) fn spawn_primary(
+    scope: &DelegationScope<'_>,
+    caller: &ManagedCallContext<'_>,
+    port: &dyn RunSettlementPort,
+    request: SpawnSpecialist<'_>,
+    owner: &crate::trusted_host::VerifiedOwner,
+) -> Result<MemberAdmissionView, MachineError> {
+    boundary(
+        "spawn_specialist",
+        spawn_specialist_in(scope, caller, port, request, None, Some(owner)),
     )
 }
 
@@ -2764,6 +2799,7 @@ fn spawn_specialist_in(
     port: &dyn RunSettlementPort,
     request: SpawnSpecialist<'_>,
     group: Option<&research_group::GroupOrigin>,
+    native_owner: Option<&crate::trusted_host::VerifiedOwner>,
 ) -> Result<MemberAdmissionView, MachineError> {
     let key = checked_key(caller.idempotency_key)?;
     if let Some(origin) = group {
@@ -2959,6 +2995,15 @@ fn spawn_specialist_in(
         }
         if let Some(origin) = group {
             origin.consume_birth(transaction)?;
+        }
+        if let Some(owner) = native_owner {
+            crate::native_preparation::admit_spawn(
+                transaction,
+                scope,
+                caller,
+                snapshot.role_name(),
+                owner,
+            )?;
         }
         crate::orchestration::admit_successor_spawn(
             transaction,
@@ -3227,7 +3272,7 @@ fn assign_specialist_task_in(
     };
     let key = checked_key(context.idempotency_key)?;
     match caller {
-        AssignmentAccounting::Native(_) => {
+        AssignmentAccounting::Native(_) | AssignmentAccounting::Primary(_) => {
             checked_provenance(context.source_turn_id, context.source_tool_call_id)?
         }
         AssignmentAccounting::Group(origin) => origin.verify(open_store(scope)?.connection())?,
@@ -5977,6 +6022,7 @@ fn build_receipt(
 /// Native Podway accounting and standalone group authority are disjoint.
 #[derive(Clone, Copy)]
 enum AssignmentAccounting<'a> {
+    Primary(&'a crate::native_preparation::Origin),
     Native(&'a crate::caller_scope::TrustedCallerScope),
     Group(&'a research_group::GroupOrigin),
     Synthesis(&'a research_merge::SynthesisSource),
@@ -5984,6 +6030,7 @@ enum AssignmentAccounting<'a> {
 impl AssignmentAccounting<'_> {
     fn require_budget(self, store: &EngagementStore, operation: &str) -> Result<(), MachineError> {
         match self {
+            Self::Primary(_) => Ok(()),
             Self::Native(caller) => require_assignment_budget(store, caller, operation),
             Self::Group(origin) => origin.verify(store.connection()),
             Self::Synthesis(_) => Ok(()),
@@ -5995,6 +6042,7 @@ impl AssignmentAccounting<'_> {
         receipt: &OperationReceipt,
     ) -> Result<(), MachineError> {
         match self {
+            Self::Primary(origin) => origin.verify_replay(store.connection(), receipt),
             Self::Native(caller) => verify_replay_scope(store, receipt, caller),
             Self::Group(origin) => origin.verify_assignment(store.connection(), receipt),
             Self::Synthesis(source) => source.verify_replay(store, receipt),
@@ -6018,6 +6066,7 @@ impl AssignmentAccounting<'_> {
         now: i64,
     ) -> Result<(), MachineError> {
         match self {
+            Self::Primary(origin) => origin.admit(connection, assignment),
             Self::Native(caller) => crate::caller_scope::admit(connection, assignment, caller, now),
             Self::Group(origin) => origin.admit_assignment(connection, assignment),
             Self::Synthesis(source) => source.retain(connection, assignment),
@@ -6052,7 +6101,7 @@ struct AssignAcceptance<'a> {
 /// It is returned as an error so the transaction rolls back: no task row and
 /// no accounting row may survive a refused assignment (Case A of the round
 /// accounting rules).
-fn assignment_refusal(code: &str, message: &'static str) -> MachineError {
+pub(crate) fn assignment_refusal(code: &str, message: &'static str) -> MachineError {
     MachineError::new(
         code,
         message,
@@ -7285,7 +7334,7 @@ fn member_start_failure_code(error: &MachineError) -> &str {
     }
 }
 
-fn successor_error(
+pub(crate) fn successor_error(
     code: &str,
     operation_kind: &str,
     operation_ref: Option<Uuid>,

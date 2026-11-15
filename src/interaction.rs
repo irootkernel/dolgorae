@@ -101,7 +101,10 @@ impl BrokerApprovalRecord {
             ]
             .iter()
             .any(|v| *v != b.decision.is_some())
-            || !matches!(self.phase.as_str(), "binding" | "intent" | "decision")
+            || !matches!(
+                self.phase.as_str(),
+                "binding" | "intent" | "released" | "decision"
+            )
         {
             return Err(invalid("Broker approval binding"));
         }
@@ -110,7 +113,7 @@ impl BrokerApprovalRecord {
                 if self.intent.is_none()
                     && self.namespace.is_none()
                     && self.public_resolution.is_none() => {}
-            "intent" | "decision" => {
+            "intent" | "released" | "decision" => {
                 let intent = self
                     .intent
                     .as_ref()
@@ -131,8 +134,10 @@ impl BrokerApprovalRecord {
                 {
                     return Err(invalid("Broker public intent authority"));
                 }
-                if self.phase == "intent" {
-                    if self.public_resolution.is_some() {
+                if self.phase != "decision" {
+                    if (self.phase == "released" && b.status != "pending")
+                        || self.public_resolution.is_some()
+                    {
                         return Err(invalid("Broker intent receipt"));
                     }
                 } else {
@@ -200,6 +205,25 @@ pub(crate) fn broker_binding_history<'a>(
     records: impl Iterator<Item = &'a crate::audit::AuditRecord>,
     run: Uuid,
 ) -> Result<std::collections::BTreeMap<Uuid, BrokerApprovalBinding>, MachineError> {
+    Ok(broker_history(records, run)?.bindings)
+}
+
+pub(crate) fn broker_intents(
+    records: &[crate::audit::AuditRecord],
+    run: Uuid,
+) -> Result<std::collections::BTreeMap<Uuid, BrokerApprovalRecord>, MachineError> {
+    Ok(broker_history(records.iter(), run)?.intents)
+}
+
+struct BrokerHistory {
+    bindings: std::collections::BTreeMap<Uuid, BrokerApprovalBinding>,
+    intents: std::collections::BTreeMap<Uuid, BrokerApprovalRecord>,
+}
+
+fn broker_history<'a>(
+    records: impl Iterator<Item = &'a crate::audit::AuditRecord>,
+    run: Uuid,
+) -> Result<BrokerHistory, MachineError> {
     let mut latest = std::collections::BTreeMap::<Uuid, BrokerApprovalBinding>::new();
     let mut intents = std::collections::BTreeMap::<Uuid, BrokerApprovalRecord>::new();
     for record in records {
@@ -243,6 +267,18 @@ pub(crate) fn broker_binding_history<'a>(
             }
             continue;
         }
+        if marker.phase == "released" {
+            let prior = intents
+                .remove(&binding.approval_id)
+                .ok_or_else(|| invalid("Broker released intent is absent"))?;
+            if marker.binding != prior.binding
+                || marker.intent != prior.intent
+                || marker.namespace != prior.namespace
+            {
+                return Err(invalid("Broker released intent changed"));
+            }
+            continue;
+        }
         if marker.phase == "decision" {
             let prior = intents
                 .get(&binding.approval_id)
@@ -257,7 +293,10 @@ pub(crate) fn broker_binding_history<'a>(
         }
         latest.insert(binding.approval_id, binding.clone());
     }
-    Ok(latest)
+    Ok(BrokerHistory {
+        bindings: latest,
+        intents,
+    })
 }
 
 pub(crate) const MAX_RESPONSE_BYTES: usize = 1_048_576;

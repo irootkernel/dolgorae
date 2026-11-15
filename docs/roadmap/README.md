@@ -2943,6 +2943,12 @@ checks, original native07 mutation, acceptance, commit and publication remain
 outside this follow-up's execution grant. Preserve pending earlier reviews and
 original failures; incomplete qualification must remain explicit.
 
+Master also approved the public Primary native-only specialist bootstrap and
+private preparation correction, its bounded accountless native verification,
+and one local checkpoint commit plus a Sorage reply to Gul. TASK-094 remains
+ACTIVE and TASK-093 remains IN_REVIEW. Gul owns adoption and F7/H4 acceptance;
+installation, push, release and real-account qualification remain separate.
+
 Depends on: the delivered TASK-093 H3. Execute this correction before Gul
 resumes the affected Phase 4 qualification and before TASK-088. Master's approved
 TASK-094 plan explicitly preserves TASK-093's pending review while implementing

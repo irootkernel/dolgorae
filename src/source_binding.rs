@@ -72,6 +72,12 @@ pub(crate) struct ProvisioningSelection {
     pub profile_binding: crate::global_runtime::GlobalProfileBinding,
     pub admission: ProvisioningAdmission,
 }
+pub(crate) fn capture_selection(
+    home: &DolgoraeHome,
+    selection: &ProvisioningSelection,
+) -> Result<RetainedSnapshot, MachineError> {
+    selection.capture(home)
+}
 impl ProvisioningSelection {
     fn capture(&self, home: &DolgoraeHome) -> Result<RetainedSnapshot, MachineError> {
         let instruct = InstructionSourceStore::new(home);
@@ -112,7 +118,7 @@ struct Partition {
     generation: u64,
     principal: String,
     controller_generation: u64,
-    caller: crate::delegation_identity::CallerScope,
+    caller: Option<crate::delegation_identity::CallerScope>,
     owner: OwnerKind,
 }
 impl Partition {
@@ -882,7 +888,7 @@ fn check_caller(
     caller: &crate::caller_scope::TrustedCallerScope,
 ) -> Result<(), MachineError> {
     owner.revalidate()?;
-    if *caller.accepted() != owner.configuration.caller_scope {
+    if Some(caller.accepted()) != owner.configuration.caller_scope.as_ref() {
         return Err(refusal());
     }
     Ok(())
@@ -1051,7 +1057,7 @@ mod tests {
                 ];
             }
             if let Some(caller) = caller {
-                f.draft.caller_scope = caller;
+                f.draft.caller_scope = Some(caller);
             }
 
             if git {
@@ -3687,7 +3693,7 @@ mod tests {
                 .map(|(id, _, _, value)| json!({"id":id,"value":value}))
                 .collect::<Vec<_>>();
             let body = json!({"schema":"podway.delegation-work-package/v1","workspace_uuid":c.workspace,"procedure_digest":digest(b"selected Procedure"),"session_id":c.session,"placement_id":c.placement,"attempt_id":c.attempt,
-                "delegation":{"binding_ref":owner.configuration.caller_scope.binding_ref,"role_ref":role.role.name,"role_snapshot_digest":role.role_snapshot_digest,"max_rounds":4,"after_accept":"retain"},
+                "delegation":{"binding_ref":owner.configuration.caller_scope.as_ref().unwrap().binding_ref,"role_ref":role.role.name,"role_snapshot_digest":role.role_snapshot_digest,"max_rounds":4,"after_accept":"retain"},
                 "action":{"title":"Review","intent":"Read retained evidence.","items":[{"id":"summary","type":"text","prompt":"Summary","required":true}]},"goal":null,
                 "evidence":[{"selector":{"node":"producer","required":true,"items":values.iter().map(|(id,..)|id).collect::<Vec<_>>()},"resolution":"resolved","source_attempt_id":source,"source_attempt_number":1,"source_items_digest":digest(&serde_json::to_vec(&source_items).unwrap()),"items":items}]});
             let mut domain = b"podway.delegation-work-package/v1\n".to_vec();
@@ -3986,7 +3992,7 @@ mod tests {
         let executable = owner.root.path.join("offline-podway");
         private(&executable, b"offline typed child substitute");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o500)).unwrap();
-        let caller = &owner.configuration.caller_scope;
+        let caller = owner.configuration.caller_scope.as_ref().unwrap();
         crate::native_consumer::PodwayConnection {
             executable,
             executable_sha256: crate::native_consumer::hash(b"offline typed child substitute"),
@@ -4789,7 +4795,7 @@ mod tests {
                 Some(outside.caller_scope.clone()),
             );
             let owner = scene.f.owner();
-            assert_eq!(owner.configuration.caller_scope, outside.caller_scope);
+            assert_eq!(owner.configuration.caller_scope, Some(outside.caller_scope));
             let selected = scene.selection("consumer-content", None, "complete_result");
             let accepted = prepare_assignment(&owner, selected.clone()).unwrap();
             let (observed, _) = scene.assign(&selected, accepted.clone()).unwrap();
@@ -6446,7 +6452,10 @@ mod tests {
             let status = json!({"schema":"dolgorae.consumer-control/v1","action":"status","target":{"kind":"context"}});
             let observed = deliver("control", EXTERNAL_CONTROL, &status);
             assert_eq!(observed["ok"], true, "{observed}");
-            assert_eq!(observed["data"]["mode"], "native_only");
+            assert_eq!(
+                observed["data"],
+                json!({"kind":"context","mode":"native_only","context_ref":null})
+            );
             if let Some(binary) = std::env::var_os("DOLGORAE_NATIVE_PRESENTATION_BINARY") {
                 let output = std::process::Command::new(binary)
                     .args([

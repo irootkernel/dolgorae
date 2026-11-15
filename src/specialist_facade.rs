@@ -121,7 +121,7 @@ pub(crate) fn failure(operation: &str, error: &MachineError, entered: bool) -> V
 }
 
 /// Produce a self-contained model schema from the reachable frozen definitions.
-pub(crate) fn input_schema(operations: &[&str]) -> Value {
+fn input_schema_for(operations: &[&str], preparation: bool) -> Value {
     use std::collections::BTreeMap;
     let schemas = crate::host_invocation::request_schemas();
     let mut definitions = BTreeMap::<String, Value>::new();
@@ -168,14 +168,28 @@ pub(crate) fn input_schema(operations: &[&str]) -> Value {
         }
     }
     let mut choices=operations.iter().map(|op|json!({"$ref":format!("{}#/$defs/{op}_request",schemas[0]["$id"].as_str().expect("schema ID"))})).collect::<Vec<_>>();
+    if preparation {
+        for operation in ["prepare_provisioning", "prepare_assignment"] {
+            choices.push(json!({"$ref":format!("{}#/$defs/{operation}_request",schemas[4]["$id"].as_str().expect("schema ID"))}));
+        }
+    }
     for choice in &mut choices {
         local(choice, schemas, &mut definitions);
     }
-    json!({"type":"object","properties":{"schema":{"const":"dolgorae.external-specialist-request/v5"},"operation":{"enum":operations}},"required":["schema","operation"],"dependentSchemas":{"operation":{"oneOf":choices}},"$defs":definitions})
+    let mut operations = operations.to_vec();
+    if preparation {
+        operations.extend(["prepare_provisioning", "prepare_assignment"]);
+    }
+    let schemas = if preparation {
+        json!({"enum":["dolgorae.external-specialist-request/v5",crate::native_preparation::SCHEMA]})
+    } else {
+        json!({"const":"dolgorae.external-specialist-request/v5"})
+    };
+    json!({"type":"object","properties":{"schema":schemas,"operation":{"enum":operations}},"required":["schema","operation"],"dependentSchemas":{"operation":{"oneOf":choices}},"$defs":definitions})
 }
 
 pub(crate) fn tool_spec(name: &str, operations: &[&str]) -> Value {
-    json!({"name":name,"description":"Use checked Specialist operations under the configured authority.","inputSchema":input_schema(operations)})
+    json!({"name":name,"description":"Use checked Specialist operations under the configured authority.","inputSchema":input_schema_for(operations, name == crate::native_consumer::MANAGED_NATIVE)})
 }
 
 pub(crate) enum NativeCarrier<'a> {
@@ -572,16 +586,23 @@ pub(crate) fn dispatch(
 ) -> Result<Value, MachineError> {
     let operation = text(request, "operation")?;
     let mut result = response(operation);
-    let caller = crate::caller_scope::TrustedCallerScope::from_port(
-        &crate::trusted_host::ConfiguredCallerPort(owner),
-    )?;
+    let caller = owner
+        .configuration
+        .caller_scope
+        .as_ref()
+        .map(|_| {
+            crate::caller_scope::TrustedCallerScope::from_port(
+                &crate::trusted_host::ConfiguredCallerPort(owner),
+            )
+        })
+        .transpose()?;
     let key = request["idempotency_key"].as_str().unwrap_or("");
     match operation {
         "assign_synthesis" => {
             return service::research_merge::assign(
                 scope,
                 managed,
-                Some(&caller),
+                caller.as_ref(),
                 port,
                 request,
                 false,
@@ -591,7 +612,13 @@ pub(crate) fn dispatch(
             return service::research_merge::merge(scope, managed, port, request, false);
         }
         "assign_group" => {
-            return service::research_group::assign(scope, managed, &caller, port, request);
+            return service::research_group::assign(
+                scope,
+                managed,
+                crate::caller_scope::TrustedCallerScope::require(caller.as_ref())?,
+                port,
+                request,
+            );
         }
         "collect_group" => {
             return service::research_group::collect(scope, managed, port, request);
@@ -645,17 +672,17 @@ pub(crate) fn dispatch(
             let role_ref = text(request, "role_ref")?;
             let agent_configuration_digest = text(request, "agent_configuration_digest")?;
             let admitted = if let Some(context) = managed {
-                service::spawn_specialist(
-                    scope,
-                    context,
-                    port,
-                    service::SpawnSpecialist {
-                        provisioning_ref,
-                        role_ref,
-                        agent_configuration_digest,
-                        expected_revision: revision(request)?,
-                    },
-                )?
+                let request = service::SpawnSpecialist {
+                    provisioning_ref,
+                    role_ref,
+                    agent_configuration_digest,
+                    expected_revision: revision(request)?,
+                };
+                if owner.configuration.caller_scope.is_none() {
+                    service::spawn_primary(scope, context, port, request, owner)?
+                } else {
+                    service::spawn_specialist(scope, context, port, request)?
+                }
             } else {
                 service::hire_external_specialist(
                     scope,
@@ -705,25 +732,43 @@ pub(crate) fn dispatch(
                 admission: assignment_admission,
             };
             let (observation, receipt) = if let Some(context) = managed {
-                service::assign_managed_with_source(
-                    scope,
-                    context,
-                    &caller,
-                    port,
-                    service::AssignSpecialistTask {
-                        member_ref: member,
-                        task,
-                        execution_intent: &execution_intent,
-                        target: None,
-                        deadline_seconds: deadline,
-                        expected_revision: revision(request)?,
-                    },
-                    &source,
-                )?
+                if let Some(caller) = &caller {
+                    service::assign_managed_with_source(
+                        scope,
+                        context,
+                        caller,
+                        port,
+                        service::AssignSpecialistTask {
+                            member_ref: member,
+                            task,
+                            execution_intent: &execution_intent,
+                            target: None,
+                            deadline_seconds: deadline,
+                            expected_revision: revision(request)?,
+                        },
+                        &source,
+                    )?
+                } else {
+                    service::assign_primary_with_source(
+                        scope,
+                        context,
+                        &crate::native_preparation::Origin::from_owner(owner)?,
+                        port,
+                        service::AssignSpecialistTask {
+                            member_ref: member,
+                            task,
+                            execution_intent: &execution_intent,
+                            target: None,
+                            deadline_seconds: deadline,
+                            expected_revision: revision(request)?,
+                        },
+                        &source,
+                    )?
+                }
             } else {
                 service::assign_external_with_source(
                     scope,
-                    &caller,
+                    crate::caller_scope::TrustedCallerScope::require(caller.as_ref())?,
                     port,
                     service::AssignExternalSpecialistTask {
                         engagement_id: id(request, "scope_ref")?,
@@ -866,7 +911,7 @@ pub(crate) fn dispatch(
                 service::get_managed_delegation_identity(
                     scope,
                     context,
-                    &caller,
+                    crate::caller_scope::TrustedCallerScope::require(caller.as_ref())?,
                     port,
                     service::CollectSpecialistTask {
                         member_ref: member,
@@ -878,7 +923,7 @@ pub(crate) fn dispatch(
             } else {
                 service::get_external_delegation_identity(
                     scope,
-                    &caller,
+                    crate::caller_scope::TrustedCallerScope::require(caller.as_ref())?,
                     port,
                     service::CollectExternalSpecialistTask {
                         engagement_id: id(request, "scope_ref")?,

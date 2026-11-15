@@ -633,7 +633,7 @@ pub(crate) fn project_audit_event(
             else {
                 return Ok(None);
             };
-            if marker.phase == "intent" {
+            if matches!(marker.phase.as_str(), "intent" | "released") {
                 return Ok(None);
             }
             if marker.binding.status != "pending" {

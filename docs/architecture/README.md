@@ -1144,7 +1144,13 @@ original approval records; `snapshot` uses `interaction`'s typed Broker approval
 bindings; and `snapshot` calls `orchestration::approval` to check the complete
 SQL/ledger view at its captured head. These observations
 retain the existing read-refusal and effect-free observation boundaries.
-Concrete runtime effects remain behind the orchestration adapter.
+Concrete runtime effects remain behind the orchestration adapter. A definitive
+pre-reservation Policy refusal can end its original private approval intent with
+a `released` marker. The Worker checks zero SQL resolution, an awaiting operation
+and no child under the Broker's IMMEDIATE write lock while appending that marker.
+`interaction` validates its exact prior intent and excludes released intents from
+later response/publication matching. Accepted and uncertain outcomes keep their
+existing recovery floor; SQL and ledger still commit independently.
 
 Each broker-held capability has one owner-only mode-0600 carrier below the
 workspace state root at `orchestration/broker-credentials/<run-id>.json`. The
@@ -4276,6 +4282,13 @@ constructor; their historical recovery cases retain the pre-policy binding.
 
 ## Private native consumer boundary
 
+`native_preparation` owns public creation bootstrap, accepted Policy selection,
+keyed preparation replay and authenticated native Primary task origins.
+`semantic` calls bootstrap after manifest publication and before Worker startup;
+`managed_specialist` authenticates each native call before preparation dispatch.
+The delegation service retains the origin with Task acceptance and checks
+native Policy limits in the spawn transaction.
+
 `native_consumer` owns the closed private control grammar, immutable protected
 setup, typed selection handles and durable request claim/recovery state.
 `consumer_bridge` composes authorized delegation-service observations with
@@ -4290,7 +4303,32 @@ existing owners. It adds no bulk spool, acceptance mirror, Merkle index or
 automatic garbage collection. Content work and subprocess execution occur
 outside the store lock. A persisted launch claim permits at most one child;
 loss at a claim/spawn/result boundary requires lookup and preserves uncertainty.
-Setup is explicit and normal calls cannot initialize or repair missing state.
+External and explicitly connected delegated setup remains administrative.
+New public Orchestrated Primary creation initializes a separate native-only
+owner before Worker startup. It retains the authenticated Controller carrier
+inside the protected Root state and binds the accepted runtime executable,
+without an external host pin or fabricated Podway references. Original creation
+replay resumes validated steps; normal tool calls cannot initialize or repair
+missing state. An explicit connection always takes precedence and fails closed
+if invalid. Existing Worker or Thread evidence prevents creation of a missing
+native owner on replay; an already published owner can resume its initialization.
+
+Automatic native-only preparation derives source selections from the accepted Markdown
+Policy and Profile, then uses the existing source registry and AcceptedTask
+capture owners. Native-only assignment retains its Root/Controller origin in
+the existing immutable content store within Task acceptance. Settlement checks
+that origin instead of requiring a Podway accounting row. Context status lists
+eligible read-only role references. Policy admission is checked at preparation
+and at each effectful admission; transport input never supplies authority.
+Instance limits count every non-retired member inside the acceptance transaction.
+Legacy Primary reservation uses the same membership population, including native
+members, while legacy views and reuse retain their existing namespace.
+Fresh approval receipts commit in that same reservation transaction, before
+Worker publication, so a refused member cannot leave a resolved approval behind.
+Private request correlation survives Turn-boundary refusal, including a null
+operation for malformed input. Policy refusals preserve their typed action and
+definitive pre-acceptance outcome; uncertain storage/authentication failures keep
+their recovery floor. Existing delegated/external status output is preserved.
 
 Native semantic and consumer tools share the existing host-mcp/host-hook
 transport and Worker correlation boundary. HostStore authenticates each family

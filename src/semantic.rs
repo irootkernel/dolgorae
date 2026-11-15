@@ -3430,6 +3430,9 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
         DarwinSystem.current_uid(),
     );
     ensure_caller_bootstrap::<I>(&state_root, &manifest, &reservation)?;
+    if intent.orchestration.is_some() {
+        crate::native_preparation::bootstrap(&home, &view, &manifest, &carrier)?;
+    }
     if replay {
         // The original Worker may have finished while Profile readiness was
         // checked. Reconcile that outcome rather than applying startup again.

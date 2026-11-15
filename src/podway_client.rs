@@ -28,7 +28,11 @@ pub(crate) fn validate_connection(
     c: &PodwayConnection,
 ) -> Result<(), MachineError> {
     owner.revalidate()?;
-    let caller = &owner.configuration.caller_scope;
+    let caller = owner
+        .configuration
+        .caller_scope
+        .as_ref()
+        .ok_or_else(refusal)?;
     if c.workspace.to_string() != caller.podway_workspace_ref
         || c.session.to_string() != caller.podway_session_ref
         || c.attempt.to_string() != caller.podway_attempt_ref

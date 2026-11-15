@@ -133,6 +133,26 @@ fn record_failure(root: &Path, stage: &str, error: &dolgorae::machine::MachineEr
         .expect("private failure diagnostic could not be retained");
 }
 
+// A failed fixture must still reach Root Close and Profile stop even when
+// the native release helper panics while checking an uncertain response.
+fn attempt_specialist_cleanup(
+    root: &Path,
+    cleanup: impl FnOnce() -> Result<(), dolgorae::machine::MachineError>,
+) -> bool {
+    let error = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup)) {
+        Ok(Ok(())) => return true,
+        Ok(Err(error)) => error,
+        Err(_) => dolgorae::machine::MachineError::new(
+            "RECOVERY_REQUIRED",
+            "native specialist cleanup panicked; original-state recovery remains required",
+            false,
+            json!({}),
+        ),
+    };
+    record_failure(root, "successor member cleanup", &error);
+    false
+}
+
 fn fail(root: &Path, stage: &str, error: dolgorae::machine::MachineError) -> ! {
     record_failure(root, stage, &error);
     panic!("{stage} failed: {}", error.code);
@@ -1179,6 +1199,11 @@ fn campaign(root: &Path, codex: &Path) -> Value {
         panic!("retained gateway requires explicit original-operation recovery");
     }
     let mut clean = true;
+    if result.is_err() && root.join("native-specialist").exists() {
+        clean &= attempt_specialist_cleanup(root, || {
+            session::cleanup_specialist(root, &home, &view, &credential)
+        });
+    }
     for entry in fs::read_dir(state_root.join("runs")).unwrap() {
         let entry = entry.unwrap();
         let Some(id) = entry
@@ -2225,6 +2250,44 @@ fn main() {
         let clean = stop_profiles(&DolgoraeHome::system().unwrap(), &root.join("operator"));
         println!("{}", json!({"retained_profiles_retired":clean}));
         assert!(clean, "accepted Profile cleanup incomplete");
+    } else if args.len() == 4
+        && args[1] == "--cleanup-native-specialist"
+        && std::env::var("DOLGORAE_RUN_NATIVE_CALLER_PIPELINE").as_deref() == Ok("1")
+    {
+        let root = Path::new(&args[2]);
+        assert_eq!(
+            fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap(),
+            root.join("home")
+        );
+        assert_eq!(
+            fs::read(root.join("fixture-owned")).unwrap(),
+            b"native-caller-pipeline/v1\n"
+        );
+        assert!(root.join("native-specialist").is_file());
+        let home = DolgoraeHome::system().unwrap();
+        let view = dolgorae::workspace::WorkspaceService::system()
+            .unwrap()
+            .discover(Some(&root.join("home/workspace")))
+            .unwrap();
+        let credential = home
+            .root()
+            .join("controller-carriers/native-pool/test-installation/pool.json");
+        session::cleanup_specialist(root, &home, &view, &credential).unwrap();
+        let run = Uuid::parse_str(args[3].to_str().unwrap()).unwrap();
+        let closed = try_mutation(
+            &view,
+            &credential,
+            run,
+            RunMutationOperation::Close { interrupt: false },
+        )
+        .unwrap();
+        assert_eq!(closed.projection.lifecycle, RunLifecycle::Closed);
+        assert!(stop_profiles(&home, &root.join("operator.json")));
+        fs::write(root.join("cleanup-result"), b"complete\n").unwrap();
+        println!(
+            "{}",
+            json!({"owned_native_specialist_cleanup_complete":true})
+        );
     } else if args.len() == 3
         && std::env::var("DOLGORAE_RUN_NATIVE_CALLER_PIPELINE").as_deref() == Ok("1")
     {
@@ -2315,6 +2378,45 @@ mod tests {
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn specialist_cleanup_contains_errors_and_panics_and_retains_diagnostics() {
+        let root = std::env::temp_dir().join(format!("native-cleanup-{}", Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        for panic in [false, true] {
+            let clean = attempt_specialist_cleanup(&root, || {
+                if panic {
+                    panic!("fixture release assertion");
+                }
+                Err(dolgorae::machine::MachineError::new(
+                    "RUN_BUSY",
+                    "release refused",
+                    false,
+                    json!({}),
+                ))
+            });
+            assert!(!clean);
+        }
+        let mut codes = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("failure-")
+                    .then(|| {
+                        let value: Value =
+                            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                        assert_eq!(value["stage"], "successor member cleanup");
+                        value["error"]["code"].as_str().unwrap().to_owned()
+                    })
+            })
+            .collect::<Vec<_>>();
+        codes.sort();
+        assert_eq!(codes, ["RECOVERY_REQUIRED", "RUN_BUSY"]);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -19,6 +19,20 @@ import run_native_caller_pipeline as probe
 
 
 def main() -> int:
+    from native_specialist_responses import decoded_result
+    original = {"schema": "dolgorae.consumer-control-response/v1", "ok": True,
+                "data": {"mode": "native_only", "allowed_role_refs": []}}
+    encoded = original
+    for _ in range(3):
+        encoded = json.dumps(encoded)
+        assert decoded_result(encoded) == original
+    for invalid in ([], "[]", "null", '"unparsed"', 17):
+        try:
+            decoded_result(invalid)
+        except (ValueError, TypeError):
+            pass
+        else:
+            raise AssertionError("native result decoder admitted a non-object")
     parser = argparse.ArgumentParser()
     parser.add_argument("--driver", type=Path, required=True)
     driver = parser.parse_args().driver.resolve(strict=True)

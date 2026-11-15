@@ -2841,7 +2841,7 @@ fn interaction_state_revision(records: &[AuditRecord]) -> u64 {
 pub(crate) fn next_interaction_revision(revision: u64, record: &AuditRecord) -> u64 {
     let changes_interactions = match record.kind() {
         AuditKind::TurnIntent => crate::interaction::broker_record(record)
-            .is_ok_and(|r| r.is_some_and(|r| r.phase != "intent")),
+            .is_ok_and(|r| r.is_some_and(|r| !matches!(r.phase.as_str(), "intent" | "released"))),
         AuditKind::ApprovalRequested
         | AuditKind::ApprovalDecided
         | AuditKind::InteractionOpened

@@ -257,7 +257,7 @@ def caller_policy_writer_component_offline() -> None:
                 command=json.loads(output[1]["item"]["input"].split("tools.exec_command(",1)[1].split(")",1)[0])
                 assert command["cmd"]==f"printf 'writer-{phase}\\n' > caller-policy-writer-{phase}.txt; printf 'writer-{phase}\\n'"
                 value.respond(request(f"TASK027_WRITER_TASK_{phase}",f"policy-writer-{phase}",{f"policy-writer-{phase}":{"exit_code":0,"output":f"writer-{phase}\n"}}))
-                (root/f"writer-{phase}-release.json").write_text(json.dumps({"phase":phase,"task_terminal":True}))
+                value.marker(f"writer-{phase}-release.json", {"phase":phase,"task_terminal":True})
                 (first if phase=="A" else second).join(2)
                 assert not (first if phase=="A" else second).is_alive()
             assert not errors and value.posts==7 and value.target_stages=={"A":2,"B":2}

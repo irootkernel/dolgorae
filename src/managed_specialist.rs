@@ -17,6 +17,13 @@ struct Connection {
     owner_path: PathBuf,
     owner_digest: String,
 }
+pub(crate) fn has_explicit_connection(state_root: &Path, root: Uuid) -> Result<bool, MachineError> {
+    match std::fs::symlink_metadata(crate::run::run_root(state_root, root).join(CONNECTION)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(refusal()),
+    }
+}
 pub(crate) fn connect(owner: &VerifiedOwner) -> Result<(), MachineError> {
     owner.revalidate()?;
     let OwnerKind::Managed { session_ref } = owner.configuration.owner else {
@@ -44,8 +51,29 @@ pub(crate) fn connect(owner: &VerifiedOwner) -> Result<(), MachineError> {
     }
     owner.revalidate()
 }
-fn load(state_root: &Path, root_run: Uuid) -> Result<(DolgoraeHome, VerifiedOwner), MachineError> {
+pub(crate) fn load(
+    state_root: &Path,
+    root_run: Uuid,
+) -> Result<(DolgoraeHome, VerifiedOwner), MachineError> {
     let root = PrivateDirectory::open(&crate::run::run_root(state_root, root_run))?;
+    if !has_explicit_connection(state_root, root_run)? {
+        let physical_home = state_root.ancestors().nth(3).ok_or_else(refusal)?;
+        let home = DolgoraeHome::from_canonical_home(physical_home.to_owned())?;
+        let owner = VerifiedOwner::load(
+            &home,
+            &crate::native_preparation::owner_path(state_root, root_run),
+        )?;
+        if owner.state_root != state_root
+            || owner.configuration.owner
+                != (OwnerKind::Managed {
+                    session_ref: root_run,
+                })
+            || owner.configuration.caller_scope.is_some()
+        {
+            return Err(refusal());
+        }
+        return Ok((home, owner));
+    }
     let record: Connection = root.read(&root.path.join(CONNECTION))?;
     if record.schema != "dolgorae.managed-owner-connection/v1" || record.root_run != root_run {
         return Err(refusal());
@@ -170,8 +198,9 @@ fn dispatch_in(
         {
             return Err(refusal());
         }
-        crate::host_invocation::validate_public_request(request)?;
-        if !facade::MANAGED.contains(&operation) {
+        crate::host_invocation::normalize_tool_request(&call.tool_name, request)?;
+        let preparation = native && request["schema"] == crate::native_preparation::SCHEMA;
+        if !preparation && !facade::MANAGED.contains(&operation) {
             return Err(refusal());
         }
         let (home, owner) = load(state_root, root_run)?;
@@ -212,7 +241,19 @@ fn dispatch_in(
             }
         }
 
+        if native {
+            let carrier = crate::controller::CredentialCarrier::open_path(
+                &owner.configuration.controller_file,
+            )?;
+            let port = crate::semantic::SemanticRunSettlementPort { carrier: &carrier };
+            bridge(&owner, call, root_run, run_generation, &port)?;
+            owner.permit(Some(("orchestrated_session", &root_ref)))?;
+        }
+        if preparation {
+            return crate::native_preparation::dispatch(&home, &owner, request);
+        }
         facade::typed_preflight(request)?;
+        crate::native_preparation::guard(&owner, request)?;
         let key = request["idempotency_key"]
             .as_str()
             .unwrap_or(&call.context.idempotency_key);
@@ -256,6 +297,11 @@ fn dispatch_in(
         }
         Ok(result)
     })();
+    if let Some(correlation) =
+        crate::native_preparation::Correlation::from_request(&call.tool_name, request)
+    {
+        return result.unwrap_or_else(|error| correlation.failure(&error));
+    }
     let public = facade::finish(operation, result, entered);
     if !native {
         return public;
@@ -294,6 +340,81 @@ fn dispatch_in(
 mod tests {
     use super::*;
     use crate::trusted_host::{HostRoute, tests::managed_fixture};
+    #[test]
+    fn explicitly_connected_owner_keeps_the_original_native_only_context_shape() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = managed_fixture(HostRoute::Codex);
+        let owner = f.owner();
+        let OwnerKind::Managed { session_ref } = owner.configuration.owner else {
+            panic!()
+        };
+        connect(&owner).unwrap();
+        crate::native_consumer::initialize(&owner, crate::native_consumer::Mode::NativeOnly {})
+            .unwrap();
+        let mut projection = crate::projection::RunStateProjection::starting(session_ref);
+        projection.run_generation = 1;
+        let path = crate::run::run_root(&owner.state_root, session_ref).join("state.json");
+        std::fs::write(&path, canonical(&projection).unwrap()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let call = crate::turn::PrimaryToolCall {
+            tool_name: crate::native_consumer::MANAGED_CONTROL.into(),
+            source_thread_id: "root-thread".into(),
+            request_id: 1,
+            run_generation: 1,
+            context: crate::primary_tool::PrimaryCallContext {
+                session_id: session_ref,
+                source_run_id: session_ref,
+                source_turn_id: "root-turn".into(),
+                source_tool_call_id: "root-call".into(),
+                idempotency_key: "context".into(),
+            },
+            payload: serde_json::json!({"schema":"dolgorae.consumer-control/v1","action":"status","target":{"kind":"context"}}),
+        };
+        let observed = dispatch_with_port(
+            &owner.state_root,
+            &call,
+            session_ref,
+            1,
+            &owner.view.workspace_id,
+            &crate::semantic::successor_fixture::AcceptingPort,
+        );
+        assert_eq!(observed["ok"], true, "{observed}");
+        assert_eq!(
+            observed["data"],
+            serde_json::json!({"kind":"context","mode":"native_only","context_ref":null})
+        );
+    }
+
+    #[test]
+    fn preparation_refusals_use_the_private_response_contract() {
+        let error = crate::native_preparation::invalid_request();
+        let correlation = crate::native_preparation::Correlation::from_request(
+            crate::native_consumer::MANAGED_NATIVE,
+            &serde_json::json!({"schema":crate::native_preparation::SCHEMA,"operation":"prepare_provisioning"}),
+        ).unwrap();
+        let response = correlation.failure(&error);
+        assert_eq!(response["error"]["required_action"], "fix_request");
+        let schemas = crate::host_invocation::request_schemas();
+        assert!(crate::host_invocation::schema_matches(
+            &response,
+            &schemas[4]["$defs"]["response"],
+            &schemas[4],
+            0
+        ));
+        assert!(!crate::host_invocation::schema_matches(
+            &response,
+            &schemas[0]["$defs"]["failure"],
+            &schemas[0],
+            0
+        ));
+        assert!(
+            !crate::consumer_bridge::native_content(&response, true)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
     #[test]
     fn managed_connection_is_explicit_immutable_and_current_root_owned() {
         for route in [HostRoute::Codex, HostRoute::Claude] {
