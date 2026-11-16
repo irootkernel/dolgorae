@@ -350,7 +350,7 @@ pub enum ProfileCommand {
 #[derive(Debug, Subcommand)]
 pub enum ProfileServerCommand {
     Status(LeafArgs),
-    /// Start the generic Profile, or confirm the exact current qualified key.
+    /// Start the generic Profile, or confirm an exact qualified or successor key.
     Start(LeafArgs),
     /// Stop with Operator authority; qualified selection is non-interrupting.
     Stop(LeafArgs),

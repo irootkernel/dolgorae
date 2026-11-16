@@ -29488,7 +29488,7 @@ mod delegated_member_start_tests {
     /// allocation; the workspace discovery that precedes the block needs real
     /// home state, so the test drives the validation function itself. A
     /// qualified admitted runtime passes the whole block, and an admitted
-    /// runtime whose executable identity is not the qualified pin still
+    /// runtime without the qualified launch policy still
     /// passes every identity check and the recovery validation — the
     /// discovery control is the only refusal. (Remove
     /// `require_discovery_control` from the block and this test fails: the

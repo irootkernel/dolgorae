@@ -1239,6 +1239,18 @@ pub(super) fn campaign(
     })
     .unwrap();
     let (instructions, _) = captured.admitted_configuration().unwrap();
+    ordinary(
+        root,
+        &[
+            "profile".into(),
+            "server".into(),
+            "start".into(),
+            "fixture-a".into(),
+            "--confirm-server-key".into(),
+            captured.profile_binding.server_key.clone(),
+        ],
+    )
+    .unwrap();
     let identity = dolgorae::controller::binding_from_carrier(
         &CredentialCarrier::open_path(credential).unwrap(),
         1,
@@ -1318,6 +1330,48 @@ pub(super) fn campaign(
         );
         assert!(capabilities.supported_methods.iter().any(|method|
             method == "BrokerService.CollectSpecialistTask"));
+        use prost::Message as _;
+        let mut profiles = pb::runtime_service_client::RuntimeServiceClient::new(connection.clone());
+        let listed = profiles.list_profiles(pb::ListProfilesRequest { context: context() })
+            .await.unwrap().into_inner();
+        let selected = profiles.get_profile(pb::GetProfileRequest {
+            context: context(), profile_name: "fixture-a".into(),
+        }).await.unwrap().into_inner();
+        fs::write(root.join("public-list-profiles.pb"), listed.encode_to_vec()).unwrap();
+        fs::write(root.join("public-get-profile.pb"), selected.encode_to_vec()).unwrap();
+        let profile = selected.profile.as_ref().unwrap();
+        assert_eq!(listed.items.iter().find(|p| p.name == "fixture-a"), Some(profile));
+        assert_eq!(profile.server_key, captured.profile_binding.server_key);
+        assert_eq!(profile.compatibility, pb::ProfileCompatibility::Unverified as i32);
+        assert_eq!(profile.runtime_version.as_deref(), Some("0.169.0"));
+        assert!(profile.server_epoch.is_some());
+        assert!(profile.blockers.is_empty());
+        assert!(profile.supported_execution_lanes.contains(&(pb::ExecutionLane::Dedicated as i32)));
+        let model = profile.models.iter().find(|m| m.model_id == captured.admitted.model).unwrap();
+        assert!(model.supported_efforts.contains(&captured.admitted.effort));
+        let validation_request = pb::ValidateProvisioningRequest {
+            context: context(), input: Some(pb::ProvisioningInput {
+                workspace: request.workspace.clone(), selection: request.provisioning.clone(),
+                instructions: request.instructions.clone(),
+            }),
+        };
+        fs::write(root.join("public-validate-provisioning-request.pb"), validation_request.encode_to_vec()).unwrap();
+        let validated = pb::provisioning_service_client::ProvisioningServiceClient::new(connection.clone())
+            .validate_provisioning(validation_request.clone()).await.unwrap().into_inner();
+        fs::write(root.join("public-validate-provisioning-response.pb"), validated.encode_to_vec()).unwrap();
+        assert_eq!(validated.captured, validation_request.input);
+        assert!(validated.blockers.is_empty());
+        fs::write(root.join("public-creation-preflight.json"), serde_json::to_vec_pretty(&json!({
+            "profile": profile.name, "server_key": profile.server_key, "server_epoch": profile.server_epoch,
+            "runtime_version": profile.runtime_version, "compatibility": "unverified",
+            "models": profile.models.iter().map(|m| json!({"model_id":m.model_id,
+                "is_default":m.is_default,"supported_efforts":m.supported_efforts})).collect::<Vec<_>>(),
+            "selected_model": captured.admitted.model, "selected_effort": captured.admitted.effort,
+            "execution_lane": "dedicated", "profile_blockers": [], "provisioning_blockers": [],
+            "captured_equal": true, "captured_source_bytes": validated.captured_source_bytes,
+            "exact_wire_captures": ["public-list-profiles.pb", "public-get-profile.pb",
+                "public-validate-provisioning-request.pb", "public-validate-provisioning-response.pb"]
+        })).unwrap()).unwrap();
         let status = pb::broker_service_client::BrokerServiceClient::new(connection.clone())
             .collect_specialist_task(pb::CollectSpecialistTaskRequest {
                 context: context(), ..Default::default()

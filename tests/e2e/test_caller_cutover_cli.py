@@ -11,6 +11,7 @@ from pathlib import Path
 
 import native_codex
 from test_runtime_admission import validate as validate_runtime_admission
+from test_profile_cli import create_fake_codex, set_mode
 from test_trusted_host_setup_cli import (validate as validate_trusted_host_setup,
                                          validate_member_recovery)
 from run_native_integrated_acceptance import TURN_TIMEOUT, overwrite_fixture_file
@@ -76,9 +77,8 @@ def validate(binary: Path) -> None:
         profile_home = root / "profile-home"
         profile_home.mkdir(mode=0o700)
         fake = root / "codex"
-        native_codex.create_native_codex(fake, codex_home=profile_home,
-            schema_source=native_codex.installed_codex(),
-            scenario=native_codex.scenario_path("scoped_specialist_review_v3.json"))
+        create_fake_codex(fake, native_codex.installed_codex(), profile_home)
+        set_mode(fake, version="0.168.9")
         call("profile", "add", "historical-runtime", "--codex-home", str(profile_home),
              "--native-subagents", "enabled", "--env", "PATH=/usr/bin:/bin",
              "--env", "LANG=C", "--env", "LC_ALL=C", "--", str(fake))

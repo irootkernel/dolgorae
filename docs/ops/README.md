@@ -495,8 +495,10 @@ separates these current executable pins from the historical H1 route
 identifiers. Original accepted bindings retain their executable; missing or
 changed bytes require recovery without fallback. Generic Profile doctor probes,
 start/restart/stop and migration retain tested/unverified compatibility admission;
-exact current pins gate only new
-qualified-mechanism admissions. A failed migration restores the
+new qualified-mechanism admissions require Codex 0.169.0 or newer without
+per-version or hash registration. Untested versions remain unverified; actual
+schema, configuration, model, effort, lane and executable/process identity
+checks still apply. A failed migration restores the
 original snapshot under its durable migration owner. Installation, native
 execution and account use retain their separate authorization boundaries.
 

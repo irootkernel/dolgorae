@@ -564,11 +564,15 @@ pub(crate) mod tests {
         let prepared = std::fs::read_dir(&owner.root.path)
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .find(|path| {
+            .filter(|path| {
                 path.file_name()
                     .unwrap()
                     .to_string_lossy()
                     .starts_with("prepared-")
+            })
+            .find(|path| {
+                let proof: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                proof["request"] == request
             })
             .unwrap();
         let original = std::fs::read(&prepared).unwrap();

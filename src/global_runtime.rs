@@ -20,11 +20,24 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-pub(crate) const CURRENT_CODEX_VERSION: &str = "0.167.2";
+pub(crate) const MINIMUM_CREATION_CODEX_VERSION: &str = "0.169.0";
+
+pub(crate) fn creation_version_supported(version: &str) -> bool {
+    matches!(
+        (crate::profile::parse_version("runtime_admission", version),
+         crate::profile::parse_version("runtime_admission", MINIMUM_CREATION_CODEX_VERSION)),
+        (Ok(actual), Ok(minimum)) if actual >= minimum
+    )
+}
+
+#[cfg(test)]
+pub(crate) const CURRENT_CODEX_VERSION: &str = MINIMUM_CREATION_CODEX_VERSION;
+#[cfg(test)]
 pub(crate) const CURRENT_CODEX_SHA256: &str =
-    "97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0";
+    "739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002";
+#[cfg(test)]
 pub(crate) const CURRENT_COMPANION_SHA256: &str =
-    "45acdb759c3ac0a6b30a5107329b364b7ac1579f2cdf270997f03bc8d6365ef6";
+    "10feae2abe764bcf2273e241ace67aecc360eb8c28a82a2988bf1d8498a9bacf";
 
 const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_MEMBERSHIP_BYTES: u64 = 8 * 1024 * 1024;
@@ -229,7 +242,7 @@ impl ResolvedGlobalProfile {
         self.bind_successor(snapshot, native_subagents)
     }
 
-    fn bind_successor(
+    pub(crate) fn bind_successor(
         self,
         launch_snapshot: ProfileSnapshot,
         native_subagents: bool,
@@ -376,10 +389,10 @@ impl ResolvedGlobalProfile {
 }
 
 impl GlobalProfileBinding {
-    /// New admission for the empirically qualified native mechanism. Actual
-    /// process, socket and configuration evidence remains Worker-owned.
+    /// New admission permits untested newer runtimes after the normal protocol
+    /// probes. Actual process, socket and configuration evidence stays Worker-owned.
     pub(crate) fn caller_workspace_supported(&self) -> bool {
-        self.accepted_current_executable() && self.uses_qualified_launch_policy()
+        self.current_runtime_eligible() && self.uses_qualified_launch_policy()
     }
 
     pub(crate) fn uses_qualified_launch_policy(&self) -> bool {
@@ -398,16 +411,20 @@ impl GlobalProfileBinding {
             .is_ok()
     }
 
-    fn accepted_current_executable(&self) -> bool {
+    fn current_runtime_eligible(&self) -> bool {
         self.validate_for_recovery().is_ok()
-            && self.launch_snapshot.codex_version == CURRENT_CODEX_VERSION
-            && self.launch_snapshot.executable_identity.sha256 == CURRENT_CODEX_SHA256
+            && creation_version_supported(&self.launch_snapshot.codex_version)
+            && self.launch_snapshot.compatibility_verdict != CompatibilityVerdict::Rejected
     }
 
     /// Retained execution uses its immutable accepted binding, without resolving
     /// the current registry or transferring qualification between executables.
     pub(crate) fn accepted_caller_workspace_supported(&self) -> bool {
-        self.accepted_current_executable()
+        self.caller_workspace_supported()
+            || (self.validate_for_recovery().is_ok()
+                && self.launch_snapshot.codex_version == "0.167.2"
+                && self.launch_snapshot.executable_identity.sha256
+                    == "97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0")
             || (self.validate_for_recovery().is_ok()
                 && self.launch_snapshot.codex_version == "0.164.0"
                 && self.launch_snapshot.executable_identity.sha256
@@ -458,7 +475,7 @@ impl GlobalProfileBinding {
             })
     }
 
-    /// Call only after qualified Current admission. The registry lock rechecks
+    /// Call only after new qualified-runtime admission. The registry lock rechecks
     /// the originally resolved definition before publishing the binding record.
     pub(crate) fn record_qualified(&self, home: &DolgoraeHome) -> Result<(), MachineError> {
         if !self.caller_workspace_supported() {
@@ -2409,7 +2426,7 @@ mod tests {
     }
 
     #[test]
-    fn current_admission_and_accepted_qualification_do_not_share_pin_eligibility() {
+    fn new_admission_uses_a_minimum_while_retained_execution_preserves_old_bindings() {
         let (parent, _) = home();
         let definition = definition(&parent);
         let old = "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878";
@@ -2419,13 +2436,24 @@ mod tests {
             "0.158.0",
             "0.159.3",
             "0.164.0",
+            "0.167.2",
+            "0.168.9",
             CURRENT_CODEX_VERSION,
-            "0.167.3",
+            "0.170.0",
+            "1.0.0",
+            "not-a-version",
         ] {
-            for sha in [old, previous, current, &"0".repeat(64)] {
+            for sha in [
+                old,
+                previous,
+                current,
+                "97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0",
+                &"b".repeat(64),
+            ] {
                 let mut snapshot = snapshot("reviewer", &definition, &"a".repeat(64));
                 snapshot.codex_version = version.to_owned();
                 snapshot.executable_identity.sha256 = sha.to_owned();
+                snapshot.compatibility_verdict = CompatibilityVerdict::Unverified;
                 let binding =
                     ResolvedGlobalProfile::from_definition("reviewer", definition.clone())
                         .unwrap()
@@ -2439,7 +2467,9 @@ mod tests {
                     "expected_output":"structured_review_v4","deadline_seconds":60,"role":null
                 })).unwrap();
                 let admission = false; // Generic construction is never qualified admission.
-                let accepted = (version == CURRENT_CODEX_VERSION && sha == current)
+                let eligible = creation_version_supported(version);
+                let accepted = (version == "0.167.2"
+                    && sha == "97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0")
                     || (version == "0.164.0" && sha == previous)
                     || (version == "0.159.3" && sha == old);
                 assert_eq!(
@@ -2488,9 +2518,28 @@ mod tests {
                 }
                 let qualified = crate::profile::qualified_test_binding(&binding);
                 assert!(qualified.uses_qualified_launch_policy());
-                let current_pin = version == CURRENT_CODEX_VERSION && sha == current;
-                assert_eq!(qualified.caller_workspace_supported(), current_pin);
-                assert_eq!(review.admit_profile(&qualified).is_ok(), current_pin);
+                assert_eq!(
+                    qualified.caller_workspace_supported(),
+                    eligible,
+                    "{version}/{sha}"
+                );
+                assert_eq!(review.admit_profile(&qualified).is_ok(), eligible);
+                assert_eq!(
+                    qualified.accepted_caller_workspace_supported(),
+                    eligible || accepted
+                );
+                assert_eq!(
+                    qualified.launch_snapshot.compatibility_verdict,
+                    CompatibilityVerdict::Unverified
+                );
+                let mut changed_identity = qualified.clone();
+                changed_identity.launch_snapshot.executable_identity.sha256 = "c".repeat(64);
+                assert!(!changed_identity.caller_workspace_supported());
+                let mut rejected = qualified.clone();
+                rejected.launch_snapshot.compatibility_verdict = CompatibilityVerdict::Rejected;
+                rejected.launch_snapshot_sha256 =
+                    canonical_digest(&rejected.launch_snapshot).unwrap();
+                assert!(!rejected.caller_workspace_supported());
                 assert_ne!(qualified.server_key, binding.server_key);
                 assert_eq!(
                     binding.launch_snapshot.disabled_features,

@@ -11585,7 +11585,7 @@ pub(crate) mod tests {
     }
 
     // Accepted captures are historical fixtures, not a new policy admission.
-    // The current-pin decision applies at each new member or task effect.
+    // New-runtime admission applies at each new member or task effect.
     #[test]
     fn historical_caller_policy_refuses_new_broker_effects_but_resumes_accepted_members() {
         for approval in ["fully_delegated", "user_approval_required"] {

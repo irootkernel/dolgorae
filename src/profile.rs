@@ -1282,6 +1282,7 @@ fn confirmed_lifecycle_binding(
     name: &str,
     profile: &RuntimeProfile,
     confirmed: &str,
+    for_stop: bool,
 ) -> Result<crate::global_runtime::GlobalProfileBinding, MachineError> {
     require_canonical_server_key("--confirm-server-key", confirmed)?;
     let resolved =
@@ -1289,9 +1290,34 @@ fn confirmed_lifecycle_binding(
     let generic = resolved
         .clone()
         .bind(observe_snapshot(context, name, profile)?)?;
-    select_confirmed_lifecycle_binding(name, confirmed, generic, || {
-        resolved.bind_qualified(observe_snapshot_policy(context, name, profile, true)?)
-    })
+    if generic.server_key == confirmed {
+        return Ok(generic);
+    }
+    let snapshot = observe_snapshot_policy(context, name, profile, true)?;
+    let qualified = resolved.clone().bind_qualified(snapshot.clone())?;
+    let mut candidates = vec![qualified.clone()];
+    for native_subagents in [true, false] {
+        candidates.push(resolved.clone().bind_successor(
+            specialist_snapshot_policy(
+                &context.dolgorae_home_root,
+                snapshot.clone(),
+                native_subagents,
+            )?,
+            native_subagents,
+        )?);
+    }
+    for candidate in candidates {
+        if candidate.server_key == confirmed {
+            if for_stop
+                && candidate.accepted_caller_workspace_supported()
+                && candidate.uses_qualified_launch_policy()
+            {
+                return Ok(candidate);
+            }
+            return select_confirmed_lifecycle_binding(name, confirmed, generic, || Ok(candidate));
+        }
+    }
+    select_confirmed_lifecycle_binding(name, confirmed, generic, || Ok(qualified))
 }
 
 fn select_confirmed_lifecycle_binding(
@@ -1316,7 +1342,7 @@ fn select_confirmed_lifecycle_binding(
         return Err(profile_mismatch(
             name,
             "qualified_current_runtime",
-            json!("qualified Current runtime"),
+            json!({"minimum_codex_version":crate::global_runtime::MINIMUM_CREATION_CODEX_VERSION}),
             json!({"codex_version":qualified.launch_snapshot.codex_version,"executable_sha256":qualified.launch_snapshot.executable_identity.sha256}),
         ));
     }
@@ -1330,7 +1356,7 @@ fn server_start(parsed: &Parsed) -> Result<Value, MachineError> {
         .get("--confirm-server-key")
         .and_then(|v| v.last())
     {
-        let binding = confirmed_lifecycle_binding(&context, &name, &profile, confirmed)?;
+        let binding = confirmed_lifecycle_binding(&context, &name, &profile, confirmed, false)?;
         if binding.caller_workspace_supported() {
             let home = DolgoraeHome::system()?;
             binding.record_qualified(&home)?;
@@ -1372,8 +1398,8 @@ fn server_stop(
         .get("--confirm-server-key")
         .and_then(|v| v.last())
     {
-        let binding = confirmed_lifecycle_binding(&context, &name, &profile, confirmed)?;
-        if binding.caller_workspace_supported() {
+        let binding = confirmed_lifecycle_binding(&context, &name, &profile, confirmed, true)?;
+        if binding.uses_qualified_launch_policy() {
             if interrupt {
                 return Err(MachineError::invalid_argument(
                     "--interrupt",
@@ -3039,7 +3065,18 @@ pub(crate) fn specialist_snapshot_for_global(
     profile: &RuntimeProfile,
     native_subagents: bool,
 ) -> Result<ProfileSnapshot, MachineError> {
-    let mut snapshot = qualified_snapshot_for_global(home, name, profile)?;
+    specialist_snapshot_policy(
+        home.root(),
+        qualified_snapshot_for_global(home, name, profile)?,
+        native_subagents,
+    )
+}
+
+fn specialist_snapshot_policy(
+    home_root: &Path,
+    mut snapshot: ProfileSnapshot,
+    native_subagents: bool,
+) -> Result<ProfileSnapshot, MachineError> {
     snapshot
         .normalized_argv
         .extend(["-c".to_owned(), "project_doc_max_bytes=0".to_owned()]);
@@ -3051,9 +3088,10 @@ pub(crate) fn specialist_snapshot_for_global(
         snapshot.disabled_features.push("multi_agent".to_owned());
         snapshot.disabled_features.sort();
     }
-    snapshot
-        .sanitized_environment
-        .insert("DOLGORAE_SUCCESSOR_PROFILE".to_owned(), name.to_owned());
+    snapshot.sanitized_environment.insert(
+        "DOLGORAE_SUCCESSOR_PROFILE".to_owned(),
+        snapshot.profile_name.clone(),
+    );
     let contract = json!({
         "schema_version": 1,
         "canonical_codex_home": snapshot.canonical_codex_home,
@@ -3072,7 +3110,7 @@ pub(crate) fn specialist_snapshot_for_global(
     snapshot.launch_contract_sha256 = canonical_sha256(&contract)?;
     snapshot.server_key = domain_separated_sha256(b"dolgorae-profile-server-key-v1\0", &contract)?;
     snapshot.derived_launch_cwd =
-        path_utf8(&home.root().join("profiles").join(&snapshot.server_key))?.to_owned();
+        path_utf8(&home_root.join("profiles").join(&snapshot.server_key))?.to_owned();
     Ok(snapshot)
 }
 
@@ -3225,6 +3263,43 @@ fn observe_registered_profile(
     definition: &RuntimeProfile,
 ) -> Result<ProfileObservation, MachineError> {
     let snapshot = observe_snapshot_reused(context, name, definition)?;
+    if crate::global_runtime::creation_version_supported(&snapshot.codex_version) {
+        // Display-only derivation reuses checked probe facts. Admission still
+        // performs fresh preparation and records its own immutable binding.
+        let qualified = snapshot_from_probes(
+            context,
+            name,
+            definition,
+            SnapshotProbes {
+                canonical_executable: PathBuf::from(&snapshot.executable_identity.resolved_path),
+                canonical_codex_home: snapshot.canonical_codex_home.clone(),
+                executable_identity: snapshot.executable_identity.clone(),
+                version: snapshot.codex_version.clone(),
+                schema_bundle_sha256: snapshot.schema_bundle_sha256.clone(),
+                verdict: snapshot.compatibility_verdict,
+                configuration: ConfigurationSnapshot {
+                    launch: snapshot.process_static_configuration.clone(),
+                    observation: snapshot.initial_configuration_observation.clone(),
+                },
+            },
+            true,
+        )?;
+        for native_subagents in [true, false] {
+            let successor = specialist_snapshot_policy(
+                &context.dolgorae_home_root,
+                qualified.clone(),
+                native_subagents,
+            )?;
+            let observed = observe_profile_snapshot(context, name, successor)?;
+            if observed.blockers.is_empty() {
+                return Ok(observed);
+            }
+        }
+        let observed = observe_profile_snapshot(context, name, qualified)?;
+        if observed.blockers.is_empty() {
+            return Ok(observed);
+        }
+    }
     observe_profile_snapshot(context, name, snapshot)
 }
 
@@ -3631,7 +3706,10 @@ fn tested_runtime_schema(
     Ok(None)
 }
 
-fn parse_version(profile_name: &str, value: &str) -> Result<(u64, u64, u64), MachineError> {
+pub(crate) fn parse_version(
+    profile_name: &str,
+    value: &str,
+) -> Result<(u64, u64, u64), MachineError> {
     let parts = value.split('.').collect::<Vec<_>>();
     if parts.len() != 3 {
         return Err(compatibility(

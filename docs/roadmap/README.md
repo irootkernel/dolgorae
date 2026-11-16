@@ -2949,6 +2949,16 @@ and one local checkpoint commit plus a Sorage reply to Gul. TASK-094 remains
 ACTIVE and TASK-093 remains IN_REVIEW. Gul owns adoption and F7/H4 acceptance;
 installation, push, release and real-account qualification remain separate.
 
+Master additionally approved completing the Codex 0.169.0-or-newer creation
+policy, with no per-version registration and no promotion of untested runtimes
+from Unverified. Preserve schema/configuration, model/effort/lane and immutable
+executable/process checks, plus original accepted replay/recovery/Close bindings.
+The bounded verification uses Codex 0.169.0 accountless scripted loopback and a
+fresh complete repository gate; earlier candidate results do not qualify this
+change. Deliver the verified tuple and Gul integration guidance through Sorage.
+TASK-094 remains ACTIVE and TASK-093 remains IN_REVIEW; checkpoint commit,
+consumer adoption, final H3 acceptance and publication remain separate effects.
+
 Depends on: the delivered TASK-093 H3. Execute this correction before Gul
 resumes the affected Phase 4 qualification and before TASK-088. Master's approved
 TASK-094 plan explicitly preserves TASK-093's pending review while implementing

@@ -1271,16 +1271,28 @@ uncertain dispatch, not a proved non-dispatch.
 
 ## Current host and Profile runtime qualification
 
-The current Profile candidate is Codex `0.167.2`
+New creation requires Codex `0.169.0` or newer. Higher versions can be attempted
+without a version/hash registry entry. Required protocol and configuration
+checks remain mandatory, and untested versions retain `unverified` compatibility.
+A successful attempt does not establish generic tested-runtime qualification or
+real-account/model behavior. The selected executable is captured by its actual
+path, device, inode and SHA-256; subsequent identity drift still refuses.
+
+A resident Code Mode host is captured from the selected installation's regular,
+executable, non-group/world-writable sibling `codex-code-mode-host`. Its actual
+image and direct owned process generation must remain unchanged throughout the
+policy proof. There is no hardcoded Codex/companion hash allowlist. Every other
+descendant retains the existing workload checks and retirement requirements.
+
+The earlier Profile candidate was Codex `0.167.2`
 `97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0`
 and companion `45acdb759c3ac0a6b30a5107329b364b7ac1579f2cdf270997f03bc8d6365ef6`.
-New qualification work covers this pair. Accountless scripted-loopback checks
-establish only the mechanisms they exercise; real-account and model behavior
-remain unverified.
+Its accountless scripted-loopback results establish only the mechanisms exercised
+on that pair; they do not qualify a newer executable.
 Generic `tested` registration requires its own compatibility, access-safety and
 Profile launch evidence; a qualified caller candidate is not that evidence.
 The earlier results below retain their original images and applicability.
-The current candidate's ordinary schema-4 accountless session fixture passed
+That earlier candidate's ordinary schema-4 accountless session fixture passed
 first and sequential WRITE, typed permission/protected input, original Run/Thread
 recovery after idle Worker loss, gateway replacement, idle and consented interrupt
 Close, Writer release and separate owned-generation absence. It used nine
@@ -1303,7 +1315,7 @@ checked encoding; actual executable versions and checksums remain explicit.
 
 New qualified caller-workspace startup/policy, instruction-discovery and
 checked-review admissions, and member/task acceptances depending on those
-mechanisms, require the current Codex pin before their acceptance commits or
+mechanisms, require Codex 0.169.0 or newer before their acceptance commits or
 launches. An installed provisioning snapshot, accepted policy or pending approval does not
 qualify a new member or task. Authenticate the owner and check the original key
 and request digest before applying current admission. Exact accepted replay and
@@ -1313,7 +1325,7 @@ receipts and supported release, closure and collection paths. Accepted Codex
 executable. Missing or changed executables refuse restart without substitution
 or re-execution.
 
-An approval resolution that would admit a new member performs the current-pin
+An approval resolution that would admit a new member performs the minimum-version
 check after owner authentication and original-resolution lookup, before storing
 the resolution receipt. Refusal leaves the pending approval unresolved so the
 owner can still deny it. Denial does not require runtime admission. A resolution
@@ -1323,9 +1335,9 @@ and accepted binding.
 Profile registry, binding-history observation and server lifecycle retain generic
 compatibility admission: the tested minimum and compatible unverified runtimes
 remain usable. This includes doctor probes, start/restart/stop, operator and
-automatic migration, compensation and diagnostics. The exact current pin applies
-only at qualified-mechanism admission callers; shared snapshot, bind, history
-and Profile launch helpers do not apply that pin.
+automatic migration, compensation and diagnostics. The new-creation minimum
+applies at qualified-mechanism admission callers; shared snapshot, bind, history
+and Profile launch helpers preserve retained execution.
 
 Earlier TASK-077 consumer qualification selected Aquarium commit
 `db132845624c24bb4d0a889503b35a2a59b2571d` and Podway commit

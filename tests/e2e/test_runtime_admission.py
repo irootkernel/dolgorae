@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Separate generic Profile compatibility from qualified caller admission.
 
-The Profile compatibility specification admits the selected release and a synthetic next patch;
-caller-workspaces-v1 requires qualification before Run or review allocation.
+Generic Profile compatibility admits synthetic versions below the qualified creation
+minimum; caller-workspaces-v1 refuses them before Run or review allocation.
 """
 from __future__ import annotations
 
@@ -37,9 +37,8 @@ def fixture_root(binary: Path):
 
 def validate(binary: Path) -> None:
     schema_source = native_codex.installed_codex()
-    selected = native_codex.codex_version(schema_source)
-    major, minor, patch = map(int, selected.split("."))
-    for version in (selected, f"{major}.{minor}.{patch + 1}"):
+    # These are offline boundary fixtures, not qualification of old runtimes.
+    for version in ("0.168.8", "0.168.9"):
         with fixture_root(binary) as root:
             home, workspace, profile_home, bin_root = (root / name for name in
                                                       ("home", "workspace", "profile", "bin"))

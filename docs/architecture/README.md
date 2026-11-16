@@ -915,8 +915,8 @@ The successor configuration reader is separate
 from the legacy v1/v2 reader. `markdown_policy` prepares policy v3 captures and
 bootstrap instructions for the later integrated adapters. These internal APIs
 do not activate public modern starts. Successor configuration preparation checks
-the selected executable against the qualified pin before shared Profile readiness
-or Run allocation; unsupported pins return `INSTRUCTION_DISCOVERY_UNSUPPORTED`.
+the selected runtime against the creation minimum before shared Profile readiness
+or Run allocation; unsupported runtimes return `INSTRUCTION_DISCOVERY_UNSUPPORTED`.
 Project instruction byte limits
 do not suppress native Profile guidance; the contract permits that separate user
 contribution and does not include it in the immutable Role claim. Retained
@@ -1003,9 +1003,9 @@ verified Thread and policy after reader readiness or Writer commit; a manifest
 alone does not prove successful startup.
 Successor admission resolves writable and general defaults into explicit private
 selections. It remains separate from the frozen legacy start service and its
-lazy thread allocation. Unsupported executable pins return
+lazy thread allocation. Unsupported runtimes return
 `WORKSPACE_STARTUP_UNSUPPORTED` before Run reservation or caller execution.
-For the qualified pin, shared Profile readiness precedes immutable intent
+For eligible qualified runtimes, shared Profile readiness precedes immutable intent
 acceptance, and authoritative Writer reservation precedes caller Dedicated
 startup. The Worker establishes the original Thread as a reader without a
 task Turn; writable startup applies verified policy before Writer commit and
@@ -2075,13 +2075,14 @@ expiry before the final proof from expiry after it. The private refusal retains
 the starting budget, elapsed proof time (null when the proof did not run) and
 deadline overrun. The final strict proof and original deadline remain unchanged.
 
-Post-start caller policy proofs can admit the one resident Code Mode host of
-the exact current candidate pair, or its retained accepted pair, under CW-WRITER. The serialized
+Post-start caller policy proofs can admit the one resident Code Mode host from
+the selected installation under CW-WRITER. The serialized
 coordinator first proves idle state, no pending interactions and the sole
 original native Thread. Qualification covers completion/cancellation of Code
 Mode isolates, including yielded cells and unawaited work; a yielded native
 command remains workload even after its Turn completes. The process proof
-captures the pinned sibling image and direct Dedicated ancestry, then verifies
+captures the actual regular, executable, non-group/world-writable sibling image
+and direct Dedicated ancestry, then verifies
 one unchanged PID/birth/UID/parent/group/session and executable device/inode
 through five full census samples. Every other descendant still refuses.
 The coordinator applies the same policy-specific census only after binding the
@@ -2611,8 +2612,10 @@ and capability.
 
 The [runtime qualification
 owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
-pins new qualified caller-workspace, instruction-discovery and checked-review
-admissions to the Codex 0.167.2 candidate. The shared Profile and worker launch
+requires Codex 0.169.0 or newer for new qualified caller-workspace,
+instruction-discovery and checked-review admissions. Admission uses the minimum
+version and actual protocol/configuration evidence, without a version/hash
+allowlist. Untested newer versions retain unverified compatibility. The shared Profile and worker launch
 functions serve both new admissions and retained execution. Their callers
 authenticate and resolve original acceptance first, then apply the current check
 before a new qualified-mechanism acceptance or its launch. Retained execution
@@ -4355,13 +4358,18 @@ and Profile retirement, preserving typed failures and physical absence checks.
 Qualified caller preparation uses the existing fresh Profile snapshot constructor
 with a private enforced-disable policy. It appends `--disable shell_snapshot`
 and sets disabled features before the existing hash/key derivation. Generic
-preparation and display-only cached observations keep their original identities.
+preparation and display-only cached snapshots keep their original identities.
+Public Profile observations derive qualified and successor display candidates
+from the same checked probe facts. They inspect ready successor servers, then
+the qualified server and the generic server.
+This selection publishes no binding and starts no server. All candidates retain
+the original compatibility verdict; real model/effort catalogs and generation
+checks remain mandatory.
 Legacy v2 Specialist Policy validation and session resolution use generic
 Profile preparation and observation. The explicitly selected legacy engagement
 and broker branches share that route, including binding-digest, model and
 capability checks. Public legacy authoring still requires migration; caller
-configuration and Markdown-policy preparation retain the qualified Current pin
-gate.
+configuration and Markdown-policy preparation require the new-creation minimum.
 Qualified candidates are unrecorded until their caller admits the current
 runtime; the registry owner then rechecks the definition while recording.
 `review_recovery` uses `direct_review_target`'s existing unsupported-boundary
@@ -4376,15 +4384,16 @@ reservation replay and Run recovery. Pre-policy accepted bindings retain their
 original readiness behavior; recovery does not upgrade their launch policy.
 
 Explicit `profile server start|stop --confirm-server-key` can select the
-current Caller-qualified launch. The main process freshly checks the selected
-definition and qualified Current candidate against that exact key. Startup
+Caller-qualified or successor launch. The main process freshly checks the selected
+definition and eligible runtime against that exact key. Startup
 records the checked binding before the existing deny-rollover readiness path;
 non-interrupting retirement requires the original recorded binding and Operator
 capability through the ordinary membership and process-absence fences. A key
 mismatch records no replacement and changes no server. Generic name-based
 commands without that selection retain their original contract. Status, restart
-and migration do not gain qualified selection. Qualified stop refuses
-`--interrupt`; generic interruption keeps its exact-key and Operator checks.
+and migration do not gain qualified selection. Qualified stop also permits a retained accepted runtime and requires its exact
+recorded binding. It refuses `--interrupt`; generic interruption keeps its exact-key
+and Operator checks.
 The normal Caller Primary collaboration fixture may prepare an unrecorded
 read-only candidate to supply its key. That fixture uses the main CLI for
 registry publication, server startup, policy installation and retirement.

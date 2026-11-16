@@ -9,6 +9,8 @@ development commits.
 
 ### Added
 
+- Allow qualified creation with Codex 0.169.0 or newer without per-version registration, retain unverified compatibility and executable/process identity checks, and observe ready qualified or successor Profile catalogs without starting servers.
+
 - Initialize public Primary native-only specialist access and derive read-only preparation from accepted Policy and Profile authority, preserving external host qualification and public contracts.
 
 - Expose Controller-authenticated managed individual task collection through the existing public-v2 Broker contract, preserving complete result identities, artifact references and read-only observation.

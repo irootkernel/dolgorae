@@ -817,7 +817,9 @@ MCP host qualification additionally selects Claude Code `2.1.310`
 (`ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd`). The
 [runtime qualification
 owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
-owns the current pins and acceptance boundary. Schema generation at 0.159.3 and
+owns historical host qualification pins and the new-creation minimum of
+Codex 0.169.0. Newer runtimes may be attempted without per-version registration
+and retain unverified compatibility until separately tested. Schema generation at 0.159.3 and
 0.164.0 establishes protocol differences, while native campaigns establish
 behavior. The historical H1 qualification remains unchanged.
 

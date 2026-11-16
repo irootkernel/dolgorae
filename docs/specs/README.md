@@ -1100,7 +1100,7 @@ capability; `--interrupt`
 additionally requires exact `--confirm-server-key`. An explicit
 `--confirm-server-key` on `profile server start|stop` MAY select the current
 Caller-qualified launch. Selection MUST freshly validate the selected Profile
-definition and qualified Current runtime, require the exact resulting key, and
+definition and eligible qualified or successor runtime, require the exact resulting key, and
 preserve the recorded launch identity. Start records that checked binding before
 the existing deny-rollover startup; non-interrupting stop requires the retained
 recorded binding and ordinary Operator, membership and absence fences. A key
@@ -1184,17 +1184,27 @@ not select either server implicitly.
 
 The [delegation runtime
 qualification](dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
-selects the Codex CLI `0.167.2` candidate
-(`97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0`) for new
-qualified caller-workspace startup/policy, instruction-discovery and checked-review
-admissions. Admission precedes each new reservation, member or task acceptance
-and runtime launch. Original-key replay,
-release, closure and recovery retain the accepted binding, including qualified
-0.159.3 and 0.164.0 records. Existing snapshots are never resealed with current pins. Generic
-Profile lifecycle and binding-history observation retain tested/unverified
-compatibility admission, including doctor probes and migration. Exact pins
-apply at qualified-mechanism admission callers, never in shared Profile helpers.
-Runtime support still requires the selected native and compatibility evidence.
+requires Codex CLI `0.169.0` or newer for new qualified caller-workspace
+startup/policy, instruction-discovery and checked-review admissions. Admission
+precedes each new reservation, member or task acceptance and runtime launch.
+Newer versions may be attempted without registering their version or executable
+hash. Required schema, configuration, model, effort and execution-lane checks
+still apply. An untested runtime remains `unverified`; successful admission does
+not promote it to `tested` or public `Compatible`.
+
+Public Profile List/Get observes ready successor generations, then the qualified
+and generic generations. Observation starts no server and invents no model
+catalog. Consumers may offer an `Unverified` runtime at or above the creation
+minimum when its actual catalog and requested lane are available, and must use
+ValidateProvisioning before creation. They must refuse incompatible runtimes and
+concrete provisioning blockers without requiring per-version approval.
+
+Original-key replay, release, closure and recovery retain the accepted binding,
+including qualified 0.159.3, 0.164.0 and 0.167.2 records. Existing snapshots are
+never resealed. Actual executable and process identities remain checked against
+that binding. Generic Profile lifecycle and binding-history observation retain
+their existing schema minimum and tested/unverified compatibility admission,
+including doctor probes and migration.
 
 ### Managed individual task collection
 

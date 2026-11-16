@@ -3,21 +3,50 @@
 
 use super::*;
 
-fn companion_sha256(codex: &str) -> Option<&'static str> {
-    match codex {
-        crate::global_runtime::CURRENT_CODEX_SHA256 => {
-            Some(crate::global_runtime::CURRENT_COMPANION_SHA256)
-        }
-        "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf" => {
-            Some("416721e33af8822041dc650793512b3e58d43e0be4f3a5c6187eb4dfaad3148a")
-        }
-        _ => None,
-    }
+#[derive(Clone)]
+struct SelectedImage {
+    resolved_path: String,
+    device: u64,
+    inode: u64,
+    sha256: String,
 }
 
-fn admitted(server: &DedicatedServerIdentity, host: &RetirementProcess) -> bool {
+fn selected_image(path: &Path) -> Result<SelectedImage, WorkerProtocolError> {
+    let before = fs::symlink_metadata(path).map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    if !before.is_file() || before.mode() & 0o111 == 0 || before.mode() & 0o022 != 0 {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    let sha256 = file_sha256(path)?;
+    let after = fs::symlink_metadata(path).map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+    if before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.len() != after.len()
+        || before.mode() != after.mode()
+        || (before.ctime(), before.ctime_nsec()) != (after.ctime(), after.ctime_nsec())
+    {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    Ok(SelectedImage {
+        resolved_path: path
+            .to_str()
+            .ok_or(WorkerProtocolError::InvalidIdentity)?
+            .to_owned(),
+        device: before.dev(),
+        inode: before.ino(),
+        sha256,
+    })
+}
+
+fn admitted(
+    server: &DedicatedServerIdentity,
+    image: &SelectedImage,
+    host: &RetirementProcess,
+) -> bool {
     let identity = &host.identity;
-    companion_sha256(&server.executable_sha256).is_some_and(|digest| host.sha256 == digest)
+    host.sha256 == image.sha256
+        && host.executable == Path::new(&image.resolved_path)
+        && host.device == image.device
+        && host.inode == image.inode
         && host.executable
             == server
                 .executable_path
@@ -38,9 +67,6 @@ pub(super) fn capture(
     let Some(server) = runtime.dedicated_server_identity.as_ref() else {
         return Err(WorkerProtocolError::InvalidRuntimeRecord);
     };
-    if companion_sha256(&server.executable_sha256).is_none() {
-        return Ok(None);
-    }
     let census = DarwinSystem
         .all_process_identities()
         .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
@@ -52,13 +78,9 @@ pub(super) fn capture(
         if DarwinSystem.live_process_path(process.pid).as_ref() != Some(&path) {
             continue;
         }
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|_| WorkerProtocolError::InvalidIdentity)?;
-        if !metadata.is_file() || metadata.mode() & 0o111 == 0 || metadata.mode() & 0o022 != 0 {
-            return Err(WorkerProtocolError::InvalidIdentity);
-        }
+        let image = selected_image(&path)?;
         let host = retirement_process(*process, vec![*process])?;
-        if !admitted(server, &host) || companion.is_some() {
+        if !admitted(server, &image, &host) || companion.is_some() {
             return Err(WorkerProtocolError::InvalidIdentity);
         }
         companion = Some(host);
@@ -117,7 +139,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admission_requires_the_exact_pair_image_and_direct_owned_generation() {
+    fn selected_image_rejects_symlinks_and_unsafe_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("companion-image-{}", Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("codex-code-mode-host");
+        fs::write(&path, b"selected image").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let image = selected_image(&path).unwrap();
+        assert_eq!(image.sha256, file_sha256(&path).unwrap());
+        for mode in [0o600, 0o777] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(selected_image(&path).is_err());
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(selected_image(&alias).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn admission_requires_the_captured_image_and_direct_owned_generation() {
         let server = DedicatedServerIdentity {
             pid: 10,
             uid: 501,
@@ -146,11 +189,25 @@ mod tests {
             inode: 3,
             sha256: crate::global_runtime::CURRENT_COMPANION_SHA256.into(),
         };
-        assert!(admitted(&server, &host));
-        let mut changed_server = server.clone();
-        changed_server.executable_sha256 = "0".repeat(64);
-        assert!(!admitted(&changed_server, &host));
-        for change in 0..8 {
+        let image = SelectedImage {
+            resolved_path: host.executable.to_str().unwrap().into(),
+            device: host.device,
+            inode: host.inode,
+            sha256: host.sha256.clone(),
+        };
+        assert!(admitted(&server, &image, &host));
+        let mut unregistered_server = server.clone();
+        unregistered_server.executable_sha256 = "b".repeat(64);
+        let mut unregistered_host = host.clone();
+        unregistered_host.sha256 = "c".repeat(64);
+        let mut unregistered_image = image.clone();
+        unregistered_image.sha256 = unregistered_host.sha256.clone();
+        assert!(admitted(
+            &unregistered_server,
+            &unregistered_image,
+            &unregistered_host
+        ));
+        for change in 0..10 {
             let mut changed = host.clone();
             match change {
                 0 => changed.sha256 = "0".repeat(64),
@@ -160,10 +217,12 @@ mod tests {
                 4 => changed.identity.session_id += 1,
                 5 => changed.identity.process_group_id += 1,
                 6 => changed.identity.birth = None,
-                _ => changed.identity.zombie = true,
+                7 => changed.identity.zombie = true,
+                8 => changed.device += 1,
+                _ => changed.inode += 1,
             }
             assert!(
-                !admitted(&server, &changed),
+                !admitted(&server, &image, &changed),
                 "accepted changed identity {change}"
             );
         }
