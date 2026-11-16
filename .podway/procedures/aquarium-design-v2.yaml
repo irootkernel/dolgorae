@@ -1,9 +1,9 @@
 schema: podway.procedure/v2
 id: aquarium-design-v2
-version: "12"
+version: "13"
 name: Aquarium Design
 purpose: Shape one approved project, feature epic, or refactor document set without implementing it.
-description: A Podway record of Aquarium context capture, Ouroboros discovery, drafting, challenge, guarded quality review, exact-diff approval, document application, and closeout.
+description: A Podway record of Aquarium context capture, Ouroboros discovery, drafting, challenge, guarded quality review, document-write authority and final content review, document application, and closeout.
 goal_tracking: true
 node_definitions:
   context-record:
@@ -189,7 +189,7 @@ node_definitions:
     type: decision
     title: Evaluate design quality
     objective: Route each complete quality result to the phase that owns its correction.
-    prompt: Is the current draft ready for exact-diff approval?
+    prompt: Is the current draft ready for document-write authority and final content review?
     evidence_guidance:
       - Read the draft identity, Ouroboros QA evidence, local adjudication, and unresolved constraints.
     options:
@@ -254,15 +254,15 @@ node_definitions:
       prompt: Explain the decision from current evidence.
   approval-decision:
     type: decision
-    title: Record exact-diff approval
-    objective: Apply only the complete diff explicitly approved by the user.
-    prompt: Did the user approve the displayed target paths and complete diff?
+    title: Confirm document-write authority
+    objective: For new-feature, apply within the actual user document scope. Other entrypoints retain exact-diff approval.
+    prompt: Does the current entrypoint have its required document-write authority?
     evidence_guidance:
-      - Compare the displayed diff with the current target snapshots.
+      - For new-feature, verify the actual document scope and current target snapshots. Other entrypoints compare the approved diff with those snapshots.
     options:
       - id: approved
-        label: Exact diff approved
-        criteria: The user explicitly approved the complete displayed diff and targets have not changed.
+        label: Document-write authority established
+        criteria: For new-feature, the invocation or envelope grants the exact document paths and operations; no diff approval is required. Other entrypoints require actual exact-diff approval. Targets have not changed.
       - id: changes-requested
         label: Changes requested
         criteria: The user rejected or changed the proposal, or a target snapshot changed.
@@ -274,10 +274,10 @@ node_definitions:
     title: Apply and validate documents
     intent: Record only approved document changes and current validation evidence.
     instructions:
-      - Apply only the exact user-approved document diff to unchanged target paths and run current document validation.
+      - For new-feature, apply the QA-reviewed document candidate under authority.document_write, rechecking target.design.targets before writing. Report actual files for user review without a separate diff approval. Other entrypoints apply only the exact user-approved diff. Run current document validation.
       - Do not implement product code, publish, or extend document approval into commit authority. Use the shared separately authorized task-commit boundary when repository policy requires committed delivery input.
       - Deliver the complete aquarium.executor-handoff/v3 with original evidence, actual candidate, checks, authority and gaps. Record actual returned work and available public handles; unavailable telemetry remains unknown. Complete this ordinary Action with current fences; delivery is not Evaluator passage.
-      - Coordinator supplies the actual exact-diff approval and current snapshot basis. Recheck before any write. A changed proposal or target returns through original draft/investigation, challenge where applicable, quality and actual approval. Evidence-only re-entry verifies unchanged approved bytes without application authority for a changed diff.
+      - Coordinator supplies entrypoint-specific write authority and current snapshots. Recheck before writing. For new-feature, reconcile concurrent edits and repeat affected QA under the same scope; final content acceptance follows application. Other entrypoints renew exact-diff approval for changed content. Evidence-only re-entry verifies current after-images and grants no write.
     items:
       - id: application-summary
         type: text
@@ -295,27 +295,79 @@ node_definitions:
       - id: application-approval-result
         type: check_result
         prompt: Record the caller-supplied result for aquarium-design-application-approval; Podway does not execute or attest this check.
-        help: Verify actual user approval of the complete exact current proposal or no-change, unchanged approved target snapshots before writes, applied bytes matching that approval and required validation. Changed proposals or targets require original quality and actual exact-diff approval again. Neither an Executor nor Evaluator verdict grants this authority.
+        help: Verify actual new-feature scoped write authority or other entrypoints exact-diff approval, unchanged target snapshots before writes, matching applied bytes and required validation. Changed content requires affected quality and snapshot verification. New-feature keeps its same-scope write grant and renews final content acceptance after application; other entrypoints renew exact-diff approval. Neither an Executor nor Evaluator verdict grants this authority.
         required: true
         operation_id: aquarium-design-application-approval
-        operation_digest: sha256:677fb5ac61e912a7364b1bd7c8ff77be7221914ddc3304629af89963fd2e3f53
+        operation_digest: sha256:d8687d25b79001c68b1ced4b61218d0ab37f608b6667ae2edb6429e0a48d5015
         accepted_outcomes:
           - pass
           - fail
           - inconclusive
+  applied-review:
+    type: decision
+    title: Review applied design documents
+    objective: Keep scoped document application separate from actual final content acceptance.
+    prompt: Has the user accepted the current applied new-feature documents?
+    evidence_guidance:
+      - Show actual scoped new-feature file links, decisions and validation. Bind actual user acceptance to current digests in authority.document_acceptance, never to write authority or Evaluator passage.
+      - Route same-scope changes through drafting, QA, application and affected assessment without diff reapproval. Other entrypoints reuse applicable exact-diff acceptance without another question.
+      - Before reassess, retain the latest actual user decision in authority.document_acceptance with source user, decision accepted, rejected or superseded, original user reference and reviewed digests.
+      - If acceptance was unverified, retain the actual accepted decision and reassess affected final criteria. Reuse unchanged QA, files and acceptance; do not rewrite files or ask again.
+      - Carry that decision into the final evidence index across rework. A correction request alone is neither rejection nor supersession.
+      - Replace the current decision after a later user decision or correction request; retain the earlier decision only as history.
+      - A rejection binds particular file images; do not apply it to revised images. Link the latest user instruction and current digests in the final evidence index.
+      - Explicit replacement of the original goal remains semantic evidence until the user changes that direction. Do not infer goal replacement from file digests.
+    options:
+      - id: accepted
+        label: Content accepted
+        criteria: Actual current content acceptance and a passing current final assessment are established under the invoking entrypoint contract.
+        guards:
+          - evidence:
+              node: evaluator-design
+              item: evaluator-goal-outcome
+            equals: achieved
+          - evidence:
+              node: evaluator-design
+              item: evaluator-verdict
+            equals: pass
+          - evidence:
+              node: evaluator-design
+              item: evaluator-unmet-criteria
+            equals: 0
+          - evidence:
+              node: evaluator-design
+              item: evaluator-unverified-criteria
+            equals: 0
+      - id: changes-requested
+        label: Revise applied documents
+        criteria: The user requests changes or the accepted applied images changed.
+      - id: not-accepted
+        label: Finish without content acceptance
+        criteria: The current applicable Evaluator records not-achieved or superseded; preserve that negative outcome without claiming acceptance.
+        guards:
+          - evidence:
+              node: evaluator-design
+              item: evaluator-goal-outcome
+            not_equals: achieved
+      - id: reassess
+        label: Refresh the final assessment
+        criteria: Actual acceptance, rejection or goal replacement makes the current final assessment incomplete or outdated. Refresh only affected final criteria, preserving the actual decision and unchanged documents.
+    reason:
+      required: true
+      prompt: Record actual acceptance or requested corrections and the current file digests.
   goal-assessment:
     type: decision
     title: Assess the design goal
     objective: Determine whether the approved document outcome was achieved without implementation.
     prompt: What is the outcome of the current design goal?
     evidence_guidance:
-      - Read the approved diff, applied digests, validation, and unresolved constraints.
+      - Read write authority, applied digests, validation, unresolved constraints and actual content acceptance. For scoped new-feature, review file links and resolve requested corrections before acceptance.
       - Use the current applicable final Evaluator report and fresh original native criterion statuses; every mandatory original criterion and integration obligation must pass.
       - Faithful negative checkpoints, zero provider findings and unsupported manual claims cannot establish whole-goal success.
     options:
       - id: achieved
         label: Goal achieved
-        criteria: The exact approved documents are applied and all required validation is current.
+        criteria: The documents are applied and all required validation is current. Scoped new-feature also requires actual user acceptance of the applied file digests; changes requested return to drafting before any completion or delivery-input commit.
         guards:
           - evidence:
               node: evaluator-design
@@ -352,6 +404,47 @@ node_definitions:
     reason:
       required: true
       prompt: Explain the outcome using current artifact evidence.
+    assessment:
+      target: session_goal
+      outcomes:
+        achieved: achieved
+        not-achieved: not_achieved
+        superseded: superseded
+  unaccepted-goal-assessment:
+    type: decision
+    title: Record an unaccepted design outcome
+    objective: Record an honest negative outcome without claiming content acceptance.
+    prompt: Which outcome is supported by the current applicable Evaluator report?
+    evidence_guidance:
+      - Preserve rejection, unmet criteria and applied files. The negative entry guard excludes achieved. Positive reassessment returns to applied review and requires actual content acceptance.
+    options:
+      - id: achieved
+        label: Return to applied review
+        criteria: The Evaluator supports achievement; actual current content acceptance is required before successful delivery. The negative entry guard prevents this option on the unaccepted path.
+        guards:
+          - evidence:
+              node: evaluator-design
+              item: evaluator-goal-outcome
+            equals: achieved
+      - id: not-achieved
+        label: Goal not achieved
+        criteria: Content was not accepted or required design obligations remain incomplete.
+        guards:
+          - evidence:
+              node: evaluator-design
+              item: evaluator-goal-outcome
+            equals: not-achieved
+      - id: superseded
+        label: Goal superseded
+        criteria: The desired design outcome was explicitly replaced.
+        guards:
+          - evidence:
+              node: evaluator-design
+              item: evaluator-goal-outcome
+            equals: superseded
+    reason:
+      required: true
+      prompt: Record the actual negative disposition, remaining effects and current file digests.
     assessment:
       target: session_goal
       outcomes:
@@ -943,7 +1036,7 @@ node_definitions:
       - id: evaluator-checkpoint-result
         type: check_result
         prompt: Record the caller-supplied result for aquarium-design-application-checkpoint; Podway does not execute or attest this check.
-        help: Verify actual satisfaction of all current application phase obligations and applicable parent constraints from direct original evidence and exact candidate bytes, authorized checks and current authority. Preserve the complete original workflow rows, global verdict and remaining unmet/unverified counts; report completeness alone is insufficient. Verify exact actually approved proposal and current target snapshots, applied bytes or approved verified no-change, required checks and exclusions. Changed proposal or target bytes invalidate approval and must return through original drafting, quality and actual exact-diff approval; Evaluator passage never grants application authority.
+        help: Verify actual satisfaction of all current application phase obligations and applicable parent constraints from direct original evidence and exact candidate bytes, authorized checks and current authority. Preserve the complete original workflow rows, global verdict and remaining unmet/unverified counts; report completeness alone is insufficient. For scoped new-feature, verify actual document-write scope, current target snapshots, applied bytes, required checks and exclusions; exact-diff approval is not required. Other entrypoints verify the exact actually approved proposal or approved verified no-change. Changed target bytes require reconciliation through original drafting, quality and the applicable document-write authority and final content review; Evaluator passage never grants application authority.
         required: true
         operation_id: aquarium-design-application-checkpoint
         operation_digest: sha256:f94c429e31ec498e2baaffaab092a6fe8ec30b4ddf69f274b9db79811d304890
@@ -1020,7 +1113,7 @@ node_definitions:
     instructions:
       - Read the actual triggering Evaluator report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
       - Only the exact currently authorized rework operation may return to draft. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
-      - Correction or changed proposal/target invalidates prior application approval and returns through original drafting, quality and actual exact-diff approval. Evidence-only return permits verification of unchanged approved bytes or no-change only; discovering any changed proposal or target requires the original reapproval route before writes.
+      - Corrections return through drafting and affected quality. New-feature retains same-scope write authority, preserves concurrent edits and invalidates final content acceptance. Other entrypoints renew exact-diff approval. Evidence-only return verifies unchanged after-images or no-change and never grants another write.
     items:
       - id: semantic-followup-summary
         type: text
@@ -1082,7 +1175,7 @@ node_definitions:
     instructions:
       - Read the actual triggering Evaluator report, original criteria and source attempt. Record exact correction or missing-evidence owner, current target and remaining actual effect authority. A negative verdict grants no effect or renewed provider budget.
       - Only the exact currently authorized evidence-needed operation may return to apply-documents. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
-      - Correction or changed proposal/target invalidates prior application approval and returns through original drafting, quality and actual exact-diff approval. Evidence-only return permits verification of unchanged approved bytes or no-change only; discovering any changed proposal or target requires the original reapproval route before writes.
+      - Corrections return through drafting and affected quality. New-feature retains same-scope write authority, preserves concurrent edits and invalidates final content acceptance. Other entrypoints renew exact-diff approval. Evidence-only return verifies unchanged after-images or no-change and never grants another write.
     items:
       - id: semantic-followup-summary
         type: text
@@ -1143,6 +1236,7 @@ node_definitions:
     intent: Assemble complete Coordinator evidence for final original-criterion assessment.
     instructions:
       - The Coordinator assembles existing original evidence and current applicability; perform no new implementation, broad audit or provider review. Preserve actual reports, remaining gaps and stopped-work boundaries.
+      - Include the actual current authority.document_acceptance decision, its original user reference and reviewed file digests in candidate-evidence and final-assessment-summary. After reassess, retain the rejection or explicit supersession from the ordinary assignment or checkpoint even though the native review attempt was invalidated. Link the original user evidence; do not invent a decision from missing acceptance or an Evaluator verdict.
     items:
       - id: final-assessment-summary
         type: text
@@ -1162,6 +1256,7 @@ node_definitions:
     title: Assess the current candidate
     intent: Obtain a retained report-only Evaluator assessment from all original evidence and current phase obligations.
     instructions:
+      - Read the original user decision linked from candidate-evidence and the ordinary authority.document_acceptance record. If the user rejects the current design outcome, record not-achieved; an explicit replacement of the original goal records superseded. A request for corrections returns to drafting and is not a final rejection. Distinguish these actual decisions from absent acceptance, keep original criterion results truthful and never report achieved against a current explicit rejection or supersession.
       - Read every original workflow criterion, current phase obligation, applicable parent constraint and original artifact directly. Retain one logical report-only Evaluator when supported; a fresh independent replacement uses original evidence, current authority and available public handles without requiring private history. An Executor summary or inherited verdict never replaces evidence.
       - Preserve all actual original criterion rows, global outcome verdict and unmet/unverified counts. The separate checkpoint result assesses the actual current phase obligations; later workflow work may remain unmet without inventing a global pass. Report completeness alone cannot establish correction or application success.
       - Record the complete applicable aquarium.evaluator-assessment/v3 from the independent native Evaluator, check coverage and current candidate applicability, then complete this ordinary Action with current fences. Do not recursively evaluate the report or fabricate native receipts.
@@ -1267,7 +1362,7 @@ node_definitions:
             equals: pass
       - id: invalid
         label: Approval invalid
-        criteria: Missing, changed or inconclusive actual approval requires original quality and actual approval again.
+        criteria: Missing write authority requires its actual grant. Concurrent edits need reconciliation and affected quality; same-scope new-feature corrections do not need a separate diff approval. Other entrypoints keep exact-diff reapproval.
         guards:
           - evidence:
               node: apply-documents
@@ -1284,7 +1379,7 @@ node_definitions:
     instructions:
       - Read actual failed or stale application approval, exact current proposal and target snapshots. Preserve all original criteria and require remaining authority for original proposal preparation; no stale approval authorizes writes.
       - Only the exact currently authorized rework operation may return to draft. An earlier different owner requires explicitly authorized manual rework. Preserve original Ouroboros leaf capabilities and all original approval gates.
-      - Correction or changed proposal/target invalidates prior application approval and returns through original drafting, quality and actual exact-diff approval. Evidence-only return permits verification of unchanged approved bytes or no-change only; discovering any changed proposal or target requires the original reapproval route before writes.
+      - Corrections return through drafting and affected quality. New-feature retains same-scope write authority, preserves concurrent edits and invalidates final content acceptance. Other entrypoints renew exact-diff approval. Evidence-only return verifies unchanged after-images or no-change and never grants another write.
     items:
       - id: semantic-followup-summary
         type: text
@@ -1448,6 +1543,62 @@ graph:
         - node: approve-diff
           required: true
       next: confirm-application-approval
+    - id: review-applied
+      use: applied-review
+      evidence_from:
+        - node: apply-documents
+          required: true
+        - node: evaluator-design
+          required: true
+          items:
+            - evaluator-assessment
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+            - evaluator-applicability
+            - evaluator-summary
+            - evaluator-goal-outcome
+      routes:
+        accepted:
+          to: assess-goal
+          effect: advance
+        changes-requested:
+          to: draft
+          effect: rework
+        not-accepted:
+          to: assess-unaccepted-goal
+          effect: advance
+        reassess:
+          to: prepare-design-assessment
+          effect: rework
+    - id: assess-unaccepted-goal
+      use: unaccepted-goal-assessment
+      evidence_from:
+        - node: review-applied
+          required: true
+        - node: evaluator-design
+          required: true
+          items:
+            - evaluator-goal-outcome
+            - evaluator-verdict
+            - evaluator-unmet-criteria
+            - evaluator-unverified-criteria
+      routes:
+        achieved:
+          to: review-applied
+          effect: rework
+        not-achieved:
+          to: closeout-unaccepted
+          effect: advance
+        superseded:
+          to: closeout-unaccepted
+          effect: advance
+    - id: closeout-unaccepted
+      use: closeout-record
+      evidence_from:
+        - node: assess-unaccepted-goal
+          required: true
+      terminal: true
     - id: assess-goal
       use: goal-assessment
       evidence_from:
@@ -1864,7 +2015,7 @@ graph:
             - evaluator-goal-outcome
       routes:
         current:
-          to: assess-goal
+          to: review-applied
           effect: advance
         invalid:
           to: evaluator-design
