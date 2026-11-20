@@ -4123,6 +4123,83 @@
           "current_outcome": "OPERATION_OUTCOME_RUNNING"
         }
       }
+    },
+    {
+      "id": "reconcile_start_operation_request",
+      "grpc_message": "dolgorae.public.v2.ReconcileStartOperationRequest",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "client_request_id": "019a0000-0000-7000-8000-000000000001",
+          "client_instance_id": "gul:fixture"
+        },
+        "controller": {
+          "absolute_file_path": "/fixture/protected/controller",
+          "expected_controller_id": "controller:fixture",
+          "expected_controller_generation": 3
+        },
+        "operation": {
+          "caller_scope": {
+            "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "principal_ref": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "controller_generation": 3,
+            "workspace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "provisioning_scope": "run-start"
+          },
+          "operation_kind": "OPERATION_KIND_START_RUN",
+          "idempotency_key": "original:unallocated-start"
+        }
+      }
+    },
+    {
+      "id": "reconcile_start_operation_response",
+      "grpc_message": "dolgorae.public.v2.LookupOperationResponse",
+      "grpc_json": {
+        "context": {
+          "protocol_version": 2,
+          "server_instance_id": "server:fixture"
+        },
+        "closed_without_acceptance": {
+          "operation": {
+            "caller_scope": {
+              "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+              "principal_ref": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "controller_generation": 3,
+              "workspace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "provisioning_scope": "run-start"
+            },
+            "operation_kind": "OPERATION_KIND_START_RUN",
+            "idempotency_key": "original:unallocated-start"
+          },
+          "closure_receipt_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "durable_watermark": 1,
+          "original_key_permanently_closed": true
+        }
+      }
+    },
+    {
+      "id": "reconcile_start_operation_error",
+      "grpc_message": "dolgorae.public.v2.DolgoraeErrorDetail",
+      "grpc_json": {
+        "detail_version": 2,
+        "dolgorae_error_code": "RECOVERY_REQUIRED",
+        "operation_kind": "OPERATION_KIND_START_RUN",
+        "effect": "EFFECT_STATE_UNRESOLVED",
+        "classification": "FAILURE_CLASSIFICATION_RECOVERY_NEEDED",
+        "action": "REQUIRED_CLIENT_ACTION_RESTORE_STATE",
+        "operation": {
+          "caller_scope": {
+            "controller_kind": "CONTROLLER_KIND_INTERACTIVE_CLIENT",
+            "principal_ref": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "controller_generation": 3,
+            "workspace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "provisioning_scope": "run-start"
+          },
+          "operation_kind": "OPERATION_KIND_START_RUN",
+          "idempotency_key": "original:unallocated-start"
+        },
+        "idempotency_key": "original:unallocated-start"
+      }
     }
   ],
   "negative": [
@@ -4369,6 +4446,13 @@
       "error": "get_maintenance_error",
       "effect_class": "R",
       "notes": "Constructed wire fixture; no runtime acceptance is asserted."
+    },
+    "OperationService.ReconcileStartOperation": {
+      "request": "reconcile_start_operation_request",
+      "response": "reconcile_start_operation_response",
+      "error": "reconcile_start_operation_error",
+      "effect_class": "S",
+      "notes": "Explicit original-Start reconciliation preserves the original operation in errors and permanently closes only a verified unaccepted key; it never redispatches."
     }
   },
   "constructed_identity_inputs": {

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/start-operation-closure/v1",
+  "title": "Pre-allocation Start closure and terminal lookup",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/closure"
+    },
+    {
+      "$ref": "#/$defs/closed_lookup"
+    }
+  ],
+  "$defs": {
+    "namespace": {
+      "allOf": [
+        {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/lookup_namespace"
+        },
+        {
+          "properties": {
+            "controller_principal": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "workspace_ref": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "scope_kind": {
+              "type": "null"
+            },
+            "scope_ref": {
+              "type": "null"
+            },
+            "operation_kind": {
+              "const": "start_run"
+            }
+          }
+        }
+      ]
+    },
+    "closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "schema",
+        "namespace",
+        "closure_id",
+        "receipt_digest"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 4
+        },
+        "schema": {
+          "const": "dolgorae.start-operation-closure/v1"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "closure_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "receipt_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        }
+      }
+    },
+    "closed_lookup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "namespace",
+        "state",
+        "closure_receipt_digest",
+        "durable_watermark",
+        "original_key_permanently_closed"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dolgorae.operation-lookup/v2"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "state": {
+          "const": "closed_without_acceptance"
+        },
+        "closure_receipt_digest": {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/digest"
+        },
+        "durable_watermark": {
+          "const": 1
+        },
+        "original_key_permanently_closed": {
+          "const": true
+        }
+      }
+    }
+  }
+}

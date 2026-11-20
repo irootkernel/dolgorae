@@ -400,6 +400,22 @@ impl MemberRunObservation {
 }
 
 impl RunSnapshot {
+    pub(crate) fn startup_ownership_blocker(&self) -> Option<&'static str> {
+        (self
+            .runtime_record
+            .as_ref()
+            .is_some_and(|record| record.startup_ownership_incomplete())
+            && self
+                .writer
+                .pending_generation_release(self.manifest.run_id)
+                .is_none()
+            && self
+                .writer
+                .acquire_retirement_recovery(self.manifest.run_id)
+                .is_none())
+        .then_some(crate::worker::STARTUP_OWNERSHIP_INCOMPLETE)
+    }
+
     pub(crate) fn generation_release_blocker(&self) -> Option<&'static str> {
         let release = self
             .writer

@@ -903,6 +903,15 @@ pub(crate) fn rpc_deadline_with<T>(
     method: &str,
     map_error: fn(&MachineError, &str) -> Status,
 ) -> Result<tokio::time::Instant, Status> {
+    rpc_deadline_with_budget(request, method, map_error, RPC_BUDGET)
+}
+
+pub(crate) fn rpc_deadline_with_budget<T>(
+    request: &Request<T>,
+    method: &str,
+    map_error: fn(&MachineError, &str) -> Status,
+    budget: Duration,
+) -> Result<tokio::time::Instant, Status> {
     let invalid_timeout = || {
         map_error(
             &MachineError::invalid_argument("grpc-timeout", "invalid RPC timeout"),
@@ -910,7 +919,7 @@ pub(crate) fn rpc_deadline_with<T>(
         )
     };
     let budget = match request.metadata().get("grpc-timeout") {
-        None => RPC_BUDGET,
+        None => budget,
         Some(value) => {
             let text = value.to_str().map_err(|_| invalid_timeout())?;
             if !(2..=9).contains(&text.len()) {
@@ -930,7 +939,7 @@ pub(crate) fn rpc_deadline_with<T>(
                 "n" => Duration::from_nanos(amount),
                 _ => return Err(invalid_timeout()),
             };
-            duration.min(RPC_BUDGET)
+            duration.min(budget)
         }
     };
     Ok(tokio::time::Instant::now() + budget)

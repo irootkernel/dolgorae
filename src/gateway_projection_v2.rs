@@ -305,6 +305,13 @@ pub fn turn_projection(
 }
 
 fn recovery(snapshot: &RunSnapshot) -> pb::RecoveryProjection {
+    if let Some(blocker) = snapshot.startup_ownership_blocker() {
+        return pb::RecoveryProjection {
+            state: pb::RecoveryState::Required as i32,
+            required_action: pb::RecoveryAction::OperatorRepair as i32,
+            blocker_code: Some(blocker.to_owned()),
+        };
+    }
     let mut recovery = recovery_for(
         snapshot.projection.lifecycle,
         snapshot

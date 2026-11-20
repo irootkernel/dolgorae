@@ -62,6 +62,7 @@ pub mod review_output;
 pub mod review_recovery;
 pub mod review_target;
 pub mod run;
+pub(crate) mod run_deletion;
 pub mod runtime;
 pub(crate) mod scheduler;
 pub mod semantic;
@@ -108,3 +109,6 @@ pub(crate) mod native_preparation;
 pub(crate) mod podway_client;
 
 pub(crate) mod public_resolution;
+
+#[cfg(test)]
+mod start_reconciliation_tests;

@@ -146,6 +146,40 @@ pub struct WorkspaceRecord {
     pub lock_root_identity: FileIdentity,
 }
 
+/// Validate retained namespace identity without reopening mutable source files.
+pub(crate) fn verify_retained_workspace_namespace(
+    state_root: &Path,
+    expected_workspace: &str,
+) -> Result<(), MachineError> {
+    let uid = SystemWorkspacePlatform.current_uid();
+    verify_secure_directory(state_root, uid)?;
+    let path = state_root.join("workspace.json");
+    verify_secure_file(&path, uid)?;
+    let bytes = read_bounded(&path, 1024 * 1024)?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| MachineError::config_invalid(&path, error.to_string()))?;
+    crate::jcs::parse(text)
+        .map_err(|error| MachineError::config_invalid(&path, error.to_string()))?;
+    let record: WorkspaceRecord = serde_json::from_slice(&bytes)
+        .map_err(|error| MachineError::config_invalid(&path, error.to_string()))?;
+    let locks = state_root.join("runtime/locks");
+    verify_secure_directory(&locks, uid)?;
+    if record.schema_version != 1
+        || record.workspace_id != expected_workspace
+        || workspace_id(&record.canonical_path.to_path_buf()?) != expected_workspace
+        || file_identity(state_root).ok() != Some(record.state_root_identity)
+        || file_identity(&locks).ok() != Some(record.lock_root_identity)
+    {
+        return Err(MachineError::new(
+            "RECOVERY_REQUIRED",
+            "retained workspace identity cannot prove startup reconciliation",
+            false,
+            serde_json::json!({"reason":"startup_namespace_identity_unverified"}),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct WorkspaceView {
     pub workspace_id: String,

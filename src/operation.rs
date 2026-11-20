@@ -119,6 +119,81 @@ impl From<&Namespace> for crate::delegation_identity::LookupNamespace {
     }
 }
 
+/// A write-once closure in the original Start allocation slot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StartOperationClosure {
+    pub schema_version: u32,
+    pub schema: String,
+    pub namespace: Namespace,
+    pub closure_id: Uuid,
+    pub receipt_digest: String,
+}
+
+impl StartOperationClosure {
+    pub(crate) fn new(namespace: Namespace) -> Result<Self, &'static str> {
+        let mut closure = Self {
+            schema_version: 4,
+            schema: "dolgorae.start-operation-closure/v1".into(),
+            namespace,
+            closure_id: Uuid::now_v7(),
+            receipt_digest: String::new(),
+        };
+        closure.receipt_digest = closure.digest()?;
+        closure.validate()?;
+        Ok(closure)
+    }
+
+    fn digest(&self) -> Result<String, &'static str> {
+        let bytes = canonical(&json!({
+            "schema_version":self.schema_version, "schema":self.schema,
+            "namespace":self.namespace, "closure_id":self.closure_id,
+        }))
+        .map_err(|_| Self::invalid())?;
+        Ok(format!("sha256:{}", crate::jcs::sha256_hex(&bytes)))
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        let ns = &self.namespace;
+        if self.schema_version != 4
+            || self.schema != "dolgorae.start-operation-closure/v1"
+            || self.closure_id.get_version_num() != 7
+            || ns.operation_kind != "start_run"
+            || ns.scope_kind.is_some()
+            || ns.scope_ref.is_some()
+            || ns.controller_generation == 0
+            || ns.controller_generation > 9_007_199_254_740_991
+            || !valid_digest(&ns.controller_principal)
+            || ns.workspace_ref.len() != 64
+            || !ns
+                .workspace_ref
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || ns.idempotency_key.is_empty()
+            || ns.idempotency_key.len() > 256
+            || self.receipt_digest != self.digest()?
+        {
+            return Err(Self::invalid());
+        }
+        Ok(())
+    }
+
+    fn invalid() -> &'static str {
+        "startup reconciliation evidence is invalid"
+    }
+
+    pub(crate) fn lookup(&self) -> Value {
+        json!({
+            "schema":"dolgorae.operation-lookup/v2",
+            "namespace":self.namespace,
+            "state":"closed_without_acceptance",
+            "closure_receipt_digest":self.receipt_digest,
+            "durable_watermark":1,
+            "original_key_permanently_closed":true,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmitIdentity {

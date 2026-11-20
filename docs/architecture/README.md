@@ -20,6 +20,19 @@ releases only its matched reservation after sync. Controller-authorized lookup
 projects the verified ledger prefix without worker startup or attachment reads;
 the original acceptance chain hash and revision remain immutable.
 
+Start reconciliation uses that specification's separate pre-allocation
+closure. The semantic service holds the permanent per-key allocation lock;
+the Run store validates retained allocation/Run coverage and atomically
+publishes the closure in the original allocation slot. The orchestration store
+observes retained aggregate admission owners and refuses closure over them,
+without setup, migration or recovery writes. Operation identity owns
+the closed record and receipt digest. Gateway adapters project the result and
+never infer absence or write recovery state themselves. Accepted allocations
+remain immutable; no Profile or execution runtime is started by reconciliation.
+The test-only `start_reconciliation_tests` module exercises these owners from
+outside their production modules; the Run store does not depend back on the
+semantic coordinator.
+
 The [Close and build recovery implementation](../specs/dolgorae-v014-close-recovery.md)
 serializes coordinators with a permanent per-Run lifecycle lock at
 `runtime/locks/lifecycle/<run-id>.lock`. It reuses the checked startup-owner
@@ -2027,15 +2040,27 @@ Initial runtime qualification, configuration readback and turnless Thread
 binding or original-Thread rebinding share one monotonic process-census deadline
 for each new physical Worker connection, capped at thirty seconds and the session
 transport budget. They may wait for same-user Dedicated startup
-descendants, retaining each observed PID and BSD birth until exact kernel
-absence. Every sample revalidates both leaders, socket identity and complete
-scope membership. Identity drift, scope escape, unreadable census and Worker
-workload fail immediately. Live startup children reset the empty count;
-qualification still requires five complete empty samples 100 milliseconds
-apart. Only the actual owned Dedicated Server creates this in-memory startup
-window. Binding success or failure consumes it permanently; connection startup
-also closes it before WorkerReady when no eager Thread binding is requested.
-Diagnostic phases and later resumes cannot restore it. No task Turn or provider
+descendants, retaining each verified PID, BSD birth and ancestry for
+retirement. Every sample revalidates both leaders, socket identity and complete
+scope membership. Qualification and caller policy checks distinguish native
+Profile tool transports from workspace workload. A transport root must be an
+exact direct child of the Dedicated Server, in its own process group and the
+Dedicated session, with all three standard descriptors connected by distinct
+directional pipes to that server. Its same-user descendants must retain their
+recorded ancestry, group and session. Tool identities are first admitted during
+turnless startup. Later policy checks revalidate the live transport and admit
+only previously retained identities. Generation absence and retirement still
+check all retained tool identities and scopes. Unverified scope membership,
+identity drift, scope escape and Worker workload prevent qualification. A new
+startup identity, an active startup helper outside a verified transport, or a
+discarded sample resets the consecutive sample count. Qualification requires
+five complete workload-free samples 100 milliseconds apart. Only the actual
+owned Dedicated Server creates this in-memory startup
+window. The final ownership proof uses the same deadline to account for any
+late startup children before committing the witness. Committing the witness
+or abandoning the connection consumes the window permanently. WorkerReady
+requires the committed witness, including when no eager Thread binding is
+requested. Diagnostic phases and later resumes cannot restore it. No task Turn or provider
 dispatch occurs inside the window. Failure retains the original or provisional
 Thread, unknown-state retry fence and Writer guard. Policy proofs and in-place
 access transitions retain their immediate refusal. A qualified acquire with an
@@ -2111,10 +2136,17 @@ Dedicated launch. Its bounded startup ownership witness binds the immutable
 Worker generation, app-server epoch, Dedicated identity and physical socket.
 The control locator and its replaceable socket epoch remain separate. Every
 admitted child and each verified nonleader ancestor are durably recorded before use; the
-witness becomes complete only after binding and final empty-scope verification,
+witness becomes complete only after binding and final workload-free policy verification,
 before WorkerReady. An incomplete witness cannot prove generation absence,
 even with no recorded children. Version 1 remains unchanged; frozen readers
 reject version 2 rather than ignore its ownership evidence.
+On an eligible first qualification timeout, the Worker records a separate
+[pre-dispatch witness](../protocol/dolgorae-startup-abort-v1.schema.json)
+bound to the runtime scope revision and the live
+descendant images. The Start owner or explicit reconciliation takes the
+original allocation and startup locks, checks the dispatch journal, and
+retains the Writer guard until exact process retirement and a terminal
+failure seal. The witness does not mark the startup scope ready.
 For reusable caller Specialists, the aggregate Role snapshot digest is the
 accepted Markdown Role body digest from Agent Configuration v3. Membership
 authorization verifies the stored configuration digest before using that capture;
@@ -2139,6 +2171,25 @@ Typed observations are validated before the lookup; disappearance cannot erase
 an observed violation. Every other scope, leader, socket, Worker and tracked-child
 check still runs before discarding the sample. The discarded sample resets the
 empty count without extending the deadline or satisfying qualification.
+The same startup deadline bounds resampling when a verified Profile tool
+uses Darwin's system `/bin/ps` as a short-lived subprocess. Its privileged
+sample must preserve its parent, process group and session. A fresh lookup
+must show the system image and the Profile's real UID, or exact process
+absence. This observation never grants signal authority or counts toward
+qualification.
+Once the witness is complete, a new child under a revalidated Profile
+transport prevents that policy sample from counting. Caller policy checks
+can resample for up to three seconds and require a fresh consecutive sequence
+without the unretained child. Ordinary workload, identity drift, and
+unverified ancestry still block the proof. Resampling never adds a process
+to the committed startup witness.
+When the second ancestry census loses part of a Startup child’s chain, it may
+also discard the sample if the Dedicated Server and every still-observed
+identity and parent edge match, and direct lookups return `ESRCH` for the child
+and every missing nonleader ancestor. A discarded sample admits no child,
+publishes no ownership witness, and still requires fresh empty samples. A
+surviving child, conflicting observation, or unavailable lookup keeps the
+ownership proof closed.
 An unavailable turnless binding after process loss is an explicit recovery
 limit; recovery cannot report a replacement thread as the original. Accepted
 instruction captures and startup selection survive that failure independently
@@ -3819,6 +3870,36 @@ Profile-wide operator shutdown alone may signal the verified singleton after
 complete membership handling.
 
 ## Runtime and Dependency Boundary
+
+Confirmed Run deletion uses the current Controller, the Writer observation
+lock, and the existing Run lifecycle and startup serializers. It consumes
+completed cleanup evidence and never drives the Worker. The Run store swaps
+the verified UUID directory with a [private tombstone](../protocol/dolgorae-run-deletion-v1.schema.json),
+syncs both parents,
+and removes only the detached directory whose identity was recorded before
+the exchange. The retained UUID prevents allocation replay from publishing
+the same Run again. History readers reject the deleted UUID, while workspace
+inventories distinguish a verified tombstone from damaged Run state.
+Operator force deletion uses the original Start allocation lock alongside
+Run lifecycle and startup serialization to prevent concurrent readmission.
+It proves generation absence before the UUID exchange, or records deferred
+runtime cleanup when both recorded control processes are absent and startup
+ownership is incomplete. The [force tombstone](../protocol/dolgorae-run-deletion-v2.schema.json)
+records the Operator identity, observed lifecycle, original Start outcome,
+and the exact remaining Writer and Profile membership scope. Both parents
+are synced before retiring that authority. A retried command can finish
+that cleanup using the marker without reopening the detached Run ledger.
+The locator and Worker digests bind deferred retirement to the exact
+generation, even when the original startup owner slots have cleared.
+For an eligible session Primary, an immediate orchestration transaction checks
+the accepted policy and empty dependency set, then records Operator abandonment.
+It retains the session, bootstrap, and Start identities. The allocation and
+lifecycle holds span this transaction. Startup and Writer locks are released
+before it, and the scoped process checks still govern physical cleanup.
+`run_deletion` owns that persisted marker and the directory exchange. It uses
+the Darwin filesystem adapter, workspace path checks, and the existing
+Run, Controller and Start receipt types. Ledger, artifact and quota admission
+reject the marker before opening or creating payload.
 
 The implementation is Rust 2024 pinned by `rust-toolchain.toml` to 1.97.1 with
 rustfmt, clippy, and `aarch64-apple-darwin`; Cargo.lock is committed. Go 1.26.6

@@ -1362,6 +1362,14 @@ fn interaction_cases(
     );
     drop(native);
     let identity = &snapshot.controller_authority().unwrap().identity;
+    let cases = fs::read_to_string(root.join(if existing_run.is_some() {
+        "task094-session"
+    } else {
+        "interaction-cases"
+    }))
+    .unwrap();
+    let cases = cases.trim().split(',').collect::<Vec<_>>();
+    let trace = root.join("home/workspace/e16-approval-fixture.txt");
     let principal_value = json!({"controller_id":identity.controller_id,"kind":identity.kind,"instance_id":identity.instance_id,"subject_id":identity.subject_id});
     let principal = format!(
         "sha256:{}",
@@ -1378,14 +1386,7 @@ fn interaction_cases(
             pb::operation_service_client::OperationServiceClient::new(channel.clone());
         let mut interactions =
             pb::interaction_service_client::InteractionServiceClient::new(channel);
-        let selected = fs::read_to_string(root.join(if existing_run.is_some() {
-            "task094-session"
-        } else {
-            "interaction-cases"
-        }))
-        .unwrap();
-        let selected = selected.trim().split(',').collect::<Vec<_>>();
-        for case in selected.iter().copied() {
+        for case in cases.iter().copied() {
             let current = runs
                 .get_run(pb::GetRunRequest {
                     context: context(),
@@ -1437,13 +1438,14 @@ fn interaction_cases(
             };
             assert_eq!(
                 summary.kind,
-                if case == "permission" {
-                    pb::InteractionKind::PermissionRequest
-                } else {
-                    pb::InteractionKind::McpElicitation
+                match case {
+                    "permission" => pb::InteractionKind::PermissionRequest,
+                    "mcp" => pb::InteractionKind::McpElicitation,
+                    "command" => pb::InteractionKind::CommandExecutionApproval,
+                    _ => panic!("unrecognized interaction case {case}"),
                 } as i32
             );
-            assert!(summary.contains_protected_input);
+            assert_eq!(summary.contains_protected_input, case != "command");
             let mut detail = interactions
                 .get_controller_interaction(pb::GetControllerInteractionRequest {
                     context: context(),
@@ -1457,6 +1459,23 @@ fn interaction_cases(
                 .interaction
                 .unwrap();
             let answer = match detail.payload.clone().unwrap() {
+                pb::controller_interaction::Payload::CommandApproval(p) => {
+                    assert_eq!(case, "command");
+                    assert_eq!(p.command.len(), 1);
+                    assert!(p.command[0].contains("E16_NATIVE_ACCEPTANCE_20261118"));
+                    assert!(p.command[0].contains("e16-approval-fixture.txt"));
+                    assert_eq!(
+                        p.cwd.and_then(|cwd| cwd.value),
+                        Some(pb::path_projection::Value::Utf8Path(
+                            trace.parent().unwrap().to_str().unwrap().into()
+                        ))
+                    );
+                    assert!(!trace.exists(), "command wrote before its approval");
+                    pb::InteractionAnswer {
+                        decision: pb::InteractionDecision::AcceptOnce as i32,
+                        ..Default::default()
+                    }
+                }
                 pb::controller_interaction::Payload::Permission(p) => {
                     assert!(!p.requested_permissions.is_empty());
                     pb::InteractionAnswer {
@@ -1511,6 +1530,12 @@ fn interaction_cases(
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             };
+            if case == "command" {
+                assert_eq!(
+                    current.writer_authority.as_ref().unwrap().state,
+                    pb::WriterAuthorityState::Active as i32
+                );
+            }
             let thread = current.thread.unwrap();
             let request = pb::ResolveInteractionRequest {
                 context: context(),
@@ -1530,13 +1555,15 @@ fn interaction_cases(
                 .unwrap()
                 .into_inner();
             let mut replay = request;
-            replay.answer = Some(pb::InteractionAnswer {
-                protected_input: Some(pb::ProtectedInputRef {
-                    absolute_file_path: "/not/read/on/receipt/replay".into(),
-                    maximum_bytes: 1,
-                }),
-                ..Default::default()
-            });
+            if case != "command" {
+                replay.answer = Some(pb::InteractionAnswer {
+                    protected_input: Some(pb::ProtectedInputRef {
+                        absolute_file_path: "/not/read/on/receipt/replay".into(),
+                        maximum_bytes: 1,
+                    }),
+                    ..Default::default()
+                });
+            }
             let replay = interactions
                 .resolve_interaction(replay)
                 .await
@@ -1576,17 +1603,16 @@ fn interaction_cases(
             assert_eq!(subjects.run_id, Some(id.to_string()));
             assert_eq!(subjects.interaction_id, Some(summary.interaction_id));
             loop {
-                let current = runs
-                    .get_run(pb::GetRunRequest {
-                        context: context(),
-                        run: run.clone(),
-                    })
-                    .await
-                    .unwrap()
-                    .into_inner()
-                    .run
-                    .unwrap();
+                let current = session::get(&mut runs, &run).await;
                 if current.lifecycle == pb::RunLifecycle::Idle as i32 {
+                    if case == "command" {
+                        assert!(current.active_turn.is_none());
+                        assert_eq!(current.pending_interaction_count, 0);
+                        assert!(matches!(
+                            current.last_final_response.and_then(|response| response.value),
+                            Some(pb::final_response::Value::InlineUtf8(text)) if text == "Done."
+                        ));
+                    }
                     break;
                 }
                 assert!(Instant::now() < deadline, "native terminal missing");
@@ -1608,15 +1634,25 @@ fn interaction_cases(
             );
         }
     }
-    let cases = fs::read_to_string(root.join(if existing_run.is_some() {
-        "task094-session"
-    } else {
-        "interaction-cases"
-    }))
-    .unwrap();
-    let permission = cases.trim().split(',').any(|v| v == "permission");
-    let mcp = cases.trim().split(',').any(|v| v == "mcp");
-    json!({"schema":"dolgorae.native-caller-pipeline/v1","mode":"interactions","public_v2_uds":true,"permission_accept":permission,"mcp_accept":mcp,"protected_receipt_replay":true,"native_turns":cases.trim().split(',').count(),"sequential_write_admissions_verified":permission&&mcp,"pre_dispatch_admission_settled":permission&&mcp})
+    let permission = cases.contains(&"permission");
+    let mcp = cases.contains(&"mcp");
+    let command = cases.contains(&"command");
+    if command {
+        assert_eq!(
+            fs::read(&trace).unwrap(),
+            b"E16_NATIVE_ACCEPTANCE_20261118\n"
+        );
+        let closed = mutation(
+            view,
+            credential,
+            id,
+            RunMutationOperation::Close { interrupt: false },
+            "command approval cleanup",
+        );
+        assert_eq!(closed.projection.lifecycle, RunLifecycle::Closed);
+        assert!(closed.writer.holder.is_none());
+    }
+    json!({"schema":"dolgorae.native-caller-pipeline/v1","mode":"interactions","public_v2_uds":true,"permission_accept":permission,"mcp_accept":mcp,"command_accept":command,"writer_released":command,"protected_receipt_replay":permission||mcp,"native_turns":cases.len(),"sequential_write_admissions_verified":permission&&mcp,"pre_dispatch_admission_settled":permission&&mcp})
 }
 
 fn pool_campaign(

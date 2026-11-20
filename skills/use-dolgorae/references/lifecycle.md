@@ -92,6 +92,34 @@ reconciliation through `run reconcile`. These commands resume the retained
 intent without starting a Turn or replaying an uncertain effect. A Profile
 Server stop is a separate Operator action and does not prove aggregate closure.
 
+## Delete a caller-workspace Run
+
+For a settled Run, confirm deletion with the current Controller.
+
+```sh
+dolgorae run delete <run-id> --workspace <path> --controller-file <path> --confirm
+```
+
+Use force deletion only when the user authorizes abandoning that Run and
+stopping its generation. Read the canonical workspace ID through
+`workspace inspect` and use the current Operator credential.
+
+```sh
+dolgorae run delete <run-id> --workspace <path> --force --confirm \
+  --confirm-workspace-id <workspace-id> --operator-file <path>
+```
+
+After a lost reply, repeat the confirmed command for the same target. Report
+any ownership or handoff refusal using the command's recovery details. Both
+commands preserve the Codex thread and prevent reallocation of the Run UUID.
+Force deletion can also abandon a session Primary whose retained binding
+matches and whose session has no Specialist dependencies or Controller close
+intent. If startup ownership was incomplete and the recorded control processes
+are absent, deletion can revoke the Run and its Writer authority while retaining
+the runtime locator. A result with `runtime_cleanup_pending: true` means that
+descendant cleanup remains unverified. The same confirmed command can retry
+cleanup after the host has restarted.
+
 ## Use low-level review targets
 
 New reviews use `specialist review` with the v4 direct-reading contract.

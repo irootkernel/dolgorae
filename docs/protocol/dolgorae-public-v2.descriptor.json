@@ -5,9 +5,9 @@
   "minimum_client_protocol_version": 2,
   "maximum_client_protocol_version": 2,
   "source": "dolgorae/public/v2/dolgorae.proto",
-  "source_sha256": "12aee93cfd0a93e05daa1d7b30d67c567658cd6c7302fd81d8c6db74138fe07d",
+  "source_sha256": "0c32da0e934f403ff4913a7969d7168c4fd3c51a714f866d36738d1ad55a19a5",
   "descriptor": "dolgorae-public-v2.descriptor.pb",
-  "descriptor_sha256": "89610f4d3434bed95626ee7d495e0c3a8712f7354d3e385598e121a485e0e8f8",
+  "descriptor_sha256": "c34b1da680ef7f8edfd8eb744047b0981311a4076b3c05c3d4adb4986565f8f5",
   "include_imports": true,
   "include_source_info": true,
   "runtime_availability": "not_activated_by_publication",
@@ -37,7 +37,7 @@
     "inputs": [
       {
         "path": "dolgorae/public/v2/dolgorae.proto",
-        "sha256": "12aee93cfd0a93e05daa1d7b30d67c567658cd6c7302fd81d8c6db74138fe07d"
+        "sha256": "0c32da0e934f403ff4913a7969d7168c4fd3c51a714f866d36738d1ad55a19a5"
       },
       {
         "path": "google/protobuf/timestamp.proto",
@@ -48,15 +48,15 @@
     "outputs": [
       {
         "path": "dolgorae-public-v2.descriptor.pb",
-        "sha256": "89610f4d3434bed95626ee7d495e0c3a8712f7354d3e385598e121a485e0e8f8"
+        "sha256": "c34b1da680ef7f8edfd8eb744047b0981311a4076b3c05c3d4adb4986565f8f5"
       },
       {
         "path": "generated/gul-consumer-v2/go/dolgorae/public/v2/dolgorae.pb.go",
-        "sha256": "8124c40ec828e99ebcd1c5fc659e1c0d1cca3c0636a97bf426b4a70bbda36127"
+        "sha256": "7786e2aa4447b6289489cecfb28ae70059c7b9f2c3605f6857c17d61026cb924"
       },
       {
         "path": "generated/gul-consumer-v2/go/dolgorae/public/v2/dolgorae_grpc.pb.go",
-        "sha256": "19217f4b590dba79cfcdd4e4bf3f5d6fab6e4fb360365b16c274960106eb7927"
+        "sha256": "e89f4cfd05393a618c9018bdd6c8e1a53b3a5da3e70e1cc4f512b52f767dd4e3"
       }
     ]
   }

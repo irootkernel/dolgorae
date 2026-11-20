@@ -7,6 +7,7 @@ use crate::workspace::LosslessPath;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
+use std::path::Path;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -17,6 +18,65 @@ pub(crate) struct CommandApprovalPayload {
     pub command: Vec<String>,
     pub cwd: LosslessPath,
     pub reason: Option<String>,
+}
+
+impl CommandApprovalPayload {
+    pub(crate) fn from_native(params: &serde_json::Value, workspace: &Path) -> Option<Self> {
+        use serde_json::Value;
+        if params.get("kind").is_some_and(|kind| kind != "command")
+            || params
+                .get("networkApprovalContext")
+                .is_some_and(|context| !context.is_null())
+        {
+            return None;
+        }
+        let command: Vec<String> = match params.get("command")? {
+            Value::String(command) => vec![command.clone()],
+            value @ Value::Array(_) => serde_json::from_value(value.clone()).ok()?,
+            _ => return None,
+        };
+        if command.first().is_none_or(|first| first.trim().is_empty()) {
+            return None;
+        }
+        let cwd = match params.get("cwd") {
+            None | Some(Value::Null) => LosslessPath::from_path(workspace),
+            Some(cwd) => serde_json::from_value(cwd.clone()).ok()?,
+        };
+        let reason =
+            serde_json::from_value(params.get("reason").cloned().unwrap_or(Value::Null)).ok()?;
+        let payload = Self {
+            title: params
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Command approval")
+                .to_owned(),
+            message: params
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Command execution requires approval")
+                .to_owned(),
+            command,
+            cwd,
+            reason,
+        };
+        payload.validate().ok()?;
+        Some(payload)
+    }
+
+    fn validate(&self) -> Result<(), MachineError> {
+        bounded(&self.title, 512)?;
+        bounded(&self.message, 4096)?;
+        if let Some(reason) = &self.reason {
+            bounded(reason, 4096)?;
+        }
+        if self.command.len() > 256 {
+            return Err(invalid("command argument count"));
+        }
+        for argument in &self.command {
+            bounded(argument, 4096)?;
+        }
+        path(&self.cwd)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -199,18 +259,7 @@ pub(crate) fn validate(interaction: &Interaction) -> Result<(), MachineError> {
         "command_execution_approval" => {
             let value: CommandApprovalPayload = serde_json::from_value(interaction.payload.clone())
                 .map_err(|_| invalid("command approval payload"))?;
-            bounded(&value.title, 512)?;
-            bounded(&value.message, 4096)?;
-            if let Some(reason) = &value.reason {
-                bounded(reason, 4096)?;
-            }
-            if value.command.len() > 256 {
-                return Err(invalid("command argument count"));
-            }
-            for argument in &value.command {
-                bounded(argument, 4096)?;
-            }
-            path(&value.cwd)?;
+            value.validate()?;
         }
         "file_change_approval" => {
             let value: FileApprovalPayload = serde_json::from_value(interaction.payload.clone())

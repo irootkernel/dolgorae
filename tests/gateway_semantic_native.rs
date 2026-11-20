@@ -66,6 +66,266 @@ fn assert_profile_sidecars(home: &std::path::Path) {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preallocation_start_reconciliation_closes_original_operations_without_dispatch() {
+    use dolgorae::protocol::public_v2 as modern;
+    let fixture = Fixture::with_tmp_scenario(support::base_scenario());
+    let carrier = dolgorae::controller::CredentialCarrier::open_path(&fixture.controller).unwrap();
+    let binding = dolgorae::controller::binding_from_carrier(&carrier, 1).unwrap();
+    let public = serde_json::json!({
+        "controller_id":binding.identity.controller_id,"kind":binding.identity.kind,
+        "instance_id":binding.identity.instance_id,"subject_id":binding.identity.subject_id,
+    });
+    let principal = format!(
+        "sha256:{}",
+        dolgorae::jcs::sha256_hex(
+            &dolgorae::jcs::canonicalize(&dolgorae::jcs::parse(&public.to_string()).unwrap())
+                .unwrap()
+        )
+    );
+    let context = || {
+        Some(modern::RequestContext {
+            protocol_version: 2,
+            client_request_id: Uuid::now_v7().to_string(),
+            client_instance_id: "start-reconciliation-contract".into(),
+        })
+    };
+    let request = |key: &str| modern::LookupOperationRequest {
+        context: context(),
+        controller: Some(modern::ControllerCarrierRef {
+            absolute_file_path: fixture.controller.to_string_lossy().into(),
+            expected_controller_id: fixture.controller_id.clone(),
+            expected_controller_generation: 1,
+        }),
+        operation: Some(modern::OperationRef {
+            caller_scope: Some(modern::CallerScope {
+                controller_kind: modern::ControllerKind::Automation as i32,
+                principal_ref: principal.clone(),
+                controller_generation: 1,
+                workspace_id: fixture.workspace_id.clone(),
+                aggregate: Some(modern::caller_scope::Aggregate::ProvisioningScope(
+                    "run-start".into(),
+                )),
+            }),
+            operation_kind: modern::OperationKind::StartRun as i32,
+            idempotency_key: key.into(),
+        }),
+    };
+    let reconcile_request =
+        |value: modern::LookupOperationRequest| modern::ReconcileStartOperationRequest {
+            context: value.context,
+            controller: value.controller,
+            operation: value.operation,
+        };
+    let mut gateway = fixture.start_gateway();
+    let channel = gateway.channel().await;
+    let mut runtime = modern::runtime_service_client::RuntimeServiceClient::new(channel.clone());
+    let capabilities = runtime
+        .get_capabilities(modern::GetCapabilitiesRequest {
+            context: context(),
+            minimum_protocol_version: 2,
+            maximum_protocol_version: 2,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        capabilities
+            .supported_methods
+            .iter()
+            .any(|m| m == "OperationService.ReconcileStartOperation")
+    );
+    let mut operations =
+        modern::operation_service_client::OperationServiceClient::new(channel.clone());
+    let before = fs::read(fixture.root.join("transcript.jsonl")).unwrap();
+    let original = request("original-unknown");
+    let lookup = operations
+        .lookup_operation(original.clone())
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(matches!(lookup.result,
+        Some(modern::lookup_operation_response::Result::Unresolved(ref value))
+            if value.known_subjects.as_ref().unwrap().run_id.is_none()));
+    let mut wrong = original.clone();
+    wrong.operation.as_mut().unwrap().operation_kind = modern::OperationKind::SubmitTurn as i32;
+    assert!(
+        operations
+            .reconcile_start_operation(reconcile_request(wrong))
+            .await
+            .is_err()
+    );
+    assert_eq!(run_count(&fixture), 0);
+    let mut wrong_generation = original.clone();
+    wrong_generation
+        .controller
+        .as_mut()
+        .unwrap()
+        .expected_controller_generation = 2;
+    assert!(
+        operations
+            .reconcile_start_operation(reconcile_request(wrong_generation))
+            .await
+            .is_err()
+    );
+
+    let closed = operations
+        .reconcile_start_operation(reconcile_request(original.clone()))
+        .await
+        .unwrap()
+        .into_inner()
+        .result
+        .unwrap();
+    let modern::lookup_operation_response::Result::ClosedWithoutAcceptance(ref proof) = closed
+    else {
+        panic!("expected a terminal Start closure");
+    };
+    assert_eq!(proof.operation, original.operation);
+    assert!(proof.original_key_permanently_closed);
+    assert_eq!(proof.durable_watermark, 1);
+    assert!(proof.closure_receipt_digest.starts_with("sha256:"));
+    assert_eq!(
+        operations
+            .reconcile_start_operation(reconcile_request(original.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .result,
+        Some(closed.clone())
+    );
+    assert_eq!(
+        operations
+            .lookup_operation(original.clone())
+            .await
+            .unwrap()
+            .into_inner()
+            .result,
+        Some(closed.clone())
+    );
+
+    let mut foreign = original.clone();
+    foreign
+        .operation
+        .as_mut()
+        .unwrap()
+        .caller_scope
+        .as_mut()
+        .unwrap()
+        .principal_ref = format!("sha256:{}", "0".repeat(64));
+    assert!(
+        operations
+            .reconcile_start_operation(reconcile_request(foreign))
+            .await
+            .is_err()
+    );
+
+    let second = operations
+        .reconcile_start_operation(reconcile_request(request("diagnostic-unknown")))
+        .await
+        .unwrap()
+        .into_inner()
+        .result
+        .unwrap();
+    let modern::lookup_operation_response::Result::ClosedWithoutAcceptance(second) = second else {
+        panic!("expected second closure")
+    };
+    assert_ne!(second.closure_receipt_digest, proof.closure_receipt_digest);
+    assert_eq!(
+        fs::read(fixture.root.join("transcript.jsonl")).unwrap(),
+        before,
+        "reconciliation must not send Profile, Thread or Turn requests"
+    );
+    assert_eq!(run_count(&fixture), 0);
+
+    // A closed key is rejected before mutable provisioning is needed.
+    let mut runs = modern::run_service_client::RunServiceClient::new(channel.clone());
+    let status = runs
+        .start_run(modern::StartRunRequest {
+            context: context(),
+            workspace: Some(modern::WorkspaceRef {
+                absolute_path: fixture.workspace.to_string_lossy().into(),
+                expected_workspace_id: fixture.workspace_id.clone(),
+            }),
+            controller: original.controller.clone(),
+            idempotency_key: "original-unknown".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    let rich = RichStatus::decode(status.details()).unwrap();
+    let detail = modern::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap();
+    assert_eq!(detail.dolgorae_error_code, "IDEMPOTENCY_CONFLICT");
+    assert_eq!(detail.operation, original.operation);
+    assert_eq!(run_count(&fixture), 0);
+
+    // An unavailable namespace remains unresolved and retains the original ref.
+    let record_path = fixture.state_root.join("workspace.json");
+    let record = fs::read(&record_path).unwrap();
+    let mut replaced: Value = serde_json::from_slice(&record).unwrap();
+    replaced["state_root_identity"]["inode"] = serde_json::json!(0);
+    fs::write(&record_path, serde_json::to_vec(&replaced).unwrap()).unwrap();
+    let unavailable = request("unavailable-unknown");
+    let status = operations
+        .reconcile_start_operation(reconcile_request(unavailable.clone()))
+        .await
+        .unwrap_err();
+    fs::write(&record_path, record).unwrap();
+    let rich = RichStatus::decode(status.details()).unwrap();
+    let detail = modern::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap();
+    assert_eq!(detail.dolgorae_error_code, "RECOVERY_REQUIRED");
+    assert_eq!(detail.operation, unavailable.operation);
+    assert_eq!(
+        operations
+            .lookup_operation(unavailable)
+            .await
+            .unwrap()
+            .into_inner()
+            .result,
+        Some(modern::lookup_operation_response::Result::Unresolved(
+            modern::UnresolvedOperation {
+                operation: request("unavailable-unknown").operation,
+                known_subjects: Some(modern::SubjectIdentities::default()),
+                effect: modern::EffectState::Unresolved as i32,
+                required_action: modern::RequiredClientAction::ReconcileOperation as i32,
+            }
+        ))
+    );
+
+    gateway.terminate();
+    let mut restarted = fixture.start_gateway();
+    let channel = restarted.channel().await;
+    let mut runtime = modern::runtime_service_client::RuntimeServiceClient::new(channel.clone());
+    runtime
+        .get_capabilities(modern::GetCapabilitiesRequest {
+            context: context(),
+            minimum_protocol_version: 2,
+            maximum_protocol_version: 2,
+        })
+        .await
+        .unwrap();
+    let mut operations = modern::operation_service_client::OperationServiceClient::new(channel);
+    assert_eq!(
+        operations
+            .lookup_operation(original.clone())
+            .await
+            .unwrap()
+            .into_inner()
+            .result,
+        Some(closed.clone())
+    );
+    assert_eq!(
+        operations
+            .reconcile_start_operation(reconcile_request(original))
+            .await
+            .unwrap()
+            .into_inner()
+            .result,
+        Some(closed)
+    );
+    assert_eq!(run_count(&fixture), 0);
+    restarted.terminate();
+}
+
 struct PublicResultAdapter;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2098,6 +2358,21 @@ async fn root_close_preserves_unknown_primary_until_matching_history_is_terminal
         .unwrap();
     let unknown = native_snapshot(&mut runs, &fixture, &started.run_id).await;
     assert_eq!(unknown.lifecycle, pb::RunLifecycle::OutcomeUnknown as i32);
+    let before_delete = audit(&fixture, &started.run_id);
+    let refused_delete = fixture.command(&[
+        "run",
+        "delete",
+        &started.run_id,
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+        "--controller-file",
+        &controller.absolute_file_path,
+        "--confirm",
+    ]);
+    assert!(!refused_delete.status.success());
+    let refusal: Value = serde_json::from_slice(&refused_delete.stdout).unwrap();
+    assert_eq!(refusal["error"]["code"], "RUN_STATE_CONFLICT");
+    assert_eq!(audit(&fixture, &started.run_id), before_delete);
     assert!(
         !audit(&fixture, &started.run_id)
             .windows(b"\"terminal_seal\":true".len())
@@ -3428,6 +3703,471 @@ fn caller_fixture_manifest(original: &[u8]) -> dolgorae::run::RunManifest {
     .unwrap();
     manifest.instructions = instructions.into();
     manifest
+}
+
+#[test]
+fn operator_force_delete_retires_only_the_verified_old_boot_generation() {
+    use dolgorae::domain::RunLifecycle;
+    use dolgorae::global_runtime::{GlobalMembershipStore, MembershipDisposition};
+    use dolgorae::paths::DolgoraeHome;
+    use dolgorae::worker::{
+        self, SocketIdentity, StartupLockFile, StartupScopeWitness, WorkerRuntimeRecord,
+    };
+    use dolgorae::writer::{WriterAuthorityState, WriterHolder, WriterStore};
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let fixture = Fixture::with_tmp_scenario(support::base_scenario());
+    let id = fixture.start_run(&["--execution-lane", "dedicated"]);
+    let other = fixture.start_run(&["--execution-lane", "dedicated"]);
+    let run_id = Uuid::parse_str(&id).unwrap();
+    let other_id = Uuid::parse_str(&other).unwrap();
+    let run = fixture.state_root.join("runs").join(&id);
+    let manifest_path = run.join("manifest.json");
+    let manifest = caller_fixture_manifest(&fs::read(&manifest_path).unwrap());
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let home = DolgoraeHome::from_canonical_home(fixture.home.clone()).unwrap();
+    let membership =
+        GlobalMembershipStore::new(&home, &fixture.profile, &fixture.server_key).unwrap();
+    let key = format!("{}:{run_id}", fixture.workspace_id);
+    let other_key = format!("{}:{other_id}", fixture.workspace_id);
+    let before = membership.load().unwrap();
+    assert_ne!(
+        before.members[&key].disposition,
+        MembershipDisposition::Released
+    );
+
+    let runtime_root = worker::runtime_root(&fixture.state_root);
+    let path = worker::runtime_record_path(&runtime_root, run_id).unwrap();
+    let mut owner = worker::current_startup_owner(&fixture.workspace_id, run_id, 1).unwrap();
+    let uid = owner.identity.uid;
+    let startup_path = worker::startup_lock_path(&runtime_root, run_id);
+    if !path.parent().unwrap().exists() {
+        fs::create_dir(path.parent().unwrap()).unwrap();
+        fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let lock = StartupLockFile::open(&startup_path, uid).unwrap();
+    owner.slot = 1;
+    let mut record = WorkerRuntimeRecord {
+        schema_version: 2,
+        identity: owner.identity.clone(),
+        socket_path: worker::worker_socket_path(uid, &fixture.workspace_id, run_id).unwrap(),
+        socket_identity: SocketIdentity {
+            device: 1,
+            inode: 1,
+        },
+        control_socket_epoch: 1,
+        app_server_epoch: Some(1),
+        control_recovery_required: false,
+        startup_scope: Some(StartupScopeWitness {
+            worker_identity: owner.identity.clone(),
+            app_server_epoch: 1,
+            dedicated_server_identity: None,
+            app_server_socket_identity: None,
+            revision: 1,
+            complete: false,
+            children: Vec::new(),
+        }),
+        dedicated_server_identity: None,
+        dolgorae_version: env!("CARGO_PKG_VERSION").into(),
+        mutation_protocol_version: worker::WORKER_PROTOCOL_VERSION,
+        binary_sha256: owner.identity.executable_sha256.clone(),
+    };
+    lock.write_owner(&owner).unwrap();
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap()
+        .write_all(&serde_json::to_vec(&record).unwrap())
+        .unwrap();
+    let writer = WriterStore::new(&fixture.state_root, &fixture.workspace_id, uid);
+    let (blocked, ()) = writer
+        .transact(|record| {
+            record.state = WriterAuthorityState::BlockedUnknown;
+            record.writer_generation = 1;
+            record.transaction_id = Some(Uuid::now_v7());
+            record.holder = Some(WriterHolder {
+                run_id,
+                profile: fixture.profile.clone(),
+                controller_id: manifest.controller.identity.controller_id,
+                controller_generation: manifest.controller.identity.generation,
+                run_generation: 1,
+                worker_generation: 1,
+                profile_server_key: fixture.server_key.clone(),
+                profile_server_epoch: 1,
+                thread_id: None,
+                lifecycle: RunLifecycle::Starting,
+                active_turn_id: None,
+                pending_interaction_count: 0,
+                last_event_cursor: None,
+            });
+            Ok(())
+        })
+        .unwrap();
+    let workspace = fixture.workspace.to_str().unwrap();
+    let operator = fixture.operator.to_str().unwrap();
+    let command = |workspace_id: &str, carrier: &str| {
+        fixture.command(&[
+            "run",
+            "delete",
+            &id,
+            "--workspace",
+            workspace,
+            "--force",
+            "--confirm",
+            "--confirm-workspace-id",
+            workspace_id,
+            "--operator-file",
+            carrier,
+        ])
+    };
+    let failure = |output: std::process::Output, code: &str| {
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{value}");
+        assert_eq!(value["error"]["code"], code, "{value}");
+        value
+    };
+    failure(command(&"f".repeat(64), operator), "INVALID_ARGUMENT");
+    assert!(
+        !command(&fixture.workspace_id, fixture.controller.to_str().unwrap())
+            .status
+            .success()
+    );
+    let error = failure(
+        command(&fixture.workspace_id, operator),
+        "RECOVERY_REQUIRED",
+    );
+    assert_eq!(
+        error["error"]["details"]["reason"],
+        "runtime_control_process_not_absent"
+    );
+    assert_eq!(writer.load().unwrap(), blocked);
+    assert!(manifest_path.exists());
+
+    // The same PID is deliberately still alive. Only the authenticated prior
+    // boot claim can permit retirement, and that path must never use the PID.
+    record.identity.boot_uuid = Uuid::now_v7();
+    record.startup_scope.as_mut().unwrap().worker_identity = record.identity.clone();
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let error = failure(
+        command(&fixture.workspace_id, operator),
+        "RECOVERY_REQUIRED",
+    );
+    assert_eq!(
+        error["error"]["details"]["reason"],
+        "runtime_startup_owner_mismatch"
+    );
+    owner.identity = record.identity.clone();
+    lock.write_owner(&owner).unwrap();
+    for _ in 0..2 {
+        let output = command(&fixture.workspace_id, operator);
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{envelope}");
+        assert_eq!(envelope["data"], serde_json::json!({"deleted":true}));
+    }
+    assert!(!path.exists());
+    let marker: Value =
+        serde_json::from_slice(&fs::read(run.join("run-deletion.json")).unwrap()).unwrap();
+    assert_eq!(marker["schema_version"], 2);
+    assert_eq!(marker["lifecycle"], "idle");
+    assert_eq!(marker["force"]["start_outcome"], "unknown");
+    assert_eq!(marker["force"]["writer_generation"], 1);
+    assert_eq!(lock.read_owner(1).unwrap(), Some(owner));
+    assert!(!fixture.state_root.join("run-deletions").join(&id).exists());
+    let after = writer.load().unwrap();
+    assert_eq!(after.state, WriterAuthorityState::None);
+    assert_eq!(after.writer_generation, blocked.writer_generation);
+    assert_eq!(after.writer_lock_inode, blocked.writer_lock_inode);
+    assert_eq!(after.handoff_lock_inode, blocked.handoff_lock_inode);
+    let members = membership.load().unwrap().members;
+    assert_eq!(members[&key].disposition, MembershipDisposition::Released);
+    assert_eq!(members[&other_key], before.members[&other_key]);
+    assert!(
+        fixture
+            .state_root
+            .join("runs")
+            .join(&other)
+            .join("manifest.json")
+            .is_file()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operator_force_delete_stops_the_live_dedicated_worker_and_server() {
+    check_force_delete_live_generation(false).await;
+    check_force_delete_live_generation(true).await;
+}
+
+async fn check_force_delete_live_generation(unresponsive: bool) {
+    use dolgorae::darwin::DarwinSystem;
+    use dolgorae::worker::{self, ProcessIdentityVerdict, SocketIdentity, StartupScopeWitness};
+    use dolgorae::writer::{WriterAuthorityState, WriterStore};
+    use std::os::unix::fs::MetadataExt as _;
+
+    let fixture = Fixture::new_compact("run_start_model_list.json");
+    let id = fixture.start_run(&["--execution-lane", "dedicated"]);
+    let run_id = Uuid::parse_str(&id).unwrap();
+    let mut gateway = fixture.start_gateway();
+    let mut runs = pb::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let initial = native_snapshot(&mut runs, &fixture, &id).await;
+    native_submit(&mut runs, &fixture, &initial, pb::WriteIntent::Write).await;
+    native_wait_lifecycle(&mut runs, &fixture, &id, pb::RunLifecycle::Idle).await;
+    let runtime =
+        worker::runtime_record_path(&worker::runtime_root(&fixture.state_root), run_id).unwrap();
+    let uid = DarwinSystem.current_uid();
+    let mut record = worker::read_runtime_record(&runtime, uid).unwrap();
+    assert_eq!(
+        worker::classify_worker_identity(&record),
+        ProcessIdentityVerdict::Match
+    );
+    let dedicated = record
+        .dedicated_server_identity
+        .clone()
+        .expect("real fixture Dedicated Server");
+    let app_socket =
+        worker::dedicated_server_socket_path(uid, run_id, record.identity.run_generation).unwrap();
+    let socket = fs::metadata(&app_socket).unwrap();
+    let worker_exit = DarwinSystem
+        .watch_process_exit(record.identity.pid)
+        .unwrap();
+    let server_exit = DarwinSystem.watch_process_exit(dedicated.pid).unwrap();
+    let writer = WriterStore::new(&fixture.state_root, &fixture.workspace_id, uid);
+    assert_eq!(writer.load().unwrap().state, WriterAuthorityState::Active);
+
+    // The fake upstream vanishes if made to qualify as a real caller Codex.
+    // The fixture Worker and Dedicated Server are genuine local processes.
+    // Give their retained legacy records the caller startup evidence fields.
+    let manifest_path = fixture
+        .state_root
+        .join("runs")
+        .join(&id)
+        .join("manifest.json");
+    let manifest = caller_fixture_manifest(&fs::read(&manifest_path).unwrap());
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    record.schema_version = 2;
+    record.startup_scope = Some(StartupScopeWitness {
+        worker_identity: record.identity.clone(),
+        app_server_epoch: record.app_server_epoch.unwrap(),
+        dedicated_server_identity: Some(dedicated),
+        app_server_socket_identity: Some(SocketIdentity {
+            device: socket.dev(),
+            inode: socket.ino(),
+        }),
+        revision: 1,
+        complete: true,
+        children: Vec::new(),
+    });
+    fs::write(&runtime, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    if unresponsive {
+        assert_eq!(
+            worker::classify_worker_identity(&record),
+            ProcessIdentityVerdict::Match
+        );
+        assert!(
+            Command::new("/bin/kill")
+                .args(["-STOP", &record.identity.pid.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let result = fixture
+        .process()
+        .args([
+            "run",
+            "delete",
+            &id,
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--force",
+            "--confirm",
+            "--confirm-workspace-id",
+            &fixture.workspace_id,
+            "--operator-file",
+            fixture.operator.to_str().unwrap(),
+        ])
+        .output();
+    if unresponsive && worker::classify_worker_identity(&record) == ProcessIdentityVerdict::Match {
+        let _ = Command::new("/bin/kill")
+            .args(["-CONT", &record.identity.pid.to_string()])
+            .status();
+    }
+    let result = result.unwrap();
+    let envelope: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(result.status.success(), "{envelope}");
+    assert_eq!(envelope["data"], serde_json::json!({"deleted":true}));
+    assert!(worker_exit.exited().unwrap());
+    assert!(server_exit.exited().unwrap());
+    assert!(!runtime.exists());
+    assert!(!app_socket.exists());
+    assert!(!record.socket_path.exists());
+    assert!(!manifest_path.exists());
+    assert_eq!(writer.load().unwrap().state, WriterAuthorityState::None);
+    gateway.terminate();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirmed_caller_run_delete_retires_only_the_settled_run() {
+    use dolgorae::protocol::public_v2 as modern;
+
+    let fixture = Fixture::with_tmp_scenario(support::base_scenario());
+    let workspace = fixture.workspace.to_str().unwrap();
+    let controller = fixture.controller.to_str().unwrap();
+    let key = "confirmed-delete-original";
+    let id = fixture.start_run(&["--execution-lane", "dedicated", "--idempotency-key", key]);
+    let run = fixture.state_root.join("runs").join(&id);
+    let manifest_path = run.join("manifest.json");
+    let delete = |controller: &str| {
+        fixture.command(&[
+            "run",
+            "delete",
+            &id,
+            "--workspace",
+            workspace,
+            "--controller-file",
+            controller,
+            "--confirm",
+        ])
+    };
+    let failure = |output: std::process::Output, code: &str| {
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{value}");
+        assert_eq!(value["error"]["code"], code, "{value}");
+    };
+
+    failure(delete(controller), "RUN_STATE_CONFLICT");
+    assert!(manifest_path.is_file());
+    fixture.cli(&[
+        "run",
+        "close",
+        &id,
+        "--workspace",
+        workspace,
+        "--controller-file",
+        controller,
+    ]);
+
+    // Retain the real ledger, retired runtime and allocation; adapt only the
+    // manifest so the fake runtime need not qualify as an external Codex.
+    let original = fs::read(&manifest_path).unwrap();
+    let manifest = caller_fixture_manifest(&original);
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let original_key_bytes = fs::read(fixture.state_root.join("idempotency/run-start").join(
+        format!("{}.json", dolgorae::jcs::sha256_hex(key.as_bytes()),),
+    ))
+    .unwrap();
+    let untouched = fixture
+        .home
+        .parent()
+        .unwrap()
+        .join("codex-home")
+        .join("original-thread-evidence");
+    fs::write(&untouched, b"retained Codex content").unwrap();
+    let another = fixture.root.join("unrelated-controller.json");
+    fixture.cli(&[
+        "controller",
+        "credential",
+        "create",
+        "--kind",
+        "automation",
+        "--instance-id",
+        "delete-wrong-controller",
+        "--output",
+        another.to_str().unwrap(),
+    ]);
+    failure(delete(another.to_str().unwrap()), "CONTROLLER_MISMATCH");
+    failure(
+        fixture.command(&[
+            "run",
+            "delete",
+            &id,
+            "--workspace",
+            workspace,
+            "--controller-file",
+            controller,
+        ]),
+        "INVALID_ARGUMENT",
+    );
+    assert!(manifest_path.is_file());
+
+    for _ in 0..2 {
+        let output = delete(controller);
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{envelope}");
+        assert_eq!(envelope["data"], serde_json::json!({"deleted":true}));
+    }
+    assert!(!manifest_path.exists());
+    assert!(run.join("run-deletion.json").is_file());
+    assert_eq!(fs::read_dir(&run).unwrap().count(), 1);
+    assert_eq!(fs::read(&untouched).unwrap(), b"retained Codex content");
+    assert_eq!(
+        fs::read(
+            fixture
+                .state_root
+                .join("idempotency/run-start")
+                .join(format!(
+                    "{}.json",
+                    dolgorae::jcs::sha256_hex(key.as_bytes()),
+                ))
+        )
+        .unwrap(),
+        original_key_bytes
+    );
+    failure(
+        fixture.command(&["run", "status", &id, "--workspace", workspace]),
+        "RUN_NOT_FOUND",
+    );
+    failure(delete(another.to_str().unwrap()), "CONTROLLER_MISMATCH");
+    failure(
+        fixture.command(&[
+            "run",
+            "start",
+            "--workspace",
+            workspace,
+            "--controller-file",
+            controller,
+            "--profile",
+            &fixture.profile,
+            "--execution-lane",
+            "dedicated",
+            "--control-mode",
+            "managed-agent",
+            "--required-assurance",
+            "best-effort-personal-alpha",
+            "--purpose",
+            "implementation",
+            "--instructions",
+            "Execute the isolated gateway test task.",
+            "--idempotency-key",
+            key,
+        ]),
+        "RUN_NOT_FOUND",
+    );
+    let other = fixture.start_run(&["--execution-lane", "dedicated"]);
+    assert_ne!(other, id);
+    let mut gateway = fixture.start_gateway();
+    let mut runs = modern::run_service_client::RunServiceClient::new(gateway.channel().await);
+    let listed = runs
+        .list_runs(modern::ListRunsRequest {
+            context: Some(modern::RequestContext {
+                protocol_version: 2,
+                client_request_id: Uuid::now_v7().to_string(),
+                client_instance_id: "confirmed-delete-test".into(),
+            }),
+            workspace: Some(modern::WorkspaceRef {
+                absolute_path: workspace.into(),
+                expected_workspace_id: fixture.workspace_id.clone(),
+            }),
+            controller_id: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].run_id, other);
+    gateway.terminate();
 }
 
 #[test]

@@ -78,27 +78,39 @@ class InteractionResponses(ScriptedResponses):
         self.mcp_worker.start()
 
     def respond(self, request):
-        from run_native_workspace_policy_fixture import code_call
+        from run_native_workspace_policy_fixture import code_call, code_results, terminal_output
         with self.lock:
             self.posts += 1
             if self.posts > 6 or not isinstance(request, dict):
                 raise ValueError("interaction fixture request bound")
             users = [v for v in request.get("input", []) if v.get("type")=="message" and v.get("role")=="user"]
             text = json.dumps(users[-1]) if users else ""
-            case = "permission" if "TASK079 permission" in text else "mcp" if "TASK079 mcp" in text else None
+            case = next((case for case in ("permission", "mcp", "command") if "TASK079 " + case in text), None)
             if case is None:
                 raise ValueError("interaction task correlation")
             if case not in self.issued_cases:
                 self.issued_cases.add(case)
                 name = "request_permissions" if case=="permission" else "mcp__fixture__ask"
                 args = {"permissions":{"file_system":{"read":[str(self.workspace)]}},"reason":"Bounded fixture read permission"} if case=="permission" else {}
-                if case == "permission":
+                if case == "command":
+                    item = code_call(request, "task079-command", [(case, "exec_command", {
+                        "cmd": "printf '%s\\n' 'E16_NATIVE_ACCEPTANCE_20261118' >> e16-approval-fixture.txt",
+                        "workdir": str(self.workspace),
+                        "sandbox_permissions": "require_escalated",
+                        "justification": "May I write the approval fixture?",
+                    })])
+                elif case == "permission":
                     item = code_call(request, "task079-"+case, [(case,name,args)])
                 else:
                     # The driver checks this configured server's actual native inventory.
                     # Native deferred tools are callable without being in exec's static description.
                     item = {"type":"custom_tool_call", "call_id":"task079-mcp", "name":"exec", "namespace":"functions", "input":"text({label:'mcp',result:await tools.mcp__fixture__ask({})});"}
             else:
+                if case == "command":
+                    result = code_results(request, "task079-command", [case])[case]
+                    expected = b"E16_NATIVE_ACCEPTANCE_20261118\n"
+                    if terminal_output(result)[0] != 0 or (self.workspace / "e16-approval-fixture.txt").read_bytes() != expected:
+                        raise ValueError("native escalated command did not write exactly once")
                 self.completed_cases.add(case)
                 item={"type":"message","role":"assistant","id":"task079-message-"+case,"content":[{"type":"output_text","text":"Done."}]}
             identity = "task079-response-"+str(self.posts)
@@ -153,7 +165,7 @@ class SessionResponses(InteractionResponses):
             return [{"type":"response.created","response":{"id":identity}}, {"type":"response.output_item.done","item":item}, {"type":"response.completed","response":{"id":identity,"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}]
 
 
-def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1, interactions: bool = False, mcp_only: bool = False, task094_session: bool = False, prepared_worker_loss: bool = False, native_specialist: bool = False, specialist_disabled: bool = False) -> dict[str, object]:
+def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_variant: str | None = None, readonly_pool: bool = False, pool_limit: int = 1, interactions: bool = False, mcp_only: bool = False, command_only: bool = False, task094_session: bool = False, prepared_worker_loss: bool = False, native_specialist: bool = False, specialist_disabled: bool = False) -> dict[str, object]:
     if os.environ.get(OPT_IN) != "1":
         raise ValueError("explicit native caller pipeline opt-in required")
     if native_specialist:
@@ -216,7 +228,8 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
             fixture.prepare(command)
             fixture.instruction_markers = {"common": "Follow the current task and the selected Role", "role": "POOL_EXPLICIT_ROLE", "profile": "Permitted isolated native Profile guidance.", "project": "Conflicting isolated project instructions.", "ancestor": "Conflicting isolated ancestor instructions."}
         if interactions:
-            private_file(scratch / "interaction-cases", b"mcp\n" if mcp_only else b"permission,mcp\n")
+            cases = b"command\n" if command_only else b"mcp\n" if mcp_only else b"permission,mcp\n"
+            private_file(scratch / "interaction-cases", cases)
         if native_specialist:
             private_file(scratch / "native-specialist", b"public-native\n")
             if specialist_disabled:
@@ -239,12 +252,17 @@ def campaign(driver: Path, codex: Path, *, binary: Path | None = None, default_v
                     or fixture.ambient_seen["project"] or fixture.ambient_seen["ancestor"]
                     or (scratch / "home" / "workspace" / "pool-write-denied").exists()):
                 raise ValueError("native pooled read-only or instruction suppression failed")
-        if interactions and (fixture.completed_cases != ({"mcp"} if mcp_only else {"permission", "mcp"}) or fixture.mcp_decision != "accept" or fixture.posts != (2 if mcp_only else 4)):
+        if command_only:
+            if fixture.completed_cases != {"command"} or fixture.posts != 2:
+                raise ValueError("native command approval routing incomplete")
+        elif interactions and (fixture.completed_cases != ({"mcp"} if mcp_only else {"permission", "mcp"}) or fixture.mcp_decision != "accept" or fixture.posts != (2 if mcp_only else 4)):
             raise ValueError("native interaction routing incomplete")
         observations = json.loads(result.stdout)
         if observations.get("schema") != "dolgorae.native-caller-pipeline/v1":
             raise ValueError("native caller pipeline observation shape invalid")
-        if interactions and not mcp_only and observations.get("sequential_write_admissions_verified") is not True:
+        if command_only and any(observations.get(key) is not True for key in ("command_accept", "writer_released")):
+            raise ValueError("native command approval or Writer cleanup unproved")
+        if interactions and not (mcp_only or command_only) and observations.get("sequential_write_admissions_verified") is not True:
             raise ValueError("sequential WRITE admission unproved")
         if native_specialist:
             import sqlite3
@@ -443,15 +461,17 @@ def main() -> int:
     parser.add_argument("--specialist-disabled", action="store_true")
     parser.add_argument("--prepared-worker-loss", action="store_true",
                         help="fault an instrumented product after preparation scope publication")
-    parser.add_argument("--interactions", action="store_true")
-    parser.add_argument("--interactions-mcp-only", action="store_true")
+    interactions = parser.add_mutually_exclusive_group()
+    interactions.add_argument("--interactions", action="store_true")
+    interactions.add_argument("--interactions-mcp-only", action="store_true")
+    interactions.add_argument("--command-approval", action="store_true")
     parser.add_argument("--pool-limit", type=int, choices=(1, 4), default=1)
     args = parser.parse_args()
     try:
         selected=default_feature_campaign if args.default_feature_startup_only else campaign
         kwargs = {"readonly_pool": True, "pool_limit": args.pool_limit} if args.readonly_pool else {}
-        if args.interactions or args.interactions_mcp_only:
-            kwargs = {"interactions": True, "mcp_only": args.interactions_mcp_only}
+        if args.interactions or args.interactions_mcp_only or args.command_approval:
+            kwargs = {"interactions": True, "mcp_only": args.interactions_mcp_only, "command_only": args.command_approval}
         if args.prepared_worker_loss and not args.task094_session:
             raise ValueError("prepared Worker loss requires task094-session")
         if args.task094_session:

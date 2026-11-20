@@ -2328,6 +2328,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     pub fn active_turn_id(&self) -> Option<&str> {
         self.active_turn_id.as_deref()
     }
+    pub(crate) fn recovery_turn_id(&self) -> Option<&str> {
+        self.recovery_turn_id.as_deref()
+    }
     pub(crate) fn default_effort(&self) -> &str {
         &self.default_effort
     }
@@ -2497,32 +2500,20 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 .caller_runtime
                 .as_mut()
                 .expect("qualified runtime")
-                .prove_startup_quiescence_observed(
-                    self.caller_startup_phase
-                        .is_some()
-                        .then_some(&mut diagnostic),
-                );
+                .prove_startup_quiescence_observed(Some(&mut diagnostic));
             if let Err(error) = result {
-                if self.caller_startup_phase.is_some() {
-                    self.caller_startup_failure = Some(serde_json::json!({
-                        "caller_context": caller_context,
-                        "process_proof": diagnostic, "worker_error_code": error.code(),
-                    }));
-                }
+                self.caller_startup_failure = Some(serde_json::json!({
+                    "caller_context": caller_context,
+                    "process_proof": diagnostic, "worker_error_code": error.code(),
+                }));
                 return Err(TurnError::TurnBusy);
             }
         }
         Ok(())
     }
 
-    pub(crate) fn finish_caller_connection_startup(&mut self) {
-        if let Some(runtime) = self.caller_runtime.as_mut() {
-            runtime.finish_connection_startup();
-        }
-    }
-
     pub(crate) fn complete_caller_runtime_startup(&mut self) -> Result<(), TurnError> {
-        if let Some(runtime) = &self.caller_runtime {
+        if let Some(runtime) = &mut self.caller_runtime {
             let mut diagnostic = Value::Null;
             if let Err(error) = runtime.complete_startup_witness(Some(&mut diagnostic)) {
                 self.caller_startup_failure = Some(serde_json::json!({
@@ -2664,6 +2655,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             ));
         }
         if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
+            self.caller_startup_failure = None;
             if self.state != CoordinatorState::Idle || !self.pending.is_empty() {
                 return Err(TurnError::TurnBusy);
             }
@@ -2683,6 +2675,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                         method: "thread/settings/update",
                     })?;
             }
+            let mut update_stage = "settings_update_request";
             let update = (|| {
                 self.server.request(
                     "thread/settings/update",
@@ -2692,6 +2685,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                         "approvalPolicy": approval,
                     }),
                 )?;
+                update_stage = "settings_update_notification";
                 // The native request response does not prove the applied settings.
                 // Bound and validate the corresponding same-thread notification.
                 for _ in 0..MAX_IGNORED_FOREIGN_REQUESTS {
@@ -2715,7 +2709,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                             approval,
                         )?;
                         if self.caller_runtime.is_some() {
+                            update_stage = "settings_update_thread_readback";
                             self.check_caller_transition_quiescence(&thread_id)?;
+                            update_stage = "settings_update_process_readback";
                             self.check_caller_process_quiescence()?;
                         }
                         return Ok(());
@@ -2728,6 +2724,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                 Err(TurnError::CorrelationMismatch)
             })();
             if let Err(error) = update {
+                let details = self
+                    .caller_startup_failure
+                    .get_or_insert_with(|| serde_json::json!({}));
+                details["substage"] = serde_json::json!(update_stage);
+                details["original_error"] = serde_json::json!({"kind": error.diagnostic_kind()});
                 return Err(self.lost_after_write(transaction_id, error));
             }
         }
@@ -3219,9 +3220,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         if self.generation_history(&history.thread_id)? != *history {
             return Err(TurnError::CorrelationMismatch);
         }
-        let rebound = self.rebind_retained_thread_with_operation(Some(operation_id));
-        self.finish_caller_connection_startup();
-        rebound?;
+        self.rebind_retained_thread_with_operation(Some(operation_id))?;
         if self.generation_history(&history.thread_id)? != *history {
             return Err(TurnError::CorrelationMismatch);
         }
@@ -3443,12 +3442,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     }
 
     fn rebind_retained_thread(&mut self) -> Result<(), TurnError> {
-        let result = self.rebind_retained_thread_inner();
-        self.finish_caller_connection_startup();
-        result
-    }
-
-    fn rebind_retained_thread_inner(&mut self) -> Result<(), TurnError> {
         self.rebind_retained_thread_with_operation(None)
     }
 
@@ -4202,12 +4195,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
     /// Specialist provisioning uses the spawn operation as the binding
     /// identity so a ready member never exposes a threadless publication gap.
     pub(crate) fn initialize_thread(&mut self, operation_id: Uuid) -> Result<(), TurnError> {
-        let result = self.initialize_thread_inner(operation_id);
-        self.finish_caller_connection_startup();
-        result
-    }
-
-    fn initialize_thread_inner(&mut self, operation_id: Uuid) -> Result<(), TurnError> {
         if self.state == CoordinatorState::OutcomeUnknown {
             return Err(TurnError::OutcomeUnknown);
         }
@@ -4692,6 +4679,11 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         if self.active_turn_id.as_deref() != Some(turn_id) {
             return Err(TurnError::CorrelationMismatch);
         }
+        if method == "item/commandExecution/requestApproval"
+            && self.resolved_interactions.contains_key(&request_id)
+        {
+            return Ok(());
+        }
         let raw = serde_json::to_vec(params).map_err(|_| TurnError::CorrelationMismatch)?;
         if raw.len() > MAX_INTERACTION_PAYLOAD_BYTES || self.pending.contains_key(&request_id) {
             return Err(TurnError::CorrelationMismatch);
@@ -4721,7 +4713,32 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             file_snapshot_sha256: file_snapshot.map(|value| value.1),
         };
         let public_request_id = Uuid::now_v7();
-        let normalized = self.normalized_interaction(&interaction, public_request_id)?;
+        let normalized = match self.normalized_interaction(&interaction, public_request_id) {
+            Err(TurnError::CorrelationMismatch)
+                if method == "item/commandExecution/requestApproval" =>
+            {
+                self.journal
+                    .append_and_sync(JournalEntry::InteractionOpened {
+                        request_id,
+                        method: method.to_owned(),
+                    })?;
+                self.journal
+                    .append_and_sync(JournalEntry::InteractionResolved { request_id })?;
+                self.resolved_interactions.insert(
+                    request_id,
+                    InteractionResolution {
+                        idempotency_key: String::new(),
+                        response_sha256: None,
+                        resolution_receipt_id: None,
+                        stale: true,
+                    },
+                );
+                return self
+                    .server
+                    .respond_result(request_id, serde_json::json!({"decision":"decline"}));
+            }
+            result => result?,
+        };
         self.journal
             .append_and_sync(JournalEntry::ApprovalRequested {
                 interaction: serde_json::json!({
@@ -5155,44 +5172,10 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             match interaction.method.as_str() {
                 "item/commandExecution/requestApproval" => (
                     "command_execution_approval",
-                    serde_json::to_value(CommandApprovalPayload {
-                        title: interaction
-                            .payload
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Command approval")
-                            .to_owned(),
-                        message: interaction
-                            .payload
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Command execution requires approval")
-                            .to_owned(),
-                        command: serde_json::from_value(
-                            interaction
-                                .payload
-                                .get("command")
-                                .cloned()
-                                .ok_or(TurnError::CorrelationMismatch)?,
-                        )
-                        .map_err(|_| TurnError::CorrelationMismatch)?,
-                        cwd: interaction
-                            .payload
-                            .get("cwd")
-                            .cloned()
-                            .map(serde_json::from_value)
-                            .transpose()
-                            .map_err(|_| TurnError::CorrelationMismatch)?
-                            .unwrap_or_else(|| LosslessPath::from_path(&self.cwd)),
-                        reason: serde_json::from_value(
-                            interaction
-                                .payload
-                                .get("reason")
-                                .cloned()
-                                .unwrap_or(Value::Null),
-                        )
-                        .map_err(|_| TurnError::CorrelationMismatch)?,
-                    })
+                    serde_json::to_value(
+                        CommandApprovalPayload::from_native(&interaction.payload, &self.cwd)
+                            .ok_or(TurnError::CorrelationMismatch)?,
+                    )
                     .map_err(|_| TurnError::CorrelationMismatch)?,
                     serde_json::json!(["accept_once", "decline", "cancel"]),
                     "dolgorae.interaction.command-approval/v1",
@@ -10644,6 +10627,102 @@ pub(crate) mod tests {
             .start_turn(request("key", DeliveryMode::Submit))
             .unwrap();
         coordinator
+    }
+
+    fn native_command_approval(command: Value) -> Value {
+        serde_json::json!({
+            "id": 79,
+            "method": "item/commandExecution/requestApproval",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "command-one",
+                "startedAtMs": 1795009163000_u64,
+                "command": command,
+                "cwd": null,
+                "reason": "Write the fixture"
+            }
+        })
+    }
+
+    #[test]
+    fn command_approval_preserves_native_text_and_legacy_arguments() {
+        let script = "printf '%s\\n' 'fixture' > result.txt";
+        for (command, expected) in [
+            (serde_json::json!(script), serde_json::json!([script])),
+            (
+                serde_json::json!(["printf", "fixture"]),
+                serde_json::json!(["printf", "fixture"]),
+            ),
+        ] {
+            let mut turn = running_turn_with(&RecordingDiagnostics::default(), vec![]);
+            turn.ingest(serde_json::json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {"type": "commandExecution", "id": "command-one", "command": script}
+                }
+            }))
+            .unwrap();
+            turn.ingest(native_command_approval(command)).unwrap();
+            assert_eq!(turn.state(), &CoordinatorState::WaitingInteraction);
+            assert_eq!(turn.pending_interactions().len(), 1);
+            assert!(turn.server.responses.is_empty());
+            let stored = turn
+                .journal
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    JournalEntry::ApprovalRequested { interaction } => Some(interaction),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(stored["interaction"]["payload"]["command"], expected);
+            assert_eq!(
+                stored["interaction"]["payload"]["cwd"],
+                serde_json::json!(LosslessPath::from_path(&turn.cwd))
+            );
+            turn.respond(
+                79,
+                "approve-once".into(),
+                serde_json::json!({"decision": "accept_once"}),
+            )
+            .unwrap();
+            assert_eq!(
+                turn.server.responses,
+                vec![(79, serde_json::json!({"decision": "accept"}))]
+            );
+            assert_eq!(turn.state(), &CoordinatorState::Running);
+            assert!(turn.pending_interactions().is_empty());
+        }
+    }
+
+    #[test]
+    fn command_approval_declines_unsupported_callbacks_without_abandoning_turn() {
+        let mut stdin = native_command_approval(serde_json::json!("write"));
+        stdin["params"]["kind"] = serde_json::json!("writeStdin");
+        let mut network = native_command_approval(serde_json::json!("connect"));
+        network["params"]["networkApprovalContext"] = serde_json::json!({"host": "example.test"});
+        for callback in [native_command_approval(Value::Null), stdin, network] {
+            let mut turn = running_turn_with(&RecordingDiagnostics::default(), vec![]);
+            let mut foreign = callback.clone();
+            foreign["params"]["threadId"] = serde_json::json!("other-thread");
+            turn.ingest(foreign).unwrap();
+            assert!(turn.server.responses.is_empty());
+            turn.ingest(callback.clone()).unwrap();
+            turn.ingest(callback).unwrap();
+            assert_eq!(
+                turn.server.responses,
+                vec![(79, serde_json::json!({"decision": "decline"}))]
+            );
+            assert_eq!(turn.state(), &CoordinatorState::Running);
+            assert!(turn.pending_interactions().is_empty());
+            assert!(turn.journal.entries.iter().all(|entry| !matches!(
+                entry,
+                JournalEntry::ApprovalRequested { .. } | JournalEntry::OutcomeUnknown { .. }
+            )));
+        }
     }
 
     fn successor_request(method: &str) -> Value {

@@ -343,6 +343,7 @@
     "RunService.ReconcileRun": [
       "THREAD_RESIDENCY_CONFLICT",
       "BACKGROUND_EXECUTION_UNVERIFIED",
+      "RECOVERY_REQUIRED",
       "OUTCOME_UNKNOWN"
     ],
     "RunService.RecoverRun": [
@@ -496,6 +497,12 @@
       "CROSS_CONTROLLER_RELEASE_REQUIRED",
       "RUN_STATE_CONFLICT",
       "OUTCOME_UNKNOWN"
+    ],
+    "OperationService.ReconcileStartOperation": [
+      "CONTROLLER_MISMATCH",
+      "IDEMPOTENCY_CONFLICT",
+      "RECOVERY_REQUIRED",
+      "RUNTIME_PATH_INVALID"
     ]
   }
 }

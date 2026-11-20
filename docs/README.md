@@ -41,6 +41,12 @@ It consumes these authorities and current runtime capability output; it does
 not redefine product behavior, grant operational authorization, or install with
 the binary.
 
+The current public-v2 Start reconciliation extension adds an explicitly
+negotiated recovery method and a terminal key-closure result. Its persisted
+[closure and lookup schema](protocol/dolgorae-start-operation-closure-v1.schema.json)
+retains no fabricated input digest. This extends the current runtime descriptor
+and bindings; the immutable historical H1 archive and its lock remain unchanged.
+
 The ledger retains the frozen [audit v1](protocol/dolgorae-audit-record-v1.schema.json)
 reader and adds [audit v2](protocol/dolgorae-audit-record-v2.schema.json) for
 hash-bound historical client projections and mutation admission/completion.

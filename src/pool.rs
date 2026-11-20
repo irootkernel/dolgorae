@@ -126,6 +126,10 @@ impl PoolAdmission {
                 else {
                     continue;
                 };
+                if store.deletion(id)?.is_some() {
+                    published.insert(id);
+                    continue;
+                }
                 let manifest = store.load_manifest(id)?;
                 published.insert(id);
                 if manifest.profile.profile_name != profile

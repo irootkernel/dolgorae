@@ -20,6 +20,7 @@ def schema_name(example_name: str) -> str:
     # Explicit v2 names validate successor payloads; executable E2E checks
     # validate the current machine/v2 producers.
     prefixes = {
+        "start-operation-closure-v1-": "dolgorae-start-operation-closure-v1.schema.json",
         "v014-identity-": "dolgorae-v014-identities-v1.schema.json",
         "v014-state-": "dolgorae-successor-state-v1.schema.json",
         "successor-machine-v5-": "dolgorae-machine-v5.schema.json",
@@ -110,6 +111,12 @@ def repaired_negative_example(
     example_name: str, instance: dict[str, object]
 ) -> dict[str, object]:
     repaired = copy.deepcopy(instance)
+    if example_name == "start-operation-closure-v1-record.invalid-kind.json":
+        repaired["namespace"]["operation_kind"] = "start_run"
+        return repaired
+    if example_name == "start-operation-closure-v1-lookup.invalid-reusable-key.json":
+        repaired["original_key_permanently_closed"] = True
+        return repaired
     if example_name.startswith(("v014-identity-release-", "v014-state-release-", "successor-facade-v5-release-", "successor-machine-v5-release-")):
         inventory = json.loads((PROTOCOL / "dolgorae-v014-release-proof-fixtures-v1.json").read_text())
         matches = [case for case in inventory["cases"] if Path(case["path"]).name == example_name and case["valid"] is False]
@@ -743,6 +750,7 @@ def main() -> int:
             *EXAMPLES.glob("v014-state-*.invalid-*.json"),
             *EXAMPLES.glob("successor-machine-v5-*.invalid-*.json"),
             *EXAMPLES.glob("successor-facade-v5-*.invalid-*.json"),
+            *EXAMPLES.glob("start-operation-closure-v1-*.invalid-*.json"),
         ]
     )
     recognized_examples = {

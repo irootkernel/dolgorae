@@ -73,7 +73,7 @@ pub struct GlobalProfileBinding {
 }
 
 /// Name-neutral launch authority owned by one physical Profile Server.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalLaunchSnapshot {
     pub schema_version: u32,
@@ -93,6 +93,14 @@ pub struct GlobalLaunchSnapshot {
     pub compatibility_verdict: CompatibilityVerdict,
     pub server_key: String,
 }
+
+impl PartialEq for GlobalLaunchSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        crate::jcs::snapshots_equal(self, other)
+    }
+}
+
+impl Eq for GlobalLaunchSnapshot {}
 
 impl From<&ProfileSnapshot> for GlobalLaunchSnapshot {
     fn from(snapshot: &ProfileSnapshot) -> Self {

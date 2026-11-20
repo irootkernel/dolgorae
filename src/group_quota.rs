@@ -169,6 +169,7 @@ impl GroupQuotaPlan {
                 _ => return Err(integrity()),
             }
             let root = crate::run::run_root(state_root, run_id);
+            crate::run_deletion::require_live_at(&root, run_id)?;
             let mut physical = None;
             let store = crate::engagement::EngagementStore::open_read_only(
                 &crate::engagement::EngagementStore::workspace_database_path(state_root),

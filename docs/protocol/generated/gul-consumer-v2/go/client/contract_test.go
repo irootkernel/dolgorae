@@ -280,6 +280,45 @@ func TestAcceptedLookupRequiresDigestSubjectAndCurrentOutcome(t *testing.T) {
 	}
 }
 
+func TestStartKeyClosureRequiresOriginalScopeAndPermanentReceipt(t *testing.T) {
+	original := &pb.OperationRef{CallerScope: &pb.CallerScope{
+		ControllerGeneration: 3, WorkspaceId: strings.Repeat("a", 64),
+		Aggregate: &pb.CallerScope_ProvisioningScope{ProvisioningScope: "run-start"},
+	}, OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: "original-key"}
+	valid := &pb.LookupOperationResponse{Result: &pb.LookupOperationResponse_ClosedWithoutAcceptance{ClosedWithoutAcceptance: &pb.ClosedStartOperation{
+		Operation: proto.Clone(original).(*pb.OperationRef), ClosureReceiptDigest: "sha256:" + strings.Repeat("b", 64),
+		DurableWatermark: 1, OriginalKeyPermanentlyClosed: true,
+	}}}
+	if err := client.ValidateLookup(valid, original); err != nil {
+		t.Fatal(err)
+	}
+	for _, corrupt := range []func(*pb.ClosedStartOperation){
+		func(c *pb.ClosedStartOperation) { c.OriginalKeyPermanentlyClosed = false },
+		func(c *pb.ClosedStartOperation) { c.DurableWatermark = 0 },
+		func(c *pb.ClosedStartOperation) { c.ClosureReceiptDigest = "garbage" },
+		func(c *pb.ClosedStartOperation) { c.Operation.CallerScope.ControllerGeneration++ },
+		func(c *pb.ClosedStartOperation) { c.Operation.IdempotencyKey = "different-key" },
+	} {
+		bad := proto.Clone(valid).(*pb.LookupOperationResponse)
+		corrupt(bad.GetClosedWithoutAcceptance())
+		if err := client.ValidateLookup(bad, original); err == nil {
+			t.Fatal("invalid permanent key closure admitted")
+		}
+	}
+	for _, corrupt := range []func(*pb.OperationRef){
+		func(o *pb.OperationRef) { o.OperationKind = pb.OperationKind_OPERATION_KIND_SUBMIT_TURN },
+		func(o *pb.OperationRef) { o.CallerScope.Aggregate = &pb.CallerScope_RunId{RunId: "run"} },
+	} {
+		wrong := proto.Clone(original).(*pb.OperationRef)
+		corrupt(wrong)
+		response := proto.Clone(valid).(*pb.LookupOperationResponse)
+		response.GetClosedWithoutAcceptance().Operation = wrong
+		if err := client.ValidateLookup(response, wrong); err == nil {
+			t.Fatal("non-provisioning Start closure admitted")
+		}
+	}
+}
+
 func TestUnsetLookupAndUnprovedAbsenceFailClosed(t *testing.T) {
 	original := &pb.OperationRef{CallerScope: &pb.CallerScope{ControllerGeneration: 3}, OperationKind: pb.OperationKind_OPERATION_KIND_START_RUN, IdempotencyKey: "original-key"}
 	for _, response := range []*pb.LookupOperationResponse{
@@ -449,6 +488,8 @@ func TestPortableFixturesDecodeAgainstGeneratedTypes(t *testing.T) {
 				original = outcome.Unresolved.GetOperation()
 			case *pb.LookupOperationResponse_Absent:
 				original = outcome.Absent.GetOperation()
+			case *pb.LookupOperationResponse_ClosedWithoutAcceptance:
+				original = outcome.ClosedWithoutAcceptance.GetOperation()
 			}
 			if err := client.ValidateLookup(lookup, original); err != nil {
 				t.Fatalf("lookup fixture %s: %v", fixture.ID, err)
@@ -542,16 +583,17 @@ func TestPortableFixturesDecodeAgainstGeneratedTypes(t *testing.T) {
 				t.Fatalf("method %s fixture lacks typed error/effect identity", name)
 			}
 			kindName := strings.ReplaceAll(strings.TrimPrefix(detail.OperationKind.String(), "OPERATION_KIND_"), "_", "")
-			if kindName != strings.ToUpper(string(method.Name())) {
+			reconcilesStart := name == "OperationService.ReconcileStartOperation"
+			if (!reconcilesStart && kindName != strings.ToUpper(string(method.Name()))) || (reconcilesStart && (kindName != "STARTRUN" || !proto.Equal(detail.Operation, request.(*pb.ReconcileStartOperationRequest).Operation))) {
 				t.Fatalf("method %s error identifies a different operation kind", name)
 			}
-			if entry.EffectClass == "S" && (detail.Subjects == nil || detail.Operation != nil || detail.IdempotencyKey != nil) {
+			if entry.EffectClass == "S" && !reconcilesStart && (detail.Subjects == nil || detail.Operation != nil || detail.IdempotencyKey != nil) {
 				t.Fatalf("unkeyed %s error must name subjects without fabricating a key", name)
 			}
 			seen++
 		}
 	}
-	if seen != 28 || len(fixtures.MethodCases) != seen {
+	if seen != 29 || len(fixtures.MethodCases) != seen {
 		t.Fatalf("new-method fixture coverage differs: seen=%d cases=%d", seen, len(fixtures.MethodCases))
 	}
 	if len(fixtures.Negative) == 0 {

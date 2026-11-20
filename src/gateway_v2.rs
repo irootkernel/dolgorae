@@ -338,8 +338,11 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         }
         operation_name.push(character.to_ascii_uppercase());
     }
-    let operation_kind =
-        pb::OperationKind::from_str_name(&operation_name).unwrap_or(pb::OperationKind::Unspecified);
+    let operation_kind = if method == "OperationService.ReconcileStartOperation" {
+        pb::OperationKind::StartRun
+    } else {
+        pb::OperationKind::from_str_name(&operation_name).unwrap_or(pb::OperationKind::Unspecified)
+    };
     let recovery = matches!(
         error.code.as_str(),
         "RECOVERY_REQUIRED" | "BACKGROUND_EXECUTION_UNVERIFIED"
@@ -393,8 +396,11 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
     } else {
         "INTERNAL_ERROR"
     };
+    let startup_repair = wire_code == "RECOVERY_REQUIRED"
+        && error.details["reason"] == crate::worker::STARTUP_OWNERSHIP_INCOMPLETE;
     let accepted_start = method == "RunService.StartRun"
         && run_id.is_some()
+        && error.details["reason"] != "run_deleted"
         && !matches!(wire_code, "WRITER_BUSY" | "IDEMPOTENCY_CONFLICT");
     let accepted_submit =
         method == "RunService.SubmitTurn" && error.details["public_v2_accepted"] == true;
@@ -483,6 +489,8 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
             pb::RequiredClientAction::ReconnectFromCommittedCursor
         } else if unknown || accepted_submit || accepted_resolve || accepted_group {
             pb::RequiredClientAction::ReconcileOperation
+        } else if startup_repair {
+            pb::RequiredClientAction::OperatorRepair
         } else if recovery {
             pb::RequiredClientAction::RecoverRun
         } else if error.code == "POOL_CAPACITY_EXCEEDED" {
@@ -539,7 +547,16 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
 
 macro_rules! execute {
     ($self:ident,$request:ident,$method:literal,$backend:ident,$body:expr) => {{
-        let deadline = crate::gateway::rpc_deadline_with(&$request, $method, error_status)?;
+        let deadline = if $method == "RunService.CloseRun" {
+            crate::gateway::rpc_deadline_with_budget(
+                &$request,
+                $method,
+                error_status,
+                std::time::Duration::from_secs(60),
+            )?
+        } else {
+            crate::gateway::rpc_deadline_with(&$request, $method, error_status)?
+        };
         let request = $request.into_inner();
         checked_context(request.context.as_ref()).map_err(|e| error_status(&e, $method))?;
         $self
@@ -746,6 +763,18 @@ fn provisioning(
     snapshot.admitted_configuration()?;
     Ok(snapshot)
 }
+fn preallocation_operation_error(
+    mut error: MachineError,
+    identity: &serde_json::Value,
+) -> MachineError {
+    if error.code != "CONTROLLER_MISMATCH" {
+        let mut details = error.details.as_object().cloned().unwrap_or_default();
+        details.insert("public_v2_operation".into(), identity.clone());
+        error.details = serde_json::Value::Object(details);
+    }
+    error
+}
+
 fn start(
     backend: &dyn ModernGatewayBackend,
     request: pb::StartRunRequest,
@@ -775,13 +804,10 @@ fn start(
         crate::workspace::SystemWorkspacePlatform,
         backend.home().workspace_root(&view.workspace_id),
     )
-    .retained_delegation_start_binding(&request.idempotency_key, &binding.identity)?;
-    start_inner(backend, request, retained.as_ref()).map_err(|mut error| {
-        if let Some(details) = error.details.as_object_mut() {
-            details.insert("public_v2_operation".into(), identity);
-        }
-        error
-    })
+    .retained_delegation_start_binding(&request.idempotency_key, &binding.identity)
+    .map_err(|error| preallocation_operation_error(error, &identity))?;
+    start_inner(backend, request, retained.as_ref())
+        .map_err(|error| preallocation_operation_error(error, &identity))
 }
 fn start_inner(
     backend: &dyn ModernGatewayBackend,
@@ -893,6 +919,7 @@ const METHODS: &[&str] = &[
     "InteractionService.GetControllerInteraction",
     "InteractionService.ResolveInteraction",
     "OperationService.LookupOperation",
+    "OperationService.ReconcileStartOperation",
     "RuntimeService.ListProfileDiagnostics",
     "ControllerService.VerifyController",
     "ArtifactService.GetArtifact",
@@ -2012,8 +2039,187 @@ fn lookup_subjects(value: &serde_json::Value) -> pb::SubjectIdentities {
         interaction_id: text("interaction_ref"),
     }
 }
+fn operation_lookup_result(
+    value: &serde_json::Value,
+    original: &pb::OperationRef,
+    scope: &pb::CallerScope,
+) -> Result<pb::lookup_operation_response::Result, MachineError> {
+    use pb::lookup_operation_response::Result as Lookup;
+    let result = match value["state"].as_str() {
+        Some("accepted") => {
+            let receipt = &value["receipt"];
+            let outcome = match value["current_outcome"].as_str() {
+                Some("completed") => pb::OperationOutcome::Completed,
+                Some("failed") => pb::OperationOutcome::Failed,
+                Some("cancelled") => pb::OperationOutcome::Cancelled,
+                Some("expired") => pb::OperationOutcome::Expired,
+                Some("running") => pb::OperationOutcome::Running,
+                Some("pending") => pb::OperationOutcome::Pending,
+                _ => pb::OperationOutcome::Unknown,
+            };
+            Lookup::Accepted(pb::AcceptedOperation {
+                receipt: Some(pb::OperationReceipt {
+                    operation: Some(original.clone()),
+                    accepted_input_digest: receipt["accepted_input_digest"]
+                        .as_str()
+                        .ok_or_else(|| invalid("receipt", "accepted input identity is missing"))?
+                        .into(),
+                    receipt_id: receipt["operation_ref"]
+                        .as_str()
+                        .ok_or_else(|| invalid("receipt", "original receipt identity is missing"))?
+                        .into(),
+                    subjects: Some(lookup_subjects(&value["accepted_subjects"])),
+                    effect: pb::EffectState::Accepted as i32,
+                    exact_replay: false,
+                }),
+                result: None,
+                current_outcome: outcome as i32,
+            })
+        }
+        Some("not_accepted") => Lookup::NotAccepted(pb::NotAcceptedOperation {
+            operation: Some(original.clone()),
+            input_digest: value["input_digest"]
+                .as_str()
+                .ok_or_else(|| invalid("lookup", "durable refusal digest is missing"))?
+                .into(),
+            definitive_refusal_code: value["refusal_code"]
+                .as_str()
+                .ok_or_else(|| invalid("lookup", "durable refusal code is missing"))?
+                .into(),
+            original_key_retry_permitted: value["exact_key_retry_permitted"]
+                .as_bool()
+                .unwrap_or(false),
+        }),
+        Some("absent") => {
+            let proof = &value["proof"];
+            if proof["authoritative"] != true
+                || proof["complete"] != true
+                || proof["tombstones_checked"] != true
+            {
+                return Err(invalid(
+                    "lookup",
+                    "authoritative absence is not established",
+                ));
+            }
+            Lookup::Absent(pb::AbsentOperation {
+                operation: Some(original.clone()),
+                retained_namespace_fence: format!(
+                    "{}:{}:{}",
+                    scope.workspace_id, scope.principal_ref, proof["retained_namespace_generation"]
+                ),
+                durable_watermark: proof["durable_watermark"]
+                    .as_u64()
+                    .ok_or_else(|| invalid("lookup", "durable watermark is missing"))?,
+                complete_authoritative_lookup: true,
+            })
+        }
+        Some("closed_without_acceptance") => {
+            if value["original_key_permanently_closed"] != true {
+                return Err(invalid("lookup", "startup closure is not permanent"));
+            }
+            Lookup::ClosedWithoutAcceptance(pb::ClosedStartOperation {
+                operation: Some(original.clone()),
+                closure_receipt_digest: value["closure_receipt_digest"]
+                    .as_str()
+                    .ok_or_else(|| invalid("lookup", "startup closure receipt is missing"))?
+                    .into(),
+                durable_watermark: value["durable_watermark"]
+                    .as_u64()
+                    .filter(|watermark| *watermark > 0)
+                    .ok_or_else(|| invalid("lookup", "startup closure watermark is missing"))?,
+                original_key_permanently_closed: true,
+            })
+        }
+        Some("unresolved") => Lookup::Unresolved(pb::UnresolvedOperation {
+            operation: Some(original.clone()),
+            known_subjects: Some(lookup_subjects(&value["known_subjects"])),
+            effect: pb::EffectState::Unresolved as i32,
+            required_action: pb::RequiredClientAction::ReconcileOperation as i32,
+        }),
+        _ => {
+            return Err(invalid(
+                "lookup",
+                "original operation outcome is unavailable",
+            ));
+        }
+    };
+    Ok(result)
+}
+
 #[tonic::async_trait]
 impl pb::operation_service_server::OperationService for GatewayTransport {
+    async fn reconcile_start_operation(
+        &self,
+        request: Request<pb::ReconcileStartOperationRequest>,
+    ) -> Result<Response<pb::LookupOperationResponse>, Status> {
+        execute!(
+            self,
+            request,
+            "OperationService.ReconcileStartOperation",
+            backend,
+            {
+                let original = required(request.operation.as_ref(), "operation")?;
+                let scope = required(original.caller_scope.as_ref(), "caller_scope")?;
+                if original.operation_kind != pb::OperationKind::StartRun as i32
+                    || !matches!(&scope.aggregate,
+                    Some(pb::caller_scope::Aggregate::ProvisioningScope(value)) if value == "run-start")
+                    || scope.workspace_id.len() != 64
+                    || !scope
+                        .workspace_id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(invalid(
+                        "operation",
+                        "the original pre-allocation Start scope is required",
+                    ));
+                }
+                let reference = required(request.controller.as_ref(), "controller")?;
+                if reference.expected_controller_generation != scope.controller_generation {
+                    return Err(invalid(
+                        "caller_scope",
+                        "Controller generation differs from the protected carrier reference",
+                    ));
+                }
+                let carrier = backend.controller(&controller(reference))?;
+                let binding =
+                    crate::controller::binding_from_carrier(&carrier, scope.controller_generation)?;
+                let namespace = crate::operation::Namespace::delegation(
+                    &binding.identity,
+                    &scope.workspace_id,
+                    None,
+                    "start_run",
+                    &original.idempotency_key,
+                )
+                .map_err(|reason| invalid("operation", reason))?;
+                if scope.controller_kind != project::controller_kind(binding.identity.kind) as i32
+                    || scope.principal_ref != namespace.controller_principal
+                {
+                    return Err(invalid(
+                        "caller_scope",
+                        "authenticated original operation scope differs",
+                    ));
+                }
+                let identity = serde_json::json!({
+                    "controller_kind":scope.controller_kind, "principal_ref":scope.principal_ref,
+                    "controller_generation":scope.controller_generation, "workspace_id":scope.workspace_id,
+                    "idempotency_key":original.idempotency_key,
+                });
+                let value = crate::semantic::reconcile_start_operation_at(
+                    &backend.home().workspace_root(&scope.workspace_id),
+                    &scope.workspace_id,
+                    &binding.identity,
+                    &original.idempotency_key,
+                )
+                .map_err(|error| preallocation_operation_error(error, &identity))?;
+                Ok(pb::LookupOperationResponse {
+                    context: Some(context(backend)),
+                    result: Some(operation_lookup_result(&value, original, scope)?),
+                })
+            }
+        )
+    }
+
     async fn lookup_operation(
         &self,
         request: Request<pb::LookupOperationRequest>,
@@ -2168,94 +2374,7 @@ impl pb::operation_service_server::OperationService for GatewayTransport {
                         ));
                     }
                 };
-                use pb::lookup_operation_response::Result as Lookup;
-                let result = match value["state"].as_str() {
-                    Some("accepted") => {
-                        let receipt = &value["receipt"];
-                        let outcome = match value["current_outcome"].as_str() {
-                            Some("completed") => pb::OperationOutcome::Completed,
-                            Some("failed") => pb::OperationOutcome::Failed,
-                            Some("cancelled") => pb::OperationOutcome::Cancelled,
-                            Some("expired") => pb::OperationOutcome::Expired,
-                            Some("running") => pb::OperationOutcome::Running,
-                            Some("pending") => pb::OperationOutcome::Pending,
-                            _ => pb::OperationOutcome::Unknown,
-                        };
-                        Lookup::Accepted(pb::AcceptedOperation {
-                            receipt: Some(pb::OperationReceipt {
-                                operation: Some(original.clone()),
-                                accepted_input_digest: receipt["accepted_input_digest"]
-                                    .as_str()
-                                    .ok_or_else(|| {
-                                        invalid("receipt", "accepted input identity is missing")
-                                    })?
-                                    .into(),
-                                receipt_id: receipt["operation_ref"]
-                                    .as_str()
-                                    .ok_or_else(|| {
-                                        invalid("receipt", "original receipt identity is missing")
-                                    })?
-                                    .into(),
-                                subjects: Some(lookup_subjects(&value["accepted_subjects"])),
-                                effect: pb::EffectState::Accepted as i32,
-                                exact_replay: false,
-                            }),
-                            result: None,
-                            current_outcome: outcome as i32,
-                        })
-                    }
-                    Some("not_accepted") => Lookup::NotAccepted(pb::NotAcceptedOperation {
-                        operation: Some(original.clone()),
-                        input_digest: value["input_digest"]
-                            .as_str()
-                            .ok_or_else(|| invalid("lookup", "durable refusal digest is missing"))?
-                            .into(),
-                        definitive_refusal_code: value["refusal_code"]
-                            .as_str()
-                            .ok_or_else(|| invalid("lookup", "durable refusal code is missing"))?
-                            .into(),
-                        original_key_retry_permitted: value["exact_key_retry_permitted"]
-                            .as_bool()
-                            .unwrap_or(false),
-                    }),
-                    Some("absent") => {
-                        let proof = &value["proof"];
-                        if proof["authoritative"] != true
-                            || proof["complete"] != true
-                            || proof["tombstones_checked"] != true
-                        {
-                            return Err(invalid(
-                                "lookup",
-                                "authoritative absence is not established",
-                            ));
-                        }
-                        Lookup::Absent(pb::AbsentOperation {
-                            operation: Some(original.clone()),
-                            retained_namespace_fence: format!(
-                                "{}:{}:{}",
-                                scope.workspace_id,
-                                scope.principal_ref,
-                                proof["retained_namespace_generation"]
-                            ),
-                            durable_watermark: proof["durable_watermark"]
-                                .as_u64()
-                                .ok_or_else(|| invalid("lookup", "durable watermark is missing"))?,
-                            complete_authoritative_lookup: true,
-                        })
-                    }
-                    Some("unresolved") => Lookup::Unresolved(pb::UnresolvedOperation {
-                        operation: Some(original.clone()),
-                        known_subjects: Some(lookup_subjects(&value["known_subjects"])),
-                        effect: pb::EffectState::Unresolved as i32,
-                        required_action: pb::RequiredClientAction::ReconcileOperation as i32,
-                    }),
-                    _ => {
-                        return Err(invalid(
-                            "lookup",
-                            "original operation outcome is unavailable",
-                        ));
-                    }
-                };
+                let result = operation_lookup_result(&value, original, scope)?;
                 Ok(pb::LookupOperationResponse {
                     context: Some(context(backend)),
                     result: Some(result),
@@ -3022,6 +3141,35 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&rich.details[0].value)
         );
         pb::DolgoraeErrorDetail::decode(rich.details[0].value.as_slice()).unwrap()
+    }
+
+    #[test]
+    fn incomplete_startup_ownership_requires_operator_without_retry() {
+        let run_id = uuid::Uuid::now_v7();
+        let error = crate::controller::recovery_required(
+            run_id,
+            1,
+            crate::worker::STARTUP_OWNERSHIP_INCOMPLETE,
+        );
+        for method in ["RunService.RecoverRun", "RunService.ReconcileRun"] {
+            let status = error_status(&error, method);
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+            let projected = detail(&status, "startup-ownership-incomplete");
+            assert_eq!(projected.dolgorae_error_code, "RECOVERY_REQUIRED");
+            assert_eq!(projected.effect, pb::EffectState::None as i32);
+            assert_eq!(
+                projected.classification,
+                pb::FailureClassification::RecoveryNeeded as i32
+            );
+            assert_eq!(
+                projected.action,
+                pb::RequiredClientAction::OperatorRepair as i32
+            );
+            assert_eq!(
+                projected.retry_classification,
+                pb::RetryClassification::Forbidden as i32
+            );
+        }
     }
 
     #[test]

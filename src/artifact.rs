@@ -753,6 +753,7 @@ fn read_artifact_range(
     reference: &ArtifactReference,
     range: (u64, u32),
 ) -> Result<Vec<u8>, MachineError> {
+    crate::run_deletion::require_live_at(&crate::run::run_root(state_root, run_id), run_id)?;
     let _content_pin = crate::orchestration::OrchestrationStore::result_reader_pin(state_root)?;
     use std::io::{Read as _, Seek as _};
     let (offset, length) = range;

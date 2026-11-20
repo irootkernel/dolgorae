@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/run-deletion/v1",
+  "title": "Private confirmed Run deletion tombstone",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workspace_id", "run_id", "lifecycle", "controller", "start_receipt", "source"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "workspace_id": {"$ref": "#/$defs/sha256"},
+    "run_id": {"type": "string", "format": "uuid"},
+    "lifecycle": {"enum": ["closed", "start_failed"]},
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "capability_sha256"],
+      "properties": {
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["controller_id", "kind", "instance_id", "subject_id", "generation"],
+          "properties": {
+            "controller_id": {"type": "string", "format": "uuid"},
+            "kind": {"enum": ["human_cli", "interactive_client", "workflow_orchestrator", "automation", "other"]},
+            "instance_id": {"type": "string"},
+            "subject_id": {"type": ["string", "null"]},
+            "generation": {"type": "integer", "minimum": 1}
+          }
+        },
+        "capability_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "start_receipt": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"}
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device", "inode"],
+      "properties": {
+        "device": {"type": "integer", "minimum": 1},
+        "inode": {"type": "integer", "minimum": 1}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

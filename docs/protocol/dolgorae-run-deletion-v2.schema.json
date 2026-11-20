@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/run-deletion/v2",
+  "title": "Private Operator force deletion tombstone",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "workspace_id",
+    "run_id",
+    "lifecycle",
+    "controller",
+    "start_receipt",
+    "source",
+    "force"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/sha256"
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "lifecycle": {
+      "enum": [
+        "starting",
+        "idle",
+        "running",
+        "waiting_interaction",
+        "reconciliation_required",
+        "paused",
+        "closed",
+        "start_failed",
+        "outcome_unknown"
+      ]
+    },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "capability_sha256"
+      ],
+      "properties": {
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "controller_id",
+            "kind",
+            "instance_id",
+            "subject_id",
+            "generation"
+          ],
+          "properties": {
+            "controller_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "enum": [
+                "human_cli",
+                "interactive_client",
+                "workflow_orchestrator",
+                "automation",
+                "other"
+              ]
+            },
+            "instance_id": {
+              "type": "string"
+            },
+            "subject_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "capability_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "start_receipt": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "https://dolgorae.local/schema/v014-identities/v1#/$defs/operation_receipt"
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device",
+        "inode"
+      ],
+      "properties": {
+        "device": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "inode": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "force": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operator_id",
+        "operator_generation",
+        "profile",
+        "server_key",
+        "worker_generation",
+        "writer_generation",
+        "start_outcome"
+      ],
+      "dependentSchemas": {
+        "deferred_runtime": {
+          "properties": {
+            "worker_generation": {"minimum": 1}
+          }
+        }
+      },
+      "properties": {
+        "operator_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "operator_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "server_key": {
+          "$ref": "#/$defs/sha256"
+        },
+        "worker_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "writer_generation": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ]
+        },
+        "start_outcome": {
+          "enum": [
+            "completed",
+            "failed",
+            "unknown"
+          ]
+        },
+        "deferred_runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["record_sha256", "worker_identity_sha256"],
+          "properties": {
+            "record_sha256": {"$ref": "#/$defs/sha256"},
+            "worker_identity_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

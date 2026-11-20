@@ -59,7 +59,7 @@ pub struct ProfileCapabilitySnapshot {
     pub capabilities: BTreeMap<String, CapabilityState>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileSnapshot {
     pub schema_version: u32,
@@ -80,6 +80,14 @@ pub struct ProfileSnapshot {
     pub launch_contract_sha256: String,
     pub initial_server_key: String,
 }
+
+impl PartialEq for ProfileSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        crate::jcs::snapshots_equal(self, other)
+    }
+}
+
+impl Eq for ProfileSnapshot {}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1624,6 +1632,12 @@ enum AllocationReservation {
     Legacy(StartReservation),
     Caller(Box<CallerStartReservation>),
     Delegation(Box<CallerStartReservation<crate::delegation_identity::InstructionSnapshot>>),
+    Closed(crate::operation::StartOperationClosure),
+}
+
+pub(crate) enum RetainedStartOperation {
+    Accepted(Box<CallerStartReservation<crate::delegation_identity::InstructionSnapshot>>),
+    Closed(Box<crate::operation::StartOperationClosure>),
 }
 
 fn public_start_normalized_body<I: CallerInstructionGeneration>(
@@ -1856,14 +1870,11 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
     }
 
     /// Reach an accepted public startup binding before consulting mutable Profile state.
-    pub(crate) fn retained_delegation_start(
+    pub(crate) fn retained_start_operation(
         &self,
         key: &str,
         controller: &ControllerIdentity,
-    ) -> Result<
-        Option<CallerStartReservation<crate::delegation_identity::InstructionSnapshot>>,
-        MachineError,
-    > {
+    ) -> Result<Option<RetainedStartOperation>, MachineError> {
         let Some(record) = self.load_record("run-start", key)? else {
             return Ok(None);
         };
@@ -1881,7 +1892,27 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
                         serde_json::json!({}),
                     ));
                 }
-                Ok(Some(*reservation))
+                Ok(Some(RetainedStartOperation::Accepted(reservation)))
+            }
+            AllocationReservation::Closed(closure) => {
+                closure.validate().map_err(startup_closure_invalid)?;
+                let expected = crate::operation::Namespace::delegation(
+                    controller,
+                    &closure.namespace.workspace_ref,
+                    None,
+                    "start_run",
+                    key,
+                )
+                .map_err(reservation_invalid)?;
+                if closure.namespace != expected {
+                    return Err(MachineError::new(
+                        "CONTROLLER_MISMATCH",
+                        "startup closure belongs to another Controller",
+                        false,
+                        serde_json::json!({}),
+                    ));
+                }
+                Ok(Some(RetainedStartOperation::Closed(Box::new(closure))))
             }
             AllocationReservation::Legacy(_) | AllocationReservation::Caller(_) => {
                 Err(MachineError::new(
@@ -1892,6 +1923,304 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
                 ))
             }
         }
+    }
+
+    pub(crate) fn retained_delegation_start(
+        &self,
+        key: &str,
+        controller: &ControllerIdentity,
+    ) -> Result<
+        Option<CallerStartReservation<crate::delegation_identity::InstructionSnapshot>>,
+        MachineError,
+    > {
+        match self.retained_start_operation(key, controller)? {
+            Some(RetainedStartOperation::Accepted(reservation)) => Ok(Some(*reservation)),
+            Some(RetainedStartOperation::Closed(closure)) => Err(start_operation_closed(&closure)),
+            None => Ok(None),
+        }
+    }
+
+    fn closure_witness(
+        &self,
+        key: &str,
+    ) -> Result<Option<crate::operation::StartOperationClosure>, MachineError> {
+        let root = self.root("run-start-closures");
+        match fs::symlink_metadata(&root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(run_path_error(&root, error.to_string())),
+            Ok(_) => {}
+        }
+        verify_secure_directory(
+            &self.state_root.join("idempotency"),
+            self.platform.current_uid(),
+        )?;
+        verify_secure_directory(&root, self.platform.current_uid())?;
+        let path = self.path("run-start-closures", key);
+        let Some(file) =
+            crate::workspace::open_secure_file_if_present(&path, self.platform.current_uid())?
+        else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        file.take(8193)
+            .read_to_end(&mut bytes)
+            .map_err(|error| run_path_error(&path, error.to_string()))?;
+        if bytes.len() > 8192 {
+            return Err(reservation_invalid(
+                "startup closure witness exceeds its bound",
+            ));
+        }
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| reservation_invalid("startup closure witness is unreadable"))?;
+        parse(text).map_err(|_| reservation_invalid("startup closure witness is invalid"))?;
+        let closure: crate::operation::StartOperationClosure = serde_json::from_slice(&bytes)
+            .map_err(|_| reservation_invalid("startup closure witness is invalid"))?;
+        closure.validate().map_err(startup_closure_invalid)?;
+        if closure.namespace.idempotency_key != key {
+            return Err(reservation_invalid("startup closure witness key differs"));
+        }
+        Ok(Some(closure))
+    }
+
+    pub(crate) fn start_closure_published(
+        &self,
+        closure: &crate::operation::StartOperationClosure,
+    ) -> Result<bool, MachineError> {
+        match self.closure_witness(&closure.namespace.idempotency_key)? {
+            Some(witness) if witness == *closure => Ok(true),
+            Some(_) => Err(reservation_invalid("startup closure witness differs")),
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) fn finish_start_closure(
+        &self,
+        closure: &crate::operation::StartOperationClosure,
+    ) -> Result<(), MachineError> {
+        if self.start_closure_published(closure)? {
+            return Ok(());
+        }
+        // A witness becomes visible only after the admission fence and its
+        // ancestors are durable. Lookup never completes a missing witness.
+        for root in [
+            self.root("run-start"),
+            self.state_root.join("idempotency"),
+            self.state_root.clone(),
+        ] {
+            sync_directory(&root).map_err(|error| run_path_error(&root, error.to_string()))?;
+        }
+        self.ensure_root("run-start-closures")?;
+        let path = self.path("run-start-closures", &closure.namespace.idempotency_key);
+        let bytes = serde_json::to_vec(closure)
+            .map_err(|_| reservation_invalid("startup closure witness is unrepresentable"))?;
+        atomic_create(&self.platform, &path, &bytes, 0o600)
+            .map_err(|error| run_path_error(&path, error.to_string()))?;
+        for root in [self.state_root.join("idempotency"), self.state_root.clone()] {
+            sync_directory(&root).map_err(|error| run_path_error(&root, error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Validate all retained allocation slots, including deletion tombstones.
+    pub(crate) fn start_allocation_inventory(
+        &self,
+        workspace: &str,
+    ) -> Result<std::collections::BTreeSet<Uuid>, MachineError> {
+        Ok(self
+            .retained_allocations(workspace)?
+            .into_iter()
+            .map(|(run_id, _, _)| run_id)
+            .collect())
+    }
+
+    pub(crate) fn retained_run_allocation(
+        &self,
+        workspace: &str,
+        run_id: Uuid,
+    ) -> Result<Option<(&'static str, String)>, MachineError> {
+        let mut matches = self
+            .retained_allocations(workspace)?
+            .into_iter()
+            .filter(|(allocated, _, _)| *allocated == run_id);
+        let allocation = matches.next().map(|(_, directory, key)| (directory, key));
+        if matches.next().is_some() {
+            return Err(reservation_invalid("Run has multiple retained allocations"));
+        }
+        Ok(allocation)
+    }
+
+    fn retained_allocations(
+        &self,
+        workspace: &str,
+    ) -> Result<Vec<(Uuid, &'static str, String)>, MachineError> {
+        let mut allocated = Vec::new();
+        for (directory, operation) in [("run-start", "start_run"), ("run-fork", "fork_run")] {
+            let root = self.root(directory);
+            let entries = match fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(run_path_error(&root, error.to_string())),
+            };
+            verify_secure_directory(&root, self.platform.current_uid())?;
+            for entry in entries {
+                let path = entry
+                    .map_err(|error| run_path_error(&root, error.to_string()))?
+                    .path();
+                if path.extension().is_none_or(|extension| extension != "json") {
+                    verify_allocation_sidecar(&path, self.platform.current_uid())?;
+                    continue;
+                }
+                // Read the enumerated name first; a displaced allocation cannot
+                // disappear by re-deriving a path from its untrusted key.
+                verify_secure_file(&path, self.platform.current_uid())?;
+                let file = crate::workspace::open_secure_file_if_present(
+                    &path,
+                    self.platform.current_uid(),
+                )?
+                .ok_or_else(|| reservation_invalid("allocation inventory record vanished"))?;
+                let mut bytes = Vec::new();
+                file.take(MAX_CALLER_START_RESERVATION_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| run_path_error(&path, error.to_string()))?;
+                if bytes.len() > MAX_CALLER_START_RESERVATION_BYTES {
+                    return Err(reservation_invalid("reservation exceeds its bound"));
+                }
+                let value: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| reservation_invalid("allocation inventory is unreadable"))?;
+                let key = value["idempotency_key"]
+                    .as_str()
+                    .or_else(|| value["namespace"]["idempotency_key"].as_str())
+                    .ok_or_else(|| reservation_invalid("allocation inventory key is missing"))?;
+                if path != self.path(directory, key) {
+                    return Err(reservation_invalid("allocation inventory filename differs"));
+                }
+                let record = self
+                    .load_record(directory, key)?
+                    .ok_or_else(|| reservation_invalid("allocation inventory record vanished"))?;
+                match record {
+                    AllocationReservation::Legacy(_) => {
+                        let record =
+                            self.load_operation(directory, operation, key)?
+                                .ok_or_else(|| {
+                                    reservation_invalid("allocation inventory record vanished")
+                                })?;
+                        allocated.push((record.run_id, directory, key.to_owned()));
+                    }
+                    AllocationReservation::Caller(record) => {
+                        record.validate()?;
+                        if directory != "run-start"
+                            || record.accepted_intent.workspace_id != workspace
+                        {
+                            return Err(reservation_invalid("allocation inventory scope differs"));
+                        }
+                        allocated.push((record.run_id, directory, key.to_owned()));
+                    }
+                    AllocationReservation::Delegation(record) => {
+                        record.validate()?;
+                        if directory != "run-start"
+                            || record.accepted_intent.workspace_id != workspace
+                        {
+                            return Err(reservation_invalid("allocation inventory scope differs"));
+                        }
+                        allocated.push((record.run_id, directory, key.to_owned()));
+                    }
+                    AllocationReservation::Closed(closure) => {
+                        closure.validate().map_err(startup_closure_invalid)?;
+                        if directory != "run-start" || closure.namespace.workspace_ref != workspace
+                        {
+                            return Err(reservation_invalid("closure inventory scope differs"));
+                        }
+                    }
+                }
+            }
+        }
+        let root = self.root("run-start-closures");
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(run_path_error(&root, error.to_string())),
+        };
+        if let Some(entries) = entries {
+            verify_secure_directory(&root, self.platform.current_uid())?;
+            for entry in entries {
+                let path = entry
+                    .map_err(|error| run_path_error(&root, error.to_string()))?
+                    .path();
+                if path.extension().is_none_or(|extension| extension != "json") {
+                    verify_allocation_sidecar(&path, self.platform.current_uid())?;
+                    continue;
+                }
+                let file = crate::workspace::open_secure_file_if_present(
+                    &path,
+                    self.platform.current_uid(),
+                )?
+                .ok_or_else(|| reservation_invalid("closure witness vanished"))?;
+                let mut bytes = Vec::new();
+                file.take(8193)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| run_path_error(&path, error.to_string()))?;
+                if bytes.len() > 8192 {
+                    return Err(reservation_invalid("closure witness exceeds its bound"));
+                }
+                let value: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| reservation_invalid("closure witness is unreadable"))?;
+                let key = value["namespace"]["idempotency_key"]
+                    .as_str()
+                    .ok_or_else(|| reservation_invalid("closure witness key is missing"))?;
+                if path != self.path("run-start-closures", key) {
+                    return Err(reservation_invalid("closure witness filename differs"));
+                }
+                let Some(AllocationReservation::Closed(closure)) =
+                    self.load_record("run-start", key)?
+                else {
+                    return Err(reservation_invalid("closure witness has no matching slot"));
+                };
+                if closure.namespace.workspace_ref != workspace
+                    || !self.start_closure_published(&closure)?
+                {
+                    return Err(reservation_invalid("closure witness scope differs"));
+                }
+            }
+        }
+        Ok(allocated)
+    }
+
+    pub(crate) fn publish_start_closure(
+        &self,
+        closure: &crate::operation::StartOperationClosure,
+        allocation: &AllocationLock,
+    ) -> Result<(), MachineError> {
+        closure.validate().map_err(startup_closure_invalid)?;
+        let root = self.ensure_root("run-start")?;
+        let named = fs::symlink_metadata(root.join(format!(
+            "{}.lock",
+            sha256_hex(closure.namespace.idempotency_key.as_bytes())
+        )))
+        .map_err(|error| run_path_error(&root, error.to_string()))?;
+        let held = allocation
+            .file
+            .metadata()
+            .map_err(|error| run_path_error(&root, error.to_string()))?;
+        if !named.is_file()
+            || named.nlink() != 1
+            || (named.dev(), named.ino()) != (held.dev(), held.ino())
+        {
+            return Err(reservation_invalid(
+                "closure does not hold its allocation lock",
+            ));
+        }
+        let path = self.path("run-start", &closure.namespace.idempotency_key);
+        let mut bytes = canonicalize(
+            &parse(
+                &serde_json::to_string(closure)
+                    .map_err(|_| reservation_invalid("closure serialization failed"))?,
+            )
+            .map_err(|_| reservation_invalid("closure serialization failed"))?,
+        )
+        .map_err(|_| reservation_invalid("closure serialization failed"))?;
+        bytes.push(b'\n');
+        atomic_create(&self.platform, &path, &bytes, 0o600)
+            .map_err(|error| run_path_error(&path, error.to_string()))
     }
 
     pub(crate) fn retained_delegation_start_binding(
@@ -1939,6 +2268,13 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
             let reservation: AllocationReservation = serde_json::from_slice(&bytes)
                 .map_err(|_| reservation_invalid("startup reservation is unreadable"))?;
             let (id, key, profile, lane) = match reservation {
+                AllocationReservation::Closed(closure) => {
+                    closure.validate().map_err(startup_closure_invalid)?;
+                    if path != self.path("run-start", &closure.namespace.idempotency_key) {
+                        return Err(reservation_invalid("startup closure filename differs"));
+                    }
+                    continue;
+                }
                 AllocationReservation::Legacy(reservation) => {
                     self.load(&reservation.idempotency_key)?;
                     continue;
@@ -1991,6 +2327,10 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
             return Ok(None);
         };
         let reservation = match decoded {
+            AllocationReservation::Closed(closure) => {
+                closure.validate().map_err(startup_closure_invalid)?;
+                return Err(start_operation_closed(&closure));
+            }
             AllocationReservation::Legacy(reservation) => reservation,
             AllocationReservation::Caller(reservation) => {
                 reservation.validate()?;
@@ -2049,10 +2389,20 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
     ) -> Result<Option<AllocationReservation>, MachineError> {
         let path = self.path(directory, idempotency_key);
         match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if directory == "run-start" && self.closure_witness(idempotency_key)?.is_some() {
+                    return Err(reservation_invalid("startup closure slot is missing"));
+                }
+                return Ok(None);
+            }
             Err(error) => return Err(run_path_error(&path, error.to_string())),
             Ok(_) => {}
         }
+        verify_secure_directory(
+            &self.state_root.join("idempotency"),
+            self.platform.current_uid(),
+        )?;
+        verify_secure_directory(&self.root(directory), self.platform.current_uid())?;
         verify_secure_file(&path, self.platform.current_uid())?;
         let file =
             crate::workspace::open_secure_file_if_present(&path, self.platform.current_uid())?
@@ -2081,6 +2431,7 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
             AllocationReservation::Delegation(reservation) => {
                 Some(serde_json::to_value(reservation))
             }
+            AllocationReservation::Closed(closure) => Some(serde_json::to_value(closure)),
             AllocationReservation::Legacy(_) => None,
         };
         if let Some(retained) = retained {
@@ -2119,6 +2470,10 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
             return Ok(None);
         };
         let encoded = match decoded {
+            AllocationReservation::Closed(closure) => {
+                closure.validate().map_err(startup_closure_invalid)?;
+                return Err(start_operation_closed(&closure));
+            }
             AllocationReservation::Legacy(legacy) => {
                 if legacy.schema_version != 1
                     || legacy.operation != "start_run"
@@ -2252,6 +2607,52 @@ impl<P: WorkspacePlatform> StartReservationStore<P> {
     }
 }
 
+fn startup_closure_invalid(reason: &'static str) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        reason,
+        false,
+        serde_json::json!({"reason":"startup_reconciliation_evidence_invalid"}),
+    )
+}
+
+fn start_operation_closed(closure: &crate::operation::StartOperationClosure) -> MachineError {
+    MachineError::new(
+        "IDEMPOTENCY_CONFLICT",
+        "startup key was permanently closed by reconciliation",
+        false,
+        serde_json::json!({"idempotency_key":closure.namespace.idempotency_key,
+            "reason":"startup_key_closed"}),
+    )
+}
+
+fn verify_allocation_sidecar(path: &Path, uid: u32) -> Result<(), MachineError> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| reservation_invalid("allocation namespace has an unknown entry"))?;
+    let lock = name.strip_suffix(".lock").is_some_and(is_sha256);
+    let temporary = name
+        .strip_prefix(".dolgorae-tmp-")
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .is_some_and(|value| value.get_version_num() == 7);
+    if !lock && !temporary {
+        return Err(reservation_invalid(
+            "allocation namespace has an unknown entry",
+        ));
+    }
+    verify_secure_file(path, uid)?;
+    if lock
+        && fs::metadata(path)
+            .map_err(|error| run_path_error(path, error.to_string()))?
+            .len()
+            != 0
+    {
+        return Err(reservation_invalid("allocation lock contains unknown data"));
+    }
+    Ok(())
+}
+
 /// A reservation file that cannot be trusted is durable-state corruption, not
 /// a fact about the caller's arguments.
 fn reservation_invalid(reason: &str) -> MachineError {
@@ -2314,6 +2715,9 @@ impl<P: WorkspacePlatform> RunStore<P> {
             },
         )?;
         if fs::symlink_metadata(&root).is_ok() {
+            if self.deletion(manifest.run_id)?.is_some() {
+                return Err(run_not_found(manifest.run_id));
+            }
             // The published Run's own lifecycle, not a guess: a Run whose
             // worker has committed no projection yet reads as `starting`,
             // which is exactly what it is.
@@ -2411,6 +2815,9 @@ impl<P: WorkspacePlatform> RunStore<P> {
             Err(error) => return Err(run_path_error(&root, error.to_string())),
         }
         verify_secure_directory(&root, self.platform.current_uid())?;
+        if self.deletion(run_id)?.is_some() {
+            return Err(run_not_found(run_id));
+        }
         let path = root.join("manifest.json");
         verify_secure_file(&path, self.platform.current_uid())?;
         let bytes = fs::read(&path).map_err(|_| run_not_found(run_id))?;
@@ -2487,6 +2894,51 @@ impl<P: WorkspacePlatform> RunStore<P> {
         Ok(manifest)
     }
 
+    pub(crate) fn deletion(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Option<crate::run_deletion::RunDeletion>, MachineError> {
+        crate::run_deletion::read_at(
+            &run_root(&self.state_root, run_id),
+            run_id,
+            self.platform.current_uid(),
+        )
+    }
+
+    /// Verify that no published Run has lost its allocation/tombstone owner.
+    pub(crate) fn verify_start_allocation_coverage(
+        &self,
+        workspace: &str,
+        allocated: &std::collections::BTreeSet<Uuid>,
+    ) -> Result<(), MachineError> {
+        let runs = self.state_root.join("runs");
+        verify_secure_directory(&runs, self.platform.current_uid())?;
+        for entry in
+            fs::read_dir(&runs).map_err(|error| run_path_error(&runs, error.to_string()))?
+        {
+            let entry = entry.map_err(|error| run_path_error(&runs, error.to_string()))?;
+            let name = entry.file_name();
+            let run = name
+                .to_str()
+                .and_then(|name| Uuid::parse_str(name).ok())
+                .filter(|id| id.get_version_num() == 7 && name == id.to_string().as_str())
+                .ok_or_else(|| reservation_invalid("Run inventory is incomplete"))?;
+            let recorded_workspace = match self.deletion(run)? {
+                Some(deletion) => deletion.workspace_id,
+                None => self.load_manifest(run)?.workspace_id,
+            };
+            if recorded_workspace != workspace || !allocated.contains(&run) {
+                return Err(MachineError::new(
+                    "RECOVERY_REQUIRED",
+                    "published Run has no verified allocation owner",
+                    false,
+                    serde_json::json!({"run_id":run,"reason":"startup_allocation_inventory_incomplete"}),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve whether a Codex thread belongs to a durable external Reviewer
     /// Run without exposing the Run store's private directory layout.
     pub fn reviewer_thread_registered(&self, thread_id: &str) -> Result<bool, MachineError> {
@@ -2528,6 +2980,9 @@ impl<P: WorkspacePlatform> RunStore<P> {
             .collect::<Vec<_>>();
         run_ids.sort();
         for run_id in run_ids {
+            if self.deletion(run_id)?.is_some() {
+                continue;
+            }
             let projection = self.load_state_projection(run_id)?;
             if projection.thread_id.as_deref() != Some(thread_id) {
                 continue;
@@ -2559,6 +3014,9 @@ impl<P: WorkspacePlatform> RunStore<P> {
         &self,
         run_id: Uuid,
     ) -> Result<crate::projection::RunStateProjection, MachineError> {
+        if self.deletion(run_id)?.is_some() {
+            return Err(run_not_found(run_id));
+        }
         let uid = self.platform.current_uid();
         let path = self
             .state_root
@@ -3213,7 +3671,7 @@ fn canonical_round_trip_preserves<T: Serialize>(value: &T) -> Result<bool, &'sta
     let canonical = canonicalize(&parsed).map_err(|_| "snapshot canonicalization failed")?;
     let round_trip: serde_json::Value =
         serde_json::from_slice(&canonical).map_err(|_| "snapshot canonicalization failed")?;
-    Ok(original == round_trip)
+    Ok(crate::jcs::values_equal(&original, &round_trip))
 }
 
 fn sorted_unique(values: &[String]) -> bool {
@@ -3513,7 +3971,7 @@ fn run_path_error(path: impl AsRef<Path>, reason: impl Into<String>) -> MachineE
     MachineError::runtime_path_invalid(path, reason)
 }
 
-fn run_not_found(run_id: Uuid) -> MachineError {
+pub(crate) fn run_not_found(run_id: Uuid) -> MachineError {
     MachineError::new(
         "RUN_NOT_FOUND",
         "run is unavailable",
@@ -4205,6 +4663,35 @@ mod tests {
                 .is_err()
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn canonical_numeric_round_trip_preserves_values_without_masking_precision_loss() {
+        for input in [
+            r#"{"mcp_servers":{"gaori":{"tool_timeout_sec":3601.0},"mulgae":{"startup_timeout_sec":30.0,"tool_timeout_sec":7501.0}}}"#,
+            r#"{"values":[-0.0,0.0,-30.0,30.5,9007199254740992.0,1e20]}"#,
+        ] {
+            let value: serde_json::Value = serde_json::from_str(input).unwrap();
+            assert!(canonical_round_trip_preserves(&value).unwrap(), "{input}");
+        }
+        let floats = serde_json::json!({"timeouts": [3601.0, 30.0, 7501.0]});
+        let integers = serde_json::json!({"timeouts": [3601, 30, 7501]});
+        assert_eq!(
+            caller_start_digest(&floats).unwrap(),
+            caller_start_digest(&integers).unwrap()
+        );
+        assert_ne!(
+            caller_start_digest(&integers).unwrap(),
+            caller_start_digest(&serde_json::json!({"timeouts": [3602, 30, 7501]})).unwrap()
+        );
+        for value in [
+            serde_json::json!({"nested": [9007199254740993_u64]}),
+            serde_json::json!({"nested": [u64::MAX]}),
+            serde_json::json!({"nested": [i64::MIN + 1]}),
+        ] {
+            assert!(!canonical_round_trip_preserves(&value).unwrap(), "{value}");
+            assert!(caller_start_digest(&value).is_err());
+        }
     }
 
     #[test]

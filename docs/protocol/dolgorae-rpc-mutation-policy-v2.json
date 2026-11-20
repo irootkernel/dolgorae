@@ -425,7 +425,7 @@
         "LOOKUP_NAMESPACE_UNAVAILABLE",
         "LOOKUP_NAMESPACE_CORRUPT"
       ],
-      "recovery": "Return exactly accepted/not_accepted/unresolved/absent under retained principal, generation, scope, kind and original key; missing index is recovery, not absence.",
+      "recovery": "Return accepted/not_accepted/unresolved/absent or a retained Start closed_without_acceptance result under the exact original namespace; missing index is recovery, not absence.",
       "request": "LookupOperationRequest",
       "response": "LookupOperationResponse",
       "stream": false,
@@ -433,6 +433,23 @@
       "runtime_admission": "negotiated_only",
       "keyed_lookup": null,
       "missing_mutation_detail": null
+    },
+    "OperationService.ReconcileStartOperation": {
+      "effect_class": "S",
+      "material_errors": [
+        "CONTROLLER_MISMATCH",
+        "IDEMPOTENCY_CONFLICT",
+        "RECOVERY_REQUIRED",
+        "RUNTIME_PATH_INVALID"
+      ],
+      "recovery": "Read the exact original operation. Reconciliation preserves accepted records or permanently closes a verified unaccepted key without redispatch; incomplete evidence remains fenced.",
+      "request": "ReconcileStartOperationRequest",
+      "response": "LookupOperationResponse",
+      "stream": false,
+      "transparent_retry": false,
+      "runtime_admission": "negotiated_only",
+      "keyed_lookup": null,
+      "missing_mutation_detail": "Unknown"
     },
     "OrchestrationService.GetOrchestratedSession": {
       "effect_class": "R",

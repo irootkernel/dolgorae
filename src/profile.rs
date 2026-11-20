@@ -86,7 +86,7 @@ pub struct ExecutableIdentity {
     pub sha256: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileSnapshot {
     pub schema_version: u32,
@@ -108,6 +108,14 @@ pub struct ProfileSnapshot {
     pub compatibility_verdict: CompatibilityVerdict,
     pub server_key: String,
 }
+
+impl PartialEq for ProfileSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        crate::jcs::snapshots_equal(self, other)
+    }
+}
+
+impl Eq for ProfileSnapshot {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2345,7 +2353,7 @@ fn membership_orphan_reason(
     };
     if !matches!(
         manifest.get("schema_version").and_then(Value::as_u64),
-        Some(2 | 3)
+        Some(2..=4)
     ) || manifest.get("run_id").and_then(Value::as_str)
         != Some(member.run_id.to_string().as_str())
         || manifest.get("workspace_id").and_then(Value::as_str)
@@ -9867,13 +9875,13 @@ mod tests {
             "workspace_id": member.workspace_id,
             "global_profile_binding": {"schema_version": 2, "server_key": key},
         });
-        for version in [2, 3] {
+        for version in [2, 3, 4] {
             manifest["schema_version"] = json!(version);
             fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
             assert_eq!(membership_orphan_reason(&root, &key, &member), None);
         }
         for (field, value) in [
-            ("schema_version", json!(4)),
+            ("schema_version", json!(5)),
             ("run_id", json!(Uuid::now_v7())),
             ("workspace_id", json!("2".repeat(64))),
         ] {

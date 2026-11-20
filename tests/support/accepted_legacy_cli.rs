@@ -8,7 +8,7 @@
 #[allow(unused_imports)]
 mod product;
 pub use product::*;
-pub(crate) use product::{codex_socket, public_resolution};
+pub(crate) use product::{codex_socket, public_resolution, run_deletion};
 #[path = "accepted_legacy_fixture.rs"]
 mod fixture;
 

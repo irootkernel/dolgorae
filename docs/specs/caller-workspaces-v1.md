@@ -104,11 +104,15 @@ Before publishing WorkerReady for each new physical Worker connection,
 initial runtime qualification, configuration
 readback and turnless Thread binding or original-Thread rebinding MAY wait for
 same-user Dedicated Server startup descendants to exit. These checks MUST share
-one monotonic budget for that connection, capped at thirty seconds
-and the session transport budget. Every observed child
-MUST retain its exact PID and birth identity until kernel absence is verified;
-identity drift, scope escape, inaccessible census and Worker workload MUST fail
-closed. Success still requires five complete empty samples at 100-ms intervals.
+one monotonic budget for that connection and remain within the session
+transport budget. The cap is sixty seconds for the first dedicated startup of
+a public-v2 caller Run or Orchestrated Session Primary, fifty seconds for its
+replacement Reader during generation release, and thirty seconds elsewhere.
+The public Start response deadline is separate. After it expires, the caller
+can look up the original Start key. Every observed child MUST retain its exact
+PID and birth identity until the kernel confirms absence. Identity drift,
+scope escape, inaccessible census, and Worker workload MUST fail closed.
+Success still requires five complete empty samples at 100-ms intervals.
 An initially different group or session MAY be admitted only after two complete
 kernel observations establish the stable PID/birth/UID ancestry to the exact
 owned Dedicated Server. Its admitted UID, birth, group and session MUST then
@@ -120,6 +124,16 @@ absence or retire Writer authority. Completed evidence MUST survive parent
 exit, Worker exit and normal control-socket replacement. Missing, corrupt,
 cross-generation or regressing evidence MUST fail closed. Version-1 runtime
 records retain their original shape and meaning; old readers reject version 2.
+An initial qualification timeout before native Thread dispatch MAY transfer
+cleanup to the startup owner through a separate immutable witness for the
+same Worker, Dedicated Server and observed descendants. The startup owner MUST
+verify the original Start, durable dispatch history, and exact process identities.
+It MUST prove five complete empty samples before sealing `start_failed` and
+releasing any matching initial Writer reservation. An unknown dispatch,
+unverified process, or incomplete census retains the recovery fence. The
+original key remains allocated to that Run. After cleanup, lookup reports an
+accepted Start with a failed outcome. Provider initialization can modify Codex
+home before this boundary.
 The existing personal-alpha limit for deliberate escape wholly between census
 polls remains unchanged.
 A startup group/census mismatch MAY discard a sample only after every differing

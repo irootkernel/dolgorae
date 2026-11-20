@@ -64,7 +64,19 @@ pub(crate) mod tests {
     }
     impl NativeFixture {
         pub(crate) fn new(approval: &str) -> Self {
-            let mut f = crate::trusted_host::tests::Fixture::new(HostRoute::Codex);
+            Self::with_primary_publication(approval, None)
+        }
+
+        pub(crate) fn with_primary_publication(
+            approval: &str,
+            publication: Option<Result<(), crate::orchestration::AdapterFailure>>,
+        ) -> Self {
+            use crate::run::{CallerRunStartRequest, CallerStartIntent, CallerStartReservation};
+
+            let mut f = crate::trusted_host::tests::Fixture::with_global_generation(
+                HostRoute::Codex,
+                publication.is_some(),
+            );
             std::fs::remove_file(&f.controller).unwrap();
             crate::controller::create_controller_credential(
                 &f.controller,
@@ -100,8 +112,65 @@ pub(crate) mod tests {
             value["captures"]["profile_bindings"]["reviewer"] = json!(binding);
             value["captures"]["configurations"]["reviewer"]["global_profile_binding_sha256"] =
                 json!(binding.digest().unwrap());
-            let accepted: crate::orchestration::AcceptedPolicySessionSnapshot =
+            let mut accepted: crate::orchestration::AcceptedPolicySessionSnapshot =
                 serde_json::from_value(value).unwrap();
+            manifest.run_id = accepted.root_run_id;
+            manifest.workspace_id = workspace;
+            manifest.canonical_workspace = crate::workspace::LosslessPath::from_path(&f.workspace);
+            manifest.controller = controller;
+            manifest.control_mode = crate::domain::ControlMode::DirectInteractive;
+            manifest.parent_ref = None;
+            manifest.agent_configuration.role_reference = None;
+            if publication.is_some() {
+                let request = CallerRunStartRequest {
+                    schema: "dolgorae-run-start-request/v2".into(),
+                    workspace: Some(f.workspace.to_str().unwrap().into()),
+                    expected_workspace_id: Some(manifest.workspace_id.clone()),
+                    profile: binding.selected_name.clone(),
+                    control_mode: manifest.control_mode,
+                    access: manifest.requested_access.unwrap(),
+                    role: manifest.selected_role.clone().unwrap(),
+                    specialist_policy: Some(accepted.captures.policy().policy_name.clone()),
+                    model: None,
+                    effort: None,
+                    purpose: manifest.purpose.clone(),
+                    parent_ref: None,
+                    required_capabilities: manifest.required_capabilities.clone(),
+                    idempotency_key: accepted.idempotency_key.clone(),
+                }
+                .resolve()
+                .unwrap();
+                let start = CallerStartReservation::new(CallerStartIntent {
+                    run_id: manifest.run_id,
+                    created_at: manifest.created_at.clone(),
+                    workspace_id: manifest.workspace_id.clone(),
+                    canonical_workspace: manifest.canonical_workspace.clone(),
+                    workspace_mode: manifest.workspace_mode,
+                    start_baseline: manifest.start_baseline.clone(),
+                    request,
+                    controller: manifest.controller.clone(),
+                    global_profile_binding: binding,
+                    instructions: manifest.instructions.delegation().unwrap().clone(),
+                    admitted_configuration: Some(manifest.agent_configuration.clone()),
+                    orchestration: Some(accepted.captures.clone()),
+                    readiness: crate::run::CallerProfileReadiness {
+                        model: manifest.model.clone(),
+                        default_effort: manifest.default_reasoning_effort.clone(),
+                        profile_capability_snapshot: manifest.profile_capability_snapshot.clone(),
+                    },
+                })
+                .unwrap();
+                accepted.request_sha256 = start.normalized_identity_sha256.clone();
+                manifest.start_operation_receipt = Some(Some(
+                    crate::run::public_start_operation_receipt(&start.accepted_intent).unwrap(),
+                ));
+                crate::run::StartReservationStore::new(
+                    crate::workspace::SystemWorkspacePlatform,
+                    &state,
+                )
+                .reserve_caller_generation(&start)
+                .unwrap();
+            }
             let mut sessions = crate::orchestration::OrchestrationStore::open(&state).unwrap();
             let accepted = sessions
                 .accept_policy_session(
@@ -114,15 +183,8 @@ pub(crate) mod tests {
             let session = sessions.prepare_caller_session(&accepted).unwrap();
             sessions.mark_primary_intent(session.session_id).unwrap();
             sessions
-                .finish_primary_publication(session.session_id, Ok(()))
+                .finish_primary_publication(session.session_id, publication.unwrap_or(Ok(())))
                 .unwrap();
-            manifest.run_id = session.session_id;
-            manifest.workspace_id = workspace;
-            manifest.canonical_workspace = crate::workspace::LosslessPath::from_path(&f.workspace);
-            manifest.controller = controller;
-            manifest.control_mode = crate::domain::ControlMode::DirectInteractive;
-            manifest.parent_ref = None;
-            manifest.agent_configuration.role_reference = None;
             manifest.aggregate_binding = Some(crate::run::AggregateBinding {
                 aggregate_kind: crate::domain::AggregateKind::OrchestratedSession,
                 aggregate_id: session.session_id,

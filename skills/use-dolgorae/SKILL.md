@@ -145,6 +145,23 @@ the complete retained-namespace proof. Missing or incompatible output, integrity
 failure and current-request rejection never resolve an earlier unknown effect.
 This native diagnostic does not establish public-v2 or consumer runtime support.
 
+## Reconcile an unknown pre-allocation Start
+
+Use public-v2 `OperationService.ReconcileStartOperation` only for an explicitly
+authorized reconciliation and when the selected runtime advertises the method
+under its negotiated current descriptor. Supply the original authenticated
+Controller scope, generation, workspace and key with provisioning scope
+`run-start`; never reconstruct mutable provisioning inputs or send Start again.
+
+`closed_without_acceptance` carries a namespace-bound closure receipt and
+permanently closes the original key. Preserve that receipt; it is not an
+`absent` result or permission to retry. An existing accepted reservation keeps
+its original lookup state and Run recovery requirements. Corrupt, incomplete
+or replaced retained state prevents closure. A missing completion witness stays
+unresolved until explicitly authorized reconciliation resumes it. This method
+starts no Profile, Run, worker, Thread or Turn. It grants no new-request,
+installation, pin-change or live qualification authority.
+
 ## Operator ledger checkpoint maintenance
 
 Use `maintenance plan`, `maintenance apply` and `maintenance get` only when the

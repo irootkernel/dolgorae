@@ -1702,6 +1702,10 @@ fn a_quarantined_pending_response_cannot_restore_the_run_or_reach_upstream() {
         "item":{"type":"fileChange","id":"file-1","status":"inProgress","changes":[]}
     }}));
     run.await_lifecycle("outcome_unknown");
+    assert!(matches!(
+        run.call(&run.wait(&turn_id)),
+        ControlResponseV1::Failed { code, retryable: false, .. } if code == "OUTCOME_UNKNOWN"
+    ));
     assert_eq!(
         failure_code(&run.call(&ControlRequestV1::Respond {
             caller: None,

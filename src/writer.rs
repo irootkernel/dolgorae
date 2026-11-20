@@ -735,6 +735,43 @@ impl WriterRecord {
         }
     }
 
+    pub(crate) fn release_aborted_initial_acquire(
+        &mut self,
+        run_id: Uuid,
+    ) -> Result<(), MachineError> {
+        let Some(holder) = self
+            .holder
+            .as_ref()
+            .filter(|holder| holder.run_id == run_id)
+        else {
+            // An earlier attempt may already have settled before a new Run acquired.
+            if self.transaction_id == Some(run_id) {
+                return Err(invariant(
+                    "startup abort found its transaction without its holder",
+                ));
+            }
+            return Ok(());
+        };
+        self.require_no_generation_release(run_id)?;
+        if !matches!(
+            self.state,
+            WriterAuthorityState::Reserved | WriterAuthorityState::BlockedUnknown
+        ) || self.transaction_id != Some(run_id)
+            || holder.run_generation != 1
+            || holder.worker_generation != 1
+            || holder.lifecycle != RunLifecycle::Starting
+            || holder.thread_id.is_some()
+            || holder.active_turn_id.is_some()
+        {
+            return Err(invariant(
+                "startup abort does not own this Writer reservation",
+            ));
+        }
+        self.state = WriterAuthorityState::Reserved;
+        self.cancel_acquire(run_id);
+        Ok(())
+    }
+
     pub fn block_unknown(&mut self, transaction_id: Uuid) {
         if self.transaction_id == Some(transaction_id) {
             self.state = WriterAuthorityState::BlockedUnknown;
@@ -1666,6 +1703,50 @@ mod tests {
             phase: GenerationReleasePhase::Prepared,
             successor: None,
         }
+    }
+
+    #[test]
+    fn startup_abort_releases_only_the_initial_threadless_reservation() {
+        let root = root();
+        let workspace = "a".repeat(64);
+        let uid = crate::darwin::DarwinSystem.current_uid();
+        WriterStore::initialize_layout(&root, &workspace, uid).unwrap();
+        let store = WriterStore::new(&root, &workspace, uid);
+        let run = Uuid::now_v7();
+        let foreign = Uuid::now_v7();
+        let mut initial = holder(run);
+        initial.thread_id = None;
+        initial.lifecycle = RunLifecycle::Starting;
+        let (blocked, ()) = store
+            .transact(|record| {
+                record.prepare_acquire(run, initial, run)?;
+                record.block_unknown(run);
+                record.release_aborted_initial_acquire(foreign)
+            })
+            .unwrap();
+        assert_eq!(blocked.state, WriterAuthorityState::BlockedUnknown);
+        assert!(
+            store
+                .transact(|record| {
+                    record.holder.as_mut().unwrap().thread_id = Some("other-thread".into());
+                    record.release_aborted_initial_acquire(run)
+                })
+                .is_err()
+        );
+        assert_eq!(store.load().unwrap(), blocked);
+        let (released, ()) = store
+            .transact(|record| record.release_aborted_initial_acquire(run))
+            .unwrap();
+        assert_eq!(released.state, WriterAuthorityState::None);
+        assert_eq!(released.writer_generation, blocked.writer_generation);
+        store
+            .transact(|record| {
+                record.prepare_acquire(foreign, holder(foreign), foreign)?;
+                record.release_aborted_initial_acquire(run)
+            })
+            .unwrap();
+        assert_eq!(store.load().unwrap().holder.unwrap().run_id, foreign);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

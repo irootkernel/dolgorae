@@ -875,6 +875,13 @@ observation, executable identity, Codex version, generated App Server schema
 digest, compatibility-manifest digest, launch-contract digest, and initial
 server key. It contains sufficient non-secret bytes and explicit-absence markers
 to reconstruct the accepted launch contract after registry edit or deletion.
+Snapshot validation and equality, including Profile Server generation checks,
+MUST compare JSON numbers by their exact mathematical values: integral
+floating-point metadata such as `3601.0` and `3601` MUST remain equivalent across
+JCS storage and recovery. Validation MUST still reject actual numeric precision
+loss, including numbers converted to preservation markers. Equivalent numeric
+representations MUST retain the same canonical digests and startup idempotency
+identity. Other snapshot fields and JSON types MUST retain exact equality.
 Existing Runs MUST NOT be rebound to another account or `CODEX_HOME`. The
 Agent Configuration snapshot additionally records the accepted model, default
 effort, purpose, required capabilities, role reference, normalized Controller
@@ -1062,7 +1069,9 @@ snapshot derived only through the journal revision/checksum and records each
 workspace/run/controller, worker generation, thread, connection/lifecycle and
 writer states, observed epoch, and runtime locator. Startup replays the journal,
 validates every referenced manifest/runtime record, and rewrites the snapshot;
-it never claims completeness by scanning incidental directories. A missing,
+it never claims completeness by scanning incidental directories. Active
+members may reference Run manifest versions 2 through 4. The manifest Run,
+workspace and Profile server binding must match the membership scope. A missing,
 corrupt, or revision-mismatched journal is incomplete and blocks profile-global
 operations. Every membership read and append verifies the existing derived index
 and any server state's v2 identity and membership revision against the journal
@@ -2465,8 +2474,10 @@ an existing serializer. Recovery requires explicit operator repair only after
 all recorded workers are absent and the incumbent thread/turn and singleton
 epoch have been reconciled.
 
-`workspace writer reset` is that operator repair and is the only v1 escape from
-a `blocked_unknown` authority record. It is an exceptional same-user correctness
+`workspace writer reset` is the v1 operator repair for a `blocked_unknown`
+authority record. The verified initial startup-abort path in
+[caller workspaces](caller-workspaces-v1.md) can settle its own reservation.
+Writer reset is an exceptional same-user correctness
 override, not a force takeover: it MUST require the operator capability, an
 exact `--confirm-workspace-id` match, and explicit `--require-worker-absence`.
 PREPARE acquires writer then run serialization, revalidates the operator
@@ -2713,6 +2724,9 @@ automatically declined. Writer approvals are never automatically accepted.
 Profile MCP servers, apps, and plugins remain available; side effects performed
 outside Codex's sandbox are outside the one-Dolgorae-writer-per-worktree
 guarantee.
+During caller-workspace startup and policy checks, verified Profile tool
+transports can stay resident while the Run is idle. The Run owns their observed
+process scopes for retirement, and Close requires their verified absence.
 
 ## SPEC-008: Run Lifecycle, Recovery, and Forking
 
@@ -2958,6 +2972,14 @@ After method-not-found, Dolgorae keeps draining the generation until Codex emits
 a terminal turn event. If Codex instead leaves the turn nonterminal, the Master
 sees the run as `running` with no Dolgorae pending request and uses `run interrupt`
 as the bounded escape.
+
+For command execution approval, Dolgorae carries a native command string as a
+single unchanged element of the protected command array. Native argument
+arrays retain their order and contents. A bounded, correlated request with
+no displayable command or with an unsupported approval kind is declined
+at its original native request ID. This covers terminal input and separate
+network approvals. Such a decline continues the Turn without presenting
+a pending command approval.
 
 The interaction MUST be fsynced before any observer delivery. Controller
 disconnect does not affect it, the first valid idempotent response MUST win, an
@@ -3419,18 +3441,61 @@ create-exclusive child of that directory. A user MAY explicitly request an
 external export destination; that copy is user output, not runtime authority.
 
 There is no retention limit or automatic deletion. `run delete` is allowed
-only for closed or start-failed runs and requires `--confirm`; it is the sole
-state-changing command allowed after audit integrity failure and appends no
-record to a ledger it cannot trust. It permanently
-deletes the Dolgorae-home Run directory only. It MUST NOT delete the Codex thread from
-`CODEX_HOME`, and Dolgorae MUST NOT later auto-import that orphaned thread.
+for independent closed or start-failed caller-workspace Runs and requires
+`--confirm` and the current Controller. Before deletion, the producer MUST prove owned-generation
+absence and Profile membership retirement, and verify that the workspace
+Writer is `none` with no live release or handoff for the Run. Deletion does not
+settle an open Run, remove a Writer guard, or signal processes. Aggregate-owned
+Runs and Runs with dependent descendants are outside this deletion path.
+Confirmed deletion is the sole Run mutation allowed after audit integrity
+failure and appends no record to a ledger it cannot trust.
+It permanently deletes the Dolgorae-home Run payload, retaining a private
+allocation tombstone at the original UUID. It MUST NOT delete the Codex thread
+from `CODEX_HOME`, and Dolgorae MUST NOT later auto-import that orphaned thread.
 When verification fails, this escape additionally requires the final complete
 ledger line to remain an independently canonical, self-hashed terminal seal and
 the existing mode-0600 `state.json` to identify that exact sequence/hash, Run,
 and terminal lifecycle. The broken earlier chain remains reported and no other
-mutation is permitted. The confirmed delete path revalidates the exact
-mode-0700 Run directory beneath the secure workspace `runs/` directory
-immediately before removal.
+mutation is permitted. The producer revalidates the exact mode-0700 Run
+directory immediately before atomically exchanging it with the tombstone.
+On a lost response, the same confirmed request revalidates the Controller and
+completes removal of only the recorded detached payload, if present. An exact
+Start replay still observes the original UUID and returns `RUN_NOT_FOUND`.
+An Operator MAY abandon an independent caller-workspace Run or an eligible
+Orchestrated Session Primary with
+`run delete --force --confirm --confirm-workspace-id <workspace-id>` and
+the current Operator credential. Force deletion can proceed without a
+terminal Turn or Start result. The producer may stop the owned Worker and
+Dedicated Server using checked process and socket identities. With incomplete
+ownership evidence on the current boot, the producer MAY delete the Run and
+revoke its Writer if the exact recorded Worker and Dedicated Server are absent
+and the Worker startup range is unowned. The Operator accepts that unrecorded
+descendants may remain. The tombstone records the locator and Worker digests,
+retains the runtime locator for cleanup, and returns `runtime_cleanup_pending: true`.
+After a verified boot change, a repeat can retire that exact locator and its
+resources without signaling any process. A matching verified-absence marker
+also proves earlier cleanup of the retained generation.
+
+The producer MUST retain the Writer and Profile membership until the
+permanent Run tombstone is durable. It then releases only the confirmed
+Run's Writer generation and its Profile membership before
+removing the detached payload. A Writer handoff or pending generation
+release involving the target requires its own reconciliation. Retry
+requires the same workspace and current credential for the original
+Operator identity. The original Start receipt and its proven outcome
+remain queryable. An unresolved accepted Start retains outcome `unknown`.
+The Run's original lifecycle is retained privately, and no terminal outcome
+is fabricated.
+An eligible Primary has the exact retained caller Start and session binding,
+with no Specialist members, spawn operations, tasks, or Controller close
+intent. After runtime and Writer preflight, the producer commits Operator
+abandonment in the session journal and sets the session to `aborted` before
+stopping the generation. This fences new work and survives a cleanup failure.
+The Start and bootstrap receipts keep their original outcomes. A successful
+response confirms deletion of the detached Run data and revocation of
+Dolgorae authority. The runtime cleanup field identifies any remaining
+process cleanup.
+Public-v2 `DeleteRun` remains unavailable until separately activated.
 
 ## SPEC-011: Agent Instruction and Side-Effect Policy
 
@@ -6095,6 +6160,13 @@ allocate a replacement under the old key. Other lost responses use the
 interaction/writer snapshot, returned operation ID when known, and
 `ReconcileRun` where required.
 `OUTCOME_UNKNOWN` and `RECOVERY_REQUIRED` always forbid blind automatic retry.
+For a successor Start without a Run reference, the explicit
+[pre-allocation reconciliation contract](dolgorae-v014-durable-operations.md#pre-allocation-start-reconciliation)
+provides `OperationService.ReconcileStartOperation`. It can durably close an
+unaccepted original key after complete retained-state verification and allocation
+serialization. `LookupOperation` then returns `closed_without_acceptance`,
+which permanently forbids original-key admission and does not fabricate an input
+digest or a historical refusal. Existing accepted state remains authoritative.
 
 `CreateWriteContinuation` returns a dedicated threadless destination Run,
 typed immutable lineage, new destination Controller, idempotency key, and a

@@ -2,7 +2,8 @@
   "contract_id": "dolgorae.gul-consumer/v2",
   "schema_version": 2,
   "protocol_version": 2,
-  "descriptor_method_count": 64,
+  "descriptor_method_count": 65,
+  "optional_methods": ["OperationService.ReconcileStartOperation"],
   "required_method_count": 45,
   "required_methods": [
     "ArtifactService.GetArtifact",
@@ -55,6 +56,7 @@
   "generated_go_module": "github.com/rootkernel/dolgorae/contracts/gul-consumer-v2",
   "descriptor": "dolgorae-public-v2.descriptor.pb",
   "lock": "dolgorae-gul-consumer-v2.lock.json",
+  "lock_applicability": "The immutable historical H1 selection is unchanged; current startup reconciliation requires negotiation of this runtime descriptor and optional method.",
   "policies": [
     "dolgorae-capabilities-v2.json",
     "dolgorae-rpc-mutation-policy-v2.json",

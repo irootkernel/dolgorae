@@ -254,16 +254,21 @@ def append_membership(
 
 
 def write_bound_manifest(
-    home: pathlib.Path, profile_root: pathlib.Path, workspace_id: str, run_id: str
+    home: pathlib.Path,
+    profile_root: pathlib.Path,
+    workspace_id: str,
+    run_id: str,
+    *,
+    schema_version: int = 2,
 ) -> None:
-    """Create the minimal immutable identity proof checked by membership repair."""
+    """Create the minimal immutable identity proof used in membership checks."""
     run_root = home / ".dolgorae" / "workspaces" / workspace_id / "runs" / run_id
     run_root.mkdir(parents=True, mode=0o700, exist_ok=True)
     manifest = run_root / "manifest.json"
     manifest.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": schema_version,
                 "workspace_id": workspace_id,
                 "run_id": run_id,
                 "global_profile_binding": {
@@ -786,11 +791,10 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
                 raise AssertionError(f"orphan tombstone failed: {tombstoned.stdout}")
             assert_valid(envelope(tombstoned), machine, "membership-tombstone Machine envelope")
 
-        # A Run registered as a live member of this server must not be
-        # interrupted by an ordinary stop. Until registration existed the live
-        # member set was always empty and every membership gate was vacuous.
+        # A live v4 member must reach the ordinary busy guard and keep the
+        # server running.
         live_member_id = "01a071ba-0000-7000-8000-000000000001"
-        write_bound_manifest(home, profile_root, workspace_id, live_member_id)
+        write_bound_manifest(home, profile_root, workspace_id, live_member_id, schema_version=4)
         append_membership(profile_root, "run_registered", workspace_id, live_member_id)
         gated_remove = run(binary, home, "profile", "remove", "default")
         gated_remove_envelope = envelope(gated_remove)

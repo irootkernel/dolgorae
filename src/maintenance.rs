@@ -534,6 +534,12 @@ fn run_ids_with_bootstrap(
                 )
             })?;
         verify_secure_directory(&entry.path(), DarwinSystem.current_uid())?;
+        if RunStore::new(SystemWorkspacePlatform, state_root)
+            .deletion(run)?
+            .is_some()
+        {
+            continue;
+        }
         runs.push(run);
         if runs.len() > 4096 {
             return Err(error(

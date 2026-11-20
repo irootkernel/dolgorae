@@ -1723,6 +1723,8 @@ message DolgoraeErrorDetail {
 }
 service OperationService {
   rpc LookupOperation(LookupOperationRequest) returns (LookupOperationResponse);
+  // Explicitly reconcile one original pre-allocation Start, without redispatch.
+  rpc ReconcileStartOperation(ReconcileStartOperationRequest) returns (LookupOperationResponse);
 }
 service ProvisioningService {
   rpc ValidateProvisioning(ValidateProvisioningRequest) returns (ValidateProvisioningResponse);
@@ -2042,6 +2044,7 @@ message LookupOperationResponse {
     NotAcceptedOperation not_accepted = 3;
     UnresolvedOperation unresolved = 4;
     AbsentOperation absent = 5;
+    ClosedStartOperation closed_without_acceptance = 6;
   }
 }
 
@@ -2758,4 +2761,17 @@ message SuccessorBounds {
   uint32 action_rounds_max = 20;
   uint64 ledger_generation_bytes = 21;
   uint64 ledger_generation_records = 22;
+}
+
+// Terminal key closure; no original input digest or historical refusal is invented.
+message ClosedStartOperation {
+  OperationRef operation = 1;
+  string closure_receipt_digest = 2;
+  uint64 durable_watermark = 3;
+  bool original_key_permanently_closed = 4;
+}
+message ReconcileStartOperationRequest {
+  RequestContext context = 1;
+  ControllerCarrierRef controller = 2;
+  OperationRef operation = 3;
 }

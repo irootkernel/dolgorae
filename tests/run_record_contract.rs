@@ -1891,6 +1891,135 @@ fn sample_caller_intent() -> CallerStartIntent {
 }
 
 #[test]
+fn canonical_numeric_profile_and_start_reservation_preserve_timeout_identity() {
+    let floats = serde_json::json!({
+        "gaori": {"tool_timeout_sec": 3601.0},
+        "mulgae": {"startup_timeout_sec": 30.0, "tool_timeout_sec": 7501.0}
+    });
+    let integers = serde_json::json!({
+        "gaori": {"tool_timeout_sec": 3601},
+        "mulgae": {"startup_timeout_sec": 30, "tool_timeout_sec": 7501}
+    });
+    let manifest_with = |metadata: Value| {
+        let mut manifest = sample_manifest();
+        manifest
+            .profile
+            .process_static_configuration
+            .insert("mcp_servers".into(), metadata);
+        manifest.profile.launch_contract_sha256 =
+            launch_contract_digest(&manifest.profile).unwrap();
+        manifest.agent_configuration.runtime_profile_snapshot_sha256 =
+            runtime_profile_snapshot_digest(&manifest.profile).unwrap();
+        manifest
+    };
+    let tree = TestTree::new();
+    let state = tree.path("state");
+    make_dir(&state);
+    make_dir(&state.join("runs"));
+    let runs = RunStore::new(SystemWorkspacePlatform, &state);
+    let manifest = manifest_with(floats.clone());
+    let directory = runs.publish(&manifest).unwrap();
+    let loaded = runs.load_manifest(manifest.run_id).unwrap();
+    assert_eq!(loaded.profile, manifest.profile);
+    assert_eq!(
+        runtime_profile_snapshot_digest(&loaded.profile).unwrap(),
+        runtime_profile_snapshot_digest(&manifest_with(integers.clone()).profile).unwrap()
+    );
+    let original_manifest = fs::read(directory.root.join("manifest.json")).unwrap();
+
+    let intent_with = |metadata: Value| {
+        let mut intent = sample_caller_intent();
+        let binding = &mut intent.global_profile_binding;
+        binding
+            .launch_snapshot
+            .process_static_configuration
+            .insert("mcp_servers".into(), metadata);
+        binding.launch_snapshot_sha256 = dolgorae::jcs::sha256_hex(
+            &canonicalize(
+                &parse(&serde_json::to_string(&binding.launch_snapshot).unwrap()).unwrap(),
+            )
+            .unwrap(),
+        );
+        intent
+    };
+    let intent = intent_with(floats);
+    let mut equivalent = intent.clone();
+    equivalent.global_profile_binding = intent_with(integers).global_profile_binding;
+    let reservation = CallerStartReservation::new(intent).unwrap();
+    let equivalent = CallerStartReservation::new(equivalent).unwrap();
+    assert_eq!(reservation.request_sha256, equivalent.request_sha256);
+    assert_eq!(
+        reservation.normalized_identity_sha256,
+        equivalent.normalized_identity_sha256
+    );
+    let store = StartReservationStore::new(SystemWorkspacePlatform, &state);
+    store.reserve_caller(&reservation).unwrap();
+    let replay = store.reserve_caller(&equivalent).unwrap();
+    assert_eq!(replay.run_id, reservation.run_id);
+    assert_eq!(
+        replay.accepted_intent.global_profile_binding,
+        reservation.accepted_intent.global_profile_binding
+    );
+    assert_eq!(
+        dolgorae::global_runtime::GlobalLaunchSnapshot::from(
+            &replay
+                .accepted_intent
+                .global_profile_binding
+                .launch_snapshot
+        ),
+        dolgorae::global_runtime::GlobalLaunchSnapshot::from(
+            &reservation
+                .accepted_intent
+                .global_profile_binding
+                .launch_snapshot
+        )
+    );
+    assert_eq!(
+        replay.normalized_identity_sha256,
+        reservation.normalized_identity_sha256
+    );
+    replay
+        .accepted_intent
+        .global_profile_binding
+        .validate_for_recovery()
+        .unwrap();
+
+    let mut changed = replay.accepted_intent.clone();
+    changed.global_profile_binding = intent_with(serde_json::json!({
+        "gaori": {"tool_timeout_sec": 3602}
+    }))
+    .global_profile_binding;
+    let changed = CallerStartReservation::new(changed).unwrap();
+    assert_ne!(
+        changed.accepted_intent.global_profile_binding,
+        reservation.accepted_intent.global_profile_binding
+    );
+    assert_ne!(
+        changed.normalized_identity_sha256,
+        reservation.normalized_identity_sha256
+    );
+    let retained = store.reserve_caller(&changed).unwrap();
+    assert_eq!(
+        retained.normalized_identity_sha256,
+        reservation.normalized_identity_sha256
+    );
+
+    for number in [
+        serde_json::json!(9007199254740993_u64),
+        serde_json::json!(u64::MAX),
+        serde_json::json!(i64::MIN + 1),
+    ] {
+        let metadata = serde_json::json!({"gaori": {"tool_timeout_sec": number}});
+        assert!(runs.publish(&manifest_with(metadata.clone())).is_err());
+        assert!(CallerStartReservation::new(intent_with(metadata)).is_err());
+        assert_eq!(
+            fs::read(directory.root.join("manifest.json")).unwrap(),
+            original_manifest
+        );
+    }
+}
+
+#[test]
 fn checked_caller_reservation_example_recovers_with_its_bound_digests() {
     let reservation: CallerStartReservation = serde_json::from_str(include_str!(
         "../docs/protocol/examples/workspace-execution-start-reservation.valid.json"

@@ -96,7 +96,7 @@ checks apply wherever the request carries their corresponding fields.
 | `RunService.CloseRun` | S | `SESSION_CLOSE_IN_PROGRESS`, `OUTCOME_UNKNOWN`, `RECOVERY_REQUIRED` | Read durable close operation and owned aggregate; continue the same owner through supported reconcile/recover; never resubmit accepted session-close intent |
 | `RunService.DeleteRun` | S | `RUN_BUSY`, `RUN_STATE_CONFLICT` | Inspect Run/tombstone and prior authorized confirmation; no automatic repeated deletion or receipt removal |
 | `RunService.RecoverRun` | S | `RECOVERY_REQUIRED`, `DEDICATED_HISTORY_BARRIER_FAILED`, `OUTCOME_UNKNOWN` | Read retained operation/generation and perform its prescribed recovery; a failed recovery cannot authorize redispatch |
-| `RunService.ReconcileRun` | S | `THREAD_RESIDENCY_CONFLICT`, `BACKGROUND_EXECUTION_UNVERIFIED`, `OUTCOME_UNKNOWN` | Read updated state and exact generation before another explicitly selected reconciliation |
+| `RunService.ReconcileRun` | S | `THREAD_RESIDENCY_CONFLICT`, `BACKGROUND_EXECUTION_UNVERIFIED`, `RECOVERY_REQUIRED`, `OUTCOME_UNKNOWN` | Read updated state and exact generation before another explicitly selected reconciliation |
 | `RunService.ForkRun` | K | `TURN_NOT_FOUND`, `THREAD_NOT_FOUND`, `IDEMPOTENCY_CONFLICT`, `OUTCOME_UNKNOWN` | Lookup original fork key and destination; preserve accepted history/provenance boundary |
 | `RunService.VerifyRun` | V | `RUN_NOT_FOUND`, `BACKGROUND_EXECUTION_UNVERIFIED`, `RUN_STATE_CONFLICT` | Refresh original Run's verification; a verification result grants no lifecycle or writer effect |
 | `RunService.CreateWriteContinuation` | K | `WRITE_CONTINUATION_SOURCE_NOT_TERMINAL`, `WRITE_CONTINUATION_CONTROLLER_INVALID`, `IDEMPOTENCY_CONFLICT` | Lookup original continuation key and destination; use a new same-principal Controller only as explicitly required by admission |
@@ -122,6 +122,26 @@ unless a typed detail or authorized authoritative read proves `none`. The
 presence of a code such as `RUN_BUSY` in a current refusal cannot resolve an
 earlier ambiguous invocation. A `DATA_LOSS` condition requires supported
 operator recovery and cannot be retried into a new generation automatically.
+
+When failed startup leaves an incomplete generation-ownership witness and
+control recovery is required, `GetRun` reports `startup_ownership_incomplete`
+with `OPERATOR_REPAIR`. `RecoverRun` and `ReconcileRun` refuse with
+`RECOVERY_REQUIRED`, `OPERATOR_REPAIR`, and forbidden retry without admitting
+another mutation. The original Run and any Writer guard remain retained.
+For a witnessed initial pre-dispatch timeout, the original Start or explicit
+`ReconcileStartOperation` can finish its exact generation's cleanup. Once
+sealed and settled, `LookupOperation` reports the original accepted Start
+receipt with outcome `FAILED`. A response timeout alone leaves the lookup
+unresolved until the Start succeeds or its failure is sealed and settled.
+
+If the control transport fails after a Close admission, the producer uses
+the exact admission and terminal seal to check whether the Close committed.
+It can finish the admitted Close by verifying absence of the final generation
+and retiring Profile membership. This path never dispatches another Close.
+Public-v2 Close allows up to sixty seconds for the producer response because
+the operation can retire a Writer generation, verify its Reader successor,
+and close that successor. A shorter client deadline still bounds the response
+wait. Expiring that wait does not cancel an admitted Close.
 
 ### New successor operations
 
@@ -191,6 +211,7 @@ Lookup's normal result MUST be exactly one of:
 | `not_accepted` | Original key/scope/kind, durably recorded definitive refusal and input identity; exact-key retry is permitted only under that method's admission rules |
 | `unresolved` | Original operation reference, known admitted identities, effect uncertainty and supported next action; reconcile without redispatch |
 | `absent` | Complete authoritative lookup under the exact retained Controller/scope/kind/key namespace, with no matching operation or tombstone; permits admission of that original key |
+| `closed_without_acceptance` | Explicit Start reconciliation proves no retained allocation and durably closes the original key; return its namespace-bound closure receipt without inventing an input digest; original-key admission is permanently forbidden |
 
 Lookup authorization MUST NOT depend on current task files, attachment paths,
 mutable prompt reconstruction or possession of an artifact ID. An unavailable,

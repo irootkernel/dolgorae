@@ -1038,11 +1038,18 @@ pub(crate) mod tests {
     }
     impl Fixture {
         pub fn new(route: HostRoute) -> Self {
+            Self::with_global_generation(route, false)
+        }
+
+        pub(crate) fn with_global_generation(route: HostRoute, global_generation: bool) -> Self {
             let root = std::env::temp_dir().join(format!("dolgorae-host-{}", Uuid::now_v7()));
             fs::create_dir(&root).unwrap();
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
             let root = root.canonicalize().unwrap();
             let home = DolgoraeHome::from_canonical_home(root.clone()).unwrap();
+            if global_generation {
+                crate::global_profile::initialize_generation(&home).unwrap();
+            }
             let workspace = root.join("workspace");
             let private = root.join("private");
             for path in [&workspace, &private, &private.join("native")] {

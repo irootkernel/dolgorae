@@ -593,6 +593,38 @@ fn ecmascript_number(value: f64) -> Result<String, JcsError> {
     Ok(output)
 }
 
+// JCS may change numeric spelling without changing value. Compare exact decimals;
+// precision-loss markers remain objects and cannot compare equal to numbers.
+pub(crate) fn values_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    match (left, right) {
+        (serde_json::Value::Number(left), serde_json::Value::Number(right)) => {
+            decimal_identity(&left.to_string()) == decimal_identity(&right.to_string())
+        }
+        (serde_json::Value::Array(left), serde_json::Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| values_equal(left, right))
+        }
+        (serde_json::Value::Object(left), serde_json::Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| values_equal(left, right))
+                })
+        }
+        _ => left == right,
+    }
+}
+
+pub(crate) fn snapshots_equal<T: serde::Serialize>(left: &T, right: &T) -> bool {
+    let left = serde_json::to_value(left).expect("snapshot is JSON serializable");
+    let right = serde_json::to_value(right).expect("snapshot is JSON serializable");
+    values_equal(&left, &right)
+}
+
 fn decimal_identity(value: &str) -> (bool, String, i64) {
     let (negative, value) = value
         .strip_prefix('-')
@@ -661,6 +693,36 @@ mod tests {
             r#"{"$dolgorae_number":"9007199254740993"}"#
         );
         assert_eq!(canonical("1e400"), r#"{"$dolgorae_number":"1e400"}"#);
+    }
+
+    #[test]
+    fn numeric_equality_preserves_exact_values_and_json_structure() {
+        for (left, right) in [
+            (r#"{"timeout":3601.0}"#, r#"{"timeout":3601}"#),
+            ("[-0.0,30.0,1e20]", "[0,30,100000000000000000000]"),
+        ] {
+            assert!(values_equal(
+                &serde_json::from_str(left).unwrap(),
+                &serde_json::from_str(right).unwrap()
+            ));
+        }
+        for (left, right) in [
+            ("3601", "3602"),
+            ("1.0000000000000002", "1"),
+            ("9007199254740993", "9007199254740992"),
+            ("3601", r#""3601""#),
+            (
+                "9007199254740993",
+                r#"{"$dolgorae_number":"9007199254740993"}"#,
+            ),
+            ("[1,2]", "[2,1]"),
+            (r#"{"a":1}"#, r#"{"a":1,"b":null}"#),
+        ] {
+            assert!(!values_equal(
+                &serde_json::from_str(left).unwrap(),
+                &serde_json::from_str(right).unwrap()
+            ));
+        }
     }
 
     #[test]

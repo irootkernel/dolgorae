@@ -1,4 +1,5 @@
-// Package client provides conservative H1 consumer admission and loss recovery.
+// Package client provides conservative consumer admission and loss recovery,
+// including the negotiated current Start reconciliation extension.
 // It does not claim that a production public-v2 provider is available.
 package client
 
@@ -126,6 +127,17 @@ func ValidateLookup(response *pb.LookupOperationResponse, original *pb.Operation
 			return fmt.Errorf("lookup remains unresolved: absence is not authoritative")
 		}
 		returned = value.Absent.GetOperation()
+	case *pb.LookupOperationResponse_ClosedWithoutAcceptance:
+		closure := value.ClosedWithoutAcceptance
+		if original.GetOperationKind() != pb.OperationKind_OPERATION_KIND_START_RUN ||
+			original.GetCallerScope().GetProvisioningScope() != "run-start" ||
+			original.GetCallerScope().GetControllerGeneration() == 0 || original.GetIdempotencyKey() == "" ||
+			!digestPattern.MatchString("sha256:"+original.GetCallerScope().GetWorkspaceId()) ||
+			!closure.GetOriginalKeyPermanentlyClosed() || closure.GetDurableWatermark() == 0 ||
+			!digestPattern.MatchString(closure.GetClosureReceiptDigest()) {
+			return fmt.Errorf("lookup remains unresolved: incomplete Start key closure")
+		}
+		returned = closure.GetOperation()
 	default:
 		return fmt.Errorf("lookup remains unresolved: unset or unsupported outcome")
 	}

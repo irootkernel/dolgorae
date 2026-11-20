@@ -86,6 +86,7 @@ pub enum RunVerb {
     ReleaseWrite,
     CreateWriteContinuation,
     Close,
+    Delete,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,32 +198,68 @@ pub(crate) fn lookup_start_operation_at(
         "known_subjects":crate::operation::Subjects {run_ref:run.map(|id|id.to_string()),..Default::default()},
         "effect":"unresolved","required_action":"reconcile_operation"})
     };
-    let Some(reservation) = StartReservationStore::new(SystemWorkspacePlatform, state_root)
-        .retained_delegation_start(key, controller)?
-    else {
-        // This owner has no retained absence fence. No-file is not nondispatch proof.
-        return Ok(unresolved(None));
+    let reservation = match StartReservationStore::new(SystemWorkspacePlatform, state_root)
+        .retained_start_operation(key, controller)?
+    {
+        Some(crate::run::RetainedStartOperation::Accepted(reservation)) => reservation,
+        Some(crate::run::RetainedStartOperation::Closed(closure)) => {
+            if closure.namespace != namespace {
+                return Err(internal("startup closure crossed its workspace"));
+            }
+            crate::workspace::verify_retained_workspace_namespace(state_root, workspace_id)?;
+            if !StartReservationStore::new(SystemWorkspacePlatform, state_root)
+                .start_closure_published(&closure)?
+            {
+                return Ok(unresolved(None));
+            }
+            return Ok(closure.lookup());
+        }
+        None => {
+            // Only explicit reconciliation may publish a no-acceptance closure.
+            return Ok(unresolved(None));
+        }
     };
     if reservation.accepted_intent.workspace_id != workspace_id {
         return Err(internal("startup lookup crossed its workspace"));
     }
     let runs = RunStore::new(SystemWorkspacePlatform, state_root);
-    let manifest = match runs.load_manifest(reservation.run_id) {
-        Ok(manifest) => manifest,
-        Err(error) if error.code == "RUN_NOT_FOUND" => {
-            return Ok(unresolved(Some(reservation.run_id)));
+    let (receipt, outcome) = if let Some(deleted) = runs.deletion(reservation.run_id)? {
+        if deleted.workspace_id != workspace_id {
+            return Err(internal("deleted startup lookup crossed its workspace"));
         }
-        Err(error) => return Err(error),
+        let outcome = deleted.start_outcome();
+        let Some(receipt) = deleted.start_receipt else {
+            return Ok(unresolved(Some(reservation.run_id)));
+        };
+        if receipt != crate::run::public_start_operation_receipt(&reservation.accepted_intent)? {
+            return Err(internal(
+                "deleted startup receipt differs from the original allocation",
+            ));
+        }
+        (receipt, outcome)
+    } else {
+        let manifest = match runs.load_manifest(reservation.run_id) {
+            Ok(manifest) => manifest,
+            Err(error) if error.code == "RUN_NOT_FOUND" => {
+                return Ok(unresolved(Some(reservation.run_id)));
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(Some(receipt)) = manifest.start_operation_receipt.as_ref() else {
+            return Ok(unresolved(Some(reservation.run_id)));
+        };
+        let outcome = if runs
+            .load_caller_start_receipt(reservation.run_id, &reservation.normalized_identity_sha256)?
+            .is_some()
+        {
+            "completed"
+        } else if startup_abort_settled(state_root, &manifest)? {
+            "failed"
+        } else {
+            return Ok(unresolved(Some(reservation.run_id)));
+        };
+        (receipt.clone(), outcome)
     };
-    let Some(Some(receipt)) = manifest.start_operation_receipt.as_ref() else {
-        return Ok(unresolved(Some(reservation.run_id)));
-    };
-    if runs
-        .load_caller_start_receipt(reservation.run_id, &reservation.normalized_identity_sha256)?
-        .is_none()
-    {
-        return Ok(unresolved(Some(reservation.run_id)));
-    }
     receipt.validate()?;
     if receipt.namespace.controller_principal != namespace.controller_principal
         || receipt.namespace.controller_generation != namespace.controller_generation
@@ -236,8 +273,81 @@ pub(crate) fn lookup_start_operation_at(
     Ok(
         json!({"schema":"dolgorae.operation-lookup/v1","namespace":namespace,"state":"accepted",
         "operation_ref":receipt.operation_ref,"accepted_input_digest":receipt.accepted_input_digest,"receipt":receipt,
-        "accepted_subjects":receipt.accepted_subjects,"current_outcome":"completed","result_ref":null,"result_digest":null}),
+        "accepted_subjects":receipt.accepted_subjects,"current_outcome":outcome,"result_ref":null,"result_digest":null}),
     )
+}
+
+/// Close an unaccepted original key under the same lock every Start holds.
+pub(crate) fn reconcile_start_operation_at(
+    state_root: &Path,
+    workspace_id: &str,
+    controller: &crate::domain::ControllerIdentity,
+    key: &str,
+) -> Result<Value, MachineError> {
+    verify_secure_directory(state_root, DarwinSystem.current_uid())?;
+    let namespace =
+        crate::operation::Namespace::delegation(controller, workspace_id, None, "start_run", key)
+            .map_err(internal)?;
+    crate::workspace::verify_retained_workspace_namespace(state_root, workspace_id)?;
+    let reservations = StartReservationStore::new(SystemWorkspacePlatform, state_root);
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
+    // Observation of an accepted key cannot close it and must not queue behind
+    // an in-flight Start unless there is an interrupted retirement to finish.
+    if let Some(crate::run::RetainedStartOperation::Accepted(reservation)) =
+        reservations.retained_start_operation(key, controller)?
+        && (runs.deletion(reservation.run_id)?.is_some()
+            || load_startup_abort(state_root, reservation.run_id)?.is_none())
+    {
+        return lookup_start_operation_at(state_root, workspace_id, controller, key);
+    }
+    let allocation = reservations.lock_allocation("run-start", key)?;
+    match reservations.retained_start_operation(key, controller)? {
+        Some(crate::run::RetainedStartOperation::Accepted(reservation)) => {
+            if reservation.accepted_intent.workspace_id != workspace_id {
+                return Err(internal("startup reconciliation crossed its workspace"));
+            }
+            if runs.deletion(reservation.run_id)?.is_none()
+                && load_startup_abort(state_root, reservation.run_id)?.is_some()
+            {
+                let manifest = runs.load_manifest(reservation.run_id)?;
+                if manifest.workspace_id != workspace_id {
+                    return Err(internal("startup manifest crossed its workspace"));
+                }
+                finish_startup_abort(state_root, &manifest)?;
+            }
+            return lookup_start_operation_at(state_root, workspace_id, controller, key);
+        }
+        Some(crate::run::RetainedStartOperation::Closed(closure)) => {
+            if closure.namespace != namespace {
+                return Err(internal("startup closure crossed its workspace"));
+            }
+            if !reservations.start_closure_published(&closure)? {
+                crate::orchestration::OrchestrationStore::verify_unaccepted_start_key(
+                    state_root,
+                    workspace_id,
+                    key,
+                )?;
+                let allocated = reservations.start_allocation_inventory(workspace_id)?;
+                RunStore::new(SystemWorkspacePlatform, state_root)
+                    .verify_start_allocation_coverage(workspace_id, &allocated)?;
+                reservations.finish_start_closure(&closure)?;
+            }
+            return Ok(closure.lookup());
+        }
+        None => {}
+    }
+    crate::orchestration::OrchestrationStore::verify_unaccepted_start_key(
+        state_root,
+        workspace_id,
+        key,
+    )?;
+    let allocated = reservations.start_allocation_inventory(workspace_id)?;
+    RunStore::new(SystemWorkspacePlatform, state_root)
+        .verify_start_allocation_coverage(workspace_id, &allocated)?;
+    let closure = crate::operation::StartOperationClosure::new(namespace).map_err(internal)?;
+    reservations.publish_start_closure(&closure, &allocation)?;
+    reservations.finish_start_closure(&closure)?;
+    Ok(closure.lookup())
 }
 
 pub fn interaction_get(args: &[OsString]) -> Result<Value, MachineError> {
@@ -432,6 +542,7 @@ impl RunVerb {
                 | Self::Reconcile
                 | Self::Fork
                 | Self::Close
+                | Self::Delete
                 | Self::AcquireWrite
                 | Self::ReleaseWrite
                 | Self::CreateWriteContinuation
@@ -461,6 +572,7 @@ impl RunVerb {
             Self::ReleaseWrite => "run.release_write",
             Self::CreateWriteContinuation => "run.create_write_continuation",
             Self::Close => "run.close",
+            Self::Delete => "run.delete",
         }
     }
 }
@@ -2308,6 +2420,7 @@ fn coordinate_session_close_inner(
     };
     snapshot.authorize_current_controller(state_root, carrier, operation)?;
     let mut store = open_close_store(state_root)?;
+    store.require_primary_not_force_abandoned(run_id)?;
     let session = store.session(run_id)?;
     let binding = snapshot
         .manifest
@@ -2829,7 +2942,17 @@ impl CoreSemanticService {
         ids.sort();
         let mut result = Vec::new();
         for id in ids {
-            let observation = crate::snapshot::RunSnapshot::observe_display(&root, id, 0)?;
+            let observation = match crate::snapshot::RunSnapshot::observe_display(&root, id, 0) {
+                Err(error)
+                    if error.code == "RUN_NOT_FOUND"
+                        && RunStore::new(SystemWorkspacePlatform, &root)
+                            .deletion(id)?
+                            .is_some() =>
+                {
+                    continue;
+                }
+                result => result?,
+            };
             if observation.0.manifest.workspace_id != workspace.workspace_id {
                 return Err(internal("Run list crossed a workspace boundary"));
             }
@@ -3235,8 +3358,17 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
             // A retry reaches immutable accepted bytes before any live Role or
             // registry access. A published Run is returned without replay.
             let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+            if store.deletion(reservation.run_id)?.is_some() {
+                return Err(crate::run_deletion::replay_refusal(reservation.run_id));
+            }
             match store.load_manifest(reservation.run_id) {
                 Ok(manifest) => {
+                    if is_orchestrated_root(&manifest) {
+                        crate::orchestration::require_primary_not_force_abandoned(
+                            &state_root,
+                            reservation.run_id,
+                        )?;
+                    }
                     validate_caller_manifest_intent::<I>(&manifest, &reservation.accepted_intent)?;
                     validate_caller_member_manifest(&manifest, member.as_ref())?;
                     validate_caller_primary_manifest::<I>(
@@ -3503,6 +3635,9 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
     let proof = match start {
         Ok(proof) => proof,
         Err(error) => {
+            if finish_startup_abort(&state_root, &manifest)? {
+                return Err(startup_aborted_error(run_id));
+            }
             // Every post-allocation refusal names the original identity. It never
             // allocates another Run or converts writable intent to reader success.
             let error = caller_startup_refusal(error, run_id);
@@ -3534,6 +3669,137 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
         )?,
         exact_replay: replay,
     })
+}
+
+fn load_startup_abort(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<Option<crate::worker::startup_abort::StartupAbort>, MachineError> {
+    crate::worker::startup_abort::load(state_root, run_id).map_err(|_| {
+        crate::controller::recovery_required(run_id, 1, crate::worker::STARTUP_OWNERSHIP_INCOMPLETE)
+    })
+}
+
+fn startup_abort_settled(state_root: &Path, manifest: &RunManifest) -> Result<bool, MachineError> {
+    let run_id = manifest.run_id;
+    let Some(abort) = load_startup_abort(state_root, run_id)? else {
+        return Ok(false);
+    };
+    let store = RunStore::new(SystemWorkspacePlatform, state_root);
+    if store.load_state_projection(run_id)?.lifecycle != RunLifecycle::StartFailed
+        || !abort
+            .has_retirement_proof(state_root)
+            .map_err(|error| error.machine_error(run_id, state_root))?
+        || closed_membership_released(state_root, manifest, run_id).is_err()
+    {
+        return Ok(false);
+    }
+    let writer = crate::writer::WriterStore::new(
+        state_root,
+        &manifest.workspace_id,
+        DarwinSystem.current_uid(),
+    );
+    let current = writer.load()?;
+    Ok(current.transaction_id != Some(run_id)
+        && current.holder.is_none_or(|holder| holder.run_id != run_id))
+}
+
+fn startup_aborted_error(run_id: Uuid) -> MachineError {
+    MachineError::new(
+        "RUN_STATE_CONFLICT",
+        "caller startup timed out before native Thread dispatch",
+        false,
+        json!({"run_id":run_id,"lifecycle":"start_failed","outcome":"not_dispatched","required_action":"use_new_start_key"}),
+    )
+}
+
+/// The caller already holds the original Start allocation lock.
+#[cfg(target_os = "macos")]
+fn finish_startup_abort(state_root: &Path, manifest: &RunManifest) -> Result<bool, MachineError> {
+    let run_id = manifest.run_id;
+    let Some(abort) = load_startup_abort(state_root, run_id)? else {
+        return Ok(false);
+    };
+    if startup_abort_settled(state_root, manifest)? {
+        return Ok(true);
+    }
+    let startup = RunStartupLock::open_existing(state_root, run_id)?;
+    startup.acquire()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match startup.lock.require_unowned_worker_range() {
+            Ok(()) => break,
+            Err(crate::worker::WorkerProtocolError::StartupBusy)
+                if std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => {
+                return Err(worker_startup_range_error(
+                    error,
+                    run_id,
+                    startup.lock.path(),
+                ));
+            }
+        }
+    }
+    let recovery = || {
+        crate::controller::recovery_required(run_id, 1, crate::worker::STARTUP_OWNERSHIP_INCOMPLETE)
+    };
+    let mut ledger =
+        ConformantLedger::open(run_root(state_root, run_id), run_id).map_err(|_| recovery())?;
+    let lifecycle = ledger
+        .verify_startup_abort_history()
+        .map_err(|_| recovery())?;
+    let proof = abort.retire(state_root, manifest).map_err(|error| {
+        crate::worker::append_private_diagnostic(
+            &run_root(state_root, run_id).join("dedicated-server-1.log"),
+            &json!({"phase":"startup_abort_retirement","error":format!("{error:?}")}),
+        );
+        recovery()
+    })?;
+    if lifecycle == RunLifecycle::Starting {
+        ledger.seal_start_failed(
+            &SystemLedgerClock::default().timestamp(),
+            "physical startup timed out before native Thread dispatch and its process scope was retired",
+            proof,
+        ).map_err(|_| recovery())?;
+    }
+    drop(ledger);
+    // The terminal ledger and retained checkpoint now fence another startup.
+    // Release the Run lock before taking Profile and Writer serializers.
+    startup.release();
+    drop(startup);
+    if manifest.aggregate_binding.is_some() {
+        crate::orchestration::OrchestrationStore::open(state_root)?.finish_primary_publication(
+            run_id,
+            Err(crate::orchestration::AdapterFailure::Rejected(
+                "RUN_STATE_CONFLICT".to_owned(),
+            )),
+        )?;
+    }
+    release_global_run_membership(state_root, manifest, run_id)?;
+    if manifest.requested_access == Some(crate::domain::CallerWorkspaceAccess::Writable) {
+        let writer = crate::writer::WriterStore::new(
+            state_root,
+            &manifest.workspace_id,
+            DarwinSystem.current_uid(),
+        );
+        writer.transact(|record| record.release_aborted_initial_acquire(run_id))?;
+    }
+    Ok(true)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn finish_startup_abort(state_root: &Path, manifest: &RunManifest) -> Result<bool, MachineError> {
+    if load_startup_abort(state_root, manifest.run_id)?.is_some() {
+        return Err(crate::controller::recovery_required(
+            manifest.run_id,
+            1,
+            crate::worker::STARTUP_OWNERSHIP_INCOMPLETE,
+        ));
+    }
+    Ok(false)
 }
 
 fn caller_startup_refusal(mut error: MachineError, run_id: Uuid) -> MachineError {
@@ -4467,6 +4733,7 @@ impl SemanticService for CoreSemanticService {
                 RunVerb::Fork => run_fork(args).map(SemanticResult::Run),
                 RunVerb::Recover => run_recover(args).map(SemanticResult::Run),
                 RunVerb::Reconcile => run_reconcile(args).map(SemanticResult::Run),
+                RunVerb::Delete => run_delete(args).map(SemanticResult::Run),
                 RunVerb::LookupOperation => lookup_submit_operation(args).map(SemanticResult::Run),
                 other => run_control(*other, args),
             },
@@ -5003,6 +5270,1102 @@ fn run_recover(args: &[OsString]) -> Result<Value, MachineError> {
 
 fn run_reconcile(args: &[OsString]) -> Result<Value, MachineError> {
     run_history_reconciliation(args, "run.reconcile")
+}
+
+fn run_delete(args: &[OsString]) -> Result<Value, MachineError> {
+    if !switch(args, "--confirm") {
+        return Err(MachineError::invalid_argument(
+            "--confirm",
+            "required for Run deletion",
+        ));
+    }
+    let workspace = crate::cli::option_path(args, "--workspace")
+        .map_err(|reason| MachineError::invalid_argument("--workspace", reason))?;
+    let view = WorkspaceService::system()?.discover(workspace.as_deref())?;
+    let state_root = workspace_state_root(&view)?;
+    let run_id = positional_run_id(args)?;
+    let force = switch(args, "--force");
+    let supplied = |flag| {
+        crate::cli::option_path(args, flag)
+            .map(|option| option.is_some())
+            .map_err(|reason| MachineError::invalid_argument(flag, reason))
+    };
+    for flag in ["--operator-file", "--operator-fd", "--confirm-workspace-id"] {
+        if !force && supplied(flag)? {
+            return Err(MachineError::invalid_argument(flag, "requires --force"));
+        }
+    }
+    if force {
+        for flag in ["--controller-file", "--controller-fd"] {
+            if supplied(flag)? {
+                return Err(MachineError::invalid_argument(
+                    flag,
+                    "use the Operator credential for --force",
+                ));
+            }
+        }
+        if required(args, "--confirm-workspace-id")? != view.workspace_id {
+            return Err(MachineError::invalid_argument(
+                "--confirm-workspace-id",
+                "confirmation does not match the canonical workspace",
+            ));
+        }
+        let carrier = carrier_from_options(args, "--operator-file", "--operator-fd")?;
+        let operator =
+            crate::controller::OperatorStore::new(crate::controller::default_operator_root()?)
+                .authorize(&carrier)?;
+        let runtime_cleanup_pending =
+            force_delete_run_at(&state_root, &view.workspace_id, run_id, &operator)?;
+        return Ok(if runtime_cleanup_pending {
+            json!({"deleted":true,"runtime_cleanup_pending":true})
+        } else {
+            json!({"deleted":true})
+        });
+    }
+    let carrier = carrier_from_options(args, "--controller-file", "--controller-fd")?;
+    delete_settled_run_at(&state_root, &view.workspace_id, run_id, &carrier)?;
+    Ok(json!({"deleted":true}))
+}
+
+fn delete_settled_run_at(
+    state_root: &Path,
+    workspace_id: &str,
+    run_id: Uuid,
+    carrier: &CredentialCarrier,
+) -> Result<(), MachineError> {
+    use crate::conformance::ConformanceError;
+    use crate::run_deletion::RunDeletion;
+
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
+    let authorize_deleted = |deleted: &RunDeletion| {
+        if deleted.workspace_id != workspace_id {
+            return Err(internal("Run deletion tombstone crossed its workspace"));
+        }
+        if deleted.force.is_some() {
+            return Err(force_delete_refusal(
+                run_id,
+                "operator_force_retry_required",
+            ));
+        }
+        authorize_controller(run_id, "run.delete", &deleted.controller, carrier).map(|_| ())
+    };
+    let generation = if let Some(deleted) = runs.deletion(run_id)? {
+        authorize_deleted(&deleted)?;
+        1
+    } else {
+        let binding = load_reconciled_controller_binding(state_root, run_id)?;
+        authorize_controller(run_id, "run.delete", &binding, carrier)?;
+        let projection = runs.load_state_projection(run_id)?;
+        require_delete_lifecycle(run_id, projection.lifecycle)?;
+        projection.run_generation
+    };
+    let _lifecycle =
+        crate::worker::RunLifecycleLease::acquire(state_root, workspace_id, run_id, generation)
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+    if let Some(deleted) = runs.deletion(run_id)? {
+        authorize_deleted(&deleted)?;
+        return deleted.finish(state_root);
+    }
+
+    let writer =
+        crate::writer::WriterStore::new(state_root, workspace_id, DarwinSystem.current_uid());
+    writer.observe_locked(|writer| {
+        let manifest = runs.load_manifest(run_id)?;
+        let projection = runs.load_state_projection(run_id)?;
+        require_delete_lifecycle(run_id, projection.lifecycle)?;
+        if manifest.workspace_id != workspace_id
+            || !manifest.uses_caller_workspace_lane()
+            || manifest.aggregate_binding.is_some()
+        {
+            return Err(delete_refusal(run_id, "run_deletion_scope_unsupported"));
+        }
+        writer.require_no_generation_release(run_id)?;
+        if writer.state != crate::writer::WriterAuthorityState::None
+            || writer.handoff.is_some()
+            || writer.holder.is_some()
+            || writer.transaction_id.is_some()
+        {
+            return Err(crate::writer::writer_busy(writer, run_id));
+        }
+        let startup = RunStartupLock::open_existing(state_root, run_id)?;
+        startup.acquire()?;
+        let result = (|| {
+            let binding = load_reconciled_controller_binding(state_root, run_id)?;
+            authorize_controller(run_id, "run.delete", &binding, carrier)?;
+            let root = run_root(state_root, run_id);
+            let _maintenance = crate::ledger_generation::WorkspaceLease::for_run(&root)
+                .map_err(|_| delete_refusal(run_id, "workspace_maintenance_unavailable"))?;
+            let deletion = RunDeletion::capture(
+                state_root,
+                workspace_id,
+                run_id,
+                projection.lifecycle,
+                binding,
+                manifest.start_operation_receipt.clone().flatten(),
+            )?;
+            if runs.load_manifest(run_id)? != manifest
+                || load_reconciled_controller_binding(state_root, run_id)? != deletion.controller
+            {
+                return Err(delete_refusal(run_id, "run_deletion_authority_changed"));
+            }
+            let runtime_record = crate::worker::runtime_record_path(
+                &crate::worker::runtime_root(state_root),
+                run_id,
+            )
+            .map_err(|error| error.machine_error(run_id, state_root))?;
+            if !matches!(std::fs::symlink_metadata(&runtime_record),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Err(delete_refusal(run_id, "runtime_locator_retained"));
+            }
+            prove_missing_locator_generation_absent_held(state_root, run_id, &startup)?;
+            closed_membership_released(state_root, &manifest, run_id)
+                .map_err(|_| delete_refusal(run_id, "profile_membership_not_retired"))?;
+            let reservations = StartReservationStore::new(SystemWorkspacePlatform, state_root);
+            if !reservations
+                .start_allocation_inventory(workspace_id)?
+                .contains(&run_id)
+            {
+                return Err(delete_refusal(run_id, "run_allocation_not_retained"));
+            }
+            let verified_lifecycle = crate::conformance::verify_delete_terminal(&root, run_id)
+                .map_err(|error| match error {
+                    ConformanceError::DeleteNotTerminal => {
+                        run_state_conflict_error(run_id, projection.lifecycle, "run.delete")
+                    }
+                    ConformanceError::Ledger(crate::ledger::LedgerError::WriterBusy(_)) => {
+                        MachineError::new(
+                            "RUN_BUSY",
+                            "the Run ledger is busy",
+                            true,
+                            json!({"run_id":run_id}),
+                        )
+                    }
+                    _ => audit_integrity(
+                        run_id,
+                        projection.ledger_head.sequence,
+                        "terminal seal is unverified",
+                    ),
+                })?;
+            if verified_lifecycle != deletion.lifecycle {
+                return Err(delete_refusal(run_id, "run_deletion_lifecycle_changed"));
+            }
+            if let Some(receipt) = &deletion.start_receipt {
+                let operation = reservations.retained_start_operation(
+                    &receipt.namespace.idempotency_key,
+                    &manifest.controller.identity,
+                )?;
+                let Some(crate::run::RetainedStartOperation::Accepted(reservation)) = operation
+                else {
+                    return Err(delete_refusal(
+                        run_id,
+                        "original_start_receipt_not_retained",
+                    ));
+                };
+                if reservation.run_id != run_id
+                    || reservation.accepted_intent.workspace_id != workspace_id
+                    || *receipt
+                        != crate::run::public_start_operation_receipt(&reservation.accepted_intent)?
+                {
+                    return Err(delete_refusal(
+                        run_id,
+                        "original_start_receipt_not_retained",
+                    ));
+                }
+                let settled = if projection.lifecycle == RunLifecycle::Closed {
+                    runs.load_caller_start_receipt(run_id, &reservation.normalized_identity_sha256)?
+                        .is_some()
+                } else {
+                    startup_abort_settled(state_root, &manifest)?
+                };
+                if !settled {
+                    return Err(delete_refusal(run_id, "original_start_outcome_unsettled"));
+                }
+            }
+            deletion.publish(state_root)?;
+            deletion.finish(state_root)
+        })();
+        startup.release_preserving_records();
+        result
+    })?
+}
+
+fn require_delete_lifecycle(run_id: Uuid, lifecycle: RunLifecycle) -> Result<(), MachineError> {
+    if matches!(lifecycle, RunLifecycle::Closed | RunLifecycle::StartFailed) {
+        Ok(())
+    } else {
+        Err(run_state_conflict_error(run_id, lifecycle, "run.delete"))
+    }
+}
+
+fn force_delete_run_at(
+    state_root: &Path,
+    workspace_id: &str,
+    run_id: Uuid,
+    operator: &crate::controller::OperatorAuthorization,
+) -> Result<bool, MachineError> {
+    use crate::run_deletion::{ForceRetirement, RunDeletion, StartOutcome};
+
+    let runs = RunStore::new(SystemWorkspacePlatform, state_root);
+    let writer =
+        crate::writer::WriterStore::new(state_root, workspace_id, DarwinSystem.current_uid());
+    let allocation = StartReservationStore::new(SystemWorkspacePlatform, state_root);
+    // Start holds this lock through membership admission and receipt
+    // publication, including historical manifests without a public receipt.
+    let (directory, key) = allocation
+        .retained_run_allocation(workspace_id, run_id)?
+        .ok_or_else(|| force_delete_refusal(run_id, "run_allocation_not_retained"))?;
+    let _allocation = allocation.lock_allocation(directory, &key)?;
+    let _lifecycle = crate::worker::RunLifecycleLease::acquire(state_root, workspace_id, run_id, 1)
+        .map_err(|error| error.machine_error(run_id, state_root))?;
+    if let Some(deletion) = runs.deletion(run_id)? {
+        let force = deletion
+            .force
+            .as_ref()
+            .ok_or_else(|| force_delete_refusal(run_id, "controller_delete_retry_required"))?;
+        if deletion.workspace_id != workspace_id
+            || force.operator_id != operator.operator_id
+            || force.operator_generation > operator.operator_generation
+        {
+            return Err(force_delete_refusal(run_id, "force_delete_scope_changed"));
+        }
+        return finish_force_deletion(state_root, workspace_id, run_id, &writer, &deletion);
+    }
+    let manifest = runs.load_manifest(run_id)?;
+    let primary = is_orchestrated_root(&manifest);
+    if manifest.workspace_id != workspace_id
+        || !manifest.uses_caller_workspace_lane()
+        || (manifest.aggregate_binding.is_some() && !primary)
+        || manifest.parent_ref.is_some()
+        || directory != "run-start"
+    {
+        return Err(force_delete_refusal(
+            run_id,
+            "force_delete_scope_unsupported",
+        ));
+    }
+    let receipt = manifest
+        .start_operation_receipt
+        .as_ref()
+        .and_then(Option::as_ref);
+    let (start_outcome, primary_start) = if let Some(receipt) = receipt {
+        let Some(crate::run::RetainedStartOperation::Accepted(reservation)) = allocation
+            .retained_start_operation(
+                &receipt.namespace.idempotency_key,
+                &manifest.controller.identity,
+            )?
+        else {
+            return Err(force_delete_refusal(
+                run_id,
+                "original_start_receipt_not_retained",
+            ));
+        };
+        if receipt.namespace.idempotency_key != key
+            || reservation.run_id != run_id
+            || reservation.accepted_intent.workspace_id != workspace_id
+            || *receipt != crate::run::public_start_operation_receipt(&reservation.accepted_intent)?
+        {
+            return Err(force_delete_refusal(
+                run_id,
+                "original_start_receipt_not_retained",
+            ));
+        }
+        if reservation.accepted_intent.orchestration.is_some() != primary {
+            return Err(force_delete_refusal(
+                run_id,
+                "force_delete_scope_unsupported",
+            ));
+        }
+        let outcome = if runs
+            .load_caller_start_receipt(run_id, &reservation.normalized_identity_sha256)?
+            .is_some()
+        {
+            StartOutcome::Completed
+        } else if startup_abort_settled(state_root, &manifest)? {
+            StartOutcome::Failed
+        } else {
+            StartOutcome::Unknown
+        };
+        (outcome, primary.then_some(reservation))
+    } else {
+        if primary {
+            return Err(force_delete_refusal(
+                run_id,
+                "original_start_receipt_not_retained",
+            ));
+        }
+        (StartOutcome::Unknown, None)
+    };
+    let binding = manifest
+        .global_profile_binding
+        .as_ref()
+        .ok_or_else(|| force_delete_refusal(run_id, "profile_scope_unverified"))?;
+    membership_for_run(state_root, &manifest)?.load_existing()?;
+    let current = writer.load()?;
+    let startup = RunStartupLock::open(state_root, run_id)?;
+    let path = crate::worker::runtime_record_path(&crate::worker::runtime_root(state_root), run_id)
+        .map_err(|error| error.machine_error(run_id, state_root))?;
+    let projection = runs.load_state_projection(run_id)?;
+    let (runtime, defer_runtime) = {
+        startup.acquire()?;
+        let runtime = force_delete_runtime(&path, run_id)?;
+        let (worker_generation, defer_runtime) = match &runtime {
+            Some(runtime) => {
+                let defer = verify_force_delete_generation(
+                    &startup,
+                    workspace_id,
+                    projection.run_generation,
+                    runtime,
+                    false,
+                )?;
+                (runtime.identity.run_generation, defer)
+            }
+            None => (
+                prove_missing_locator_generation_absent_held(state_root, run_id, &startup)?,
+                false,
+            ),
+        };
+        force_delete_writer_generation(&current, run_id, worker_generation, &binding.server_key)?;
+        startup.release_preserving_records();
+        (runtime, defer_runtime)
+    };
+    let abandon_primary = || -> Result<(), MachineError> {
+        if let Some(start) = &primary_start {
+            if load_startup_abort(state_root, run_id)?.is_some() {
+                return Err(force_delete_refusal(
+                    run_id,
+                    "force_delete_startup_abort_requires_reconciliation",
+                ));
+            }
+            crate::orchestration::OrchestrationStore::open_existing(state_root)?
+                .ok_or_else(|| force_delete_refusal(run_id, "force_delete_session_not_retained"))?
+                .abandon_primary_for_delete(&manifest, start, operator)?;
+        }
+        Ok(())
+    };
+    abandon_primary()?;
+    if let Some(runtime) = &runtime {
+        if !defer_runtime {
+            crate::worker::stop_force_delete_runtime(runtime)
+                .map_err(|error| error.machine_error(run_id, &path))?;
+        }
+        // An older Worker can have a broker request in flight when the
+        // session is fenced. Recheck dependencies after the generation exits.
+        abandon_primary()?;
+    }
+
+    let deletion = writer.observe_locked(|current| {
+        startup.acquire()?;
+        if runs.load_manifest(run_id)? != manifest
+            || force_delete_runtime(&path, run_id)? != runtime
+        {
+            return Err(force_delete_refusal(run_id, "force_delete_scope_changed"));
+        }
+        let mut deferred_runtime = None;
+        if let Some(runtime) = &runtime {
+            let defer = verify_force_delete_generation(
+                &startup,
+                workspace_id,
+                projection.run_generation,
+                runtime,
+                false,
+            )?;
+            if defer != defer_runtime {
+                return Err(force_delete_refusal(run_id, "force_delete_scope_changed"));
+            }
+            startup
+                .lock
+                .require_unowned_worker_range()
+                .map_err(|error| error.machine_error(run_id, &path))?;
+            force_delete_writer_generation(
+                current,
+                run_id,
+                runtime.identity.run_generation,
+                &binding.server_key,
+            )?;
+            if defer {
+                deferred_runtime = Some(deferred_runtime_identity(runtime)?);
+            } else {
+                crate::worker::retire_force_delete_runtime(&path, runtime)
+                    .map_err(|error| error.machine_error(run_id, &path))?;
+            }
+        }
+        let worker_generation = match runtime.as_ref().filter(|_| defer_runtime) {
+            Some(runtime) => runtime.identity.run_generation,
+            None => prove_missing_locator_generation_absent_held(state_root, run_id, &startup)?,
+        };
+        let writer_generation = force_delete_writer_generation(
+            current,
+            run_id,
+            worker_generation,
+            &binding.server_key,
+        )?;
+        let _maintenance =
+            crate::ledger_generation::WorkspaceLease::for_run(&run_root(state_root, run_id))
+                .map_err(|_| force_delete_refusal(run_id, "workspace_maintenance_unavailable"))?;
+        let deletion = RunDeletion::capture_force(
+            state_root,
+            &manifest,
+            projection.lifecycle,
+            ForceRetirement {
+                operator_id: operator.operator_id,
+                operator_generation: operator.operator_generation,
+                profile: binding.selected_name.clone(),
+                server_key: binding.server_key.clone(),
+                worker_generation,
+                writer_generation,
+                start_outcome,
+                deferred_runtime,
+            },
+        )?;
+        deletion.publish(state_root)?;
+        startup.release_preserving_records();
+        Ok::<_, MachineError>(deletion)
+    })??;
+    drop(startup);
+    finish_force_deletion(state_root, workspace_id, run_id, &writer, &deletion)
+}
+
+fn force_delete_runtime(
+    path: &Path,
+    run_id: Uuid,
+) -> Result<Option<crate::worker::WorkerRuntimeRecord>, MachineError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => crate::worker::read_runtime_record(path, DarwinSystem.current_uid())
+            .map(Some)
+            .map_err(|error| error.machine_error(run_id, path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(force_delete_refusal(run_id, "runtime_locator_unreadable")),
+    }
+}
+
+fn deferred_runtime_identity(
+    runtime: &crate::worker::WorkerRuntimeRecord,
+) -> Result<crate::run_deletion::DeferredRuntime, MachineError> {
+    let run_id = runtime.identity.run_id;
+    let bytes = serde_json::to_vec(runtime)
+        .map_err(|_| force_delete_refusal(run_id, "runtime_locator_unreadable"))?;
+    Ok(crate::run_deletion::DeferredRuntime {
+        record_sha256: crate::jcs::sha256_hex(&bytes),
+        worker_identity_sha256: crate::worker::worker_identity_digest(&runtime.identity)
+            .ok_or_else(|| force_delete_refusal(run_id, "runtime_scope_mismatch"))?,
+    })
+}
+
+fn verify_force_delete_generation(
+    startup: &RunStartupLock,
+    workspace_id: &str,
+    projected_generation: u64,
+    runtime: &crate::worker::WorkerRuntimeRecord,
+    bound_by_tombstone: bool,
+) -> Result<bool, MachineError> {
+    use crate::worker::{self, ProcessIdentityVerdict};
+    let identity = &runtime.identity;
+    let run_id = startup.run_id;
+    let uid = DarwinSystem.current_uid();
+    let boot = crate::worker::boot_session_uuid(uid)
+        .map_err(|error| error.machine_error(run_id, startup.lock.path()))?;
+    if identity.uid != uid
+        || identity.workspace_id != workspace_id
+        || identity.run_id != run_id
+        || identity.run_generation < projected_generation
+    {
+        return Err(force_delete_refusal(run_id, "runtime_scope_mismatch"));
+    }
+    for slot in [0, 1] {
+        let owner = startup
+            .lock
+            .read_owner(slot)
+            .map_err(|error| error.machine_error(run_id, startup.lock.path()))?;
+        if owner.as_ref().is_some_and(|owner| {
+            let claim = &owner.identity;
+            claim.run_id != run_id
+                || claim.workspace_id != workspace_id
+                || claim.uid != uid
+                || claim.run_generation > identity.run_generation
+                || (claim.run_generation == identity.run_generation
+                    && claim.boot_uuid != identity.boot_uuid)
+                || (slot == 1
+                    && claim.run_generation == identity.run_generation
+                    && claim != identity)
+        }) || (slot == 1
+            && boot != identity.boot_uuid
+            && owner
+                .as_ref()
+                .map_or(!bound_by_tombstone, |owner| &owner.identity != identity))
+        {
+            return Err(force_delete_refusal(
+                run_id,
+                "runtime_startup_owner_mismatch",
+            ));
+        }
+    }
+    let defer = boot == identity.boot_uuid
+        && runtime
+            .startup_scope
+            .as_ref()
+            .is_none_or(|scope| !scope.complete);
+    if defer {
+        startup
+            .lock
+            .require_unowned_worker_range()
+            .map_err(|error| error.machine_error(run_id, startup.lock.path()))?;
+        if worker::classify_worker_identity(runtime) != ProcessIdentityVerdict::Absent
+            || runtime
+                .dedicated_server_identity
+                .as_ref()
+                .is_some_and(|server| {
+                    worker::classify_dedicated_server_identity(server)
+                        != ProcessIdentityVerdict::Absent
+                })
+        {
+            return Err(force_delete_refusal(
+                run_id,
+                "runtime_control_process_not_absent",
+            ));
+        }
+    }
+    Ok(defer)
+}
+
+fn force_delete_writer_generation(
+    writer: &crate::writer::WriterRecord,
+    run_id: Uuid,
+    worker_generation: u64,
+    server_key: &str,
+) -> Result<Option<u64>, MachineError> {
+    writer.require_no_generation_release(run_id)?;
+    if writer.handoff.as_ref().is_some_and(|handoff| {
+        handoff.source_run_id == run_id || handoff.destination_run_id == run_id
+    }) {
+        return Err(force_delete_refusal(
+            run_id,
+            "writer_handoff_requires_reconciliation",
+        ));
+    }
+    let Some(holder) = writer
+        .holder
+        .as_ref()
+        .filter(|holder| holder.run_id == run_id)
+    else {
+        return Ok(None);
+    };
+    if holder.run_generation != worker_generation
+        || holder.worker_generation != worker_generation
+        || holder.profile_server_key != server_key
+    {
+        return Err(force_delete_refusal(run_id, "writer_generation_mismatch"));
+    }
+    Ok(Some(writer.writer_generation))
+}
+
+fn finish_force_deletion(
+    state_root: &Path,
+    workspace_id: &str,
+    run_id: Uuid,
+    writer: &crate::writer::WriterStore,
+    deletion: &crate::run_deletion::RunDeletion,
+) -> Result<bool, MachineError> {
+    let force = deletion
+        .force
+        .as_ref()
+        .ok_or_else(|| internal("force marker missing"))?;
+    deletion.sync_published(state_root)?;
+    if deletion.payload_pending(state_root)? {
+        let check_writer = |record: &crate::writer::WriterRecord| {
+            let observed = force_delete_writer_generation(
+                record,
+                run_id,
+                force.worker_generation,
+                &force.server_key,
+            )?;
+            if observed.is_some() && observed != force.writer_generation {
+                return Err(force_delete_refusal(run_id, "writer_generation_mismatch"));
+            }
+            Ok(observed.is_some())
+        };
+        if check_writer(&writer.load()?)? {
+            writer.transact(|record| {
+                if check_writer(record)? {
+                    record.holder = None;
+                    record.transaction_id = None;
+                    record.state = crate::writer::WriterAuthorityState::None;
+                    record.recovery_action = None;
+                }
+                Ok(())
+            })?;
+        }
+        let membership = deletion_membership(state_root, &force.profile, &force.server_key)?;
+        let index = membership.load_existing()?;
+        if index
+            .members
+            .get(&format!("{workspace_id}:{run_id}"))
+            .is_some_and(|member| member.disposition != MembershipDisposition::Released)
+        {
+            membership.record(workspace_id, run_id, MembershipDisposition::Released)?;
+        }
+    }
+    deletion.finish(state_root)?;
+    let Some(deferred) = &force.deferred_runtime else {
+        return Ok(false);
+    };
+    // Logical removal is already durable. Keep reporting pending whenever
+    // the retained evidence cannot authorize physical cleanup.
+    Ok(!finish_deferred_runtime(
+        state_root,
+        workspace_id,
+        run_id,
+        force.worker_generation,
+        deferred,
+    )
+    .unwrap_or(false))
+}
+
+fn finish_deferred_runtime(
+    state_root: &Path,
+    workspace_id: &str,
+    run_id: Uuid,
+    generation: u64,
+    deferred: &crate::run_deletion::DeferredRuntime,
+) -> Result<bool, MachineError> {
+    use crate::worker;
+    let root = worker::runtime_root(state_root);
+    let path = worker::runtime_record_path(&root, run_id)
+        .map_err(|error| error.machine_error(run_id, state_root))?;
+    let startup = RunStartupLock::open_existing(state_root, run_id)?;
+    startup.acquire()?;
+    startup
+        .lock
+        .require_unowned_worker_range()
+        .map_err(|error| error.machine_error(run_id, &path))?;
+    if let Some(runtime) = force_delete_runtime(&path, run_id)? {
+        if runtime.identity.run_generation != generation
+            || deferred_runtime_identity(&runtime)? != *deferred
+            || worker::boot_session_uuid(DarwinSystem.current_uid())
+                .map_err(|error| error.machine_error(run_id, &path))?
+                == runtime.identity.boot_uuid
+        {
+            return Ok(false);
+        }
+        // The published tombstone already binds the exact locator and Worker.
+        // A previously cleared slot is expected when startup exited normally.
+        verify_force_delete_generation(&startup, workspace_id, generation, &runtime, true)?;
+        worker::retire_force_delete_runtime(&path, &runtime)
+            .map_err(|error| error.machine_error(run_id, &path))?;
+    }
+    let marker = worker::verified_absence_marker(&root, run_id)
+        .map_err(|error| error.machine_error(run_id, &path))?;
+    Ok(marker.is_some_and(|marker| {
+        marker.run_id == run_id
+            && marker.run_generation == generation
+            && marker.worker_identity_sha256 == deferred.worker_identity_sha256
+    }) && crate::process_inventory::run_registration_count(run_id)? == 0)
+}
+
+fn force_delete_refusal(run_id: Uuid, reason: &'static str) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "force deletion could not verify the Run's owned resources",
+        false,
+        json!({"run_id":run_id,"reason":reason}),
+    )
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod force_delete_primary_tests {
+    use super::*;
+    use crate::native_preparation::tests::NativeFixture;
+    use crate::orchestration::{AdapterFailure, OrchestrationStore};
+    use crate::worker::{
+        self, SocketIdentity, StartupLockFile, StartupScopeWitness, WorkerRuntimeRecord,
+    };
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn fixture(publication: Result<(), AdapterFailure>) -> NativeFixture {
+        let fixture = NativeFixture::with_primary_publication("fully_delegated", Some(publication));
+        let manifest = &fixture.manifest;
+        membership_for_run(&fixture.state(), manifest)
+            .unwrap()
+            .record(
+                &manifest.workspace_id,
+                manifest.run_id,
+                MembershipDisposition::Active,
+            )
+            .unwrap();
+        fixture
+    }
+
+    fn remove(fixture: &NativeFixture) -> Result<bool, MachineError> {
+        if let Some(binary) = std::env::var_os("DOLGORAE_BIN") {
+            let output = std::process::Command::new(binary)
+                .env_clear()
+                .env("HOME", &fixture.f.root)
+                .env("TMPDIR", &fixture.f.private)
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .args([
+                    "run",
+                    "delete",
+                    &fixture.manifest.run_id.to_string(),
+                    "--workspace",
+                ])
+                .arg(&fixture.f.workspace)
+                .args([
+                    "--force",
+                    "--confirm",
+                    "--confirm-workspace-id",
+                    &fixture.manifest.workspace_id,
+                    "--operator-file",
+                ])
+                .arg(&fixture.f.operator)
+                .output()
+                .unwrap();
+            let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(envelope["command"], "run.delete");
+            assert_eq!(envelope["ok"], output.status.success());
+            if output.status.success() {
+                return match &envelope["data"] {
+                    data if data == &json!({"deleted":true}) => Ok(false),
+                    data if data == &json!({"deleted":true,"runtime_cleanup_pending":true}) => {
+                        Ok(true)
+                    }
+                    data => panic!("unexpected deletion result: {data}"),
+                };
+            }
+            return Err(serde_json::from_value(envelope["error"].clone()).unwrap());
+        }
+        let operator = crate::controller::OperatorStore::new(fixture.f.home.operator_root())
+            .authorize(&CredentialCarrier::open_path(&fixture.f.operator).unwrap())
+            .unwrap();
+        force_delete_run_at(
+            &fixture.state(),
+            &fixture.manifest.workspace_id,
+            fixture.manifest.run_id,
+            &operator,
+        )
+    }
+
+    #[test]
+    fn force_delete_primary_preserves_an_existing_controller_close_intent() {
+        let fixture = fixture(Ok(()));
+        let state = fixture.state();
+        let id = fixture.manifest.run_id;
+        let mut store = OrchestrationStore::open(&state).unwrap();
+        let (close, _) = store.begin_session_close(id, true, 1).unwrap();
+        let close = close.unwrap();
+        let error = remove(&fixture).unwrap_err();
+        assert_eq!(
+            error.details["reason"],
+            "force_delete_session_has_dependency"
+        );
+        assert_eq!(error.details["dependency_kind"], "close");
+        assert_eq!(error.details["dependency_id"], json!(close.operation_id));
+        assert_eq!(store.session_close(id).unwrap(), Some(close));
+        assert!(
+            RunStore::new(SystemWorkspacePlatform, &state)
+                .load_manifest(id)
+                .is_ok()
+        );
+    }
+
+    fn assert_removed(fixture: &NativeFixture, lifecycle: RunLifecycle) {
+        let state = fixture.state();
+        let manifest = &fixture.manifest;
+        let id = manifest.run_id;
+        let runs = RunStore::new(SystemWorkspacePlatform, &state);
+        assert_eq!(runs.load_manifest(id).unwrap_err().code, "RUN_NOT_FOUND");
+        let marker = runs.deletion(id).unwrap().unwrap();
+        assert_eq!(marker.lifecycle, lifecycle);
+        let receipt = manifest
+            .start_operation_receipt
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let lookup = lookup_start_operation_at(
+            &state,
+            &manifest.workspace_id,
+            &manifest.controller.identity,
+            &receipt.namespace.idempotency_key,
+        )
+        .unwrap();
+        assert_eq!(lookup["current_outcome"], "unknown");
+        assert_eq!(lookup["receipt"], json!(receipt));
+        let store = OrchestrationStore::open_observer(&state).unwrap();
+        assert_eq!(store.session(id).unwrap().status, "aborted");
+        assert!(store.session_close(id).unwrap().is_none());
+        assert_eq!(
+            store
+                .require_primary_not_force_abandoned(id)
+                .unwrap_err()
+                .details["reason"],
+            "operator_force_delete_pending",
+        );
+        assert!(
+            membership_for_run(&state, manifest)
+                .unwrap()
+                .released_for_display(&manifest.workspace_id, id)
+                .unwrap()
+        );
+        assert!(!marker.payload_pending(&state).unwrap());
+        remove(fixture).unwrap();
+    }
+
+    #[test]
+    fn force_delete_primary_replays_after_durable_abandonment_and_keeps_unknown_history() {
+        let fixture = fixture(Ok(()));
+        let manifest = &fixture.manifest;
+        let id = manifest.run_id;
+        let state = fixture.state();
+        let path = run_root(&state, id).join("state.json");
+        let mut projection = crate::projection::RunStateProjection::starting(id);
+        projection.lifecycle = RunLifecycle::OutcomeUnknown;
+        std::fs::write(&path, serde_json::to_vec(&projection).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Model a lost process immediately after the durable session intent.
+        let carrier = CredentialCarrier::open_path(&fixture.f.operator).unwrap();
+        let operator = crate::controller::OperatorStore::new(fixture.f.home.operator_root())
+            .authorize(&carrier)
+            .unwrap();
+        let start = manifest
+            .start_operation_receipt
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let allocation = StartReservationStore::new(SystemWorkspacePlatform, &state);
+        let key = &start.namespace.idempotency_key;
+        let _allocation = allocation.lock_allocation("run-start", key).unwrap();
+        let _lease =
+            worker::RunLifecycleLease::acquire(&state, &manifest.workspace_id, id, 1).unwrap();
+        let Some(crate::run::RetainedStartOperation::Accepted(start)) = allocation
+            .retained_start_operation(key, &manifest.controller.identity)
+            .unwrap()
+        else {
+            panic!("original accepted Start is required")
+        };
+        let mut store = OrchestrationStore::open(&state).unwrap();
+        store
+            .abandon_primary_for_delete(manifest, &start, &operator)
+            .unwrap();
+        let revision = store.session(id).unwrap().revision;
+        assert!(store.begin_session_close(id, true, 1).is_err());
+        assert!(crate::orchestration::ensure_primary_turn_admission(&state, id).is_err());
+        assert!(path.exists());
+        drop((_lease, _allocation, operator, store));
+
+        remove(&fixture).unwrap();
+        assert_removed(&fixture, RunLifecycle::OutcomeUnknown);
+        assert_eq!(
+            OrchestrationStore::open_observer(&state)
+                .unwrap()
+                .session(id)
+                .unwrap()
+                .revision,
+            revision
+        );
+    }
+
+    #[test]
+    fn force_delete_primary_requires_absent_control_processes_or_prior_boot_proof() {
+        let fixture = fixture(Err(AdapterFailure::Unknown));
+        let manifest = &fixture.manifest;
+        let id = manifest.run_id;
+        let state = fixture.state();
+        let runtime = worker::runtime_root(&state);
+        let mut owner = worker::current_startup_owner(&manifest.workspace_id, id, 1).unwrap();
+        let uid = owner.identity.uid;
+        owner.slot = 1;
+        worker::prepare_runtime_root(&runtime, uid).unwrap();
+        let startup = StartupLockFile::open(&worker::startup_lock_path(&runtime, id), uid).unwrap();
+        startup.write_owner(&owner).unwrap();
+        let path = worker::runtime_record_path(&runtime, id).unwrap();
+        let mut record = incomplete_record(owner.identity.clone());
+        write_runtime(&path, &record);
+        assert_eq!(
+            remove(&fixture).unwrap_err().details["reason"],
+            "runtime_control_process_not_absent"
+        );
+        let store = OrchestrationStore::open_observer(&state).unwrap();
+        assert_eq!(store.session(id).unwrap().status, "recovering");
+        drop(store);
+
+        // A prior-boot record must not address the fixture's live PID.
+        owner.identity.boot_uuid = Uuid::now_v7();
+        record = incomplete_record(owner.identity.clone());
+        startup.write_owner(&owner).unwrap();
+        write_runtime(&path, &record);
+        drop(startup);
+        assert!(!remove(&fixture).unwrap());
+        assert!(!path.exists());
+        assert_removed(&fixture, RunLifecycle::Starting);
+    }
+
+    fn incomplete_record(identity: worker::WorkerIdentity) -> WorkerRuntimeRecord {
+        WorkerRuntimeRecord {
+            schema_version: 2,
+            socket_path: worker::worker_socket_path(
+                identity.uid,
+                &identity.workspace_id,
+                identity.run_id,
+            )
+            .unwrap(),
+            socket_identity: SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            control_socket_epoch: 1,
+            app_server_epoch: Some(1),
+            control_recovery_required: false,
+            startup_scope: Some(StartupScopeWitness {
+                worker_identity: identity.clone(),
+                app_server_epoch: 1,
+                dedicated_server_identity: None,
+                app_server_socket_identity: None,
+                revision: 1,
+                complete: false,
+                children: Vec::new(),
+            }),
+            dedicated_server_identity: None,
+            dolgorae_version: env!("CARGO_PKG_VERSION").into(),
+            mutation_protocol_version: worker::WORKER_PROTOCOL_VERSION,
+            binary_sha256: identity.executable_sha256.clone(),
+            identity,
+        }
+    }
+
+    fn write_runtime(path: &Path, record: &WorkerRuntimeRecord) {
+        std::fs::write(path, serde_json::to_vec(record).unwrap()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn force_delete_primary_revokes_writer_with_incomplete_same_boot_startup() {
+        use crate::writer::{WriterAuthorityState, WriterHolder, WriterStore};
+        let fixture = fixture(Err(AdapterFailure::Unknown));
+        let manifest = &fixture.manifest;
+        let id = manifest.run_id;
+        let state = fixture.state();
+        let runtime = worker::runtime_root(&state);
+        let mut identity = worker::current_startup_owner(&manifest.workspace_id, id, 1)
+            .unwrap()
+            .identity;
+        let uid = identity.uid;
+        let exited_pid = || {
+            let mut process = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+            let pid = process.id();
+            assert!(process.wait().unwrap().success());
+            pid
+        };
+        let server_pid = exited_pid();
+        let server = worker::DedicatedServerIdentity {
+            pid: server_pid,
+            process_group_id: server_pid,
+            session_id: server_pid,
+            uid,
+            start_tvsec: identity.start_tvsec,
+            start_tvusec: identity.start_tvusec,
+            executable_path: identity.executable_path.clone(),
+            executable_device: identity.executable_device,
+            executable_inode: identity.executable_inode,
+            executable_sha256: identity.executable_sha256.clone(),
+        };
+        identity.pid = exited_pid();
+        identity.process_group_id = identity.pid;
+        identity.session_id = identity.pid;
+        let mut record = incomplete_record(identity);
+        record.dedicated_server_identity = Some(server.clone());
+        let scope = record.startup_scope.as_mut().unwrap();
+        scope.dedicated_server_identity = Some(server);
+        scope.app_server_socket_identity = Some(SocketIdentity {
+            device: 1,
+            inode: 1,
+        });
+        worker::prepare_runtime_root(&runtime, uid).unwrap();
+        let startup = StartupLockFile::open(&worker::startup_lock_path(&runtime, id), uid).unwrap();
+        assert!(startup.read_owner(0).unwrap().is_none());
+        assert!(startup.read_owner(1).unwrap().is_none());
+        drop(startup);
+        let path = worker::runtime_record_path(&runtime, id).unwrap();
+        write_runtime(&path, &record);
+
+        let binding = manifest.global_profile_binding.as_ref().unwrap();
+        let writer = WriterStore::new(&state, &manifest.workspace_id, uid);
+        writer
+            .transact(|record| {
+                record.state = WriterAuthorityState::BlockedUnknown;
+                record.writer_generation = 1;
+                record.transaction_id = Some(Uuid::now_v7());
+                record.holder = Some(WriterHolder {
+                    run_id: id,
+                    profile: binding.selected_name.clone(),
+                    controller_id: manifest.controller.identity.controller_id,
+                    controller_generation: manifest.controller.identity.generation,
+                    run_generation: 1,
+                    worker_generation: 1,
+                    profile_server_key: binding.server_key.clone(),
+                    profile_server_epoch: 1,
+                    thread_id: None,
+                    lifecycle: RunLifecycle::Starting,
+                    active_turn_id: None,
+                    pending_interaction_count: 0,
+                    last_event_cursor: None,
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(remove(&fixture).unwrap());
+        assert_removed(&fixture, RunLifecycle::Starting);
+        assert!(remove(&fixture).unwrap());
+        let released = writer.load().unwrap();
+        assert_eq!(released.state, WriterAuthorityState::None);
+        assert!(released.holder.is_none());
+        assert_eq!(worker::read_runtime_record(&path, uid).unwrap(), record);
+        assert!(
+            worker::verified_absence_marker(&runtime, id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn force_delete_primary_retires_only_the_tombstone_bound_prior_boot_locator() {
+        let fixture = fixture(Err(AdapterFailure::Unknown));
+        let manifest = &fixture.manifest;
+        let id = manifest.run_id;
+        let state = fixture.state();
+        let runtime = worker::runtime_root(&state);
+        let mut identity = worker::current_startup_owner(&manifest.workspace_id, id, 1)
+            .unwrap()
+            .identity;
+        let uid = identity.uid;
+        identity.boot_uuid = Uuid::now_v7();
+        let mut record = incomplete_record(identity);
+        let deferred = deferred_runtime_identity(&record).unwrap();
+        worker::prepare_runtime_root(&runtime, uid).unwrap();
+        drop(StartupLockFile::open(&worker::startup_lock_path(&runtime, id), uid).unwrap());
+        let path = worker::runtime_record_path(&runtime, id).unwrap();
+        let retry = || finish_deferred_runtime(&state, &manifest.workspace_id, id, 1, &deferred);
+        record.control_socket_epoch += 1;
+        write_runtime(&path, &record);
+        assert!(!retry().unwrap());
+        assert_eq!(worker::read_runtime_record(&path, uid).unwrap(), record);
+        record.control_socket_epoch -= 1;
+        write_runtime(&path, &record);
+        assert!(retry().unwrap());
+        assert!(!path.exists());
+        assert!(retry().unwrap());
+    }
+}
+
+fn delete_refusal(run_id: Uuid, reason: &'static str) -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "Run removal requires verified terminal cleanup in its original scope",
+        false,
+        json!({"run_id":run_id,"reason":reason}),
+    )
 }
 
 fn run_history_reconciliation(
@@ -5581,6 +6944,25 @@ fn history_reconciliation_with_lifecycle(
     }
     let binding = load_reconciled_controller_binding(state_root, run_id)?;
     authorize_controller(run_id, operation, &binding, carrier)?;
+    if let Some(record) = runtime
+        .as_ref()
+        .filter(|record| record.startup_ownership_incomplete())
+    {
+        if let Some(expected) = expected_state_revision
+            && expected != durable_head(state_root, run_id)?
+        {
+            return Err(run_state_conflict_error(
+                run_id,
+                projection.lifecycle,
+                operation,
+            ));
+        }
+        return Err(crate::controller::recovery_required(
+            run_id,
+            record.identity.run_generation,
+            crate::worker::STARTUP_OWNERSHIP_INCOMPLETE,
+        ));
+    }
     let admission_id = match begin_prepared_mutation(
         view,
         state_root,
@@ -7254,6 +8636,9 @@ fn start_run_typed(
     }
     let run_id = reservation.run_id;
     let store = RunStore::new(SystemWorkspacePlatform, &state_root);
+    if store.deletion(run_id)?.is_some() {
+        return Err(crate::run_deletion::replay_refusal(run_id));
+    }
     let mut orchestration = if let Some(policy) = &orchestration_policy {
         let mut orchestration = crate::orchestration::OrchestrationStore::open(&state_root)?;
         orchestration.prepare_session(
@@ -7603,7 +8988,8 @@ fn run_control(verb: RunVerb, args: &[OsString]) -> Result<SemanticResult, Machi
         | RunVerb::CreateWriteContinuation
         | RunVerb::Fork
         | RunVerb::Recover
-        | RunVerb::Reconcile => {
+        | RunVerb::Reconcile
+        | RunVerb::Delete => {
             return Err(internal("run allocation is composed separately"));
         }
         RunVerb::LookupOperation => return Err(internal("operation lookup is a durable observer")),
@@ -8366,6 +9752,18 @@ fn run_control_admitted_with_lifecycle(
                 None,
             ));
         }
+        Err(error)
+            if verb == RunVerb::Close
+                && error.code() == "TRANSPORT_FAILURE"
+                && let Some(admission_id) = admission_id =>
+        {
+            if let Some(value) =
+                retained_close_after_transport_loss(state_root, run_id, admission_id)?
+            {
+                return Ok((SemanticResult::Run(value), None));
+            }
+            return Err(error.machine_error(run_id, &runtime_record));
+        }
         Err(error) => return Err(error.machine_error(run_id, &runtime_record)),
     };
     let response = if matches!(verb, RunVerb::Pause | RunVerb::Close)
@@ -8435,7 +9833,18 @@ fn run_control_admitted_with_lifecycle(
     let mut control_socket_epoch = crate::worker::read_runtime_record(&runtime_record, uid)
         .map_or(1, |record| record.control_socket_epoch);
     if lifecycle_stopped {
-        stop_lifecycle_generation(state_root, run_id, &runtime_record)?;
+        if let Err(error) = stop_lifecycle_generation(state_root, run_id, &runtime_record) {
+            if verb == RunVerb::Close
+                && matches!(&response, ControlResponseV1::Closed { .. })
+                && error.code == "TRANSPORT_FAILURE"
+                && let Some(admission_id) = admission_id
+                && let Some(value) =
+                    retained_close_after_transport_loss(state_root, run_id, admission_id)?
+            {
+                return Ok((SemanticResult::Run(value), Some(response)));
+            }
+            return Err(error);
+        }
         control_socket_epoch = 0;
     }
     let value = control_response_value(
@@ -8448,6 +9857,53 @@ fn run_control_admitted_with_lifecycle(
     Ok((value, Some(response)))
 }
 
+fn retained_close_after_transport_loss(
+    state_root: &Path,
+    run_id: Uuid,
+    admission_id: Uuid,
+) -> Result<Option<Value>, MachineError> {
+    let snapshot = RunSources::load(state_root, run_id, 0)?;
+    if !crate::run::is_caller_workspace_generation(snapshot.manifest.schema_version)
+        || snapshot.projection.lifecycle != RunLifecycle::Closed
+        || snapshot.projection.run_generation == 0
+        || snapshot
+            .writer
+            .holder
+            .as_ref()
+            .is_some_and(|holder| holder.run_id == run_id)
+    {
+        return Ok(None);
+    }
+    let (projection, ledger) = observe_run_ledger(state_root, run_id, true)?;
+    if projection != snapshot.projection
+        || ledger
+            .records()
+            .last()
+            .is_none_or(|record| record.kind() != AuditKind::LifecycleTransition)
+        || !ledger
+            .payloads_of_kind(AuditKind::LifecycleTransition)
+            .map_err(|error| internal(error.to_string()))?
+            .last()
+            .is_some_and(|entry| entry["current"] == "closed" && entry["terminal_seal"] == true)
+        || !ledger
+            .payloads_of_kind(AuditKind::MutationAdmitted)
+            .map_err(|error| internal(error.to_string()))?
+            .last()
+            .is_some_and(|entry| {
+                entry["admission_id"] == json!(admission_id)
+                    && entry["operation"] == RunVerb::Close.operation_name()
+            })
+    {
+        return Ok(None);
+    }
+    verify_closed_run_runtime(
+        state_root,
+        run_id,
+        MissingLocatorRule::ProveGenerationAbsent,
+    )?;
+    run_object(state_root, run_id, 0, "Absent").map(Some)
+}
+
 fn stop_lifecycle_generation(
     state_root: &Path,
     run_id: Uuid,
@@ -8456,19 +9912,39 @@ fn stop_lifecycle_generation(
     let uid = DarwinSystem.current_uid();
     let record = crate::worker::read_runtime_record(runtime_record, uid)
         .map_err(|error| error.machine_error(run_id, runtime_record))?;
-    let response = crate::worker::call_run_worker_bounded(
+    let shutdown = crate::worker::call_run_worker_bounded(
         state_root,
         run_id,
         uid,
         None,
         Duration::from_secs(10),
         |expected| ControlRequestV1::Shutdown { expected },
-    )
-    .map_err(|error| error.machine_error(run_id, runtime_record))?;
-    if !matches!(response, ControlResponseV1::Shutdown { .. }) {
-        return Err(internal(
-            "lifecycle shutdown returned an unexpected response",
-        ));
+    );
+    match shutdown {
+        Ok(ControlResponseV1::Shutdown { .. }) => {}
+        Err(error)
+            if error.code() == "TRANSPORT_FAILURE"
+                && record.identity.run_id == run_id
+                && record
+                    .startup_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.complete)
+                && RunStore::new(SystemWorkspacePlatform, state_root)
+                    .load_state_projection(run_id)
+                    .is_ok_and(|state| {
+                        state.lifecycle == RunLifecycle::Closed
+                            && state.run_generation == record.identity.run_generation
+                    }) =>
+        {
+            // A lost Shutdown response cannot invalidate an existing terminal
+            // seal. Only the full recorded absence proof below can finish it.
+        }
+        Err(error) => return Err(error.machine_error(run_id, runtime_record)),
+        Ok(_) => {
+            return Err(internal(
+                "lifecycle shutdown returned an unexpected response",
+            ));
+        }
     }
     let deadline = std::time::Instant::now()
         .checked_add(Duration::from_secs(10))
@@ -13524,6 +15000,18 @@ fn membership_for_run(
     state_root: &Path,
     manifest: &RunManifest,
 ) -> Result<GlobalMembershipStore, MachineError> {
+    let binding = manifest
+        .global_profile_binding
+        .as_ref()
+        .ok_or_else(|| internal("Run has no retained Profile binding"))?;
+    deletion_membership(state_root, &binding.selected_name, &binding.server_key)
+}
+
+fn deletion_membership(
+    state_root: &Path,
+    profile: &str,
+    server_key: &str,
+) -> Result<GlobalMembershipStore, MachineError> {
     let workspaces = state_root
         .parent()
         .filter(|path| path.file_name().is_some_and(|name| name == "workspaces"))
@@ -13531,11 +15019,7 @@ fn membership_for_run(
     let root = workspaces
         .parent()
         .ok_or_else(|| internal("Run Profile home is missing"))?;
-    let binding = manifest
-        .global_profile_binding
-        .as_ref()
-        .ok_or_else(|| internal("Run has no retained Profile binding"))?;
-    GlobalMembershipStore::from_root(root, &binding.selected_name, &binding.server_key)
+    GlobalMembershipStore::from_root(root, profile, server_key)
 }
 
 pub(crate) fn profile_cleanup_required(
@@ -14683,7 +16167,19 @@ impl RunSources {
             |value| json!(value),
         );
         let mut recovery = recovery_value(manifest, lifecycle);
-        if self
+        if let Some(blocker) = self.startup_ownership_blocker() {
+            recovery["status"] = json!("recovery_required");
+            recovery["reason"] = json!(blocker);
+            recovery["safe_actions"] = json!(["run.status", "run.events"]);
+            recovery["unsafe_actions"] = json!([
+                "run.send",
+                "run.submit",
+                "run.respond",
+                "run.interrupt",
+                "run.recover",
+                "run.reconcile"
+            ]);
+        } else if self
             .runtime_record
             .as_ref()
             .is_some_and(|record| record.control_recovery_required)
@@ -15720,7 +17216,17 @@ fn ensure_run_worker_locked(
     manifest: RunManifest,
     startup: &mut Option<RunStartupLock>,
 ) -> Result<u64, MachineError> {
+    if is_orchestrated_root(&manifest) {
+        crate::orchestration::require_primary_not_force_abandoned(state_root, run_id)?;
+    }
     let uid = DarwinSystem.current_uid();
+    if load_startup_abort(state_root, run_id)?.is_some() {
+        return Err(crate::controller::recovery_required(
+            run_id,
+            1,
+            crate::worker::STARTUP_OWNERSHIP_INCOMPLETE,
+        ));
+    }
     crate::writer::WriterStore::new(state_root, &view.workspace_id, uid)
         .load()?
         .require_no_generation_release(run_id)?;
@@ -26658,6 +28164,17 @@ mod tests {
                     .accepted_intent;
                 intent.global_profile_binding.launch_snapshot.codex_version = version.to_owned();
                 intent
+                    .global_profile_binding
+                    .launch_snapshot
+                    .process_static_configuration
+                    .insert(
+                        "mcp_servers".into(),
+                        json!({
+                            "gaori": {"tool_timeout_sec": 3601.0},
+                            "mulgae": {"startup_timeout_sec": 30.0, "tool_timeout_sec": 7501.0}
+                        }),
+                    );
+                intent
                     .readiness
                     .profile_capability_snapshot
                     .app_server_version = version.to_owned();
@@ -26803,10 +28320,7 @@ mod tests {
                     None,
                 )
                 .unwrap();
-                assert_eq!(
-                    serde_json::to_value(&replay).unwrap(),
-                    serde_json::to_value(&manifest).unwrap()
-                );
+                assert_eq!(replay, manifest);
                 assert_eq!(
                     std::fs::read(run.join("manifest.json")).unwrap(),
                     manifest_bytes
@@ -29136,6 +30650,21 @@ mod delegated_member_start_tests {
             reservation.accepted_intent.global_profile_binding
         };
         binding.launch_snapshot.canonical_codex_home = codex_home.to_str().unwrap().to_owned();
+        binding.launch_snapshot.process_static_configuration.insert(
+            "mcp_servers".into(),
+            json!({
+                "gaori": {"tool_timeout_sec": 3601.0},
+                "mulgae": {"startup_timeout_sec": 30.0, "tool_timeout_sec": 7501.0}
+            }),
+        );
+        binding
+            .launch_snapshot
+            .initial_configuration_observation
+            .insert("numeric_metadata".into(), json!([-0.0, 30.5, 1e20]));
+        binding.launch_snapshot.launch_contract_sha256 =
+            run_profile_snapshot(&binding.launch_snapshot)
+                .unwrap()
+                .launch_contract_sha256;
         let encoded = serde_json::to_string(&binding.launch_snapshot).unwrap();
         binding.launch_snapshot_sha256 =
             sha256_hex(&canonicalize(&parse(&encoded).unwrap()).unwrap());

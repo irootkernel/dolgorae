@@ -5,6 +5,8 @@
 //! can silently relax identity, framing, or runtime-record validation.
 
 mod companion;
+mod profile_tools;
+pub(crate) mod startup_abort;
 
 use crate::app_server::{DuplexConnection, SolicitedSink, TransportError};
 #[cfg(target_os = "macos")]
@@ -630,6 +632,8 @@ pub struct StartupOwnedChild {
     pub ancestry: Vec<crate::darwin::ProcessCensusEntry>,
 }
 
+pub(crate) const STARTUP_OWNERSHIP_INCOMPLETE: &str = "startup_ownership_incomplete";
+
 impl StartupScopeWitness {
     fn pending(worker_identity: WorkerIdentity, app_server_epoch: u64) -> Self {
         Self {
@@ -778,7 +782,6 @@ pub(crate) struct QualifiedCallerRuntime {
     server_key: String,
     binding_sha256: String,
     startup: Option<StartupWorkload>,
-    startup_deadline: Instant,
 }
 
 fn record_session_startup_failure(
@@ -1379,6 +1382,10 @@ impl QualifiedCallerRuntime {
             owned.socket_identity.clone(),
             owned.identity.uid,
         );
+        let mut startup = startup;
+        let cap = startup_abort::startup_cap(manifest, session, &runtime);
+        startup.deadline =
+            Instant::now() + Duration::from_secs(session.transport_timeout_seconds.min(cap));
         let mut qualification = Self {
             runtime,
             runtime_path: runtime_path.clone(),
@@ -1388,7 +1395,6 @@ impl QualifiedCallerRuntime {
             binding_sha256: binding
                 .digest()
                 .map_err(|_| WorkerProtocolError::InvalidRuntimeRecord)?,
-            startup_deadline: startup.deadline,
             startup: Some(startup),
         };
         qualification.startup.as_mut().unwrap().runtime_path = Some(runtime_path);
@@ -1416,31 +1422,25 @@ impl QualifiedCallerRuntime {
             .map(|_| ())
     }
 
-    pub(crate) fn finish_connection_startup(&mut self) {
-        self.startup.take();
-    }
-
     pub(crate) fn complete_startup_witness(
-        &self,
+        &mut self,
         mut diagnostic: Option<&mut Value>,
     ) -> Result<(), WorkerProtocolError> {
-        if self.startup.is_some() {
-            return Err(proof_refusal(
-                &mut diagnostic,
-                "startup_window_not_closed",
-                Value::Null,
-            ));
-        }
+        let mut startup = self.startup.take().ok_or_else(|| {
+            proof_refusal(&mut diagnostic, "startup_window_consumed", Value::Null)
+        })?;
         let before = Instant::now();
-        startup_commit_deadline_observed(self.startup_deadline, before, None, &mut diagnostic)?;
-        self.prove_quiescence_observed(diagnostic.as_deref_mut())?;
-        let after = Instant::now();
-        startup_commit_deadline_observed(
-            self.startup_deadline,
-            before,
-            Some(after),
-            &mut diagnostic,
+        startup_commit_deadline_observed(startup.deadline, before, None, &mut diagnostic)?;
+        let runtime = self.current_runtime()?;
+        prove_group_empty_samples(
+            &runtime,
+            true,
+            false,
+            diagnostic.as_deref_mut(),
+            Some(&mut startup),
         )?;
+        let after = Instant::now();
+        startup_commit_deadline_observed(startup.deadline, before, Some(after), &mut diagnostic)?;
         update_runtime_record(&self.runtime_path, self.runtime.identity.uid, |record| {
             if record.identity != self.runtime.identity
                 || record.dedicated_server_identity != self.runtime.dedicated_server_identity
@@ -1546,21 +1546,30 @@ impl QualifiedCallerRuntime {
 }
 
 /// Caller policy proof and its authoritative revalidation share this census.
-/// Generic workload and generation-absence entry points must remain strict.
+/// Retirement and full generation absence always account for tool processes.
 fn prove_caller_policy_quiescence(
     runtime: &WorkerRuntimeRecord,
     diagnostic: Option<&mut Value>,
 ) -> Result<(), WorkerProtocolError> {
-    if runtime
+    let host = if runtime
         .startup_scope
         .as_ref()
-        .is_none_or(|scope| !scope.complete)
+        .is_some_and(|scope| scope.complete)
     {
-        return prove_group_empty_observed(runtime, true, false, diagnostic).map(|_| ());
-    }
-    let host = companion::capture(runtime)?;
-    prove_group_empty_samples_with_companion(runtime, true, false, diagnostic, None, host.as_ref())
-        .map(|_| ())
+        companion::capture(runtime)?
+    } else {
+        None
+    };
+    prove_group_empty_samples_with_companion(
+        runtime,
+        true,
+        false,
+        diagnostic,
+        None,
+        host.as_ref(),
+        true,
+    )
+    .map(|_| ())
 }
 
 impl CallerPolicyProof {
@@ -2779,7 +2788,26 @@ pub struct BackgroundAbsenceEvidence {
 pub fn prove_worker_workload_absent(
     record: &WorkerRuntimeRecord,
 ) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
-    prove_group_empty(record, true, false)
+    prove_live_worker_workload_absent(record, None)
+}
+
+fn prove_live_worker_workload_absent(
+    record: &WorkerRuntimeRecord,
+    diagnostic: Option<&mut Value>,
+) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
+    let allow_profile_tools = record
+        .startup_scope
+        .as_ref()
+        .is_some_and(|scope| scope.complete);
+    prove_group_empty_samples_with_companion(
+        record,
+        true,
+        false,
+        diagnostic,
+        None,
+        None,
+        allow_profile_tools,
+    )
 }
 
 pub(crate) fn prove_worker_workload_absent_with_diagnostic(
@@ -2787,7 +2815,7 @@ pub(crate) fn prove_worker_workload_absent_with_diagnostic(
     record: &WorkerRuntimeRecord,
 ) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
     let mut details = Value::Null;
-    let proof = prove_group_empty_observed(record, true, false, Some(&mut details));
+    let proof = prove_live_worker_workload_absent(record, Some(&mut details));
     if let Err(error) = &proof {
         let log = state_root
             .join("runs")
@@ -2957,6 +2985,39 @@ fn startup_ancestries_match(
         })
 }
 
+fn startup_child_exited(
+    ancestry: &[crate::darwin::ProcessCensusEntry],
+    census: &[crate::darwin::ProcessCensusEntry],
+    lookup: impl FnMut(u32) -> Result<crate::darwin::BsdProcessIdentity, std::io::Error>,
+) -> bool {
+    let (leader, descendants) = ancestry.split_last().expect("verified startup ancestry");
+    let (child, ancestors) = descendants.split_first().expect("verified startup child");
+    let observation = |prior: &crate::darwin::ProcessCensusEntry| {
+        census.iter().find(|entry| entry.pid == prior.pid)
+    };
+    let matches = |prior: &crate::darwin::ProcessCensusEntry,
+                   current: &crate::darwin::ProcessCensusEntry| {
+        same_owned_child(prior, current) && prior.parent_pid == current.parent_pid
+    };
+    if !observation(leader).is_some_and(|current| matches(leader, current))
+        || descendants
+            .iter()
+            .any(|prior| observation(prior).is_some_and(|current| !matches(prior, current)))
+    {
+        return false;
+    }
+    // The second census can retain the child after its parent has disappeared.
+    // An exact exit only invalidates this sample. It never establishes scope ownership.
+    let mut lookup = lookup;
+    let mut exited =
+        |pid| matches!(lookup(pid), Err(error) if error.raw_os_error() == Some(libc::ESRCH));
+    exited(child.pid)
+        && ancestors
+            .iter()
+            .filter(|prior| observation(prior).is_none())
+            .all(|prior| exited(prior.pid))
+}
+
 impl StartupWorkload {
     fn new(
         budget: Duration,
@@ -2993,7 +3054,16 @@ impl StartupWorkload {
         site: &'static str,
         diagnostic: &mut Option<&mut Value>,
     ) -> Result<(), WorkerProtocolError> {
-        self.dirty_sample = true;
+        if self.transient_tool_probe(process, server, census)
+            && self.children.get(&process.pid).is_none_or(|prior| {
+                prior.parent_pid == process.parent_pid
+                    && prior.process_group_id == process.process_group_id
+                    && prior.session_id == process.session_id
+            })
+        {
+            self.dirty_sample = true;
+            return Ok(());
+        }
         if let Some(prior) = self.children.get(&process.pid) {
             if !same_owned_child(prior, process) {
                 return Err(proof_refusal(
@@ -3004,6 +3074,7 @@ impl StartupWorkload {
             }
             return Ok(());
         }
+        self.dirty_sample = true;
         let Some(first) = startup_ancestry(census, process, server) else {
             return Err(proof_refusal(
                 diagnostic,
@@ -3018,27 +3089,58 @@ impl StartupWorkload {
                 serde_json::json!({"site":site,"os_error":error.raw_os_error()}),
             )
         })?;
-        if !second_census.iter().any(|entry| entry.pid == process.pid)
-            && matches!(DarwinSystem.bsd_process_identity(process.pid), Err(error) if error.raw_os_error() == Some(libc::ESRCH))
-        {
-            return Ok(());
-        }
         let second = second_census
             .iter()
             .find(|entry| entry.pid == process.pid)
             .and_then(|entry| startup_ancestry(&second_census, entry, server));
-        let Some(ancestry) = Some(first).filter(|chain| {
-            second
-                .as_ref()
-                .is_some_and(|observed| startup_ancestries_match(chain, observed))
-        }) else {
+        if second.is_none()
+            && second_census
+                .iter()
+                .find(|entry| entry.pid == process.pid)
+                .is_some_and(|entry| {
+                    entry.parent_pid == process.parent_pid
+                        && entry.process_group_id == process.process_group_id
+                        && entry.session_id == process.session_id
+                        && self.transient_tool_probe(entry, server, &second_census)
+                })
+        {
+            return Ok(());
+        }
+        let mut exit_checks = Vec::new();
+        if second.is_none()
+            && startup_child_exited(&first, &second_census, |pid| {
+                let result = DarwinSystem.bsd_process_identity(pid);
+                if diagnostic.is_some() {
+                    exit_checks.push(serde_json::json!({
+                        "pid":pid,
+                        "found":result.is_ok(),
+                        "os_error":result.as_ref().err().and_then(std::io::Error::raw_os_error),
+                    }));
+                }
+                result
+            })
+        {
+            return Ok(());
+        }
+        if !second
+            .as_ref()
+            .is_some_and(|observed| startup_ancestries_match(&first, observed))
+        {
+            let second_observations = first
+                .iter()
+                .filter_map(|prior| second_census.iter().find(|entry| entry.pid == prior.pid))
+                .map(scope_observation)
+                .collect::<Vec<_>>();
             return Err(proof_refusal(
                 diagnostic,
                 "startup_child_ancestry",
                 serde_json::json!({"site":site,"observed":scope_observation(process),
-                    "second_ancestry":second,"expected_server":server}),
+                    "first_ancestry":first,"second_ancestry":second,
+                    "second_observations":second_observations,"exit_checks":exit_checks,
+                    "expected_server":server}),
             ));
-        };
+        }
+        let ancestry = first;
         let owned = ancestry[..ancestry.len() - 1]
             .iter()
             .enumerate()
@@ -3098,6 +3200,19 @@ impl StartupWorkload {
         Ok(())
     }
 
+    fn transient_tool_probe(
+        &self,
+        process: &crate::darwin::ProcessCensusEntry,
+        server: &DedicatedServerIdentity,
+        census: &[crate::darwin::ProcessCensusEntry],
+    ) -> bool {
+        self.runtime_path.is_some()
+            && process.uid == 0
+            && process.birth.is_none()
+            && profile_tools::ToolProcesses::sample(server, census, None)
+                .startup_ps(process, server)
+    }
+
     fn observe(
         &mut self,
         process: &crate::darwin::ProcessCensusEntry,
@@ -3139,15 +3254,16 @@ impl StartupWorkload {
         Ok(())
     }
 
-    fn reconcile_membership(
+    fn reconcile_group_membership(
         &mut self,
         server: &DedicatedServerIdentity,
-        members: &[u32],
+        group_members: (u32, &[u32]),
         enumerated: &[u32],
         census: &[crate::darwin::ProcessCensusEntry],
         diagnostic: &mut Option<&mut Value>,
         lookup: impl Fn(u32) -> Result<crate::darwin::BsdProcessIdentity, std::io::Error>,
     ) -> Result<(), WorkerProtocolError> {
+        let (group, members) = group_members;
         self.dirty_sample = true;
         let members = members
             .iter()
@@ -3167,7 +3283,7 @@ impl StartupWorkload {
             }
             if let Some(process) = census.iter().find(|process| process.pid == pid) {
                 // Validate typed drift before disappearance can discard it.
-                if self.children.contains_key(&pid) {
+                if self.runtime_path.is_some() || self.children.contains_key(&pid) {
                     self.observe_owned(
                         process,
                         server,
@@ -3175,22 +3291,17 @@ impl StartupWorkload {
                         "dedicated_membership",
                         diagnostic,
                     )?;
-                } else if self.runtime_path.is_none() {
-                    self.observe(process, server, diagnostic)?;
                 } else {
-                    self.observe_owned(
-                        process,
-                        server,
-                        census,
-                        "dedicated_membership",
-                        diagnostic,
-                    )?;
+                    self.observe(process, server, diagnostic)?;
                 }
             }
             match lookup(pid) {
                 Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
                     self.dirty_sample = true;
                 }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        && self.discard_tool_probe_membership(pid, group, server, census) => {}
                 Ok(current) if current.pid == pid => {
                     let observed = crate::darwin::ProcessCensusEntry {
                         pid,
@@ -3222,6 +3333,7 @@ impl StartupWorkload {
                         "startup_membership_identity",
                         serde_json::json!({
                             "pid": pid,
+                            "group": group,
                             "observed": current.as_ref().ok(),
                             "os_error": current.as_ref().err().and_then(std::io::Error::raw_os_error),
                         }),
@@ -3232,6 +3344,49 @@ impl StartupWorkload {
         Ok(())
     }
 
+    #[cfg(test)]
+    fn reconcile_membership(
+        &mut self,
+        server: &DedicatedServerIdentity,
+        members: &[u32],
+        enumerated: &[u32],
+        census: &[crate::darwin::ProcessCensusEntry],
+        diagnostic: &mut Option<&mut Value>,
+        lookup: impl Fn(u32) -> Result<crate::darwin::BsdProcessIdentity, std::io::Error>,
+    ) -> Result<(), WorkerProtocolError> {
+        self.reconcile_group_membership(
+            server,
+            (server.process_group_id, members),
+            enumerated,
+            census,
+            diagnostic,
+            lookup,
+        )
+    }
+
+    fn discard_tool_probe_membership(
+        &self,
+        pid: u32,
+        group: u32,
+        server: &DedicatedServerIdentity,
+        census: &[crate::darwin::ProcessCensusEntry],
+    ) -> bool {
+        if self.runtime_path.is_none()
+            || !profile_tools::ToolProcesses::sample(server, census, None).contains(group)
+        {
+            return false;
+        }
+        let Ok(fresh) = DarwinSystem.all_process_identities() else {
+            return false;
+        };
+        if let Some(entry) = fresh.iter().find(|entry| entry.pid == pid) {
+            return entry.process_group_id == group
+                && self.transient_tool_probe(entry, server, &fresh);
+        }
+        matches!(DarwinSystem.bsd_process_identity(pid), Err(error) if error.raw_os_error() == Some(libc::ESRCH))
+    }
+
+    #[cfg(test)]
     fn children_absent(
         &self,
         diagnostic: &mut Option<&mut Value>,
@@ -3294,6 +3449,7 @@ fn prove_group_empty_samples(
         diagnostic,
         startup,
         None,
+        false,
     )
 }
 
@@ -3304,8 +3460,33 @@ fn prove_group_empty_samples_with_companion(
     mut diagnostic: Option<&mut Value>,
     mut startup: Option<&mut StartupWorkload>,
     companion: Option<&RetirementProcess>,
+    caller_policy: bool,
 ) -> Result<BackgroundAbsenceEvidence, WorkerProtocolError> {
     record.validate()?;
+    let retained_tools = caller_policy
+        .then(|| {
+            record
+                .startup_scope
+                .as_ref()
+                .map(|scope| scope.children.as_slice())
+        })
+        .flatten();
+    if retained_tools.is_some()
+        && let Some(scope) = &record.startup_scope
+        && let Some(identity) = &scope.app_server_socket_identity
+    {
+        let path = dedicated_server_socket_path(
+            record.identity.uid,
+            record.identity.run_id,
+            record.identity.run_generation,
+        )?;
+        if !crate::codex_socket::inspect(&path, record.identity.uid)
+            .is_ok_and(|socket| socket.dev() == identity.device && socket.ino() == identity.inode)
+        {
+            record_socket_refusal(diagnostic, identity);
+            return Err(WorkerProtocolError::SocketIdentityMismatch);
+        }
+    }
     if !allow_recorded_worker
         && record
             .startup_scope
@@ -3314,7 +3495,7 @@ fn prove_group_empty_samples_with_companion(
     {
         return Err(proof_refusal(
             &mut diagnostic,
-            "startup_ownership_incomplete",
+            STARTUP_OWNERSHIP_INCOMPLETE,
             Value::Null,
         ));
     }
@@ -3327,7 +3508,12 @@ fn prove_group_empty_samples_with_companion(
     let mut sampled_count = 0_u32;
     let mut last_sample = Value::Null;
     let mut proof_entry_remaining_ms = None;
+    let policy_deadline = Instant::now() + Duration::from_secs(3);
     loop {
+        let mut tool_sample = retained_tools.map(|retained| profile_tools::PolicySample {
+            retained,
+            dirty: false,
+        });
         let mut sample_started = None;
         if let Some(wait) = startup.as_deref_mut() {
             let now = Instant::now();
@@ -3335,7 +3521,7 @@ fn prove_group_empty_samples_with_companion(
                 .unwrap_or(u64::MAX);
             proof_entry_remaining_ms.get_or_insert(remaining);
             if now >= wait.deadline {
-                return Err(proof_refusal(
+                proof_refusal(
                     &mut diagnostic,
                     "startup_quiescence_timeout",
                     serde_json::json!({
@@ -3353,7 +3539,8 @@ fn prove_group_empty_samples_with_companion(
                             .take(4).map(scope_observation).collect::<Vec<_>>(),
                         "last_sample": last_sample,
                     }),
-                ));
+                );
+                return Err(WorkerProtocolError::StartupQuiescenceTimeout);
             }
             sample_started = Some(now);
             if let Err(error) = wait.verify_socket() {
@@ -3389,6 +3576,7 @@ fn prove_group_empty_samples_with_companion(
                     diagnostic.as_deref_mut(),
                     startup.as_deref_mut(),
                     companion,
+                    tool_sample.as_mut(),
                 )?
             };
             if !scope_verified {
@@ -3463,6 +3651,12 @@ fn prove_group_empty_samples_with_companion(
             ));
         }
         companion::verify(companion, &census)?;
+        let tools = profile_tool_processes(
+            record.dedicated_server_identity.as_ref(),
+            &census,
+            startup.as_deref(),
+            retained_tools,
+        );
         let by_pid = census
             .iter()
             .map(|identity| (identity.pid, identity.parent_pid))
@@ -3499,7 +3693,9 @@ fn prove_group_empty_samples_with_companion(
             same_scope || (!allow_recorded_worker && identity.pid == record.identity.pid)
         });
         for process in unexpected {
-            if companion::contains(companion, process) {
+            if companion::contains(companion, process)
+                || (startup.is_none() && tools.contains(process.pid))
+            {
                 continue;
             }
             if let (Some(wait), Some(server)) =
@@ -3513,6 +3709,12 @@ fn prove_group_empty_samples_with_companion(
                 )
             {
                 wait.observe_owned(process, server, &census, "worker_census", &mut diagnostic)?;
+                continue;
+            }
+            if let (Some(sample), Some(server)) =
+                (tool_sample.as_mut(), &record.dedicated_server_identity)
+                && sample.defer_member(&tools, process, server)
+            {
                 continue;
             }
             return Err(proof_refusal(
@@ -3567,14 +3769,24 @@ fn prove_group_empty_samples_with_companion(
             enumerated.sort_unstable();
             if members != enumerated {
                 match (startup.as_deref_mut(), &record.dedicated_server_identity) {
-                    (Some(wait), Some(server)) => wait.reconcile_membership(
+                    (Some(wait), Some(server)) => wait.reconcile_group_membership(
                         server,
-                        &members,
+                        (group, &members),
                         &enumerated,
                         &census,
                         &mut diagnostic,
                         |pid| DarwinSystem.bsd_process_identity(pid),
                     )?,
+                    (None, Some(server))
+                        if tool_sample.as_mut().is_some_and(|sample| {
+                            sample.defer_membership_change(
+                                &tools,
+                                server,
+                                group,
+                                (&members, &enumerated),
+                                &census,
+                            )
+                        }) => {}
                     _ => {
                         return Err(proof_refusal(
                             &mut diagnostic,
@@ -3591,6 +3803,7 @@ fn prove_group_empty_samples_with_companion(
                     || entry.session_id == child.session_id
             }) && entry.pid != record.identity.pid
                 && !companion::contains(companion, entry)
+                && !(startup.is_none() && tools.contains(entry.pid))
                 && record
                     .dedicated_server_identity
                     .as_ref()
@@ -3605,6 +3818,10 @@ fn prove_group_empty_samples_with_companion(
                         "recorded_scope",
                         &mut diagnostic,
                     )?,
+                    (None, Some(server))
+                        if tool_sample
+                            .as_mut()
+                            .is_some_and(|sample| sample.defer_member(&tools, entry, server)) => {}
                     _ => {
                         return Err(proof_refusal(
                             &mut diagnostic,
@@ -3627,6 +3844,9 @@ fn prove_group_empty_samples_with_companion(
                         && current.process_group_id == child.process_group_id
                         && current.session_id == child.session_id =>
                 {
+                    if tools.contains(child.pid) {
+                        continue;
+                    }
                     recorded_absent = false;
                     present_child_count += 1;
                     if diagnostic.is_some() && present_child_sample.len() < 4 {
@@ -3639,6 +3859,18 @@ fn prove_group_empty_samples_with_companion(
                         ));
                     }
                 }
+                _ if let (Some(wait), Some(server)) =
+                    (startup.as_deref_mut(), &record.dedicated_server_identity)
+                    && let Some(entry) = census.iter().find(|entry| entry.pid == child.pid)
+                    && entry.parent_pid == child.parent_pid
+                    && tools.startup_ps(entry, server) =>
+                {
+                    wait.dirty_sample = true;
+                }
+                _ if let (Some(sample), Some(server)) =
+                    (tool_sample.as_mut(), &record.dedicated_server_identity)
+                    && let Some(entry) = census.iter().find(|entry| entry.pid == child.pid)
+                    && sample.defer_member(&tools, entry, server) => {}
                 current => {
                     return Err(proof_refusal(
                         &mut diagnostic,
@@ -3678,7 +3910,7 @@ fn prove_group_empty_samples_with_companion(
             last_sample["remaining_budget_at_sample_start_ms"] = start_remaining_ms.into();
             last_sample["sample_elapsed_ms"] = sample_elapsed_ms.into();
             if now >= wait.deadline {
-                return Err(proof_refusal(
+                proof_refusal(
                     &mut diagnostic,
                     "startup_quiescence_timeout",
                     serde_json::json!({
@@ -3700,13 +3932,26 @@ fn prove_group_empty_samples_with_companion(
                             .take(4).map(scope_observation).collect::<Vec<_>>(),
                         "last_sample": last_sample,
                     }),
-                ));
+                );
+                return Err(WorkerProtocolError::StartupQuiescenceTimeout);
             }
-            if !recorded_absent || !wait.children_absent(&mut diagnostic)? || wait.dirty_sample {
+            if !recorded_absent || wait.dirty_sample {
                 empty_samples = 0;
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
+        }
+        if tool_sample.is_some_and(|sample| sample.dirty) {
+            if Instant::now() >= policy_deadline {
+                return Err(proof_refusal(
+                    &mut diagnostic,
+                    "profile_tool_activity_unsettled",
+                    Value::Null,
+                ));
+            }
+            empty_samples = 0;
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
         }
         empty_samples += 1;
         if empty_samples == 5 {
@@ -3747,6 +3992,7 @@ fn dedicated_group_has_only_expected_leader_sample(
         diagnostic,
         startup,
         None,
+        None,
     )
 }
 
@@ -3756,6 +4002,7 @@ fn dedicated_group_has_only_expected_leader_with_companion(
     mut diagnostic: Option<&mut Value>,
     mut startup: Option<&mut StartupWorkload>,
     companion: Option<&RetirementProcess>,
+    mut tool_sample: Option<&mut profile_tools::PolicySample<'_>>,
 ) -> Result<bool, WorkerProtocolError> {
     let mut members = DarwinSystem
         .process_group_pids(server.process_group_id)
@@ -3800,9 +4047,9 @@ fn dedicated_group_has_only_expected_leader_with_companion(
     enumerated.sort_unstable();
     if enumerated != members {
         match startup.as_deref_mut() {
-            Some(wait) => wait.reconcile_membership(
+            Some(wait) => wait.reconcile_group_membership(
                 server,
-                &members,
+                (server.process_group_id, &members),
                 &enumerated,
                 &census,
                 &mut diagnostic,
@@ -3819,6 +4066,12 @@ fn dedicated_group_has_only_expected_leader_with_companion(
         }
     }
     companion::verify(companion, &census)?;
+    let tools = profile_tool_processes(
+        Some(server),
+        &census,
+        startup.as_deref(),
+        tool_sample.as_ref().map(|sample| sample.retained),
+    );
     let by_pid = census
         .iter()
         .map(|identity| (identity.pid, identity.parent_pid))
@@ -3846,7 +4099,9 @@ fn dedicated_group_has_only_expected_leader_with_companion(
         )
     });
     for process in unexpected {
-        if companion::contains(companion, process) {
+        if companion::contains(companion, process)
+            || (startup.is_none() && tools.contains(process.pid))
+        {
             continue;
         }
         if let Some(wait) = startup.as_deref_mut() {
@@ -3859,6 +4114,12 @@ fn dedicated_group_has_only_expected_leader_with_companion(
             )?;
             continue;
         }
+        if tool_sample
+            .as_mut()
+            .is_some_and(|sample| sample.defer_member(&tools, process, server))
+        {
+            continue;
+        }
         proof_refusal(
             &mut diagnostic,
             "dedicated_scope",
@@ -3867,6 +4128,22 @@ fn dedicated_group_has_only_expected_leader_with_companion(
         return Ok(false);
     }
     Ok(true)
+}
+
+fn profile_tool_processes(
+    server: Option<&DedicatedServerIdentity>,
+    census: &[crate::darwin::ProcessCensusEntry],
+    startup: Option<&StartupWorkload>,
+    retained: Option<&[StartupOwnedChild]>,
+) -> profile_tools::ToolProcesses {
+    match server {
+        Some(server)
+            if retained.is_some() || startup.is_some_and(|wait| wait.runtime_path.is_some()) =>
+        {
+            profile_tools::ToolProcesses::sample(server, census, retained)
+        }
+        _ => profile_tools::ToolProcesses::default(),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -4655,6 +4932,14 @@ impl Drop for StartupByteGuard<'_> {
 }
 
 impl WorkerRuntimeRecord {
+    pub(crate) fn startup_ownership_incomplete(&self) -> bool {
+        self.control_recovery_required
+            && self
+                .startup_scope
+                .as_ref()
+                .is_some_and(|scope| !scope.complete)
+    }
+
     pub fn validate(&self) -> Result<(), WorkerProtocolError> {
         self.identity.validate()?;
         if !matches!(self.schema_version, 1 | 2)
@@ -8497,6 +8782,7 @@ impl WorkerSession {
         });
         let mut startup_phase = "ledger_replay";
         let mut startup_details = None;
+        let mut abort_checkpoint = false;
         let coordinator = (|| {
             let (replayed, interaction_decisions, turn_receipts) = {
                 let ledger = ledger
@@ -8602,8 +8888,30 @@ impl WorkerSession {
                 let path = runtime_record_path(&runtime_root(state_root), facts.run_id)?;
                 let runtime = read_runtime_record(&path, uid)?;
                 let qualification = QualifiedCallerRuntime::from_owned_server(
-                    &manifest, session, owned, runtime, path,
-                )?;
+                    &manifest,
+                    session,
+                    owned,
+                    runtime,
+                    path.clone(),
+                )
+                .inspect_err(|error| {
+                    if *error == WorkerProtocolError::StartupQuiescenceTimeout
+                        && replayed.lifecycle == crate::domain::RunLifecycle::Starting
+                        && replayed.thread_id.is_none()
+                        && replayed.latest_turn_id.is_none()
+                    {
+                        abort_checkpoint = startup_abort::capture(&manifest, session, &path)
+                            .inspect_err(|error| {
+                                record_session_startup_failure(
+                                    session,
+                                    "startup_abort_checkpoint",
+                                    *error,
+                                    None,
+                                );
+                            })
+                            .unwrap_or(false);
+                    }
+                })?;
                 startup_phase = "configuration_qualification";
                 coordinator
                     .qualify_caller_runtime(qualification)
@@ -8751,7 +9059,6 @@ impl WorkerSession {
                         startup_error(coordinator.state())
                     })?;
             }
-            coordinator.finish_caller_connection_startup();
             startup_phase = "startup_ownership_commit";
             coordinator
                 .complete_caller_runtime_startup()
@@ -8776,7 +9083,9 @@ impl WorkerSession {
                 mailbox.stop();
                 wire.shutdown();
                 let _ = reader.join();
-                let _ = stop_dedicated_server(&mut dedicated_server);
+                if !abort_checkpoint {
+                    let _ = stop_dedicated_server(&mut dedicated_server);
+                }
                 return Err(error);
             }
         };
@@ -9766,6 +10075,12 @@ fn stop_dedicated_server(
             .checked_add(Duration::from_secs(5))
             .unwrap_or_else(Instant::now);
         while Instant::now() < deadline {
+            // The leader remains in the process group until its actual parent
+            // reaps it. Reap during the grace period before testing emptiness.
+            server
+                .child
+                .try_wait()
+                .map_err(|_| WorkerProtocolError::Io)?;
             if DarwinSystem
                 .process_group_pids(server.identity.process_group_id)
                 .is_ok_and(|members| members.is_empty())
@@ -10187,6 +10502,7 @@ fn drain_run(
                     break;
                 }
                 SessionWork::Message(Ok(message)) => {
+                    let was_running = coordinator.active_turn_id().is_some();
                     match coordinator.ingest(message) {
                         Ok(Some(terminal)) => {
                             progress.settle(terminal.clone());
@@ -10210,6 +10526,25 @@ fn drain_run(
                                 progress.fail(TurnError::Journal(storage.message));
                             }
                             if *coordinator.state() == CoordinatorState::OutcomeUnknown {
+                                if was_running && let Some(turn_id) = coordinator.recovery_turn_id()
+                                {
+                                    progress.abandon(turn_id.to_owned());
+                                    append_private_diagnostic(
+                                        &authority
+                                            .state_root
+                                            .join("runs")
+                                            .join(identity.run_id.to_string())
+                                            .join(format!(
+                                                "dedicated-server-{}.log",
+                                                identity.run_generation
+                                            )),
+                                        &serde_json::json!({
+                                            "schema": "dolgorae.turn-ingest-failure/v1",
+                                            "turn_id": turn_id,
+                                            "error": error.diagnostic_kind(),
+                                        }),
+                                    );
+                                }
                                 #[cfg(all(test, dolgorae_native_acceptance))]
                                 mailbox.native_diagnostic("drain", "ingest_failure");
                                 progress.fail(error);
@@ -11599,7 +11934,10 @@ fn perform(
     {
         return refusal_from(crate::orchestration::approval::recovery());
     }
-    let policy_verification = matches!(mutation.command, SessionCommand::VerifyCallerPolicy { .. });
+    let policy_verification = matches!(
+        mutation.command,
+        SessionCommand::VerifyCallerPolicy { .. } | SessionCommand::SetWriterAccess { .. }
+    ) && coordinator.is_caller_workspace();
     let reconciled = if matches!(mutation.command, SessionCommand::Reconcile) {
         match reconcile_successor_member(
             coordinator,
@@ -12631,6 +12969,7 @@ pub enum WorkerProtocolError {
     StartupBusy,
     LedgerReplay,
     WorkerStartFailed,
+    StartupQuiescenceTimeout,
     AppServerUnavailable,
     ThreadStartupOutcomeUnknown,
     Io,
@@ -12651,6 +12990,7 @@ impl WorkerProtocolError {
             Self::ThreadStartupOutcomeUnknown => "OUTCOME_UNKNOWN",
             Self::LedgerReplay => "AUDIT_INTEGRITY_FAILURE",
             Self::WorkerStartFailed
+            | Self::StartupQuiescenceTimeout
             | Self::AppServerUnavailable
             | Self::MalformedFrame
             | Self::InvalidIdentity
@@ -12748,6 +13088,10 @@ impl WorkerProtocolError {
             Self::InvalidIdentity => (
                 "private worker transport failed",
                 transport_details("correlate"),
+            ),
+            Self::StartupQuiescenceTimeout => (
+                "dedicated startup workload did not become quiescent",
+                transport_details("read"),
             ),
             Self::Io => ("private worker transport failed", transport_details("read")),
         };
@@ -14060,16 +14404,144 @@ pub fn remove_verified_absent_runtime(
     let record = read_runtime_record(runtime_record, uid)?;
     stop_orphaned_dedicated_server(&record)?;
     prove_worker_generation_absent(&record)?;
-    let owner_root = runtime_record
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
+    remove_proven_absent_runtime(runtime_record, &record)
+}
+
+/// Stop the current exact generation. Previous-boot generations are retired
+/// without consulting their PIDs after the caller checks the startup claims.
+pub(crate) fn stop_force_delete_runtime(
+    record: &WorkerRuntimeRecord,
+) -> Result<(), WorkerProtocolError> {
+    let identity = &record.identity;
+    if boot_session_uuid(identity.uid)? != identity.boot_uuid {
+        return Ok(());
+    }
+    if record
+        .startup_scope
+        .as_ref()
+        .is_none_or(|scope| !scope.complete)
+    {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    if classify_worker_identity(record) == ProcessIdentityVerdict::Match {
+        // Address the retained inode and identity directly. Frozen Shutdown
+        // gives the Worker the opportunity to settle effects it can observe.
+        let send_shutdown = || -> Result<ControlResponseV1, WorkerProtocolError> {
+            if record.observe_socket()? != record.socket_identity {
+                return Err(WorkerProtocolError::SocketIdentityMismatch);
+            }
+            let mut stream = DeadlineStream::connect(
+                &record.socket_path,
+                Instant::now() + Duration::from_secs(12),
+            )
+            .map_err(|_| WorkerProtocolError::Io)?;
+            write_frame(
+                &mut stream,
+                &ControlRequestV1::Shutdown {
+                    expected: identity.clone(),
+                },
+            )?;
+            read_frame(&mut std::io::BufReader::new(stream))
+        };
+        let _ = send_shutdown();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            observe_owned_worker_child(identity)?;
+            if classify_worker_identity(record) != ProcessIdentityVerdict::Match {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        if classify_worker_identity(record) == ProcessIdentityVerdict::Match {
+            // Only an identified leader in a checked process scope can be
+            // signalled if its control socket fails to stop it.
+            let server_live = record
+                .dedicated_server_identity
+                .as_ref()
+                .is_some_and(|server| {
+                    classify_dedicated_server_identity(server) == ProcessIdentityVerdict::Match
+                });
+            prove_group_empty(record, true, server_live)?;
+            if classify_worker_identity(record) != ProcessIdentityVerdict::Match {
+                return Err(WorkerProtocolError::InvalidIdentity);
+            }
+            let leader = crate::darwin::ProcessCensusEntry {
+                pid: identity.pid,
+                parent_pid: 0,
+                uid: identity.uid,
+                process_group_id: identity.process_group_id,
+                session_id: identity.session_id,
+                birth: Some((identity.start_tvsec, identity.start_tvusec)),
+                zombie: false,
+            };
+            match DarwinSystem.signal_exact_process(&leader, libc::SIGKILL) {
+                Ok(()) => {}
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+                Err(_) => return Err(WorkerProtocolError::InvalidIdentity),
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                observe_owned_worker_child(identity)?;
+                if classify_worker_identity(record) != ProcessIdentityVerdict::Match
+                    || Instant::now() >= deadline
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    if classify_worker_identity(record) != ProcessIdentityVerdict::Absent {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    stop_orphaned_dedicated_server(record)?;
+    prove_worker_generation_absent(record).map(|_| ())
+}
+
+/// Called under the startup serializer after the complete generation has
+/// been stopped or the exact locator was tied to an earlier host boot.
+pub(crate) fn retire_force_delete_runtime(
+    path: &Path,
+    record: &WorkerRuntimeRecord,
+) -> Result<(), WorkerProtocolError> {
+    let identity = &record.identity;
+    if boot_session_uuid(identity.uid)? != identity.boot_uuid {
+        crate::process_inventory::retire_prior_boot_run(
+            runtime_owner_root(path)?,
+            identity.run_id,
+            identity.boot_uuid,
+        )
+        .map_err(|_| WorkerProtocolError::Io)?;
+    }
+    let socket_path =
+        dedicated_server_socket_path(identity.uid, identity.run_id, identity.run_generation)?;
+    if let Some(socket) = record
+        .startup_scope
+        .as_ref()
+        .and_then(|scope| scope.app_server_socket_identity.as_ref())
+    {
+        crate::codex_socket::remove_recorded(
+            &socket_path,
+            identity.uid,
+            socket.device,
+            socket.inode,
+        )
+        .map_err(|_| WorkerProtocolError::SocketIdentityMismatch)?;
+    } else {
+        crate::codex_socket::require_vacant(&socket_path, identity.uid)
+            .map_err(|_| WorkerProtocolError::SocketIdentityMismatch)?;
+    }
+    remove_proven_absent_runtime(path, record)
+}
+
+fn remove_proven_absent_runtime(
+    runtime_record: &Path,
+    record: &WorkerRuntimeRecord,
+) -> Result<(), WorkerProtocolError> {
+    let uid = record.identity.uid;
     let mut owner = crate::process_inventory::Retirement {
         kind: "worker",
-        owner_root,
+        owner_root: runtime_owner_root(runtime_record)?,
         boot_uuid: record.identity.boot_uuid,
         run_id: Some(record.identity.run_id),
     };
@@ -14106,7 +14578,7 @@ pub fn remove_verified_absent_runtime(
     // generation BEFORE the locator is removed: the locator's
     // only remover is this function, so a missing locator is proven absent
     // only through this marker (or the absence of any generation evidence).
-    record_verified_absence_marker(runtime_record, &record)?;
+    record_verified_absence_marker(runtime_record, record)?;
     fs::remove_file(runtime_record).map_err(|_| WorkerProtocolError::Io)?;
     File::open(
         runtime_record
@@ -14115,6 +14587,13 @@ pub fn remove_verified_absent_runtime(
     )
     .and_then(|directory| directory.sync_all())
     .map_err(|_| WorkerProtocolError::Io)
+}
+
+fn runtime_owner_root(runtime_record: &Path) -> Result<&Path, WorkerProtocolError> {
+    runtime_record
+        .ancestors()
+        .nth(5)
+        .ok_or(WorkerProtocolError::InvalidRuntimeRecord)
 }
 
 /// The durable proof that one Run's exact worker generation was verified
@@ -18723,6 +19202,52 @@ pub(crate) mod tests {
         assert!(startup_ancestries_match(&first, &second));
         assert!(startup_ancestries_match(&second, &first));
         assert!(!startup_ancestries_match(&first, &second[..2]));
+
+        let stale_leaf = [leaf, leader];
+        assert!(startup_ancestry(&stale_leaf, &leaf, &server).is_none());
+        let exited = |_| Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+        let mut probed = Vec::new();
+        assert!(startup_child_exited(&first, &stale_leaf, |pid| {
+            probed.push(pid);
+            exited(pid)
+        }));
+        assert_eq!(probed, [leaf.pid, parent.pid]);
+        assert!(startup_child_exited(&first, &[parent, leader], exited));
+        assert!(!startup_child_exited(&first, &[leaf], exited));
+
+        let inaccessible = |_| Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        assert!(!startup_child_exited(&first, &stale_leaf, inaccessible));
+        let live = crate::darwin::BsdProcessIdentity {
+            pid: leaf.pid,
+            parent_pid: leaf.parent_pid,
+            uid: leaf.uid,
+            process_group_id: leaf.process_group_id,
+            session_id: leaf.session_id,
+            start_tvsec: 10,
+            start_tvusec: 3,
+            zombie: true,
+        };
+        assert!(!startup_child_exited(&first, &stale_leaf, |_| Ok(live)));
+        assert!(!startup_child_exited(&first, &stale_leaf, |pid| {
+            if pid == leaf.pid {
+                exited(pid)
+            } else {
+                inaccessible(pid)
+            }
+        }));
+        for changed in [
+            crate::darwin::ProcessCensusEntry {
+                birth: Some((20, 1)),
+                ..leaf
+            },
+            crate::darwin::ProcessCensusEntry {
+                parent_pid: 1,
+                ..leaf
+            },
+        ] {
+            assert!(!startup_child_exited(&first, &[changed, leader], exited));
+        }
+
         for ancestor in 0..first.len() {
             for changed in [
                 crate::darwin::ProcessCensusEntry {
@@ -19054,7 +19579,10 @@ pub(crate) mod tests {
                         executable_sha256: file_sha256(&path).unwrap(),
                         executable_path: path,
                     };
-                    let socket_path = root.join("s");
+                    let socket_path =
+                        dedicated_server_socket_path(owner.identity.uid, owner.identity.run_id, 1)
+                            .unwrap();
+                    prepare_socket_root(owner.identity.uid, socket_path.parent().unwrap()).unwrap();
                     let _socket = UnixListener::bind(&socket_path).unwrap();
                     let metadata = fs::symlink_metadata(&socket_path).unwrap();
                     let socket_identity = SocketIdentity {
@@ -19333,6 +19861,29 @@ pub(crate) mod tests {
             let completed =
                 read_runtime_record(&root.join("runtime.json"), DarwinSystem.current_uid())
                     .unwrap();
+            let remove_fixture_socket = || {
+                let identity = &completed.identity;
+                let path = dedicated_server_socket_path(
+                    identity.uid,
+                    identity.run_id,
+                    identity.run_generation,
+                )
+                .unwrap();
+                let socket = completed
+                    .startup_scope
+                    .as_ref()
+                    .unwrap()
+                    .app_server_socket_identity
+                    .as_ref()
+                    .unwrap();
+                crate::codex_socket::remove_recorded(
+                    &path,
+                    identity.uid,
+                    socket.device,
+                    socket.inode,
+                )
+                .unwrap();
+            };
             if mode != "complete" {
                 assert!(!completed.startup_scope.as_ref().unwrap().complete);
                 assert_eq!(
@@ -19364,6 +19915,7 @@ pub(crate) mod tests {
                 fs::write(root.join("server.release"), b"release").unwrap();
                 absent(completed.dedicated_server_identity.as_ref().unwrap().pid);
                 assert!(prove_worker_generation_absent(&completed).is_err());
+                remove_fixture_socket();
                 fs::remove_dir_all(root).unwrap();
                 continue;
             }
@@ -19384,6 +19936,7 @@ pub(crate) mod tests {
                 .unwrap_or_else(|error| {
                     panic!("generation absence refused: {error:?}: {diagnostic}")
                 });
+            remove_fixture_socket();
             fs::remove_dir_all(root).unwrap();
         }
     }
@@ -19514,6 +20067,7 @@ pub(crate) mod tests {
                 None,
                 None,
                 Some(&host),
+                false,
             )
             .unwrap();
             assert_eq!(evidence.consecutive_empty_samples, 5);
@@ -19528,6 +20082,7 @@ pub(crate) mod tests {
                     None,
                     None,
                     Some(&drifted),
+                    false,
                 )
                 .is_err()
             );
@@ -19541,6 +20096,7 @@ pub(crate) mod tests {
                     None,
                     None,
                     Some(&reparented),
+                    false,
                 )
                 .is_err()
             );
@@ -19611,7 +20167,7 @@ pub(crate) mod tests {
                     Some(&mut details),
                     Some(&mut startup)
                 ),
-                Err(WorkerProtocolError::InvalidIdentity)
+                Err(WorkerProtocolError::StartupQuiescenceTimeout)
             );
             assert_eq!(details["predicate"], "startup_quiescence_timeout");
             let observation = &details["observation"];
@@ -19647,15 +20203,14 @@ pub(crate) mod tests {
                 record.identity.uid,
             );
             expired.deadline = startup.deadline;
-            let commit = QualifiedCallerRuntime {
+            let mut commit = QualifiedCallerRuntime {
                 runtime: context_record.clone(),
                 runtime_path: runtime_path.clone(),
                 socket_path: socket_path.clone(),
                 socket_identity: startup.socket_identity.clone(),
                 server_key: "test".to_owned(),
                 binding_sha256: "1".repeat(64),
-                startup_deadline: expired.deadline,
-                startup: None,
+                startup: Some(expired),
             };
             let before_commit = fs::read(&runtime_path).unwrap();
             let mut commit_details = Value::Null;
@@ -19671,6 +20226,7 @@ pub(crate) mod tests {
             );
             assert!(commit_details["observation"]["final_proof_elapsed_ms"].is_null());
             assert!(commit_details["observation"]["deadline_overrun_ms"].is_u64());
+            assert!(commit.startup.is_none());
             assert_eq!(fs::read(&runtime_path).unwrap(), before_commit);
             assert!(
                 !read_runtime_record(&runtime_path, record.identity.uid)
@@ -19686,8 +20242,12 @@ pub(crate) mod tests {
                 socket_identity: startup.socket_identity.clone(),
                 server_key: "test".to_owned(),
                 binding_sha256: "1".repeat(64),
-                startup_deadline: expired.deadline,
-                startup: Some(expired),
+                startup: Some(StartupWorkload::new(
+                    Duration::ZERO,
+                    socket_path.clone(),
+                    startup.socket_identity.clone(),
+                    record.identity.uid,
+                )),
             });
 
             assert!(prove_worker_workload_absent(&record).is_ok());
@@ -28092,7 +28652,6 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
             server_key: binding.server_key.clone(),
             binding_sha256: binding.digest().unwrap(),
             startup: None,
-            startup_deadline: Instant::now() + Duration::from_secs(10),
         };
         let run_root = fixture
             .state_root

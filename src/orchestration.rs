@@ -1153,6 +1153,41 @@ pub(crate) fn ensure_primary_turn_admission(
     )
 }
 
+const OPERATOR_ABANDONMENT: &str = "session_operator_abandoned";
+
+fn primary_operator_abandoned(connection: &Connection, run_id: Uuid) -> Result<bool, MachineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM orchestration_events WHERE session_id=?1 AND kind=?2)",
+            params![run_id.to_string(), OPERATOR_ABANDONMENT],
+            |row| row.get(0),
+        )
+        .map_err(internal)
+}
+
+fn require_primary_not_abandoned(
+    connection: &Connection,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
+    if primary_operator_abandoned(connection, run_id)? {
+        return Err(MachineError::new(
+            "RECOVERY_REQUIRED",
+            "the Operator abandoned this Primary for force deletion",
+            false,
+            serde_json::json!({"run_id":run_id,"reason":"operator_force_delete_pending",
+                "required_action":"repeat_force_delete"}),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn require_primary_not_force_abandoned(
+    state_root: &Path,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
+    OrchestrationStore::open_observer(state_root)?.require_primary_not_force_abandoned(run_id)
+}
+
 fn ensure_primary_turn_admission_for_binding(
     state_root: &Path,
     run_id: Uuid,
@@ -1165,9 +1200,9 @@ fn ensure_primary_turn_admission_for_binding(
     }) else {
         return Ok(());
     };
-    if let Some(close) =
-        OrchestrationStore::open_observer(state_root)?.session_close(binding.aggregate_id)?
-    {
+    let store = OrchestrationStore::open_observer(state_root)?;
+    store.require_primary_not_force_abandoned(run_id)?;
+    if let Some(close) = store.session_close(binding.aggregate_id)? {
         return Err(MachineError::new(
             "SESSION_CLOSE_IN_PROGRESS",
             "whole-session close intent prevents new Primary Turns",
@@ -1431,6 +1466,88 @@ impl OrchestrationStore {
             state_root: state_root.to_owned(),
             uid: crate::darwin::DarwinSystem.current_uid(),
         })
+    }
+
+    /// Refuse to close a Start key if aggregate admission survived a lost
+    /// allocation record. This observation never creates or migrates state.
+    pub(crate) fn verify_unaccepted_start_key(
+        state_root: &Path,
+        workspace_id: &str,
+        key: &str,
+    ) -> Result<(), MachineError> {
+        let blocked = || {
+            MachineError::new(
+                "RECOVERY_REQUIRED",
+                "retained aggregate admission prevents startup key closure",
+                false,
+                serde_json::json!({"reason":"retained_start_admission","required_action":"restore_state"}),
+            )
+        };
+        if matches!(
+            crate::engagement::delegation_namespace(state_root)?,
+            crate::engagement::DelegationNamespace::RecoveryRequired
+        ) {
+            return Err(blocked());
+        }
+        let path = EngagementStore::workspace_database_path(state_root);
+        if crate::engagement::admit_generation(&path)?.is_none() {
+            return Ok(());
+        }
+        let store = Self::open_observer(state_root)?;
+        let snapshot = store.connection.unchecked_transaction().map_err(internal)?;
+        let extension: Option<String> = snapshot
+            .query_row(
+                "SELECT value FROM metadata WHERE key='orchestration_schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        if extension.is_none() {
+            let partial: bool = snapshot
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name IN (
+                    'caller_policy_session_acceptances','orchestrated_sessions',
+                    'aggregate_bootstrap_operations','brokered_members',
+                    'brokered_spawn_operations','brokered_specialist_reuse_receipts',
+                    'brokered_approval_resolutions','brokered_tasks','brokered_task_acceptances',
+                    'brokered_task_controls','brokered_result_publications',
+                    'brokered_result_publication_sequence','brokered_delivery_receipts',
+                    'orchestrated_session_closes','orchestration_events','brokered_tool_results'))",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(internal)?;
+            if partial {
+                return Err(blocked());
+            }
+            store.connection.check_identity()?;
+            return Ok(());
+        }
+        for table in [
+            "caller_policy_session_acceptances",
+            "aggregate_bootstrap_operations",
+        ] {
+            let exists: bool = snapshot
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .map_err(internal)?;
+            if !exists {
+                return Err(blocked());
+            }
+            let retained: bool = snapshot.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE workspace_id=?1 AND idempotency_key=?2)"),
+                params![workspace_id, key], |row| row.get(0),
+            ).map_err(internal)?;
+            if retained {
+                return Err(blocked());
+            }
+        }
+        store.connection.check_identity()?;
+        Ok(())
     }
 
     pub fn published_result_artifact(
@@ -3435,6 +3552,7 @@ impl OrchestrationStore {
     ) -> Result<(), MachineError> {
         let now = self.now_ms()?;
         let transaction = self.transaction()?;
+        require_primary_not_abandoned(&transaction, context.session_id)?;
         transaction
             .execute(
                 "INSERT INTO brokered_spawn_operations(
@@ -3587,6 +3705,7 @@ impl OrchestrationStore {
             let accepted_request_json = canonical_string(&accepted_task)?;
             let accepted_request_sha256 = sha256_hex(accepted_request_json.as_bytes());
             let transaction = self.transaction()?;
+            require_primary_not_abandoned(&transaction, context.session_id)?;
             transaction
                 .execute(
                     "INSERT INTO brokered_tasks(
@@ -5091,6 +5210,136 @@ impl OrchestrationStore {
             .transpose()
     }
 
+    pub(crate) fn require_primary_not_force_abandoned(
+        &self,
+        run_id: Uuid,
+    ) -> Result<(), MachineError> {
+        require_primary_not_abandoned(&self.connection, run_id)
+    }
+
+    /// Fence a root-only session under the same transaction as dependency admission.
+    /// The caller holds the root lifecycle lease and original Start allocation.
+    pub(crate) fn abandon_primary_for_delete<I: crate::run::CallerInstructionGeneration>(
+        &mut self,
+        manifest: &crate::run::RunManifest,
+        start: &crate::run::CallerStartReservation<I>,
+        operator: &crate::controller::OperatorPublic,
+    ) -> Result<(), MachineError> {
+        let run_id = manifest.run_id;
+        let target = run_id.to_string();
+        let binding = manifest
+            .aggregate_binding
+            .as_ref()
+            .filter(|binding| {
+                binding.aggregate_kind == crate::domain::AggregateKind::OrchestratedSession
+                    && binding.member_kind == AggregateMemberKind::Primary
+                    && binding.aggregate_id == run_id
+            })
+            .ok_or_else(|| integrity("force deletion requires the exact Primary binding"))?;
+        let captures = start
+            .accepted_intent
+            .orchestration
+            .as_ref()
+            .filter(|captures| captures.workspace_id() == manifest.workspace_id)
+            .ok_or_else(|| {
+                integrity("force deletion requires the original session Start policy")
+            })?;
+        let policy = SessionPolicySnapshot::Caller(captures.clone());
+        let policy_sha256 = policy.digest()?;
+        if start.run_id != run_id
+            || binding.policy_sha256.as_deref() != Some(policy_sha256.as_str())
+        {
+            return Err(integrity("force deletion crossed its accepted Primary"));
+        }
+        let root = self.state_root.clone();
+        let now = self.now_ms()?;
+        let tx = self.transaction()?;
+        let accepted = find_accepted_policy_session_on(
+            &tx,
+            &root,
+            &manifest.workspace_id,
+            run_id,
+            &start.idempotency_key,
+            &start.normalized_identity_sha256,
+        )?
+        .filter(|accepted| &accepted.captures == captures)
+        .ok_or_else(|| integrity("force deletion differs from the retained session acceptance"))?;
+        let (status, bootstrap): (String, String) = tx
+            .query_row(
+                "SELECT s.status,b.state FROM orchestrated_sessions s
+             JOIN aggregate_bootstrap_operations b USING(session_id)
+             WHERE s.session_id=?1 AND s.root_run_id=?1 AND s.workspace_id=?2
+               AND s.bootstrap_operation_id=?3 AND b.operation_id=?3 AND b.workspace_id=?2
+               AND b.idempotency_key=?4 AND b.request_sha256=?5 AND s.policy_sha256=?6
+               AND s.policy_json=?7",
+                params![
+                    target,
+                    manifest.workspace_id,
+                    binding.operation_id.to_string(),
+                    accepted.idempotency_key,
+                    accepted.request_sha256,
+                    policy_sha256,
+                    canonical_string(&policy)?,
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(|| integrity("force deletion session or bootstrap identity differs"))?;
+        let dependency: Option<(String, String)> = tx.query_row(
+            "SELECT 'member',run_id FROM brokered_members WHERE session_id=?1
+             UNION ALL SELECT 'spawn',operation_id FROM brokered_spawn_operations WHERE session_id=?1
+             UNION ALL SELECT 'task',task_id FROM brokered_tasks WHERE session_id=?1
+             UNION ALL SELECT 'close',operation_id FROM orchestrated_session_closes WHERE session_id=?1
+             LIMIT 1",
+            [&target],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional().map_err(internal)?;
+        if let Some((kind, id)) = dependency {
+            return Err(MachineError::new(
+                "RECOVERY_REQUIRED",
+                "force deletion requires a session with no dependent operations",
+                false,
+                serde_json::json!({"run_id":run_id,"reason":"force_delete_session_has_dependency",
+                    "dependency_kind":kind,"dependency_id":id}),
+            ));
+        }
+        if primary_operator_abandoned(&tx, run_id)? {
+            return if status == "aborted" {
+                Ok(())
+            } else {
+                Err(integrity("force deletion session is no longer abandoned"))
+            };
+        }
+        if !matches!(
+            (status.as_str(), bootstrap.as_str()),
+            ("active", "ready") | ("recovering", "recovery_required")
+        ) {
+            return Err(session_conflict(
+                run_id,
+                "session and bootstrap are not eligible for force deletion",
+            ));
+        }
+        tx.execute(
+            "UPDATE orchestrated_sessions SET status='aborted',updated_at_ms=?2 WHERE session_id=?1",
+            params![target, now],
+        ).map_err(internal)?;
+        append_event(
+            &tx,
+            run_id,
+            OPERATOR_ABANDONMENT,
+            &sha256_hex(
+                format!(
+                    "{run_id}\0{}\0{}",
+                    operator.operator_id, operator.operator_generation,
+                )
+                .as_bytes(),
+            ),
+            now,
+        )?;
+        crate::storage_observation::commit(tx).map_err(internal)
+    }
+
     pub fn begin_session_close(
         &mut self,
         session_id: Uuid,
@@ -5102,6 +5351,7 @@ impl OrchestrationStore {
         }
         let now = self.now_ms()?;
         let transaction = self.transaction()?;
+        require_primary_not_abandoned(&transaction, session_id)?;
         let existing = transaction
             .query_row(
                 "SELECT operation_id,interrupt,initiating_controller_generation,progress,safe_error_code
@@ -5486,6 +5736,7 @@ impl OrchestrationStore {
         abort: bool,
         adapter: &mut A,
     ) -> Result<OrchestratedSessionSnapshot, MachineError> {
+        self.require_primary_not_force_abandoned(session_id)?;
         let session = self.session(session_id)?;
         if matches!(session.status.as_str(), "completed" | "aborted") {
             return Ok(session);
@@ -5550,6 +5801,7 @@ impl OrchestrationStore {
         let terminal = if abort { "aborted" } else { "completed" };
         let now = self.now_ms()?;
         let transaction = self.transaction()?;
+        require_primary_not_abandoned(&transaction, session_id)?;
         transaction
             .execute(
                 "UPDATE orchestrated_sessions SET status=?2,updated_at_ms=?3

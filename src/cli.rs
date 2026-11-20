@@ -1368,7 +1368,20 @@ fn leaf_spec(command: &str) -> LeafSpec {
             0,
             0,
         ),
-        "run.delete" => spec(C, &["--confirm"], &["--confirm"], 1, 1),
+        "run.delete" => spec(
+            &[
+                "--workspace",
+                "--controller-file",
+                "--controller-fd",
+                "--confirm-workspace-id",
+                "--operator-file",
+                "--operator-fd",
+            ],
+            &["--confirm", "--force"],
+            &["--confirm"],
+            1,
+            1,
+        ),
         "run.export" => spec(
             &[
                 "--workspace",

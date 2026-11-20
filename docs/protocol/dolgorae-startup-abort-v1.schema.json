@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolgorae.local/schema/startup-abort/v1",
+  "title": "Private pre-dispatch startup timeout witness",
+  "description": "The owner verifies the original Start, ledger, runtime scope and process identities before using this evidence. The scope digest is SHA-256 of its JCS encoding.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "worker", "control_socket_epoch", "scope_sha256", "live_children"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "control_socket_epoch": {"type": "integer", "minimum": 1},
+    "worker": {
+      "allOf": [
+        {"$ref": "https://dolgorae.local/schema/worker-runtime/v2#/$defs/worker"},
+        {"properties": {"run_generation": {"const": 1}}}
+      ]
+    },
+    "scope_sha256": {"$ref": "#/$defs/digest"},
+    "live_children": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["identity", "ancestry", "executable", "device", "inode", "sha256"],
+        "properties": {
+          "identity": {"$ref": "https://dolgorae.local/schema/worker-runtime/v2#/$defs/entry"},
+          "ancestry": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 32,
+            "items": {"$ref": "https://dolgorae.local/schema/worker-runtime/v2#/$defs/entry"}
+          },
+          "executable": {"type": "string", "pattern": "^/"},
+          "device": {"type": "integer", "minimum": 1},
+          "inode": {"type": "integer", "minimum": 1},
+          "sha256": {"$ref": "#/$defs/digest"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

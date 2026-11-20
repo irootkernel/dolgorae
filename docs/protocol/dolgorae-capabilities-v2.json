@@ -41,6 +41,7 @@
     "ObservationService.ListRunTimelineItems",
     "ObservationService.WatchRunEvents",
     "OperationService.LookupOperation",
+    "OperationService.ReconcileStartOperation",
     "OrchestrationService.GetOrchestratedSession",
     "OrchestrationService.ListOrchestratedSessionResults",
     "ProvisioningService.InstallProvisioning",

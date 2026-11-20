@@ -11,6 +11,15 @@
     }
   ],
   "$defs": {
+    "run_delete_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deleted"],
+      "properties": {
+        "deleted": { "const": true },
+        "runtime_cleanup_pending": { "const": true }
+      }
+    },
     "base": {
       "type": "object",
       "required": [
@@ -86,6 +95,9 @@
               "anyOf": [
                 {
                   "$ref": "https://dolgorae.local/schema/machine-output/v1#/$defs/data"
+                },
+                {
+                  "$ref": "#/$defs/run_delete_result"
                 },
                 {
                   "$ref": "https://dolgorae.local/schema/specialist-policy/v2"
@@ -693,16 +705,7 @@
           "then": {
             "properties": {
               "data": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "deleted"
-                ],
-                "properties": {
-                  "deleted": {
-                    "const": true
-                  }
-                }
+                "$ref": "#/$defs/run_delete_result"
               }
             }
           }

@@ -171,6 +171,14 @@ pub(crate) struct StartFailureAuthority {
 }
 
 impl StartFailureAuthority {
+    /// The caller owns the startup lock and has proved the exact generation retired.
+    pub(crate) fn from_retired_startup_abort(run_id: Uuid) -> Self {
+        Self {
+            run_id,
+            _verified_bootstrap_election: (),
+        }
+    }
+
     /// This constructor is intentionally crate-private. The startup/recovery
     /// owner may mint the capability only after its byte-0 lock and absence
     /// probes have succeeded; API consumers cannot assert those facts with
@@ -818,6 +826,26 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> ConformantLedger<C, F
             evidence.hash(),
         )?;
         self.append_terminal_pair(evidence, seal)
+    }
+
+    pub(crate) fn verify_startup_abort_history(&self) -> Result<RunLifecycle, ConformanceError> {
+        let report = self.verify()?;
+        let projection = self.ledger.projection()?;
+        if !matches!(
+            report.lifecycle,
+            RunLifecycle::Starting | RunLifecycle::StartFailed
+        ) || projection.run_generation > 1
+            || projection.thread_id.is_some()
+            || projection.latest_turn_id.is_some()
+        {
+            return Err(ConformanceError::UnauthorizedStartFailure);
+        }
+        for record in self.ledger.durable_records()? {
+            if caller_native_intent(record)? || record.kind() == AuditKind::TurnStarted {
+                return Err(ConformanceError::UnauthorizedStartFailure);
+            }
+        }
+        Ok(report.lifecycle)
     }
 
     pub fn seal_closed(
@@ -1738,25 +1766,7 @@ fn delete_run_confirmed_inner(
     let runs_identity = secure_directory_identity(&runs_root, uid)?;
     let run_identity = secure_directory_identity(&run_root, uid)?;
     let _workspace_lease = crate::ledger_generation::WorkspaceLease::for_run(&run_root)?;
-    let escape_snapshot = capture_terminal_escape(&run_root, run_id);
-    let terminal = match ConformantLedger::open(&run_root, run_id) {
-        Ok(ledger) => {
-            let report = ledger.verify()?;
-            report.terminal_sealed
-                && matches!(
-                    report.lifecycle,
-                    RunLifecycle::Closed | RunLifecycle::StartFailed
-                )
-        }
-        Err(ConformanceError::Ledger(LedgerError::Integrity(_)))
-        | Err(ConformanceError::InvalidHistory(_)) => {
-            terminal_state_escape(&run_root, run_id, escape_snapshot?)?
-        }
-        Err(error) => return Err(error),
-    };
-    if !terminal {
-        return Err(ConformanceError::DeleteNotTerminal);
-    }
+    verify_delete_terminal(&run_root, run_id)?;
     if secure_directory_identity(state_root, uid)? != state_identity
         || secure_directory_identity(&runs_root, uid)? != runs_identity
         || secure_directory_identity(&run_root, uid)? != run_identity
@@ -1769,6 +1779,39 @@ fn delete_run_confirmed_inner(
     fs::remove_dir_all(&run_root)?;
     sync_directory(&runs_root)?;
     Ok(())
+}
+
+pub(crate) fn verify_delete_terminal(
+    run_root: &Path,
+    run_id: Uuid,
+) -> Result<RunLifecycle, ConformanceError> {
+    let snapshot = capture_terminal_escape(run_root, run_id)?;
+    let lifecycle = snapshot.state.lifecycle;
+    let verified = (|| {
+        let ledger = crate::ledger::ObservedLedger::open_complete(
+            run_root,
+            run_id,
+            snapshot.state.ledger_head.sequence,
+        )?;
+        let state = ConformanceState::from_verified(run_id, ledger.records(), || Ok(()))?;
+        state.require_complete_terminal_pair()?;
+        let report = state.report;
+        Ok(report.terminal_sealed
+            && report.lifecycle == snapshot.state.lifecycle
+            && report.head_hash == snapshot.state.ledger_head.hash)
+    })();
+    let terminal = match verified {
+        Ok(terminal) => terminal,
+        Err(ConformanceError::Ledger(LedgerError::Integrity(_)))
+        | Err(ConformanceError::InvalidHistory(_)) => {
+            terminal_state_escape(run_root, run_id, snapshot)?
+        }
+        Err(error) => return Err(error),
+    };
+    if !terminal {
+        return Err(ConformanceError::DeleteNotTerminal);
+    }
+    Ok(lifecycle)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2227,6 +2270,66 @@ mod tests {
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 
     const TIMESTAMP: &str = "2026-08-21T12:34:56.123456Z";
+
+    #[test]
+    fn startup_abort_history_rejects_durable_thread_dispatch_intent() {
+        let run_id = Uuid::now_v7();
+        let root = std::env::temp_dir().join(format!("dolgorae-abort-history-{run_id}"));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join("recovery"))
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("audit.jsonl"))
+            .unwrap();
+        let mut ledger = ConformantLedger::open(&root, run_id).unwrap();
+        ledger
+            .bootstrap(&BootstrapRequest {
+                timestamp: TIMESTAMP.into(),
+                workspace_id: "a".repeat(64),
+                intent: IdempotencyIntent {
+                    schema_version: 1,
+                    operation: IdempotencyOperation::StartRun,
+                    idempotency_key: "caller".into(),
+                    normalized_identity_sha256: "b".repeat(64),
+                    run_id,
+                },
+                record_kind: BootstrapRecordKind::RunCreated,
+                initial_access: "unknown".into(),
+                default_effort: Some("low".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            ledger.verify_startup_abort_history().unwrap(),
+            RunLifecycle::Starting
+        );
+        let intent = ledger
+            .next_record(
+                TIMESTAMP,
+                AuditKind::TurnIntent,
+                crate::jcs::parse(
+                    &serde_json::to_string(&CallerNativeIntent {
+                        schema: "dolgorae.caller-native-intent/v1".into(),
+                        operation_id: run_id,
+                        method: "thread/start".into(),
+                    })
+                    .unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        ledger.append(intent, AppendDurability::Required).unwrap();
+        assert!(matches!(
+            ledger.verify_startup_abort_history(),
+            Err(ConformanceError::UnauthorizedStartFailure)
+        ));
+        drop(ledger);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn terminal_delete_excludes_maintenance_through_removal_for_valid_and_corrupt_history() {

@@ -857,6 +857,56 @@ pub fn retire_process(
     retire_matching(&root()?, owner, RetirementIdentity::Bsd(process))
 }
 
+/// A caller holding Run startup serialization has bound this exact Run and
+/// owner root to an earlier boot. The registration may predate PID activation.
+/// Do not inspect or signal current processes using identities from that boot.
+pub(crate) fn retire_prior_boot_run(
+    owner_root: &Path,
+    run_id: Uuid,
+    boot_uuid: Uuid,
+) -> Result<(), MachineError> {
+    let current = DarwinSystem
+        .boot_session_uuid()
+        .ok()
+        .and_then(|value| Uuid::parse_str(&value).ok());
+    if boot_uuid.is_nil() || current.is_none_or(|boot| boot.is_nil() || boot == boot_uuid) {
+        return Err(unsafe_state("prior boot cannot be verified"));
+    }
+    let owner_root =
+        fs::canonicalize(owner_root).map_err(|error| unsafe_state(error.to_string()))?;
+    let owner =
+        fs::symlink_metadata(&owner_root).map_err(|error| unsafe_state(error.to_string()))?;
+    let directory = root()?;
+    let identity = inventory_directory_identity(&directory)?;
+    for entry in fs::read_dir(&directory).map_err(|error| unsafe_state(error.to_string()))? {
+        let path = entry
+            .map_err(|error| unsafe_state(error.to_string()))?
+            .path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(record) = read_record_if_present(&path)? else {
+            continue;
+        };
+        if record.run_id != Some(run_id)
+            || !matches!(record.kind.as_str(), "worker" | "dedicated_server")
+            || record.owner_root != owner_root
+            || record.owner_device != owner.dev()
+            || record.owner_inode != owner.ino()
+            || Uuid::parse_str(&record.boot_uuid).ok() != Some(boot_uuid)
+        {
+            continue;
+        }
+        verify_inventory_directory(&directory, identity)?;
+        remove_registered_socket(&record)?;
+        fs::remove_file(path).map_err(|error| unsafe_state(error.to_string()))?;
+    }
+    verify_inventory_directory(&directory, identity)?;
+    File::open(&directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| unsafe_state(error.to_string()))
+}
+
 pub fn retire_profile_process(
     owner: &Retirement<'_>,
     pid: u32,

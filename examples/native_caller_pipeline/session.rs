@@ -198,7 +198,7 @@ async fn channel(socket: &Path) -> tonic::transport::Channel {
         .await
         .unwrap()
 }
-async fn get(
+pub(super) async fn get(
     runs: &mut RunServiceClient<tonic::transport::Channel>,
     run: &Option<pb::RunRef>,
 ) -> pb::RunProjection {

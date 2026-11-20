@@ -1055,6 +1055,7 @@ fn run_verb(command: &RunCommand) -> Option<(SemanticRunVerb, &[OsString])> {
             leaf.args.as_slice(),
         ),
         RunCommand::Close(leaf) => (SemanticRunVerb::Close, leaf.args.as_slice()),
+        RunCommand::Delete(leaf) => (SemanticRunVerb::Delete, leaf.args.as_slice()),
         _ => return None,
     })
 }

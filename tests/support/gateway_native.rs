@@ -292,9 +292,15 @@ impl Drop for Fixture {
                         "--workspace",
                         self.workspace.to_str().unwrap(),
                     ]);
-                    let already_closed = status.status.success()
-                        && serde_json::from_slice::<Value>(&status.stdout)
-                            .is_ok_and(|value| value["ok"] == true && value["data"]["state"] == "closed")
+                    let terminal =
+                        serde_json::from_slice::<Value>(&status.stdout).is_ok_and(|value| {
+                            (status.status.success()
+                                && value["ok"] == true
+                                && value["data"]["state"] == "closed")
+                                || (value["error"]["code"] == "RUN_NOT_FOUND"
+                                    && run.path().join("run-deletion.json").is_file())
+                        });
+                    let already_closed = terminal
                         && dolgorae::worker::runtime_record_path(
                             &dolgorae::worker::runtime_root(&self.state_root),
                             Uuid::parse_str(id).unwrap(),

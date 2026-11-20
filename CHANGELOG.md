@@ -81,6 +81,12 @@ development commits.
 
 ### Fixed
 
+- Accept equivalent integral floating-point Profile metadata during startup and recovery while preserving numeric precision-loss checks and canonical idempotency identities.
+- Reconcile unknown pre-allocation Starts through an authenticated public operation, preserving existing acceptance or durably closing the original key without redispatch.
+- Recognize v4 Run manifests during Profile membership validation, including non-interrupting Profile Stop.
+- Resample writable Run startup when a child exits during ancestry verification. Preserve refusals for surviving or misidentified processes.
+- Allow Operators to force-delete abandoned Runs and revoke Writer authority when startup ownership is incomplete and the recorded control processes are absent.
+
 - Retire process registrations only for the recorded owner and generation,
   preserving unrelated registrations and sockets after PID reuse during Run
   recovery and Profile Server shutdown.

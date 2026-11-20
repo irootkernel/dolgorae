@@ -17109,6 +17109,7 @@ type LookupOperationResponse struct {
 	//	*LookupOperationResponse_NotAccepted
 	//	*LookupOperationResponse_Unresolved
 	//	*LookupOperationResponse_Absent
+	//	*LookupOperationResponse_ClosedWithoutAcceptance
 	Result        isLookupOperationResponse_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -17194,6 +17195,15 @@ func (x *LookupOperationResponse) GetAbsent() *AbsentOperation {
 	return nil
 }
 
+func (x *LookupOperationResponse) GetClosedWithoutAcceptance() *ClosedStartOperation {
+	if x != nil {
+		if x, ok := x.Result.(*LookupOperationResponse_ClosedWithoutAcceptance); ok {
+			return x.ClosedWithoutAcceptance
+		}
+	}
+	return nil
+}
+
 type isLookupOperationResponse_Result interface {
 	isLookupOperationResponse_Result()
 }
@@ -17214,6 +17224,10 @@ type LookupOperationResponse_Absent struct {
 	Absent *AbsentOperation `protobuf:"bytes,5,opt,name=absent,proto3,oneof"`
 }
 
+type LookupOperationResponse_ClosedWithoutAcceptance struct {
+	ClosedWithoutAcceptance *ClosedStartOperation `protobuf:"bytes,6,opt,name=closed_without_acceptance,json=closedWithoutAcceptance,proto3,oneof"`
+}
+
 func (*LookupOperationResponse_Accepted) isLookupOperationResponse_Result() {}
 
 func (*LookupOperationResponse_NotAccepted) isLookupOperationResponse_Result() {}
@@ -17221,6 +17235,8 @@ func (*LookupOperationResponse_NotAccepted) isLookupOperationResponse_Result() {
 func (*LookupOperationResponse_Unresolved) isLookupOperationResponse_Result() {}
 
 func (*LookupOperationResponse_Absent) isLookupOperationResponse_Result() {}
+
+func (*LookupOperationResponse_ClosedWithoutAcceptance) isLookupOperationResponse_Result() {}
 
 // This reference comes from authenticated adapter metadata/protected state.
 // It MUST NOT appear as an argument in a model-visible tool schema.
@@ -24609,6 +24625,135 @@ func (x *SuccessorBounds) GetLedgerGenerationRecords() uint64 {
 	return 0
 }
 
+// Terminal key closure; no original input digest or historical refusal is invented.
+type ClosedStartOperation struct {
+	state                        protoimpl.MessageState `protogen:"open.v1"`
+	Operation                    *OperationRef          `protobuf:"bytes,1,opt,name=operation,proto3" json:"operation,omitempty"`
+	ClosureReceiptDigest         string                 `protobuf:"bytes,2,opt,name=closure_receipt_digest,json=closureReceiptDigest,proto3" json:"closure_receipt_digest,omitempty"`
+	DurableWatermark             uint64                 `protobuf:"varint,3,opt,name=durable_watermark,json=durableWatermark,proto3" json:"durable_watermark,omitempty"`
+	OriginalKeyPermanentlyClosed bool                   `protobuf:"varint,4,opt,name=original_key_permanently_closed,json=originalKeyPermanentlyClosed,proto3" json:"original_key_permanently_closed,omitempty"`
+	unknownFields                protoimpl.UnknownFields
+	sizeCache                    protoimpl.SizeCache
+}
+
+func (x *ClosedStartOperation) Reset() {
+	*x = ClosedStartOperation{}
+	mi := &file_dolgorae_public_v2_dolgorae_proto_msgTypes[260]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClosedStartOperation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClosedStartOperation) ProtoMessage() {}
+
+func (x *ClosedStartOperation) ProtoReflect() protoreflect.Message {
+	mi := &file_dolgorae_public_v2_dolgorae_proto_msgTypes[260]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClosedStartOperation.ProtoReflect.Descriptor instead.
+func (*ClosedStartOperation) Descriptor() ([]byte, []int) {
+	return file_dolgorae_public_v2_dolgorae_proto_rawDescGZIP(), []int{260}
+}
+
+func (x *ClosedStartOperation) GetOperation() *OperationRef {
+	if x != nil {
+		return x.Operation
+	}
+	return nil
+}
+
+func (x *ClosedStartOperation) GetClosureReceiptDigest() string {
+	if x != nil {
+		return x.ClosureReceiptDigest
+	}
+	return ""
+}
+
+func (x *ClosedStartOperation) GetDurableWatermark() uint64 {
+	if x != nil {
+		return x.DurableWatermark
+	}
+	return 0
+}
+
+func (x *ClosedStartOperation) GetOriginalKeyPermanentlyClosed() bool {
+	if x != nil {
+		return x.OriginalKeyPermanentlyClosed
+	}
+	return false
+}
+
+type ReconcileStartOperationRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	Controller    *ControllerCarrierRef  `protobuf:"bytes,2,opt,name=controller,proto3" json:"controller,omitempty"`
+	Operation     *OperationRef          `protobuf:"bytes,3,opt,name=operation,proto3" json:"operation,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReconcileStartOperationRequest) Reset() {
+	*x = ReconcileStartOperationRequest{}
+	mi := &file_dolgorae_public_v2_dolgorae_proto_msgTypes[261]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReconcileStartOperationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReconcileStartOperationRequest) ProtoMessage() {}
+
+func (x *ReconcileStartOperationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_dolgorae_public_v2_dolgorae_proto_msgTypes[261]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReconcileStartOperationRequest.ProtoReflect.Descriptor instead.
+func (*ReconcileStartOperationRequest) Descriptor() ([]byte, []int) {
+	return file_dolgorae_public_v2_dolgorae_proto_rawDescGZIP(), []int{261}
+}
+
+func (x *ReconcileStartOperationRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *ReconcileStartOperationRequest) GetController() *ControllerCarrierRef {
+	if x != nil {
+		return x.Controller
+	}
+	return nil
+}
+
+func (x *ReconcileStartOperationRequest) GetOperation() *OperationRef {
+	if x != nil {
+		return x.Operation
+	}
+	return nil
+}
+
 var File_dolgorae_public_v2_dolgorae_proto protoreflect.FileDescriptor
 
 const file_dolgorae_public_v2_dolgorae_proto_rawDesc = "" +
@@ -25876,7 +26021,7 @@ const file_dolgorae_public_v2_dolgorae_proto_rawDesc = "" +
 	"\toperation\x18\x01 \x01(\v2 .dolgorae.public.v2.OperationRefR\toperation\x128\n" +
 	"\x18retained_namespace_fence\x18\x02 \x01(\tR\x16retainedNamespaceFence\x12+\n" +
 	"\x11durable_watermark\x18\x03 \x01(\x04R\x10durableWatermark\x12B\n" +
-	"\x1dcomplete_authoritative_lookup\x18\x04 \x01(\bR\x1bcompleteAuthoritativeLookup\"\x80\x03\n" +
+	"\x1dcomplete_authoritative_lookup\x18\x04 \x01(\bR\x1bcompleteAuthoritativeLookup\"\xe8\x03\n" +
 	"\x17LookupOperationResponse\x12=\n" +
 	"\acontext\x18\x01 \x01(\v2#.dolgorae.public.v2.ResponseContextR\acontext\x12C\n" +
 	"\baccepted\x18\x02 \x01(\v2%.dolgorae.public.v2.AcceptedOperationH\x00R\baccepted\x12M\n" +
@@ -25884,7 +26029,8 @@ const file_dolgorae_public_v2_dolgorae_proto_rawDesc = "" +
 	"\n" +
 	"unresolved\x18\x04 \x01(\v2'.dolgorae.public.v2.UnresolvedOperationH\x00R\n" +
 	"unresolved\x12=\n" +
-	"\x06absent\x18\x05 \x01(\v2#.dolgorae.public.v2.AbsentOperationH\x00R\x06absentB\b\n" +
+	"\x06absent\x18\x05 \x01(\v2#.dolgorae.public.v2.AbsentOperationH\x00R\x06absent\x12f\n" +
+	"\x19closed_without_acceptance\x18\x06 \x01(\v2(.dolgorae.public.v2.ClosedStartOperationH\x00R\x17closedWithoutAcceptanceB\b\n" +
 	"\x06result\"\x94\x01\n" +
 	"\x14TrustedInvocationRef\x122\n" +
 	"\x15logical_invocation_id\x18\x01 \x01(\tR\x13logicalInvocationId\x12\x1d\n" +
@@ -26555,7 +26701,18 @@ const file_dolgorae_public_v2_dolgorae_proto_rawDesc = "" +
 	"\x19dedicated_generations_max\x18\x13 \x01(\rR\x17dedicatedGenerationsMax\x12*\n" +
 	"\x11action_rounds_max\x18\x14 \x01(\rR\x0factionRoundsMax\x126\n" +
 	"\x17ledger_generation_bytes\x18\x15 \x01(\x04R\x15ledgerGenerationBytes\x12:\n" +
-	"\x19ledger_generation_records\x18\x16 \x01(\x04R\x17ledgerGenerationRecords*{\n" +
+	"\x19ledger_generation_records\x18\x16 \x01(\x04R\x17ledgerGenerationRecords\"\x80\x02\n" +
+	"\x14ClosedStartOperation\x12>\n" +
+	"\toperation\x18\x01 \x01(\v2 .dolgorae.public.v2.OperationRefR\toperation\x124\n" +
+	"\x16closure_receipt_digest\x18\x02 \x01(\tR\x14closureReceiptDigest\x12+\n" +
+	"\x11durable_watermark\x18\x03 \x01(\x04R\x10durableWatermark\x12E\n" +
+	"\x1foriginal_key_permanently_closed\x18\x04 \x01(\bR\x1coriginalKeyPermanentlyClosed\"\xe8\x01\n" +
+	"\x1eReconcileStartOperationRequest\x12<\n" +
+	"\acontext\x18\x01 \x01(\v2\".dolgorae.public.v2.RequestContextR\acontext\x12H\n" +
+	"\n" +
+	"controller\x18\x02 \x01(\v2(.dolgorae.public.v2.ControllerCarrierRefR\n" +
+	"controller\x12>\n" +
+	"\toperation\x18\x03 \x01(\v2 .dolgorae.public.v2.OperationRefR\toperation*{\n" +
 	"\x11ProjectionProfile\x12\"\n" +
 	"\x1ePROJECTION_PROFILE_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aPROJECTION_PROFILE_MINIMAL\x10\x01\x12\"\n" +
@@ -27112,9 +27269,10 @@ const file_dolgorae_public_v2_dolgorae_proto_rawDesc = "" +
 	"\x11ReadArtifactChunk\x12,.dolgorae.public.v2.ReadArtifactChunkRequest\x1a-.dolgorae.public.v2.ReadArtifactChunkResponse2\xb1\x02\n" +
 	"\x14OrchestrationService\x12\x7f\n" +
 	"\x16GetOrchestratedSession\x121.dolgorae.public.v2.GetOrchestratedSessionRequest\x1a2.dolgorae.public.v2.GetOrchestratedSessionResponse\x12\x97\x01\n" +
-	"\x1eListOrchestratedSessionResults\x129.dolgorae.public.v2.ListOrchestratedSessionResultsRequest\x1a:.dolgorae.public.v2.ListOrchestratedSessionResultsResponse2~\n" +
+	"\x1eListOrchestratedSessionResults\x129.dolgorae.public.v2.ListOrchestratedSessionResultsRequest\x1a:.dolgorae.public.v2.ListOrchestratedSessionResultsResponse2\xfa\x01\n" +
 	"\x10OperationService\x12j\n" +
-	"\x0fLookupOperation\x12*.dolgorae.public.v2.LookupOperationRequest\x1a+.dolgorae.public.v2.LookupOperationResponse2\x88\x02\n" +
+	"\x0fLookupOperation\x12*.dolgorae.public.v2.LookupOperationRequest\x1a+.dolgorae.public.v2.LookupOperationResponse\x12z\n" +
+	"\x17ReconcileStartOperation\x122.dolgorae.public.v2.ReconcileStartOperationRequest\x1a+.dolgorae.public.v2.LookupOperationResponse2\x88\x02\n" +
 	"\x13ProvisioningService\x12y\n" +
 	"\x14ValidateProvisioning\x12/.dolgorae.public.v2.ValidateProvisioningRequest\x1a0.dolgorae.public.v2.ValidateProvisioningResponse\x12v\n" +
 	"\x13InstallProvisioning\x12..dolgorae.public.v2.InstallProvisioningRequest\x1a/.dolgorae.public.v2.InstallProvisioningResponse2\x8a\v\n" +
@@ -27162,7 +27320,7 @@ func file_dolgorae_public_v2_dolgorae_proto_rawDescGZIP() []byte {
 }
 
 var file_dolgorae_public_v2_dolgorae_proto_enumTypes = make([]protoimpl.EnumInfo, 70)
-var file_dolgorae_public_v2_dolgorae_proto_msgTypes = make([]protoimpl.MessageInfo, 260)
+var file_dolgorae_public_v2_dolgorae_proto_msgTypes = make([]protoimpl.MessageInfo, 262)
 var file_dolgorae_public_v2_dolgorae_proto_goTypes = []any{
 	(ProjectionProfile)(0),                         // 0: dolgorae.public.v2.ProjectionProfile
 	(PublicTransport)(0),                           // 1: dolgorae.public.v2.PublicTransport
@@ -27494,7 +27652,9 @@ var file_dolgorae_public_v2_dolgorae_proto_goTypes = []any{
 	(*InteractionAnswer)(nil),                      // 327: dolgorae.public.v2.InteractionAnswer
 	(*WriterBusyDiagnostic)(nil),                   // 328: dolgorae.public.v2.WriterBusyDiagnostic
 	(*SuccessorBounds)(nil),                        // 329: dolgorae.public.v2.SuccessorBounds
-	(*timestamppb.Timestamp)(nil),                  // 330: google.protobuf.Timestamp
+	(*ClosedStartOperation)(nil),                   // 330: dolgorae.public.v2.ClosedStartOperation
+	(*ReconcileStartOperationRequest)(nil),         // 331: dolgorae.public.v2.ReconcileStartOperationRequest
+	(*timestamppb.Timestamp)(nil),                  // 332: google.protobuf.Timestamp
 }
 var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	72,  // 0: dolgorae.public.v2.RunRef.workspace:type_name -> dolgorae.public.v2.WorkspaceRef
@@ -27507,7 +27667,7 @@ var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	24,  // 7: dolgorae.public.v2.ServerLaneProjection.state:type_name -> dolgorae.public.v2.ServerLaneState
 	25,  // 8: dolgorae.public.v2.BackgroundExecutionProjection.state:type_name -> dolgorae.public.v2.BackgroundExecutionState
 	26,  // 9: dolgorae.public.v2.BackgroundExecutionProjection.mechanism:type_name -> dolgorae.public.v2.BackgroundExecutionMechanism
-	330, // 10: dolgorae.public.v2.BackgroundExecutionProjection.quiescent_since:type_name -> google.protobuf.Timestamp
+	332, // 10: dolgorae.public.v2.BackgroundExecutionProjection.quiescent_since:type_name -> google.protobuf.Timestamp
 	27,  // 11: dolgorae.public.v2.RecoveryProjection.state:type_name -> dolgorae.public.v2.RecoveryState
 	28,  // 12: dolgorae.public.v2.RecoveryProjection.required_action:type_name -> dolgorae.public.v2.RecoveryAction
 	10,  // 13: dolgorae.public.v2.RunConfigurationProjection.purpose:type_name -> dolgorae.public.v2.PurposeKind
@@ -27516,7 +27676,7 @@ var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	9,   // 16: dolgorae.public.v2.LineageProjection.creation_reason:type_name -> dolgorae.public.v2.WriteContinuationReason
 	11,  // 17: dolgorae.public.v2.LineageProjection.source_controller_kind:type_name -> dolgorae.public.v2.ControllerKind
 	11,  // 18: dolgorae.public.v2.LineageProjection.destination_controller_kind:type_name -> dolgorae.public.v2.ControllerKind
-	330, // 19: dolgorae.public.v2.LineageProjection.created_at:type_name -> google.protobuf.Timestamp
+	332, // 19: dolgorae.public.v2.LineageProjection.created_at:type_name -> google.protobuf.Timestamp
 	71,  // 20: dolgorae.public.v2.WriterState.context:type_name -> dolgorae.public.v2.ResponseContext
 	22,  // 21: dolgorae.public.v2.WriterState.authority_state:type_name -> dolgorae.public.v2.WriterAuthorityState
 	20,  // 22: dolgorae.public.v2.WriterState.effective_access:type_name -> dolgorae.public.v2.EffectiveAccess
@@ -27619,7 +27779,7 @@ var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	111, // 119: dolgorae.public.v2.GetProfileResponse.profile:type_name -> dolgorae.public.v2.ProfileProjection
 	70,  // 120: dolgorae.public.v2.ListProfileDiagnosticsRequest.context:type_name -> dolgorae.public.v2.RequestContext
 	0,   // 121: dolgorae.public.v2.ListProfileDiagnosticsRequest.projection:type_name -> dolgorae.public.v2.ProjectionProfile
-	330, // 122: dolgorae.public.v2.ProfileDiagnostic.occurred_at:type_name -> google.protobuf.Timestamp
+	332, // 122: dolgorae.public.v2.ProfileDiagnostic.occurred_at:type_name -> google.protobuf.Timestamp
 	71,  // 123: dolgorae.public.v2.ListProfileDiagnosticsResponse.context:type_name -> dolgorae.public.v2.ResponseContext
 	116, // 124: dolgorae.public.v2.ListProfileDiagnosticsResponse.items:type_name -> dolgorae.public.v2.ProfileDiagnostic
 	70,  // 125: dolgorae.public.v2.StartRunRequest.context:type_name -> dolgorae.public.v2.RequestContext
@@ -27722,7 +27882,7 @@ var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	22,  // 222: dolgorae.public.v2.WriterStateChangedEvent.previous:type_name -> dolgorae.public.v2.WriterAuthorityState
 	22,  // 223: dolgorae.public.v2.WriterStateChangedEvent.current:type_name -> dolgorae.public.v2.WriterAuthorityState
 	147, // 224: dolgorae.public.v2.WorkspaceChanges.paths:type_name -> dolgorae.public.v2.PathProjection
-	330, // 225: dolgorae.public.v2.DurableRunEvent.occurred_at:type_name -> google.protobuf.Timestamp
+	332, // 225: dolgorae.public.v2.DurableRunEvent.occurred_at:type_name -> google.protobuf.Timestamp
 	0,   // 226: dolgorae.public.v2.DurableRunEvent.projection:type_name -> dolgorae.public.v2.ProjectionProfile
 	86,  // 227: dolgorae.public.v2.DurableRunEvent.stamp:type_name -> dolgorae.public.v2.ProjectionStamp
 	144, // 228: dolgorae.public.v2.DurableRunEvent.run_state_changed:type_name -> dolgorae.public.v2.RunStateChanged
@@ -27741,14 +27901,14 @@ var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	167, // 241: dolgorae.public.v2.DurableRunEvent.generation_changed:type_name -> dolgorae.public.v2.GenerationChanged
 	168, // 242: dolgorae.public.v2.DurableRunEvent.reasoning_suppressed:type_name -> dolgorae.public.v2.ReasoningSuppressed
 	4,   // 243: dolgorae.public.v2.RunEventHeartbeat.lifecycle:type_name -> dolgorae.public.v2.RunLifecycle
-	330, // 244: dolgorae.public.v2.RunEventHeartbeat.emitted_at:type_name -> google.protobuf.Timestamp
+	332, // 244: dolgorae.public.v2.RunEventHeartbeat.emitted_at:type_name -> google.protobuf.Timestamp
 	42,  // 245: dolgorae.public.v2.RunEventStreamEnd.reason:type_name -> dolgorae.public.v2.StreamEndReason
 	169, // 246: dolgorae.public.v2.RunEventEnvelope.durable_event:type_name -> dolgorae.public.v2.DurableRunEvent
 	170, // 247: dolgorae.public.v2.RunEventEnvelope.heartbeat:type_name -> dolgorae.public.v2.RunEventHeartbeat
 	171, // 248: dolgorae.public.v2.RunEventEnvelope.stream_end:type_name -> dolgorae.public.v2.RunEventStreamEnd
 	8,   // 249: dolgorae.public.v2.ImageInputMetadata.detail:type_name -> dolgorae.public.v2.ImageDetail
 	43,  // 250: dolgorae.public.v2.TimelineItem.type:type_name -> dolgorae.public.v2.TimelineItemType
-	330, // 251: dolgorae.public.v2.TimelineItem.occurred_at:type_name -> google.protobuf.Timestamp
+	332, // 251: dolgorae.public.v2.TimelineItem.occurred_at:type_name -> google.protobuf.Timestamp
 	195, // 252: dolgorae.public.v2.TimelineItem.artifact:type_name -> dolgorae.public.v2.ArtifactRef
 	173, // 253: dolgorae.public.v2.TimelineItem.images:type_name -> dolgorae.public.v2.ImageInputMetadata
 	44,  // 254: dolgorae.public.v2.TimelineItem.status:type_name -> dolgorae.public.v2.TimelineItemStatus
@@ -27764,9 +27924,9 @@ var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	36,  // 264: dolgorae.public.v2.InteractionSummary.kind:type_name -> dolgorae.public.v2.InteractionKind
 	37,  // 265: dolgorae.public.v2.InteractionSummary.status:type_name -> dolgorae.public.v2.InteractionStatus
 	11,  // 266: dolgorae.public.v2.InteractionSummary.controller_kind:type_name -> dolgorae.public.v2.ControllerKind
-	330, // 267: dolgorae.public.v2.InteractionSummary.created_at:type_name -> google.protobuf.Timestamp
-	330, // 268: dolgorae.public.v2.InteractionSummary.expires_at:type_name -> google.protobuf.Timestamp
-	330, // 269: dolgorae.public.v2.InteractionSummary.resolved_at:type_name -> google.protobuf.Timestamp
+	332, // 267: dolgorae.public.v2.InteractionSummary.created_at:type_name -> google.protobuf.Timestamp
+	332, // 268: dolgorae.public.v2.InteractionSummary.expires_at:type_name -> google.protobuf.Timestamp
+	332, // 269: dolgorae.public.v2.InteractionSummary.resolved_at:type_name -> google.protobuf.Timestamp
 	177, // 270: dolgorae.public.v2.ControllerInteraction.summary:type_name -> dolgorae.public.v2.InteractionSummary
 	86,  // 271: dolgorae.public.v2.ControllerInteraction.stamp:type_name -> dolgorae.public.v2.ProjectionStamp
 	148, // 272: dolgorae.public.v2.ControllerInteraction.command_approval:type_name -> dolgorae.public.v2.CommandApprovalInteraction
@@ -27818,7 +27978,7 @@ var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	74,  // 318: dolgorae.public.v2.VerifyControllerRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
 	71,  // 319: dolgorae.public.v2.VerifyControllerResponse.context:type_name -> dolgorae.public.v2.ResponseContext
 	75,  // 320: dolgorae.public.v2.VerifyControllerResponse.controller:type_name -> dolgorae.public.v2.ControllerProjection
-	330, // 321: dolgorae.public.v2.VerifyControllerResponse.verified_at:type_name -> google.protobuf.Timestamp
+	332, // 321: dolgorae.public.v2.VerifyControllerResponse.verified_at:type_name -> google.protobuf.Timestamp
 	45,  // 322: dolgorae.public.v2.ArtifactRef.kind:type_name -> dolgorae.public.v2.ArtifactKind
 	46,  // 323: dolgorae.public.v2.ArtifactRef.visibility:type_name -> dolgorae.public.v2.ArtifactVisibility
 	70,  // 324: dolgorae.public.v2.GetArtifactRequest.context:type_name -> dolgorae.public.v2.RequestContext
@@ -27838,7 +27998,7 @@ var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	52,  // 338: dolgorae.public.v2.OrchestratedSessionProjection.close_progress:type_name -> dolgorae.public.v2.SessionCloseProgress
 	55,  // 339: dolgorae.public.v2.OrchestratedSessionProjection.recovery_classification:type_name -> dolgorae.public.v2.RecoveryClassification
 	56,  // 340: dolgorae.public.v2.OrchestratedSessionProjection.required_action:type_name -> dolgorae.public.v2.RequiredClientAction
-	330, // 341: dolgorae.public.v2.OrchestratedSessionProjection.captured_at:type_name -> google.protobuf.Timestamp
+	332, // 341: dolgorae.public.v2.OrchestratedSessionProjection.captured_at:type_name -> google.protobuf.Timestamp
 	50,  // 342: dolgorae.public.v2.OrchestratedSessionProjection.availability:type_name -> dolgorae.public.v2.OrchestratedSessionAvailability
 	70,  // 343: dolgorae.public.v2.GetOrchestratedSessionRequest.context:type_name -> dolgorae.public.v2.RequestContext
 	73,  // 344: dolgorae.public.v2.GetOrchestratedSessionRequest.root_run:type_name -> dolgorae.public.v2.RunRef
@@ -27846,7 +28006,7 @@ var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	71,  // 346: dolgorae.public.v2.GetOrchestratedSessionResponse.context:type_name -> dolgorae.public.v2.ResponseContext
 	200, // 347: dolgorae.public.v2.GetOrchestratedSessionResponse.session:type_name -> dolgorae.public.v2.OrchestratedSessionProjection
 	73,  // 348: dolgorae.public.v2.OrchestratedSessionResult.specialist_run:type_name -> dolgorae.public.v2.RunRef
-	330, // 349: dolgorae.public.v2.OrchestratedSessionResult.published_at:type_name -> google.protobuf.Timestamp
+	332, // 349: dolgorae.public.v2.OrchestratedSessionResult.published_at:type_name -> google.protobuf.Timestamp
 	53,  // 350: dolgorae.public.v2.OrchestratedSessionResult.format:type_name -> dolgorae.public.v2.OrchestratedResultFormat
 	195, // 351: dolgorae.public.v2.OrchestratedSessionResult.artifact:type_name -> dolgorae.public.v2.ArtifactRef
 	73,  // 352: dolgorae.public.v2.OrchestratedSessionResult.artifact_owner:type_name -> dolgorae.public.v2.RunRef
@@ -27854,7 +28014,7 @@ var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	73,  // 354: dolgorae.public.v2.ListOrchestratedSessionResultsRequest.root_run:type_name -> dolgorae.public.v2.RunRef
 	74,  // 355: dolgorae.public.v2.ListOrchestratedSessionResultsRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
 	71,  // 356: dolgorae.public.v2.ListOrchestratedSessionResultsResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	330, // 357: dolgorae.public.v2.ListOrchestratedSessionResultsResponse.captured_at:type_name -> google.protobuf.Timestamp
+	332, // 357: dolgorae.public.v2.ListOrchestratedSessionResultsResponse.captured_at:type_name -> google.protobuf.Timestamp
 	203, // 358: dolgorae.public.v2.ListOrchestratedSessionResultsResponse.items:type_name -> dolgorae.public.v2.OrchestratedSessionResult
 	56,  // 359: dolgorae.public.v2.DolgoraeErrorDetail.action:type_name -> dolgorae.public.v2.RequiredClientAction
 	54,  // 360: dolgorae.public.v2.DolgoraeErrorDetail.retry_classification:type_name -> dolgorae.public.v2.RetryClassification
@@ -27922,384 +28082,391 @@ var file_dolgorae_public_v2_dolgorae_proto_depIdxs = []int32{
 	226, // 422: dolgorae.public.v2.LookupOperationResponse.not_accepted:type_name -> dolgorae.public.v2.NotAcceptedOperation
 	227, // 423: dolgorae.public.v2.LookupOperationResponse.unresolved:type_name -> dolgorae.public.v2.UnresolvedOperation
 	228, // 424: dolgorae.public.v2.LookupOperationResponse.absent:type_name -> dolgorae.public.v2.AbsentOperation
-	74,  // 425: dolgorae.public.v2.KeyedAdmission.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	230, // 426: dolgorae.public.v2.KeyedAdmission.trusted_invocation:type_name -> dolgorae.public.v2.TrustedInvocationRef
-	72,  // 427: dolgorae.public.v2.ExternalScope.workspace:type_name -> dolgorae.public.v2.WorkspaceRef
-	73,  // 428: dolgorae.public.v2.ManagedScope.root_primary_run:type_name -> dolgorae.public.v2.RunRef
-	232, // 429: dolgorae.public.v2.DelegationScope.external:type_name -> dolgorae.public.v2.ExternalScope
-	233, // 430: dolgorae.public.v2.DelegationScope.managed:type_name -> dolgorae.public.v2.ManagedScope
-	207, // 431: dolgorae.public.v2.ContextRef.content:type_name -> dolgorae.public.v2.BytesRef
-	207, // 432: dolgorae.public.v2.AcceptedImageRef.content:type_name -> dolgorae.public.v2.BytesRef
-	8,   // 433: dolgorae.public.v2.AcceptedImageRef.detail:type_name -> dolgorae.public.v2.ImageDetail
-	207, // 434: dolgorae.public.v2.AcceptedTaskIdentity.task_body:type_name -> dolgorae.public.v2.BytesRef
-	235, // 435: dolgorae.public.v2.AcceptedTaskIdentity.contexts:type_name -> dolgorae.public.v2.ContextRef
-	236, // 436: dolgorae.public.v2.AcceptedTaskIdentity.images:type_name -> dolgorae.public.v2.AcceptedImageRef
-	57,  // 437: dolgorae.public.v2.AcceptedTaskIdentity.execution_intent:type_name -> dolgorae.public.v2.CreationMode
-	235, // 438: dolgorae.public.v2.StructuredTaskBody.context:type_name -> dolgorae.public.v2.ContextRef
-	239, // 439: dolgorae.public.v2.StructuredTaskBody.criteria:type_name -> dolgorae.public.v2.TaskCriterion
-	238, // 440: dolgorae.public.v2.TaskInput.structured:type_name -> dolgorae.public.v2.StructuredTaskBody
-	237, // 441: dolgorae.public.v2.TaskInput.identity:type_name -> dolgorae.public.v2.AcceptedTaskIdentity
-	66,  // 442: dolgorae.public.v2.ChangeRef.kind:type_name -> dolgorae.public.v2.AcceptedChangeKind
-	207, // 443: dolgorae.public.v2.ChangeRef.before:type_name -> dolgorae.public.v2.BytesRef
-	207, // 444: dolgorae.public.v2.ChangeRef.after:type_name -> dolgorae.public.v2.BytesRef
-	241, // 445: dolgorae.public.v2.CompleteResultIdentity.source:type_name -> dolgorae.public.v2.ResultSource
-	64,  // 446: dolgorae.public.v2.CompleteResultIdentity.terminal_outcome:type_name -> dolgorae.public.v2.TaskOutcome
-	207, // 447: dolgorae.public.v2.CompleteResultIdentity.final_response:type_name -> dolgorae.public.v2.BytesRef
-	207, // 448: dolgorae.public.v2.CompleteResultIdentity.structured_output:type_name -> dolgorae.public.v2.BytesRef
-	242, // 449: dolgorae.public.v2.CompleteResultIdentity.changes:type_name -> dolgorae.public.v2.ChangeRef
-	235, // 450: dolgorae.public.v2.CompleteResultIdentity.attachments:type_name -> dolgorae.public.v2.ContextRef
-	207, // 451: dolgorae.public.v2.ContentRef.content:type_name -> dolgorae.public.v2.BytesRef
-	195, // 452: dolgorae.public.v2.ContentRef.artifact:type_name -> dolgorae.public.v2.ArtifactRef
-	89,  // 453: dolgorae.public.v2.ContentRef.unavailable:type_name -> dolgorae.public.v2.UnavailableContent
-	73,  // 454: dolgorae.public.v2.ContentRef.artifact_owner:type_name -> dolgorae.public.v2.RunRef
-	243, // 455: dolgorae.public.v2.CompleteResult.identity:type_name -> dolgorae.public.v2.CompleteResultIdentity
-	244, // 456: dolgorae.public.v2.CompleteResult.final_response:type_name -> dolgorae.public.v2.ContentRef
-	244, // 457: dolgorae.public.v2.CompleteResult.structured_output:type_name -> dolgorae.public.v2.ContentRef
-	244, // 458: dolgorae.public.v2.CompleteResult.change_contents:type_name -> dolgorae.public.v2.ContentRef
-	244, // 459: dolgorae.public.v2.CompleteResult.attachment_contents:type_name -> dolgorae.public.v2.ContentRef
-	234, // 460: dolgorae.public.v2.DelegationIdentity.scope:type_name -> dolgorae.public.v2.DelegationScope
-	65,  // 461: dolgorae.public.v2.DelegationIdentity.disposition:type_name -> dolgorae.public.v2.MemberDisposition
-	221, // 462: dolgorae.public.v2.DelegationIdentity.accepted_operation:type_name -> dolgorae.public.v2.OperationRef
-	232, // 463: dolgorae.public.v2.ExternalDelegationIdentity.scope:type_name -> dolgorae.public.v2.ExternalScope
-	75,  // 464: dolgorae.public.v2.ExternalDelegationIdentity.external_controller:type_name -> dolgorae.public.v2.ControllerProjection
-	246, // 465: dolgorae.public.v2.ExternalDelegationIdentity.facts:type_name -> dolgorae.public.v2.DelegationIdentity
-	233, // 466: dolgorae.public.v2.ManagedDelegationIdentity.scope:type_name -> dolgorae.public.v2.ManagedScope
-	73,  // 467: dolgorae.public.v2.ManagedDelegationIdentity.root_primary_run:type_name -> dolgorae.public.v2.RunRef
-	73,  // 468: dolgorae.public.v2.ManagedDelegationIdentity.specialist_run:type_name -> dolgorae.public.v2.RunRef
-	246, // 469: dolgorae.public.v2.ManagedDelegationIdentity.facts:type_name -> dolgorae.public.v2.DelegationIdentity
-	65,  // 470: dolgorae.public.v2.MemberProjection.disposition:type_name -> dolgorae.public.v2.MemberDisposition
-	246, // 471: dolgorae.public.v2.MemberProjection.identity:type_name -> dolgorae.public.v2.DelegationIdentity
-	73,  // 472: dolgorae.public.v2.MemberProjection.run:type_name -> dolgorae.public.v2.RunRef
-	80,  // 473: dolgorae.public.v2.MemberProjection.recovery:type_name -> dolgorae.public.v2.RecoveryProjection
-	64,  // 474: dolgorae.public.v2.TaskProjection.outcome:type_name -> dolgorae.public.v2.TaskOutcome
-	237, // 475: dolgorae.public.v2.TaskProjection.identity:type_name -> dolgorae.public.v2.AcceptedTaskIdentity
-	245, // 476: dolgorae.public.v2.TaskProjection.result:type_name -> dolgorae.public.v2.CompleteResult
-	80,  // 477: dolgorae.public.v2.TaskProjection.recovery:type_name -> dolgorae.public.v2.RecoveryProjection
-	232, // 478: dolgorae.public.v2.ExternalEngagementProjection.scope:type_name -> dolgorae.public.v2.ExternalScope
-	75,  // 479: dolgorae.public.v2.ExternalEngagementProjection.controller:type_name -> dolgorae.public.v2.ControllerProjection
-	52,  // 480: dolgorae.public.v2.ExternalEngagementProjection.close_progress:type_name -> dolgorae.public.v2.SessionCloseProgress
-	80,  // 481: dolgorae.public.v2.ExternalEngagementProjection.recovery:type_name -> dolgorae.public.v2.RecoveryProjection
-	70,  // 482: dolgorae.public.v2.OpenExternalEngagementRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	72,  // 483: dolgorae.public.v2.OpenExternalEngagementRequest.workspace:type_name -> dolgorae.public.v2.WorkspaceRef
-	231, // 484: dolgorae.public.v2.OpenExternalEngagementRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
-	71,  // 485: dolgorae.public.v2.OpenExternalEngagementResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	251, // 486: dolgorae.public.v2.OpenExternalEngagementResponse.engagement:type_name -> dolgorae.public.v2.ExternalEngagementProjection
-	223, // 487: dolgorae.public.v2.OpenExternalEngagementResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
-	70,  // 488: dolgorae.public.v2.GetExternalEngagementRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	232, // 489: dolgorae.public.v2.GetExternalEngagementRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
-	74,  // 490: dolgorae.public.v2.GetExternalEngagementRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	71,  // 491: dolgorae.public.v2.GetExternalEngagementResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	251, // 492: dolgorae.public.v2.GetExternalEngagementResponse.engagement:type_name -> dolgorae.public.v2.ExternalEngagementProjection
-	70,  // 493: dolgorae.public.v2.HireExternalSpecialistRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	232, // 494: dolgorae.public.v2.HireExternalSpecialistRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
-	231, // 495: dolgorae.public.v2.HireExternalSpecialistRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
-	214, // 496: dolgorae.public.v2.HireExternalSpecialistRequest.provisioning:type_name -> dolgorae.public.v2.ProvisioningSelection
-	212, // 497: dolgorae.public.v2.HireExternalSpecialistRequest.instructions:type_name -> dolgorae.public.v2.CapturedInstructions
-	71,  // 498: dolgorae.public.v2.HireExternalSpecialistResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	249, // 499: dolgorae.public.v2.HireExternalSpecialistResponse.member:type_name -> dolgorae.public.v2.MemberProjection
-	247, // 500: dolgorae.public.v2.HireExternalSpecialistResponse.identity:type_name -> dolgorae.public.v2.ExternalDelegationIdentity
-	223, // 501: dolgorae.public.v2.HireExternalSpecialistResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
-	70,  // 502: dolgorae.public.v2.AssignExternalSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	232, // 503: dolgorae.public.v2.AssignExternalSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
-	231, // 504: dolgorae.public.v2.AssignExternalSpecialistTaskRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
-	240, // 505: dolgorae.public.v2.AssignExternalSpecialistTaskRequest.task:type_name -> dolgorae.public.v2.TaskInput
-	71,  // 506: dolgorae.public.v2.AssignExternalSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	250, // 507: dolgorae.public.v2.AssignExternalSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
-	247, // 508: dolgorae.public.v2.AssignExternalSpecialistTaskResponse.identity:type_name -> dolgorae.public.v2.ExternalDelegationIdentity
-	223, // 509: dolgorae.public.v2.AssignExternalSpecialistTaskResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
-	70,  // 510: dolgorae.public.v2.AwaitExternalSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	232, // 511: dolgorae.public.v2.AwaitExternalSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
-	74,  // 512: dolgorae.public.v2.AwaitExternalSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	71,  // 513: dolgorae.public.v2.AwaitExternalSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	250, // 514: dolgorae.public.v2.AwaitExternalSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
-	70,  // 515: dolgorae.public.v2.CollectExternalSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	232, // 516: dolgorae.public.v2.CollectExternalSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
-	74,  // 517: dolgorae.public.v2.CollectExternalSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	71,  // 518: dolgorae.public.v2.CollectExternalSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	250, // 519: dolgorae.public.v2.CollectExternalSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
-	247, // 520: dolgorae.public.v2.CollectExternalSpecialistTaskResponse.identity:type_name -> dolgorae.public.v2.ExternalDelegationIdentity
-	70,  // 521: dolgorae.public.v2.CancelExternalSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	232, // 522: dolgorae.public.v2.CancelExternalSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
-	74,  // 523: dolgorae.public.v2.CancelExternalSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	71,  // 524: dolgorae.public.v2.CancelExternalSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	250, // 525: dolgorae.public.v2.CancelExternalSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
-	70,  // 526: dolgorae.public.v2.ReleaseExternalSpecialistRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	232, // 527: dolgorae.public.v2.ReleaseExternalSpecialistRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
-	74,  // 528: dolgorae.public.v2.ReleaseExternalSpecialistRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	71,  // 529: dolgorae.public.v2.ReleaseExternalSpecialistResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	249, // 530: dolgorae.public.v2.ReleaseExternalSpecialistResponse.member:type_name -> dolgorae.public.v2.MemberProjection
-	70,  // 531: dolgorae.public.v2.CloseExternalEngagementRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	232, // 532: dolgorae.public.v2.CloseExternalEngagementRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
-	74,  // 533: dolgorae.public.v2.CloseExternalEngagementRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	71,  // 534: dolgorae.public.v2.CloseExternalEngagementResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	251, // 535: dolgorae.public.v2.CloseExternalEngagementResponse.engagement:type_name -> dolgorae.public.v2.ExternalEngagementProjection
-	70,  // 536: dolgorae.public.v2.GetExternalDelegationIdentityRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	232, // 537: dolgorae.public.v2.GetExternalDelegationIdentityRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
-	74,  // 538: dolgorae.public.v2.GetExternalDelegationIdentityRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	221, // 539: dolgorae.public.v2.GetExternalDelegationIdentityRequest.accepted_operation:type_name -> dolgorae.public.v2.OperationRef
-	71,  // 540: dolgorae.public.v2.GetExternalDelegationIdentityResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	247, // 541: dolgorae.public.v2.GetExternalDelegationIdentityResponse.identity:type_name -> dolgorae.public.v2.ExternalDelegationIdentity
-	70,  // 542: dolgorae.public.v2.SpawnSpecialistRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	233, // 543: dolgorae.public.v2.SpawnSpecialistRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
-	231, // 544: dolgorae.public.v2.SpawnSpecialistRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
-	214, // 545: dolgorae.public.v2.SpawnSpecialistRequest.provisioning:type_name -> dolgorae.public.v2.ProvisioningSelection
-	212, // 546: dolgorae.public.v2.SpawnSpecialistRequest.instructions:type_name -> dolgorae.public.v2.CapturedInstructions
-	71,  // 547: dolgorae.public.v2.SpawnSpecialistResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	249, // 548: dolgorae.public.v2.SpawnSpecialistResponse.member:type_name -> dolgorae.public.v2.MemberProjection
-	248, // 549: dolgorae.public.v2.SpawnSpecialistResponse.identity:type_name -> dolgorae.public.v2.ManagedDelegationIdentity
-	223, // 550: dolgorae.public.v2.SpawnSpecialistResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
-	70,  // 551: dolgorae.public.v2.AssignSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	233, // 552: dolgorae.public.v2.AssignSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
-	231, // 553: dolgorae.public.v2.AssignSpecialistTaskRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
-	240, // 554: dolgorae.public.v2.AssignSpecialistTaskRequest.task:type_name -> dolgorae.public.v2.TaskInput
-	71,  // 555: dolgorae.public.v2.AssignSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	250, // 556: dolgorae.public.v2.AssignSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
-	248, // 557: dolgorae.public.v2.AssignSpecialistTaskResponse.identity:type_name -> dolgorae.public.v2.ManagedDelegationIdentity
-	223, // 558: dolgorae.public.v2.AssignSpecialistTaskResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
-	70,  // 559: dolgorae.public.v2.AwaitSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	233, // 560: dolgorae.public.v2.AwaitSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
-	74,  // 561: dolgorae.public.v2.AwaitSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	71,  // 562: dolgorae.public.v2.AwaitSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	250, // 563: dolgorae.public.v2.AwaitSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
-	70,  // 564: dolgorae.public.v2.CollectSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	233, // 565: dolgorae.public.v2.CollectSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
-	74,  // 566: dolgorae.public.v2.CollectSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	71,  // 567: dolgorae.public.v2.CollectSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	250, // 568: dolgorae.public.v2.CollectSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
-	248, // 569: dolgorae.public.v2.CollectSpecialistTaskResponse.identity:type_name -> dolgorae.public.v2.ManagedDelegationIdentity
-	70,  // 570: dolgorae.public.v2.CancelSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	233, // 571: dolgorae.public.v2.CancelSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
-	74,  // 572: dolgorae.public.v2.CancelSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	71,  // 573: dolgorae.public.v2.CancelSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	250, // 574: dolgorae.public.v2.CancelSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
-	70,  // 575: dolgorae.public.v2.ReleaseSpecialistRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	233, // 576: dolgorae.public.v2.ReleaseSpecialistRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
-	74,  // 577: dolgorae.public.v2.ReleaseSpecialistRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	71,  // 578: dolgorae.public.v2.ReleaseSpecialistResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	249, // 579: dolgorae.public.v2.ReleaseSpecialistResponse.member:type_name -> dolgorae.public.v2.MemberProjection
-	70,  // 580: dolgorae.public.v2.GetManagedDelegationIdentityRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	233, // 581: dolgorae.public.v2.GetManagedDelegationIdentityRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
-	74,  // 582: dolgorae.public.v2.GetManagedDelegationIdentityRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	221, // 583: dolgorae.public.v2.GetManagedDelegationIdentityRequest.accepted_operation:type_name -> dolgorae.public.v2.OperationRef
-	71,  // 584: dolgorae.public.v2.GetManagedDelegationIdentityResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	248, // 585: dolgorae.public.v2.GetManagedDelegationIdentityResponse.identity:type_name -> dolgorae.public.v2.ManagedDelegationIdentity
-	286, // 586: dolgorae.public.v2.GroupAssignmentIdentity.entries:type_name -> dolgorae.public.v2.GroupAssignmentEntry
-	64,  // 587: dolgorae.public.v2.GroupSource.state:type_name -> dolgorae.public.v2.TaskOutcome
-	287, // 588: dolgorae.public.v2.GroupProjection.assignment:type_name -> dolgorae.public.v2.GroupAssignmentIdentity
-	288, // 589: dolgorae.public.v2.GroupProjection.coverage:type_name -> dolgorae.public.v2.GroupSource
-	67,  // 590: dolgorae.public.v2.WaitPredicate.kind:type_name -> dolgorae.public.v2.WaitPredicateKind
-	207, // 591: dolgorae.public.v2.GroupTaskSource.content:type_name -> dolgorae.public.v2.BytesRef
-	70,  // 592: dolgorae.public.v2.AssignGroupRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	234, // 593: dolgorae.public.v2.AssignGroupRequest.scope:type_name -> dolgorae.public.v2.DelegationScope
-	231, // 594: dolgorae.public.v2.AssignGroupRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
-	287, // 595: dolgorae.public.v2.AssignGroupRequest.assignment:type_name -> dolgorae.public.v2.GroupAssignmentIdentity
-	291, // 596: dolgorae.public.v2.AssignGroupRequest.inputs:type_name -> dolgorae.public.v2.GroupTaskSource
-	71,  // 597: dolgorae.public.v2.AssignGroupResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	289, // 598: dolgorae.public.v2.AssignGroupResponse.group:type_name -> dolgorae.public.v2.GroupProjection
-	223, // 599: dolgorae.public.v2.AssignGroupResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
-	70,  // 600: dolgorae.public.v2.AwaitGroupRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	234, // 601: dolgorae.public.v2.AwaitGroupRequest.scope:type_name -> dolgorae.public.v2.DelegationScope
-	74,  // 602: dolgorae.public.v2.AwaitGroupRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	290, // 603: dolgorae.public.v2.AwaitGroupRequest.predicate:type_name -> dolgorae.public.v2.WaitPredicate
-	71,  // 604: dolgorae.public.v2.AwaitGroupResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	289, // 605: dolgorae.public.v2.AwaitGroupResponse.group:type_name -> dolgorae.public.v2.GroupProjection
-	70,  // 606: dolgorae.public.v2.CollectGroupRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	234, // 607: dolgorae.public.v2.CollectGroupRequest.scope:type_name -> dolgorae.public.v2.DelegationScope
-	74,  // 608: dolgorae.public.v2.CollectGroupRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
-	71,  // 609: dolgorae.public.v2.CollectGroupResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	289, // 610: dolgorae.public.v2.CollectGroupResponse.group:type_name -> dolgorae.public.v2.GroupProjection
-	245, // 611: dolgorae.public.v2.CollectGroupResponse.results:type_name -> dolgorae.public.v2.CompleteResult
-	244, // 612: dolgorae.public.v2.CollectGroupResponse.source_manifest:type_name -> dolgorae.public.v2.ContentRef
-	299, // 613: dolgorae.public.v2.PinnedEvidence.commit_blob:type_name -> dolgorae.public.v2.CommitBlobEvidence
-	300, // 614: dolgorae.public.v2.PinnedEvidence.git_object:type_name -> dolgorae.public.v2.GitObjectEvidence
-	235, // 615: dolgorae.public.v2.PinnedEvidence.accepted_context:type_name -> dolgorae.public.v2.ContextRef
-	298, // 616: dolgorae.public.v2.StructuredFinding.evidence:type_name -> dolgorae.public.v2.PinnedEvidence
-	301, // 617: dolgorae.public.v2.StructuredFindings.findings:type_name -> dolgorae.public.v2.StructuredFinding
-	288, // 618: dolgorae.public.v2.FindingSource.source:type_name -> dolgorae.public.v2.GroupSource
-	301, // 619: dolgorae.public.v2.FindingSource.finding:type_name -> dolgorae.public.v2.StructuredFinding
-	303, // 620: dolgorae.public.v2.FindingSet.entries:type_name -> dolgorae.public.v2.FindingSource
-	303, // 621: dolgorae.public.v2.FindingConflict.claims:type_name -> dolgorae.public.v2.FindingSource
-	288, // 622: dolgorae.public.v2.MergedFindings.sources:type_name -> dolgorae.public.v2.GroupSource
-	304, // 623: dolgorae.public.v2.MergedFindings.findings:type_name -> dolgorae.public.v2.FindingSet
-	305, // 624: dolgorae.public.v2.MergedFindings.conflicts:type_name -> dolgorae.public.v2.FindingConflict
-	288, // 625: dolgorae.public.v2.MergedFindings.missing_sources:type_name -> dolgorae.public.v2.GroupSource
-	288, // 626: dolgorae.public.v2.MergedFindingsIdentity.sources:type_name -> dolgorae.public.v2.GroupSource
-	207, // 627: dolgorae.public.v2.MergedFindingsIdentity.merged_output:type_name -> dolgorae.public.v2.BytesRef
-	70,  // 628: dolgorae.public.v2.MergeGroupResultsRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	234, // 629: dolgorae.public.v2.MergeGroupResultsRequest.scope:type_name -> dolgorae.public.v2.DelegationScope
-	231, // 630: dolgorae.public.v2.MergeGroupResultsRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
-	288, // 631: dolgorae.public.v2.MergeGroupResultsRequest.sources:type_name -> dolgorae.public.v2.GroupSource
-	71,  // 632: dolgorae.public.v2.MergeGroupResultsResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	307, // 633: dolgorae.public.v2.MergeGroupResultsResponse.identity:type_name -> dolgorae.public.v2.MergedFindingsIdentity
-	244, // 634: dolgorae.public.v2.MergeGroupResultsResponse.merged_output:type_name -> dolgorae.public.v2.ContentRef
-	223, // 635: dolgorae.public.v2.MergeGroupResultsResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
-	70,  // 636: dolgorae.public.v2.AssignSynthesisRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	234, // 637: dolgorae.public.v2.AssignSynthesisRequest.scope:type_name -> dolgorae.public.v2.DelegationScope
-	231, // 638: dolgorae.public.v2.AssignSynthesisRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
-	240, // 639: dolgorae.public.v2.AssignSynthesisRequest.task:type_name -> dolgorae.public.v2.TaskInput
-	71,  // 640: dolgorae.public.v2.AssignSynthesisResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	250, // 641: dolgorae.public.v2.AssignSynthesisResponse.task:type_name -> dolgorae.public.v2.TaskProjection
-	223, // 642: dolgorae.public.v2.AssignSynthesisResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
-	246, // 643: dolgorae.public.v2.AssignSynthesisResponse.identity:type_name -> dolgorae.public.v2.DelegationIdentity
-	72,  // 644: dolgorae.public.v2.MaintenanceScope.workspace:type_name -> dolgorae.public.v2.WorkspaceRef
-	312, // 645: dolgorae.public.v2.MaintenancePlan.scope:type_name -> dolgorae.public.v2.MaintenanceScope
-	68,  // 646: dolgorae.public.v2.MaintenancePlan.kind:type_name -> dolgorae.public.v2.MaintenanceKind
-	314, // 647: dolgorae.public.v2.MaintenanceProjection.plan:type_name -> dolgorae.public.v2.MaintenancePlan
-	69,  // 648: dolgorae.public.v2.MaintenanceProjection.state:type_name -> dolgorae.public.v2.MaintenanceState
-	70,  // 649: dolgorae.public.v2.PlanMaintenanceRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	312, // 650: dolgorae.public.v2.PlanMaintenanceRequest.scope:type_name -> dolgorae.public.v2.MaintenanceScope
-	313, // 651: dolgorae.public.v2.PlanMaintenanceRequest.operator:type_name -> dolgorae.public.v2.OperatorCarrierRef
-	68,  // 652: dolgorae.public.v2.PlanMaintenanceRequest.kind:type_name -> dolgorae.public.v2.MaintenanceKind
-	71,  // 653: dolgorae.public.v2.PlanMaintenanceResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	314, // 654: dolgorae.public.v2.PlanMaintenanceResponse.plan:type_name -> dolgorae.public.v2.MaintenancePlan
-	70,  // 655: dolgorae.public.v2.ApplyMaintenanceRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	313, // 656: dolgorae.public.v2.ApplyMaintenanceRequest.operator:type_name -> dolgorae.public.v2.OperatorCarrierRef
-	314, // 657: dolgorae.public.v2.ApplyMaintenanceRequest.plan:type_name -> dolgorae.public.v2.MaintenancePlan
-	71,  // 658: dolgorae.public.v2.ApplyMaintenanceResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	315, // 659: dolgorae.public.v2.ApplyMaintenanceResponse.maintenance:type_name -> dolgorae.public.v2.MaintenanceProjection
-	70,  // 660: dolgorae.public.v2.GetMaintenanceRequest.context:type_name -> dolgorae.public.v2.RequestContext
-	312, // 661: dolgorae.public.v2.GetMaintenanceRequest.scope:type_name -> dolgorae.public.v2.MaintenanceScope
-	313, // 662: dolgorae.public.v2.GetMaintenanceRequest.operator:type_name -> dolgorae.public.v2.OperatorCarrierRef
-	71,  // 663: dolgorae.public.v2.GetMaintenanceResponse.context:type_name -> dolgorae.public.v2.ResponseContext
-	315, // 664: dolgorae.public.v2.GetMaintenanceResponse.maintenance:type_name -> dolgorae.public.v2.MaintenanceProjection
-	154, // 665: dolgorae.public.v2.McpElicitationInteraction.questions:type_name -> dolgorae.public.v2.InteractionQuestion
-	39,  // 666: dolgorae.public.v2.InteractionAnswer.decision:type_name -> dolgorae.public.v2.InteractionDecision
-	325, // 667: dolgorae.public.v2.InteractionAnswer.answers:type_name -> dolgorae.public.v2.QuestionAnswer
-	326, // 668: dolgorae.public.v2.InteractionAnswer.protected_input:type_name -> dolgorae.public.v2.ProtectedInputRef
-	22,  // 669: dolgorae.public.v2.WriterBusyDiagnostic.authority_state:type_name -> dolgorae.public.v2.WriterAuthorityState
-	92,  // 670: dolgorae.public.v2.RuntimeService.GetCapabilities:input_type -> dolgorae.public.v2.GetCapabilitiesRequest
-	106, // 671: dolgorae.public.v2.RuntimeService.InspectWorkspace:input_type -> dolgorae.public.v2.InspectWorkspaceRequest
-	109, // 672: dolgorae.public.v2.RuntimeService.ListProfiles:input_type -> dolgorae.public.v2.ListProfilesRequest
-	113, // 673: dolgorae.public.v2.RuntimeService.GetProfile:input_type -> dolgorae.public.v2.GetProfileRequest
-	115, // 674: dolgorae.public.v2.RuntimeService.ListProfileDiagnostics:input_type -> dolgorae.public.v2.ListProfileDiagnosticsRequest
-	118, // 675: dolgorae.public.v2.RunService.StartRun:input_type -> dolgorae.public.v2.StartRunRequest
-	120, // 676: dolgorae.public.v2.RunService.ListRuns:input_type -> dolgorae.public.v2.ListRunsRequest
-	122, // 677: dolgorae.public.v2.RunService.GetRun:input_type -> dolgorae.public.v2.GetRunRequest
-	125, // 678: dolgorae.public.v2.RunService.SubmitTurn:input_type -> dolgorae.public.v2.SubmitTurnRequest
-	127, // 679: dolgorae.public.v2.RunService.InterruptTurn:input_type -> dolgorae.public.v2.InterruptTurnRequest
-	128, // 680: dolgorae.public.v2.RunService.SetDefaultEffort:input_type -> dolgorae.public.v2.SetDefaultEffortRequest
-	129, // 681: dolgorae.public.v2.RunService.PauseRun:input_type -> dolgorae.public.v2.PauseRunRequest
-	130, // 682: dolgorae.public.v2.RunService.ResumeRun:input_type -> dolgorae.public.v2.ResumeRunRequest
-	131, // 683: dolgorae.public.v2.RunService.CloseRun:input_type -> dolgorae.public.v2.CloseRunRequest
-	132, // 684: dolgorae.public.v2.RunService.DeleteRun:input_type -> dolgorae.public.v2.DeleteRunRequest
-	134, // 685: dolgorae.public.v2.RunService.RecoverRun:input_type -> dolgorae.public.v2.RecoverRunRequest
-	135, // 686: dolgorae.public.v2.RunService.ReconcileRun:input_type -> dolgorae.public.v2.ReconcileRunRequest
-	137, // 687: dolgorae.public.v2.RunService.ForkRun:input_type -> dolgorae.public.v2.ForkRunRequest
-	138, // 688: dolgorae.public.v2.RunService.VerifyRun:input_type -> dolgorae.public.v2.VerifyRunRequest
-	140, // 689: dolgorae.public.v2.RunService.CreateWriteContinuation:input_type -> dolgorae.public.v2.CreateWriteContinuationRequest
-	143, // 690: dolgorae.public.v2.ObservationService.WatchRunEvents:input_type -> dolgorae.public.v2.WatchRunEventsRequest
-	175, // 691: dolgorae.public.v2.ObservationService.ListRunTimelineItems:input_type -> dolgorae.public.v2.ListRunTimelineItemsRequest
-	179, // 692: dolgorae.public.v2.InteractionService.ListPendingInteractions:input_type -> dolgorae.public.v2.ListPendingInteractionsRequest
-	181, // 693: dolgorae.public.v2.InteractionService.GetControllerInteraction:input_type -> dolgorae.public.v2.GetControllerInteractionRequest
-	183, // 694: dolgorae.public.v2.InteractionService.ResolveInteraction:input_type -> dolgorae.public.v2.ResolveInteractionRequest
-	185, // 695: dolgorae.public.v2.WriterService.GetWorkspaceWriterStatus:input_type -> dolgorae.public.v2.GetWorkspaceWriterStatusRequest
-	187, // 696: dolgorae.public.v2.WriterService.AcquireWriter:input_type -> dolgorae.public.v2.AcquireWriterRequest
-	188, // 697: dolgorae.public.v2.WriterService.ReleaseWriter:input_type -> dolgorae.public.v2.ReleaseWriterRequest
-	189, // 698: dolgorae.public.v2.WriterService.PrepareWriterHandoff:input_type -> dolgorae.public.v2.PrepareWriterHandoffRequest
-	190, // 699: dolgorae.public.v2.WriterService.CommitWriterHandoff:input_type -> dolgorae.public.v2.CommitWriterHandoffRequest
-	191, // 700: dolgorae.public.v2.WriterService.CancelWriterHandoff:input_type -> dolgorae.public.v2.CancelWriterHandoffRequest
-	193, // 701: dolgorae.public.v2.ControllerService.VerifyController:input_type -> dolgorae.public.v2.VerifyControllerRequest
-	196, // 702: dolgorae.public.v2.ArtifactService.GetArtifact:input_type -> dolgorae.public.v2.GetArtifactRequest
-	198, // 703: dolgorae.public.v2.ArtifactService.ReadArtifactChunk:input_type -> dolgorae.public.v2.ReadArtifactChunkRequest
-	201, // 704: dolgorae.public.v2.OrchestrationService.GetOrchestratedSession:input_type -> dolgorae.public.v2.GetOrchestratedSessionRequest
-	204, // 705: dolgorae.public.v2.OrchestrationService.ListOrchestratedSessionResults:input_type -> dolgorae.public.v2.ListOrchestratedSessionResultsRequest
-	224, // 706: dolgorae.public.v2.OperationService.LookupOperation:input_type -> dolgorae.public.v2.LookupOperationRequest
-	216, // 707: dolgorae.public.v2.ProvisioningService.ValidateProvisioning:input_type -> dolgorae.public.v2.ValidateProvisioningRequest
-	218, // 708: dolgorae.public.v2.ProvisioningService.InstallProvisioning:input_type -> dolgorae.public.v2.InstallProvisioningRequest
-	252, // 709: dolgorae.public.v2.SpecialistService.OpenExternalEngagement:input_type -> dolgorae.public.v2.OpenExternalEngagementRequest
-	254, // 710: dolgorae.public.v2.SpecialistService.GetExternalEngagement:input_type -> dolgorae.public.v2.GetExternalEngagementRequest
-	256, // 711: dolgorae.public.v2.SpecialistService.HireExternalSpecialist:input_type -> dolgorae.public.v2.HireExternalSpecialistRequest
-	258, // 712: dolgorae.public.v2.SpecialistService.AssignExternalSpecialistTask:input_type -> dolgorae.public.v2.AssignExternalSpecialistTaskRequest
-	260, // 713: dolgorae.public.v2.SpecialistService.AwaitExternalSpecialistTask:input_type -> dolgorae.public.v2.AwaitExternalSpecialistTaskRequest
-	262, // 714: dolgorae.public.v2.SpecialistService.CollectExternalSpecialistTask:input_type -> dolgorae.public.v2.CollectExternalSpecialistTaskRequest
-	264, // 715: dolgorae.public.v2.SpecialistService.CancelExternalSpecialistTask:input_type -> dolgorae.public.v2.CancelExternalSpecialistTaskRequest
-	266, // 716: dolgorae.public.v2.SpecialistService.ReleaseExternalSpecialist:input_type -> dolgorae.public.v2.ReleaseExternalSpecialistRequest
-	268, // 717: dolgorae.public.v2.SpecialistService.CloseExternalEngagement:input_type -> dolgorae.public.v2.CloseExternalEngagementRequest
-	270, // 718: dolgorae.public.v2.SpecialistService.GetExternalDelegationIdentity:input_type -> dolgorae.public.v2.GetExternalDelegationIdentityRequest
-	272, // 719: dolgorae.public.v2.BrokerService.SpawnSpecialist:input_type -> dolgorae.public.v2.SpawnSpecialistRequest
-	274, // 720: dolgorae.public.v2.BrokerService.AssignSpecialistTask:input_type -> dolgorae.public.v2.AssignSpecialistTaskRequest
-	276, // 721: dolgorae.public.v2.BrokerService.AwaitSpecialistTask:input_type -> dolgorae.public.v2.AwaitSpecialistTaskRequest
-	278, // 722: dolgorae.public.v2.BrokerService.CollectSpecialistTask:input_type -> dolgorae.public.v2.CollectSpecialistTaskRequest
-	280, // 723: dolgorae.public.v2.BrokerService.CancelSpecialistTask:input_type -> dolgorae.public.v2.CancelSpecialistTaskRequest
-	282, // 724: dolgorae.public.v2.BrokerService.ReleaseSpecialist:input_type -> dolgorae.public.v2.ReleaseSpecialistRequest
-	284, // 725: dolgorae.public.v2.BrokerService.GetManagedDelegationIdentity:input_type -> dolgorae.public.v2.GetManagedDelegationIdentityRequest
-	292, // 726: dolgorae.public.v2.GroupService.AssignGroup:input_type -> dolgorae.public.v2.AssignGroupRequest
-	294, // 727: dolgorae.public.v2.GroupService.AwaitGroup:input_type -> dolgorae.public.v2.AwaitGroupRequest
-	296, // 728: dolgorae.public.v2.GroupService.CollectGroup:input_type -> dolgorae.public.v2.CollectGroupRequest
-	308, // 729: dolgorae.public.v2.GroupService.MergeGroupResults:input_type -> dolgorae.public.v2.MergeGroupResultsRequest
-	310, // 730: dolgorae.public.v2.GroupService.AssignSynthesis:input_type -> dolgorae.public.v2.AssignSynthesisRequest
-	316, // 731: dolgorae.public.v2.MaintenanceService.PlanMaintenance:input_type -> dolgorae.public.v2.PlanMaintenanceRequest
-	318, // 732: dolgorae.public.v2.MaintenanceService.ApplyMaintenance:input_type -> dolgorae.public.v2.ApplyMaintenanceRequest
-	320, // 733: dolgorae.public.v2.MaintenanceService.GetMaintenance:input_type -> dolgorae.public.v2.GetMaintenanceRequest
-	105, // 734: dolgorae.public.v2.RuntimeService.GetCapabilities:output_type -> dolgorae.public.v2.GetCapabilitiesResponse
-	108, // 735: dolgorae.public.v2.RuntimeService.InspectWorkspace:output_type -> dolgorae.public.v2.InspectWorkspaceResponse
-	112, // 736: dolgorae.public.v2.RuntimeService.ListProfiles:output_type -> dolgorae.public.v2.ListProfilesResponse
-	114, // 737: dolgorae.public.v2.RuntimeService.GetProfile:output_type -> dolgorae.public.v2.GetProfileResponse
-	117, // 738: dolgorae.public.v2.RuntimeService.ListProfileDiagnostics:output_type -> dolgorae.public.v2.ListProfileDiagnosticsResponse
-	119, // 739: dolgorae.public.v2.RunService.StartRun:output_type -> dolgorae.public.v2.StartRunResponse
-	121, // 740: dolgorae.public.v2.RunService.ListRuns:output_type -> dolgorae.public.v2.ListRunsResponse
-	123, // 741: dolgorae.public.v2.RunService.GetRun:output_type -> dolgorae.public.v2.GetRunResponse
-	126, // 742: dolgorae.public.v2.RunService.SubmitTurn:output_type -> dolgorae.public.v2.SubmitTurnAccepted
-	136, // 743: dolgorae.public.v2.RunService.InterruptTurn:output_type -> dolgorae.public.v2.RunMutationResponse
-	136, // 744: dolgorae.public.v2.RunService.SetDefaultEffort:output_type -> dolgorae.public.v2.RunMutationResponse
-	136, // 745: dolgorae.public.v2.RunService.PauseRun:output_type -> dolgorae.public.v2.RunMutationResponse
-	136, // 746: dolgorae.public.v2.RunService.ResumeRun:output_type -> dolgorae.public.v2.RunMutationResponse
-	136, // 747: dolgorae.public.v2.RunService.CloseRun:output_type -> dolgorae.public.v2.RunMutationResponse
-	133, // 748: dolgorae.public.v2.RunService.DeleteRun:output_type -> dolgorae.public.v2.DeleteRunResponse
-	136, // 749: dolgorae.public.v2.RunService.RecoverRun:output_type -> dolgorae.public.v2.RunMutationResponse
-	136, // 750: dolgorae.public.v2.RunService.ReconcileRun:output_type -> dolgorae.public.v2.RunMutationResponse
-	119, // 751: dolgorae.public.v2.RunService.ForkRun:output_type -> dolgorae.public.v2.StartRunResponse
-	139, // 752: dolgorae.public.v2.RunService.VerifyRun:output_type -> dolgorae.public.v2.VerifyRunResponse
-	142, // 753: dolgorae.public.v2.RunService.CreateWriteContinuation:output_type -> dolgorae.public.v2.CreateWriteContinuationResponse
-	172, // 754: dolgorae.public.v2.ObservationService.WatchRunEvents:output_type -> dolgorae.public.v2.RunEventEnvelope
-	176, // 755: dolgorae.public.v2.ObservationService.ListRunTimelineItems:output_type -> dolgorae.public.v2.ListRunTimelineItemsResponse
-	180, // 756: dolgorae.public.v2.InteractionService.ListPendingInteractions:output_type -> dolgorae.public.v2.ListPendingInteractionsResponse
-	182, // 757: dolgorae.public.v2.InteractionService.GetControllerInteraction:output_type -> dolgorae.public.v2.GetControllerInteractionResponse
-	184, // 758: dolgorae.public.v2.InteractionService.ResolveInteraction:output_type -> dolgorae.public.v2.ResolveInteractionResponse
-	186, // 759: dolgorae.public.v2.WriterService.GetWorkspaceWriterStatus:output_type -> dolgorae.public.v2.GetWorkspaceWriterStatusResponse
-	87,  // 760: dolgorae.public.v2.WriterService.AcquireWriter:output_type -> dolgorae.public.v2.WriterState
-	87,  // 761: dolgorae.public.v2.WriterService.ReleaseWriter:output_type -> dolgorae.public.v2.WriterState
-	192, // 762: dolgorae.public.v2.WriterService.PrepareWriterHandoff:output_type -> dolgorae.public.v2.WriterHandoffResponse
-	192, // 763: dolgorae.public.v2.WriterService.CommitWriterHandoff:output_type -> dolgorae.public.v2.WriterHandoffResponse
-	192, // 764: dolgorae.public.v2.WriterService.CancelWriterHandoff:output_type -> dolgorae.public.v2.WriterHandoffResponse
-	194, // 765: dolgorae.public.v2.ControllerService.VerifyController:output_type -> dolgorae.public.v2.VerifyControllerResponse
-	197, // 766: dolgorae.public.v2.ArtifactService.GetArtifact:output_type -> dolgorae.public.v2.GetArtifactResponse
-	199, // 767: dolgorae.public.v2.ArtifactService.ReadArtifactChunk:output_type -> dolgorae.public.v2.ReadArtifactChunkResponse
-	202, // 768: dolgorae.public.v2.OrchestrationService.GetOrchestratedSession:output_type -> dolgorae.public.v2.GetOrchestratedSessionResponse
-	205, // 769: dolgorae.public.v2.OrchestrationService.ListOrchestratedSessionResults:output_type -> dolgorae.public.v2.ListOrchestratedSessionResultsResponse
-	229, // 770: dolgorae.public.v2.OperationService.LookupOperation:output_type -> dolgorae.public.v2.LookupOperationResponse
-	217, // 771: dolgorae.public.v2.ProvisioningService.ValidateProvisioning:output_type -> dolgorae.public.v2.ValidateProvisioningResponse
-	219, // 772: dolgorae.public.v2.ProvisioningService.InstallProvisioning:output_type -> dolgorae.public.v2.InstallProvisioningResponse
-	253, // 773: dolgorae.public.v2.SpecialistService.OpenExternalEngagement:output_type -> dolgorae.public.v2.OpenExternalEngagementResponse
-	255, // 774: dolgorae.public.v2.SpecialistService.GetExternalEngagement:output_type -> dolgorae.public.v2.GetExternalEngagementResponse
-	257, // 775: dolgorae.public.v2.SpecialistService.HireExternalSpecialist:output_type -> dolgorae.public.v2.HireExternalSpecialistResponse
-	259, // 776: dolgorae.public.v2.SpecialistService.AssignExternalSpecialistTask:output_type -> dolgorae.public.v2.AssignExternalSpecialistTaskResponse
-	261, // 777: dolgorae.public.v2.SpecialistService.AwaitExternalSpecialistTask:output_type -> dolgorae.public.v2.AwaitExternalSpecialistTaskResponse
-	263, // 778: dolgorae.public.v2.SpecialistService.CollectExternalSpecialistTask:output_type -> dolgorae.public.v2.CollectExternalSpecialistTaskResponse
-	265, // 779: dolgorae.public.v2.SpecialistService.CancelExternalSpecialistTask:output_type -> dolgorae.public.v2.CancelExternalSpecialistTaskResponse
-	267, // 780: dolgorae.public.v2.SpecialistService.ReleaseExternalSpecialist:output_type -> dolgorae.public.v2.ReleaseExternalSpecialistResponse
-	269, // 781: dolgorae.public.v2.SpecialistService.CloseExternalEngagement:output_type -> dolgorae.public.v2.CloseExternalEngagementResponse
-	271, // 782: dolgorae.public.v2.SpecialistService.GetExternalDelegationIdentity:output_type -> dolgorae.public.v2.GetExternalDelegationIdentityResponse
-	273, // 783: dolgorae.public.v2.BrokerService.SpawnSpecialist:output_type -> dolgorae.public.v2.SpawnSpecialistResponse
-	275, // 784: dolgorae.public.v2.BrokerService.AssignSpecialistTask:output_type -> dolgorae.public.v2.AssignSpecialistTaskResponse
-	277, // 785: dolgorae.public.v2.BrokerService.AwaitSpecialistTask:output_type -> dolgorae.public.v2.AwaitSpecialistTaskResponse
-	279, // 786: dolgorae.public.v2.BrokerService.CollectSpecialistTask:output_type -> dolgorae.public.v2.CollectSpecialistTaskResponse
-	281, // 787: dolgorae.public.v2.BrokerService.CancelSpecialistTask:output_type -> dolgorae.public.v2.CancelSpecialistTaskResponse
-	283, // 788: dolgorae.public.v2.BrokerService.ReleaseSpecialist:output_type -> dolgorae.public.v2.ReleaseSpecialistResponse
-	285, // 789: dolgorae.public.v2.BrokerService.GetManagedDelegationIdentity:output_type -> dolgorae.public.v2.GetManagedDelegationIdentityResponse
-	293, // 790: dolgorae.public.v2.GroupService.AssignGroup:output_type -> dolgorae.public.v2.AssignGroupResponse
-	295, // 791: dolgorae.public.v2.GroupService.AwaitGroup:output_type -> dolgorae.public.v2.AwaitGroupResponse
-	297, // 792: dolgorae.public.v2.GroupService.CollectGroup:output_type -> dolgorae.public.v2.CollectGroupResponse
-	309, // 793: dolgorae.public.v2.GroupService.MergeGroupResults:output_type -> dolgorae.public.v2.MergeGroupResultsResponse
-	311, // 794: dolgorae.public.v2.GroupService.AssignSynthesis:output_type -> dolgorae.public.v2.AssignSynthesisResponse
-	317, // 795: dolgorae.public.v2.MaintenanceService.PlanMaintenance:output_type -> dolgorae.public.v2.PlanMaintenanceResponse
-	319, // 796: dolgorae.public.v2.MaintenanceService.ApplyMaintenance:output_type -> dolgorae.public.v2.ApplyMaintenanceResponse
-	321, // 797: dolgorae.public.v2.MaintenanceService.GetMaintenance:output_type -> dolgorae.public.v2.GetMaintenanceResponse
-	734, // [734:798] is the sub-list for method output_type
-	670, // [670:734] is the sub-list for method input_type
-	670, // [670:670] is the sub-list for extension type_name
-	670, // [670:670] is the sub-list for extension extendee
-	0,   // [0:670] is the sub-list for field type_name
+	330, // 425: dolgorae.public.v2.LookupOperationResponse.closed_without_acceptance:type_name -> dolgorae.public.v2.ClosedStartOperation
+	74,  // 426: dolgorae.public.v2.KeyedAdmission.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	230, // 427: dolgorae.public.v2.KeyedAdmission.trusted_invocation:type_name -> dolgorae.public.v2.TrustedInvocationRef
+	72,  // 428: dolgorae.public.v2.ExternalScope.workspace:type_name -> dolgorae.public.v2.WorkspaceRef
+	73,  // 429: dolgorae.public.v2.ManagedScope.root_primary_run:type_name -> dolgorae.public.v2.RunRef
+	232, // 430: dolgorae.public.v2.DelegationScope.external:type_name -> dolgorae.public.v2.ExternalScope
+	233, // 431: dolgorae.public.v2.DelegationScope.managed:type_name -> dolgorae.public.v2.ManagedScope
+	207, // 432: dolgorae.public.v2.ContextRef.content:type_name -> dolgorae.public.v2.BytesRef
+	207, // 433: dolgorae.public.v2.AcceptedImageRef.content:type_name -> dolgorae.public.v2.BytesRef
+	8,   // 434: dolgorae.public.v2.AcceptedImageRef.detail:type_name -> dolgorae.public.v2.ImageDetail
+	207, // 435: dolgorae.public.v2.AcceptedTaskIdentity.task_body:type_name -> dolgorae.public.v2.BytesRef
+	235, // 436: dolgorae.public.v2.AcceptedTaskIdentity.contexts:type_name -> dolgorae.public.v2.ContextRef
+	236, // 437: dolgorae.public.v2.AcceptedTaskIdentity.images:type_name -> dolgorae.public.v2.AcceptedImageRef
+	57,  // 438: dolgorae.public.v2.AcceptedTaskIdentity.execution_intent:type_name -> dolgorae.public.v2.CreationMode
+	235, // 439: dolgorae.public.v2.StructuredTaskBody.context:type_name -> dolgorae.public.v2.ContextRef
+	239, // 440: dolgorae.public.v2.StructuredTaskBody.criteria:type_name -> dolgorae.public.v2.TaskCriterion
+	238, // 441: dolgorae.public.v2.TaskInput.structured:type_name -> dolgorae.public.v2.StructuredTaskBody
+	237, // 442: dolgorae.public.v2.TaskInput.identity:type_name -> dolgorae.public.v2.AcceptedTaskIdentity
+	66,  // 443: dolgorae.public.v2.ChangeRef.kind:type_name -> dolgorae.public.v2.AcceptedChangeKind
+	207, // 444: dolgorae.public.v2.ChangeRef.before:type_name -> dolgorae.public.v2.BytesRef
+	207, // 445: dolgorae.public.v2.ChangeRef.after:type_name -> dolgorae.public.v2.BytesRef
+	241, // 446: dolgorae.public.v2.CompleteResultIdentity.source:type_name -> dolgorae.public.v2.ResultSource
+	64,  // 447: dolgorae.public.v2.CompleteResultIdentity.terminal_outcome:type_name -> dolgorae.public.v2.TaskOutcome
+	207, // 448: dolgorae.public.v2.CompleteResultIdentity.final_response:type_name -> dolgorae.public.v2.BytesRef
+	207, // 449: dolgorae.public.v2.CompleteResultIdentity.structured_output:type_name -> dolgorae.public.v2.BytesRef
+	242, // 450: dolgorae.public.v2.CompleteResultIdentity.changes:type_name -> dolgorae.public.v2.ChangeRef
+	235, // 451: dolgorae.public.v2.CompleteResultIdentity.attachments:type_name -> dolgorae.public.v2.ContextRef
+	207, // 452: dolgorae.public.v2.ContentRef.content:type_name -> dolgorae.public.v2.BytesRef
+	195, // 453: dolgorae.public.v2.ContentRef.artifact:type_name -> dolgorae.public.v2.ArtifactRef
+	89,  // 454: dolgorae.public.v2.ContentRef.unavailable:type_name -> dolgorae.public.v2.UnavailableContent
+	73,  // 455: dolgorae.public.v2.ContentRef.artifact_owner:type_name -> dolgorae.public.v2.RunRef
+	243, // 456: dolgorae.public.v2.CompleteResult.identity:type_name -> dolgorae.public.v2.CompleteResultIdentity
+	244, // 457: dolgorae.public.v2.CompleteResult.final_response:type_name -> dolgorae.public.v2.ContentRef
+	244, // 458: dolgorae.public.v2.CompleteResult.structured_output:type_name -> dolgorae.public.v2.ContentRef
+	244, // 459: dolgorae.public.v2.CompleteResult.change_contents:type_name -> dolgorae.public.v2.ContentRef
+	244, // 460: dolgorae.public.v2.CompleteResult.attachment_contents:type_name -> dolgorae.public.v2.ContentRef
+	234, // 461: dolgorae.public.v2.DelegationIdentity.scope:type_name -> dolgorae.public.v2.DelegationScope
+	65,  // 462: dolgorae.public.v2.DelegationIdentity.disposition:type_name -> dolgorae.public.v2.MemberDisposition
+	221, // 463: dolgorae.public.v2.DelegationIdentity.accepted_operation:type_name -> dolgorae.public.v2.OperationRef
+	232, // 464: dolgorae.public.v2.ExternalDelegationIdentity.scope:type_name -> dolgorae.public.v2.ExternalScope
+	75,  // 465: dolgorae.public.v2.ExternalDelegationIdentity.external_controller:type_name -> dolgorae.public.v2.ControllerProjection
+	246, // 466: dolgorae.public.v2.ExternalDelegationIdentity.facts:type_name -> dolgorae.public.v2.DelegationIdentity
+	233, // 467: dolgorae.public.v2.ManagedDelegationIdentity.scope:type_name -> dolgorae.public.v2.ManagedScope
+	73,  // 468: dolgorae.public.v2.ManagedDelegationIdentity.root_primary_run:type_name -> dolgorae.public.v2.RunRef
+	73,  // 469: dolgorae.public.v2.ManagedDelegationIdentity.specialist_run:type_name -> dolgorae.public.v2.RunRef
+	246, // 470: dolgorae.public.v2.ManagedDelegationIdentity.facts:type_name -> dolgorae.public.v2.DelegationIdentity
+	65,  // 471: dolgorae.public.v2.MemberProjection.disposition:type_name -> dolgorae.public.v2.MemberDisposition
+	246, // 472: dolgorae.public.v2.MemberProjection.identity:type_name -> dolgorae.public.v2.DelegationIdentity
+	73,  // 473: dolgorae.public.v2.MemberProjection.run:type_name -> dolgorae.public.v2.RunRef
+	80,  // 474: dolgorae.public.v2.MemberProjection.recovery:type_name -> dolgorae.public.v2.RecoveryProjection
+	64,  // 475: dolgorae.public.v2.TaskProjection.outcome:type_name -> dolgorae.public.v2.TaskOutcome
+	237, // 476: dolgorae.public.v2.TaskProjection.identity:type_name -> dolgorae.public.v2.AcceptedTaskIdentity
+	245, // 477: dolgorae.public.v2.TaskProjection.result:type_name -> dolgorae.public.v2.CompleteResult
+	80,  // 478: dolgorae.public.v2.TaskProjection.recovery:type_name -> dolgorae.public.v2.RecoveryProjection
+	232, // 479: dolgorae.public.v2.ExternalEngagementProjection.scope:type_name -> dolgorae.public.v2.ExternalScope
+	75,  // 480: dolgorae.public.v2.ExternalEngagementProjection.controller:type_name -> dolgorae.public.v2.ControllerProjection
+	52,  // 481: dolgorae.public.v2.ExternalEngagementProjection.close_progress:type_name -> dolgorae.public.v2.SessionCloseProgress
+	80,  // 482: dolgorae.public.v2.ExternalEngagementProjection.recovery:type_name -> dolgorae.public.v2.RecoveryProjection
+	70,  // 483: dolgorae.public.v2.OpenExternalEngagementRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	72,  // 484: dolgorae.public.v2.OpenExternalEngagementRequest.workspace:type_name -> dolgorae.public.v2.WorkspaceRef
+	231, // 485: dolgorae.public.v2.OpenExternalEngagementRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
+	71,  // 486: dolgorae.public.v2.OpenExternalEngagementResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	251, // 487: dolgorae.public.v2.OpenExternalEngagementResponse.engagement:type_name -> dolgorae.public.v2.ExternalEngagementProjection
+	223, // 488: dolgorae.public.v2.OpenExternalEngagementResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
+	70,  // 489: dolgorae.public.v2.GetExternalEngagementRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	232, // 490: dolgorae.public.v2.GetExternalEngagementRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
+	74,  // 491: dolgorae.public.v2.GetExternalEngagementRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	71,  // 492: dolgorae.public.v2.GetExternalEngagementResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	251, // 493: dolgorae.public.v2.GetExternalEngagementResponse.engagement:type_name -> dolgorae.public.v2.ExternalEngagementProjection
+	70,  // 494: dolgorae.public.v2.HireExternalSpecialistRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	232, // 495: dolgorae.public.v2.HireExternalSpecialistRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
+	231, // 496: dolgorae.public.v2.HireExternalSpecialistRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
+	214, // 497: dolgorae.public.v2.HireExternalSpecialistRequest.provisioning:type_name -> dolgorae.public.v2.ProvisioningSelection
+	212, // 498: dolgorae.public.v2.HireExternalSpecialistRequest.instructions:type_name -> dolgorae.public.v2.CapturedInstructions
+	71,  // 499: dolgorae.public.v2.HireExternalSpecialistResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	249, // 500: dolgorae.public.v2.HireExternalSpecialistResponse.member:type_name -> dolgorae.public.v2.MemberProjection
+	247, // 501: dolgorae.public.v2.HireExternalSpecialistResponse.identity:type_name -> dolgorae.public.v2.ExternalDelegationIdentity
+	223, // 502: dolgorae.public.v2.HireExternalSpecialistResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
+	70,  // 503: dolgorae.public.v2.AssignExternalSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	232, // 504: dolgorae.public.v2.AssignExternalSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
+	231, // 505: dolgorae.public.v2.AssignExternalSpecialistTaskRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
+	240, // 506: dolgorae.public.v2.AssignExternalSpecialistTaskRequest.task:type_name -> dolgorae.public.v2.TaskInput
+	71,  // 507: dolgorae.public.v2.AssignExternalSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	250, // 508: dolgorae.public.v2.AssignExternalSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
+	247, // 509: dolgorae.public.v2.AssignExternalSpecialistTaskResponse.identity:type_name -> dolgorae.public.v2.ExternalDelegationIdentity
+	223, // 510: dolgorae.public.v2.AssignExternalSpecialistTaskResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
+	70,  // 511: dolgorae.public.v2.AwaitExternalSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	232, // 512: dolgorae.public.v2.AwaitExternalSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
+	74,  // 513: dolgorae.public.v2.AwaitExternalSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	71,  // 514: dolgorae.public.v2.AwaitExternalSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	250, // 515: dolgorae.public.v2.AwaitExternalSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
+	70,  // 516: dolgorae.public.v2.CollectExternalSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	232, // 517: dolgorae.public.v2.CollectExternalSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
+	74,  // 518: dolgorae.public.v2.CollectExternalSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	71,  // 519: dolgorae.public.v2.CollectExternalSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	250, // 520: dolgorae.public.v2.CollectExternalSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
+	247, // 521: dolgorae.public.v2.CollectExternalSpecialistTaskResponse.identity:type_name -> dolgorae.public.v2.ExternalDelegationIdentity
+	70,  // 522: dolgorae.public.v2.CancelExternalSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	232, // 523: dolgorae.public.v2.CancelExternalSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
+	74,  // 524: dolgorae.public.v2.CancelExternalSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	71,  // 525: dolgorae.public.v2.CancelExternalSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	250, // 526: dolgorae.public.v2.CancelExternalSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
+	70,  // 527: dolgorae.public.v2.ReleaseExternalSpecialistRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	232, // 528: dolgorae.public.v2.ReleaseExternalSpecialistRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
+	74,  // 529: dolgorae.public.v2.ReleaseExternalSpecialistRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	71,  // 530: dolgorae.public.v2.ReleaseExternalSpecialistResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	249, // 531: dolgorae.public.v2.ReleaseExternalSpecialistResponse.member:type_name -> dolgorae.public.v2.MemberProjection
+	70,  // 532: dolgorae.public.v2.CloseExternalEngagementRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	232, // 533: dolgorae.public.v2.CloseExternalEngagementRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
+	74,  // 534: dolgorae.public.v2.CloseExternalEngagementRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	71,  // 535: dolgorae.public.v2.CloseExternalEngagementResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	251, // 536: dolgorae.public.v2.CloseExternalEngagementResponse.engagement:type_name -> dolgorae.public.v2.ExternalEngagementProjection
+	70,  // 537: dolgorae.public.v2.GetExternalDelegationIdentityRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	232, // 538: dolgorae.public.v2.GetExternalDelegationIdentityRequest.scope:type_name -> dolgorae.public.v2.ExternalScope
+	74,  // 539: dolgorae.public.v2.GetExternalDelegationIdentityRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	221, // 540: dolgorae.public.v2.GetExternalDelegationIdentityRequest.accepted_operation:type_name -> dolgorae.public.v2.OperationRef
+	71,  // 541: dolgorae.public.v2.GetExternalDelegationIdentityResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	247, // 542: dolgorae.public.v2.GetExternalDelegationIdentityResponse.identity:type_name -> dolgorae.public.v2.ExternalDelegationIdentity
+	70,  // 543: dolgorae.public.v2.SpawnSpecialistRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	233, // 544: dolgorae.public.v2.SpawnSpecialistRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
+	231, // 545: dolgorae.public.v2.SpawnSpecialistRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
+	214, // 546: dolgorae.public.v2.SpawnSpecialistRequest.provisioning:type_name -> dolgorae.public.v2.ProvisioningSelection
+	212, // 547: dolgorae.public.v2.SpawnSpecialistRequest.instructions:type_name -> dolgorae.public.v2.CapturedInstructions
+	71,  // 548: dolgorae.public.v2.SpawnSpecialistResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	249, // 549: dolgorae.public.v2.SpawnSpecialistResponse.member:type_name -> dolgorae.public.v2.MemberProjection
+	248, // 550: dolgorae.public.v2.SpawnSpecialistResponse.identity:type_name -> dolgorae.public.v2.ManagedDelegationIdentity
+	223, // 551: dolgorae.public.v2.SpawnSpecialistResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
+	70,  // 552: dolgorae.public.v2.AssignSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	233, // 553: dolgorae.public.v2.AssignSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
+	231, // 554: dolgorae.public.v2.AssignSpecialistTaskRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
+	240, // 555: dolgorae.public.v2.AssignSpecialistTaskRequest.task:type_name -> dolgorae.public.v2.TaskInput
+	71,  // 556: dolgorae.public.v2.AssignSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	250, // 557: dolgorae.public.v2.AssignSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
+	248, // 558: dolgorae.public.v2.AssignSpecialistTaskResponse.identity:type_name -> dolgorae.public.v2.ManagedDelegationIdentity
+	223, // 559: dolgorae.public.v2.AssignSpecialistTaskResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
+	70,  // 560: dolgorae.public.v2.AwaitSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	233, // 561: dolgorae.public.v2.AwaitSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
+	74,  // 562: dolgorae.public.v2.AwaitSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	71,  // 563: dolgorae.public.v2.AwaitSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	250, // 564: dolgorae.public.v2.AwaitSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
+	70,  // 565: dolgorae.public.v2.CollectSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	233, // 566: dolgorae.public.v2.CollectSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
+	74,  // 567: dolgorae.public.v2.CollectSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	71,  // 568: dolgorae.public.v2.CollectSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	250, // 569: dolgorae.public.v2.CollectSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
+	248, // 570: dolgorae.public.v2.CollectSpecialistTaskResponse.identity:type_name -> dolgorae.public.v2.ManagedDelegationIdentity
+	70,  // 571: dolgorae.public.v2.CancelSpecialistTaskRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	233, // 572: dolgorae.public.v2.CancelSpecialistTaskRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
+	74,  // 573: dolgorae.public.v2.CancelSpecialistTaskRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	71,  // 574: dolgorae.public.v2.CancelSpecialistTaskResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	250, // 575: dolgorae.public.v2.CancelSpecialistTaskResponse.task:type_name -> dolgorae.public.v2.TaskProjection
+	70,  // 576: dolgorae.public.v2.ReleaseSpecialistRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	233, // 577: dolgorae.public.v2.ReleaseSpecialistRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
+	74,  // 578: dolgorae.public.v2.ReleaseSpecialistRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	71,  // 579: dolgorae.public.v2.ReleaseSpecialistResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	249, // 580: dolgorae.public.v2.ReleaseSpecialistResponse.member:type_name -> dolgorae.public.v2.MemberProjection
+	70,  // 581: dolgorae.public.v2.GetManagedDelegationIdentityRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	233, // 582: dolgorae.public.v2.GetManagedDelegationIdentityRequest.scope:type_name -> dolgorae.public.v2.ManagedScope
+	74,  // 583: dolgorae.public.v2.GetManagedDelegationIdentityRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	221, // 584: dolgorae.public.v2.GetManagedDelegationIdentityRequest.accepted_operation:type_name -> dolgorae.public.v2.OperationRef
+	71,  // 585: dolgorae.public.v2.GetManagedDelegationIdentityResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	248, // 586: dolgorae.public.v2.GetManagedDelegationIdentityResponse.identity:type_name -> dolgorae.public.v2.ManagedDelegationIdentity
+	286, // 587: dolgorae.public.v2.GroupAssignmentIdentity.entries:type_name -> dolgorae.public.v2.GroupAssignmentEntry
+	64,  // 588: dolgorae.public.v2.GroupSource.state:type_name -> dolgorae.public.v2.TaskOutcome
+	287, // 589: dolgorae.public.v2.GroupProjection.assignment:type_name -> dolgorae.public.v2.GroupAssignmentIdentity
+	288, // 590: dolgorae.public.v2.GroupProjection.coverage:type_name -> dolgorae.public.v2.GroupSource
+	67,  // 591: dolgorae.public.v2.WaitPredicate.kind:type_name -> dolgorae.public.v2.WaitPredicateKind
+	207, // 592: dolgorae.public.v2.GroupTaskSource.content:type_name -> dolgorae.public.v2.BytesRef
+	70,  // 593: dolgorae.public.v2.AssignGroupRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	234, // 594: dolgorae.public.v2.AssignGroupRequest.scope:type_name -> dolgorae.public.v2.DelegationScope
+	231, // 595: dolgorae.public.v2.AssignGroupRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
+	287, // 596: dolgorae.public.v2.AssignGroupRequest.assignment:type_name -> dolgorae.public.v2.GroupAssignmentIdentity
+	291, // 597: dolgorae.public.v2.AssignGroupRequest.inputs:type_name -> dolgorae.public.v2.GroupTaskSource
+	71,  // 598: dolgorae.public.v2.AssignGroupResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	289, // 599: dolgorae.public.v2.AssignGroupResponse.group:type_name -> dolgorae.public.v2.GroupProjection
+	223, // 600: dolgorae.public.v2.AssignGroupResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
+	70,  // 601: dolgorae.public.v2.AwaitGroupRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	234, // 602: dolgorae.public.v2.AwaitGroupRequest.scope:type_name -> dolgorae.public.v2.DelegationScope
+	74,  // 603: dolgorae.public.v2.AwaitGroupRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	290, // 604: dolgorae.public.v2.AwaitGroupRequest.predicate:type_name -> dolgorae.public.v2.WaitPredicate
+	71,  // 605: dolgorae.public.v2.AwaitGroupResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	289, // 606: dolgorae.public.v2.AwaitGroupResponse.group:type_name -> dolgorae.public.v2.GroupProjection
+	70,  // 607: dolgorae.public.v2.CollectGroupRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	234, // 608: dolgorae.public.v2.CollectGroupRequest.scope:type_name -> dolgorae.public.v2.DelegationScope
+	74,  // 609: dolgorae.public.v2.CollectGroupRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	71,  // 610: dolgorae.public.v2.CollectGroupResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	289, // 611: dolgorae.public.v2.CollectGroupResponse.group:type_name -> dolgorae.public.v2.GroupProjection
+	245, // 612: dolgorae.public.v2.CollectGroupResponse.results:type_name -> dolgorae.public.v2.CompleteResult
+	244, // 613: dolgorae.public.v2.CollectGroupResponse.source_manifest:type_name -> dolgorae.public.v2.ContentRef
+	299, // 614: dolgorae.public.v2.PinnedEvidence.commit_blob:type_name -> dolgorae.public.v2.CommitBlobEvidence
+	300, // 615: dolgorae.public.v2.PinnedEvidence.git_object:type_name -> dolgorae.public.v2.GitObjectEvidence
+	235, // 616: dolgorae.public.v2.PinnedEvidence.accepted_context:type_name -> dolgorae.public.v2.ContextRef
+	298, // 617: dolgorae.public.v2.StructuredFinding.evidence:type_name -> dolgorae.public.v2.PinnedEvidence
+	301, // 618: dolgorae.public.v2.StructuredFindings.findings:type_name -> dolgorae.public.v2.StructuredFinding
+	288, // 619: dolgorae.public.v2.FindingSource.source:type_name -> dolgorae.public.v2.GroupSource
+	301, // 620: dolgorae.public.v2.FindingSource.finding:type_name -> dolgorae.public.v2.StructuredFinding
+	303, // 621: dolgorae.public.v2.FindingSet.entries:type_name -> dolgorae.public.v2.FindingSource
+	303, // 622: dolgorae.public.v2.FindingConflict.claims:type_name -> dolgorae.public.v2.FindingSource
+	288, // 623: dolgorae.public.v2.MergedFindings.sources:type_name -> dolgorae.public.v2.GroupSource
+	304, // 624: dolgorae.public.v2.MergedFindings.findings:type_name -> dolgorae.public.v2.FindingSet
+	305, // 625: dolgorae.public.v2.MergedFindings.conflicts:type_name -> dolgorae.public.v2.FindingConflict
+	288, // 626: dolgorae.public.v2.MergedFindings.missing_sources:type_name -> dolgorae.public.v2.GroupSource
+	288, // 627: dolgorae.public.v2.MergedFindingsIdentity.sources:type_name -> dolgorae.public.v2.GroupSource
+	207, // 628: dolgorae.public.v2.MergedFindingsIdentity.merged_output:type_name -> dolgorae.public.v2.BytesRef
+	70,  // 629: dolgorae.public.v2.MergeGroupResultsRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	234, // 630: dolgorae.public.v2.MergeGroupResultsRequest.scope:type_name -> dolgorae.public.v2.DelegationScope
+	231, // 631: dolgorae.public.v2.MergeGroupResultsRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
+	288, // 632: dolgorae.public.v2.MergeGroupResultsRequest.sources:type_name -> dolgorae.public.v2.GroupSource
+	71,  // 633: dolgorae.public.v2.MergeGroupResultsResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	307, // 634: dolgorae.public.v2.MergeGroupResultsResponse.identity:type_name -> dolgorae.public.v2.MergedFindingsIdentity
+	244, // 635: dolgorae.public.v2.MergeGroupResultsResponse.merged_output:type_name -> dolgorae.public.v2.ContentRef
+	223, // 636: dolgorae.public.v2.MergeGroupResultsResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
+	70,  // 637: dolgorae.public.v2.AssignSynthesisRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	234, // 638: dolgorae.public.v2.AssignSynthesisRequest.scope:type_name -> dolgorae.public.v2.DelegationScope
+	231, // 639: dolgorae.public.v2.AssignSynthesisRequest.admission:type_name -> dolgorae.public.v2.KeyedAdmission
+	240, // 640: dolgorae.public.v2.AssignSynthesisRequest.task:type_name -> dolgorae.public.v2.TaskInput
+	71,  // 641: dolgorae.public.v2.AssignSynthesisResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	250, // 642: dolgorae.public.v2.AssignSynthesisResponse.task:type_name -> dolgorae.public.v2.TaskProjection
+	223, // 643: dolgorae.public.v2.AssignSynthesisResponse.receipt:type_name -> dolgorae.public.v2.OperationReceipt
+	246, // 644: dolgorae.public.v2.AssignSynthesisResponse.identity:type_name -> dolgorae.public.v2.DelegationIdentity
+	72,  // 645: dolgorae.public.v2.MaintenanceScope.workspace:type_name -> dolgorae.public.v2.WorkspaceRef
+	312, // 646: dolgorae.public.v2.MaintenancePlan.scope:type_name -> dolgorae.public.v2.MaintenanceScope
+	68,  // 647: dolgorae.public.v2.MaintenancePlan.kind:type_name -> dolgorae.public.v2.MaintenanceKind
+	314, // 648: dolgorae.public.v2.MaintenanceProjection.plan:type_name -> dolgorae.public.v2.MaintenancePlan
+	69,  // 649: dolgorae.public.v2.MaintenanceProjection.state:type_name -> dolgorae.public.v2.MaintenanceState
+	70,  // 650: dolgorae.public.v2.PlanMaintenanceRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	312, // 651: dolgorae.public.v2.PlanMaintenanceRequest.scope:type_name -> dolgorae.public.v2.MaintenanceScope
+	313, // 652: dolgorae.public.v2.PlanMaintenanceRequest.operator:type_name -> dolgorae.public.v2.OperatorCarrierRef
+	68,  // 653: dolgorae.public.v2.PlanMaintenanceRequest.kind:type_name -> dolgorae.public.v2.MaintenanceKind
+	71,  // 654: dolgorae.public.v2.PlanMaintenanceResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	314, // 655: dolgorae.public.v2.PlanMaintenanceResponse.plan:type_name -> dolgorae.public.v2.MaintenancePlan
+	70,  // 656: dolgorae.public.v2.ApplyMaintenanceRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	313, // 657: dolgorae.public.v2.ApplyMaintenanceRequest.operator:type_name -> dolgorae.public.v2.OperatorCarrierRef
+	314, // 658: dolgorae.public.v2.ApplyMaintenanceRequest.plan:type_name -> dolgorae.public.v2.MaintenancePlan
+	71,  // 659: dolgorae.public.v2.ApplyMaintenanceResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	315, // 660: dolgorae.public.v2.ApplyMaintenanceResponse.maintenance:type_name -> dolgorae.public.v2.MaintenanceProjection
+	70,  // 661: dolgorae.public.v2.GetMaintenanceRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	312, // 662: dolgorae.public.v2.GetMaintenanceRequest.scope:type_name -> dolgorae.public.v2.MaintenanceScope
+	313, // 663: dolgorae.public.v2.GetMaintenanceRequest.operator:type_name -> dolgorae.public.v2.OperatorCarrierRef
+	71,  // 664: dolgorae.public.v2.GetMaintenanceResponse.context:type_name -> dolgorae.public.v2.ResponseContext
+	315, // 665: dolgorae.public.v2.GetMaintenanceResponse.maintenance:type_name -> dolgorae.public.v2.MaintenanceProjection
+	154, // 666: dolgorae.public.v2.McpElicitationInteraction.questions:type_name -> dolgorae.public.v2.InteractionQuestion
+	39,  // 667: dolgorae.public.v2.InteractionAnswer.decision:type_name -> dolgorae.public.v2.InteractionDecision
+	325, // 668: dolgorae.public.v2.InteractionAnswer.answers:type_name -> dolgorae.public.v2.QuestionAnswer
+	326, // 669: dolgorae.public.v2.InteractionAnswer.protected_input:type_name -> dolgorae.public.v2.ProtectedInputRef
+	22,  // 670: dolgorae.public.v2.WriterBusyDiagnostic.authority_state:type_name -> dolgorae.public.v2.WriterAuthorityState
+	221, // 671: dolgorae.public.v2.ClosedStartOperation.operation:type_name -> dolgorae.public.v2.OperationRef
+	70,  // 672: dolgorae.public.v2.ReconcileStartOperationRequest.context:type_name -> dolgorae.public.v2.RequestContext
+	74,  // 673: dolgorae.public.v2.ReconcileStartOperationRequest.controller:type_name -> dolgorae.public.v2.ControllerCarrierRef
+	221, // 674: dolgorae.public.v2.ReconcileStartOperationRequest.operation:type_name -> dolgorae.public.v2.OperationRef
+	92,  // 675: dolgorae.public.v2.RuntimeService.GetCapabilities:input_type -> dolgorae.public.v2.GetCapabilitiesRequest
+	106, // 676: dolgorae.public.v2.RuntimeService.InspectWorkspace:input_type -> dolgorae.public.v2.InspectWorkspaceRequest
+	109, // 677: dolgorae.public.v2.RuntimeService.ListProfiles:input_type -> dolgorae.public.v2.ListProfilesRequest
+	113, // 678: dolgorae.public.v2.RuntimeService.GetProfile:input_type -> dolgorae.public.v2.GetProfileRequest
+	115, // 679: dolgorae.public.v2.RuntimeService.ListProfileDiagnostics:input_type -> dolgorae.public.v2.ListProfileDiagnosticsRequest
+	118, // 680: dolgorae.public.v2.RunService.StartRun:input_type -> dolgorae.public.v2.StartRunRequest
+	120, // 681: dolgorae.public.v2.RunService.ListRuns:input_type -> dolgorae.public.v2.ListRunsRequest
+	122, // 682: dolgorae.public.v2.RunService.GetRun:input_type -> dolgorae.public.v2.GetRunRequest
+	125, // 683: dolgorae.public.v2.RunService.SubmitTurn:input_type -> dolgorae.public.v2.SubmitTurnRequest
+	127, // 684: dolgorae.public.v2.RunService.InterruptTurn:input_type -> dolgorae.public.v2.InterruptTurnRequest
+	128, // 685: dolgorae.public.v2.RunService.SetDefaultEffort:input_type -> dolgorae.public.v2.SetDefaultEffortRequest
+	129, // 686: dolgorae.public.v2.RunService.PauseRun:input_type -> dolgorae.public.v2.PauseRunRequest
+	130, // 687: dolgorae.public.v2.RunService.ResumeRun:input_type -> dolgorae.public.v2.ResumeRunRequest
+	131, // 688: dolgorae.public.v2.RunService.CloseRun:input_type -> dolgorae.public.v2.CloseRunRequest
+	132, // 689: dolgorae.public.v2.RunService.DeleteRun:input_type -> dolgorae.public.v2.DeleteRunRequest
+	134, // 690: dolgorae.public.v2.RunService.RecoverRun:input_type -> dolgorae.public.v2.RecoverRunRequest
+	135, // 691: dolgorae.public.v2.RunService.ReconcileRun:input_type -> dolgorae.public.v2.ReconcileRunRequest
+	137, // 692: dolgorae.public.v2.RunService.ForkRun:input_type -> dolgorae.public.v2.ForkRunRequest
+	138, // 693: dolgorae.public.v2.RunService.VerifyRun:input_type -> dolgorae.public.v2.VerifyRunRequest
+	140, // 694: dolgorae.public.v2.RunService.CreateWriteContinuation:input_type -> dolgorae.public.v2.CreateWriteContinuationRequest
+	143, // 695: dolgorae.public.v2.ObservationService.WatchRunEvents:input_type -> dolgorae.public.v2.WatchRunEventsRequest
+	175, // 696: dolgorae.public.v2.ObservationService.ListRunTimelineItems:input_type -> dolgorae.public.v2.ListRunTimelineItemsRequest
+	179, // 697: dolgorae.public.v2.InteractionService.ListPendingInteractions:input_type -> dolgorae.public.v2.ListPendingInteractionsRequest
+	181, // 698: dolgorae.public.v2.InteractionService.GetControllerInteraction:input_type -> dolgorae.public.v2.GetControllerInteractionRequest
+	183, // 699: dolgorae.public.v2.InteractionService.ResolveInteraction:input_type -> dolgorae.public.v2.ResolveInteractionRequest
+	185, // 700: dolgorae.public.v2.WriterService.GetWorkspaceWriterStatus:input_type -> dolgorae.public.v2.GetWorkspaceWriterStatusRequest
+	187, // 701: dolgorae.public.v2.WriterService.AcquireWriter:input_type -> dolgorae.public.v2.AcquireWriterRequest
+	188, // 702: dolgorae.public.v2.WriterService.ReleaseWriter:input_type -> dolgorae.public.v2.ReleaseWriterRequest
+	189, // 703: dolgorae.public.v2.WriterService.PrepareWriterHandoff:input_type -> dolgorae.public.v2.PrepareWriterHandoffRequest
+	190, // 704: dolgorae.public.v2.WriterService.CommitWriterHandoff:input_type -> dolgorae.public.v2.CommitWriterHandoffRequest
+	191, // 705: dolgorae.public.v2.WriterService.CancelWriterHandoff:input_type -> dolgorae.public.v2.CancelWriterHandoffRequest
+	193, // 706: dolgorae.public.v2.ControllerService.VerifyController:input_type -> dolgorae.public.v2.VerifyControllerRequest
+	196, // 707: dolgorae.public.v2.ArtifactService.GetArtifact:input_type -> dolgorae.public.v2.GetArtifactRequest
+	198, // 708: dolgorae.public.v2.ArtifactService.ReadArtifactChunk:input_type -> dolgorae.public.v2.ReadArtifactChunkRequest
+	201, // 709: dolgorae.public.v2.OrchestrationService.GetOrchestratedSession:input_type -> dolgorae.public.v2.GetOrchestratedSessionRequest
+	204, // 710: dolgorae.public.v2.OrchestrationService.ListOrchestratedSessionResults:input_type -> dolgorae.public.v2.ListOrchestratedSessionResultsRequest
+	224, // 711: dolgorae.public.v2.OperationService.LookupOperation:input_type -> dolgorae.public.v2.LookupOperationRequest
+	331, // 712: dolgorae.public.v2.OperationService.ReconcileStartOperation:input_type -> dolgorae.public.v2.ReconcileStartOperationRequest
+	216, // 713: dolgorae.public.v2.ProvisioningService.ValidateProvisioning:input_type -> dolgorae.public.v2.ValidateProvisioningRequest
+	218, // 714: dolgorae.public.v2.ProvisioningService.InstallProvisioning:input_type -> dolgorae.public.v2.InstallProvisioningRequest
+	252, // 715: dolgorae.public.v2.SpecialistService.OpenExternalEngagement:input_type -> dolgorae.public.v2.OpenExternalEngagementRequest
+	254, // 716: dolgorae.public.v2.SpecialistService.GetExternalEngagement:input_type -> dolgorae.public.v2.GetExternalEngagementRequest
+	256, // 717: dolgorae.public.v2.SpecialistService.HireExternalSpecialist:input_type -> dolgorae.public.v2.HireExternalSpecialistRequest
+	258, // 718: dolgorae.public.v2.SpecialistService.AssignExternalSpecialistTask:input_type -> dolgorae.public.v2.AssignExternalSpecialistTaskRequest
+	260, // 719: dolgorae.public.v2.SpecialistService.AwaitExternalSpecialistTask:input_type -> dolgorae.public.v2.AwaitExternalSpecialistTaskRequest
+	262, // 720: dolgorae.public.v2.SpecialistService.CollectExternalSpecialistTask:input_type -> dolgorae.public.v2.CollectExternalSpecialistTaskRequest
+	264, // 721: dolgorae.public.v2.SpecialistService.CancelExternalSpecialistTask:input_type -> dolgorae.public.v2.CancelExternalSpecialistTaskRequest
+	266, // 722: dolgorae.public.v2.SpecialistService.ReleaseExternalSpecialist:input_type -> dolgorae.public.v2.ReleaseExternalSpecialistRequest
+	268, // 723: dolgorae.public.v2.SpecialistService.CloseExternalEngagement:input_type -> dolgorae.public.v2.CloseExternalEngagementRequest
+	270, // 724: dolgorae.public.v2.SpecialistService.GetExternalDelegationIdentity:input_type -> dolgorae.public.v2.GetExternalDelegationIdentityRequest
+	272, // 725: dolgorae.public.v2.BrokerService.SpawnSpecialist:input_type -> dolgorae.public.v2.SpawnSpecialistRequest
+	274, // 726: dolgorae.public.v2.BrokerService.AssignSpecialistTask:input_type -> dolgorae.public.v2.AssignSpecialistTaskRequest
+	276, // 727: dolgorae.public.v2.BrokerService.AwaitSpecialistTask:input_type -> dolgorae.public.v2.AwaitSpecialistTaskRequest
+	278, // 728: dolgorae.public.v2.BrokerService.CollectSpecialistTask:input_type -> dolgorae.public.v2.CollectSpecialistTaskRequest
+	280, // 729: dolgorae.public.v2.BrokerService.CancelSpecialistTask:input_type -> dolgorae.public.v2.CancelSpecialistTaskRequest
+	282, // 730: dolgorae.public.v2.BrokerService.ReleaseSpecialist:input_type -> dolgorae.public.v2.ReleaseSpecialistRequest
+	284, // 731: dolgorae.public.v2.BrokerService.GetManagedDelegationIdentity:input_type -> dolgorae.public.v2.GetManagedDelegationIdentityRequest
+	292, // 732: dolgorae.public.v2.GroupService.AssignGroup:input_type -> dolgorae.public.v2.AssignGroupRequest
+	294, // 733: dolgorae.public.v2.GroupService.AwaitGroup:input_type -> dolgorae.public.v2.AwaitGroupRequest
+	296, // 734: dolgorae.public.v2.GroupService.CollectGroup:input_type -> dolgorae.public.v2.CollectGroupRequest
+	308, // 735: dolgorae.public.v2.GroupService.MergeGroupResults:input_type -> dolgorae.public.v2.MergeGroupResultsRequest
+	310, // 736: dolgorae.public.v2.GroupService.AssignSynthesis:input_type -> dolgorae.public.v2.AssignSynthesisRequest
+	316, // 737: dolgorae.public.v2.MaintenanceService.PlanMaintenance:input_type -> dolgorae.public.v2.PlanMaintenanceRequest
+	318, // 738: dolgorae.public.v2.MaintenanceService.ApplyMaintenance:input_type -> dolgorae.public.v2.ApplyMaintenanceRequest
+	320, // 739: dolgorae.public.v2.MaintenanceService.GetMaintenance:input_type -> dolgorae.public.v2.GetMaintenanceRequest
+	105, // 740: dolgorae.public.v2.RuntimeService.GetCapabilities:output_type -> dolgorae.public.v2.GetCapabilitiesResponse
+	108, // 741: dolgorae.public.v2.RuntimeService.InspectWorkspace:output_type -> dolgorae.public.v2.InspectWorkspaceResponse
+	112, // 742: dolgorae.public.v2.RuntimeService.ListProfiles:output_type -> dolgorae.public.v2.ListProfilesResponse
+	114, // 743: dolgorae.public.v2.RuntimeService.GetProfile:output_type -> dolgorae.public.v2.GetProfileResponse
+	117, // 744: dolgorae.public.v2.RuntimeService.ListProfileDiagnostics:output_type -> dolgorae.public.v2.ListProfileDiagnosticsResponse
+	119, // 745: dolgorae.public.v2.RunService.StartRun:output_type -> dolgorae.public.v2.StartRunResponse
+	121, // 746: dolgorae.public.v2.RunService.ListRuns:output_type -> dolgorae.public.v2.ListRunsResponse
+	123, // 747: dolgorae.public.v2.RunService.GetRun:output_type -> dolgorae.public.v2.GetRunResponse
+	126, // 748: dolgorae.public.v2.RunService.SubmitTurn:output_type -> dolgorae.public.v2.SubmitTurnAccepted
+	136, // 749: dolgorae.public.v2.RunService.InterruptTurn:output_type -> dolgorae.public.v2.RunMutationResponse
+	136, // 750: dolgorae.public.v2.RunService.SetDefaultEffort:output_type -> dolgorae.public.v2.RunMutationResponse
+	136, // 751: dolgorae.public.v2.RunService.PauseRun:output_type -> dolgorae.public.v2.RunMutationResponse
+	136, // 752: dolgorae.public.v2.RunService.ResumeRun:output_type -> dolgorae.public.v2.RunMutationResponse
+	136, // 753: dolgorae.public.v2.RunService.CloseRun:output_type -> dolgorae.public.v2.RunMutationResponse
+	133, // 754: dolgorae.public.v2.RunService.DeleteRun:output_type -> dolgorae.public.v2.DeleteRunResponse
+	136, // 755: dolgorae.public.v2.RunService.RecoverRun:output_type -> dolgorae.public.v2.RunMutationResponse
+	136, // 756: dolgorae.public.v2.RunService.ReconcileRun:output_type -> dolgorae.public.v2.RunMutationResponse
+	119, // 757: dolgorae.public.v2.RunService.ForkRun:output_type -> dolgorae.public.v2.StartRunResponse
+	139, // 758: dolgorae.public.v2.RunService.VerifyRun:output_type -> dolgorae.public.v2.VerifyRunResponse
+	142, // 759: dolgorae.public.v2.RunService.CreateWriteContinuation:output_type -> dolgorae.public.v2.CreateWriteContinuationResponse
+	172, // 760: dolgorae.public.v2.ObservationService.WatchRunEvents:output_type -> dolgorae.public.v2.RunEventEnvelope
+	176, // 761: dolgorae.public.v2.ObservationService.ListRunTimelineItems:output_type -> dolgorae.public.v2.ListRunTimelineItemsResponse
+	180, // 762: dolgorae.public.v2.InteractionService.ListPendingInteractions:output_type -> dolgorae.public.v2.ListPendingInteractionsResponse
+	182, // 763: dolgorae.public.v2.InteractionService.GetControllerInteraction:output_type -> dolgorae.public.v2.GetControllerInteractionResponse
+	184, // 764: dolgorae.public.v2.InteractionService.ResolveInteraction:output_type -> dolgorae.public.v2.ResolveInteractionResponse
+	186, // 765: dolgorae.public.v2.WriterService.GetWorkspaceWriterStatus:output_type -> dolgorae.public.v2.GetWorkspaceWriterStatusResponse
+	87,  // 766: dolgorae.public.v2.WriterService.AcquireWriter:output_type -> dolgorae.public.v2.WriterState
+	87,  // 767: dolgorae.public.v2.WriterService.ReleaseWriter:output_type -> dolgorae.public.v2.WriterState
+	192, // 768: dolgorae.public.v2.WriterService.PrepareWriterHandoff:output_type -> dolgorae.public.v2.WriterHandoffResponse
+	192, // 769: dolgorae.public.v2.WriterService.CommitWriterHandoff:output_type -> dolgorae.public.v2.WriterHandoffResponse
+	192, // 770: dolgorae.public.v2.WriterService.CancelWriterHandoff:output_type -> dolgorae.public.v2.WriterHandoffResponse
+	194, // 771: dolgorae.public.v2.ControllerService.VerifyController:output_type -> dolgorae.public.v2.VerifyControllerResponse
+	197, // 772: dolgorae.public.v2.ArtifactService.GetArtifact:output_type -> dolgorae.public.v2.GetArtifactResponse
+	199, // 773: dolgorae.public.v2.ArtifactService.ReadArtifactChunk:output_type -> dolgorae.public.v2.ReadArtifactChunkResponse
+	202, // 774: dolgorae.public.v2.OrchestrationService.GetOrchestratedSession:output_type -> dolgorae.public.v2.GetOrchestratedSessionResponse
+	205, // 775: dolgorae.public.v2.OrchestrationService.ListOrchestratedSessionResults:output_type -> dolgorae.public.v2.ListOrchestratedSessionResultsResponse
+	229, // 776: dolgorae.public.v2.OperationService.LookupOperation:output_type -> dolgorae.public.v2.LookupOperationResponse
+	229, // 777: dolgorae.public.v2.OperationService.ReconcileStartOperation:output_type -> dolgorae.public.v2.LookupOperationResponse
+	217, // 778: dolgorae.public.v2.ProvisioningService.ValidateProvisioning:output_type -> dolgorae.public.v2.ValidateProvisioningResponse
+	219, // 779: dolgorae.public.v2.ProvisioningService.InstallProvisioning:output_type -> dolgorae.public.v2.InstallProvisioningResponse
+	253, // 780: dolgorae.public.v2.SpecialistService.OpenExternalEngagement:output_type -> dolgorae.public.v2.OpenExternalEngagementResponse
+	255, // 781: dolgorae.public.v2.SpecialistService.GetExternalEngagement:output_type -> dolgorae.public.v2.GetExternalEngagementResponse
+	257, // 782: dolgorae.public.v2.SpecialistService.HireExternalSpecialist:output_type -> dolgorae.public.v2.HireExternalSpecialistResponse
+	259, // 783: dolgorae.public.v2.SpecialistService.AssignExternalSpecialistTask:output_type -> dolgorae.public.v2.AssignExternalSpecialistTaskResponse
+	261, // 784: dolgorae.public.v2.SpecialistService.AwaitExternalSpecialistTask:output_type -> dolgorae.public.v2.AwaitExternalSpecialistTaskResponse
+	263, // 785: dolgorae.public.v2.SpecialistService.CollectExternalSpecialistTask:output_type -> dolgorae.public.v2.CollectExternalSpecialistTaskResponse
+	265, // 786: dolgorae.public.v2.SpecialistService.CancelExternalSpecialistTask:output_type -> dolgorae.public.v2.CancelExternalSpecialistTaskResponse
+	267, // 787: dolgorae.public.v2.SpecialistService.ReleaseExternalSpecialist:output_type -> dolgorae.public.v2.ReleaseExternalSpecialistResponse
+	269, // 788: dolgorae.public.v2.SpecialistService.CloseExternalEngagement:output_type -> dolgorae.public.v2.CloseExternalEngagementResponse
+	271, // 789: dolgorae.public.v2.SpecialistService.GetExternalDelegationIdentity:output_type -> dolgorae.public.v2.GetExternalDelegationIdentityResponse
+	273, // 790: dolgorae.public.v2.BrokerService.SpawnSpecialist:output_type -> dolgorae.public.v2.SpawnSpecialistResponse
+	275, // 791: dolgorae.public.v2.BrokerService.AssignSpecialistTask:output_type -> dolgorae.public.v2.AssignSpecialistTaskResponse
+	277, // 792: dolgorae.public.v2.BrokerService.AwaitSpecialistTask:output_type -> dolgorae.public.v2.AwaitSpecialistTaskResponse
+	279, // 793: dolgorae.public.v2.BrokerService.CollectSpecialistTask:output_type -> dolgorae.public.v2.CollectSpecialistTaskResponse
+	281, // 794: dolgorae.public.v2.BrokerService.CancelSpecialistTask:output_type -> dolgorae.public.v2.CancelSpecialistTaskResponse
+	283, // 795: dolgorae.public.v2.BrokerService.ReleaseSpecialist:output_type -> dolgorae.public.v2.ReleaseSpecialistResponse
+	285, // 796: dolgorae.public.v2.BrokerService.GetManagedDelegationIdentity:output_type -> dolgorae.public.v2.GetManagedDelegationIdentityResponse
+	293, // 797: dolgorae.public.v2.GroupService.AssignGroup:output_type -> dolgorae.public.v2.AssignGroupResponse
+	295, // 798: dolgorae.public.v2.GroupService.AwaitGroup:output_type -> dolgorae.public.v2.AwaitGroupResponse
+	297, // 799: dolgorae.public.v2.GroupService.CollectGroup:output_type -> dolgorae.public.v2.CollectGroupResponse
+	309, // 800: dolgorae.public.v2.GroupService.MergeGroupResults:output_type -> dolgorae.public.v2.MergeGroupResultsResponse
+	311, // 801: dolgorae.public.v2.GroupService.AssignSynthesis:output_type -> dolgorae.public.v2.AssignSynthesisResponse
+	317, // 802: dolgorae.public.v2.MaintenanceService.PlanMaintenance:output_type -> dolgorae.public.v2.PlanMaintenanceResponse
+	319, // 803: dolgorae.public.v2.MaintenanceService.ApplyMaintenance:output_type -> dolgorae.public.v2.ApplyMaintenanceResponse
+	321, // 804: dolgorae.public.v2.MaintenanceService.GetMaintenance:output_type -> dolgorae.public.v2.GetMaintenanceResponse
+	740, // [740:805] is the sub-list for method output_type
+	675, // [675:740] is the sub-list for method input_type
+	675, // [675:675] is the sub-list for extension type_name
+	675, // [675:675] is the sub-list for extension extendee
+	0,   // [0:675] is the sub-list for field type_name
 }
 
 func init() { file_dolgorae_public_v2_dolgorae_proto_init() }
@@ -28405,6 +28572,7 @@ func file_dolgorae_public_v2_dolgorae_proto_init() {
 		(*LookupOperationResponse_NotAccepted)(nil),
 		(*LookupOperationResponse_Unresolved)(nil),
 		(*LookupOperationResponse_Absent)(nil),
+		(*LookupOperationResponse_ClosedWithoutAcceptance)(nil),
 	}
 	file_dolgorae_public_v2_dolgorae_proto_msgTypes[161].OneofWrappers = []any{}
 	file_dolgorae_public_v2_dolgorae_proto_msgTypes[164].OneofWrappers = []any{
@@ -28444,7 +28612,7 @@ func file_dolgorae_public_v2_dolgorae_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dolgorae_public_v2_dolgorae_proto_rawDesc), len(file_dolgorae_public_v2_dolgorae_proto_rawDesc)),
 			NumEnums:      70,
-			NumMessages:   260,
+			NumMessages:   262,
 			NumExtensions: 0,
 			NumServices:   14,
 		},

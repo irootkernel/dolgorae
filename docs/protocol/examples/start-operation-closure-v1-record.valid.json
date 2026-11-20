@@ -1,0 +1,15 @@
+{
+  "schema_version": 4,
+  "schema": "dolgorae.start-operation-closure/v1",
+  "namespace": {
+    "controller_principal": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "controller_generation": 1,
+    "workspace_ref": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "scope_kind": null,
+    "scope_ref": null,
+    "operation_kind": "start_run",
+    "idempotency_key": "closed-start-example"
+  },
+  "closure_id": "00000000-0000-7000-8000-000000000001",
+  "receipt_digest": "sha256:ca49a7c59cd2c4d75d24647e6e292fc8266f22baac454a6deaf2f65edd5557f6"
+}

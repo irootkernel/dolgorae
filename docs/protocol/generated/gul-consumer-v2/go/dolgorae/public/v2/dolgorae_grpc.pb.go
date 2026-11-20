@@ -1903,7 +1903,8 @@ var OrchestrationService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	OperationService_LookupOperation_FullMethodName = "/dolgorae.public.v2.OperationService/LookupOperation"
+	OperationService_LookupOperation_FullMethodName         = "/dolgorae.public.v2.OperationService/LookupOperation"
+	OperationService_ReconcileStartOperation_FullMethodName = "/dolgorae.public.v2.OperationService/ReconcileStartOperation"
 )
 
 // OperationServiceClient is the client API for OperationService service.
@@ -1911,6 +1912,8 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type OperationServiceClient interface {
 	LookupOperation(ctx context.Context, in *LookupOperationRequest, opts ...grpc.CallOption) (*LookupOperationResponse, error)
+	// Explicitly reconcile one original pre-allocation Start, without redispatch.
+	ReconcileStartOperation(ctx context.Context, in *ReconcileStartOperationRequest, opts ...grpc.CallOption) (*LookupOperationResponse, error)
 }
 
 type operationServiceClient struct {
@@ -1931,11 +1934,23 @@ func (c *operationServiceClient) LookupOperation(ctx context.Context, in *Lookup
 	return out, nil
 }
 
+func (c *operationServiceClient) ReconcileStartOperation(ctx context.Context, in *ReconcileStartOperationRequest, opts ...grpc.CallOption) (*LookupOperationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LookupOperationResponse)
+	err := c.cc.Invoke(ctx, OperationService_ReconcileStartOperation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // OperationServiceServer is the server API for OperationService service.
 // All implementations must embed UnimplementedOperationServiceServer
 // for forward compatibility.
 type OperationServiceServer interface {
 	LookupOperation(context.Context, *LookupOperationRequest) (*LookupOperationResponse, error)
+	// Explicitly reconcile one original pre-allocation Start, without redispatch.
+	ReconcileStartOperation(context.Context, *ReconcileStartOperationRequest) (*LookupOperationResponse, error)
 	mustEmbedUnimplementedOperationServiceServer()
 }
 
@@ -1948,6 +1963,9 @@ type UnimplementedOperationServiceServer struct{}
 
 func (UnimplementedOperationServiceServer) LookupOperation(context.Context, *LookupOperationRequest) (*LookupOperationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method LookupOperation not implemented")
+}
+func (UnimplementedOperationServiceServer) ReconcileStartOperation(context.Context, *ReconcileStartOperationRequest) (*LookupOperationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReconcileStartOperation not implemented")
 }
 func (UnimplementedOperationServiceServer) mustEmbedUnimplementedOperationServiceServer() {}
 func (UnimplementedOperationServiceServer) testEmbeddedByValue()                          {}
@@ -1988,6 +2006,24 @@ func _OperationService_LookupOperation_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OperationService_ReconcileStartOperation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReconcileStartOperationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OperationServiceServer).ReconcileStartOperation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OperationService_ReconcileStartOperation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OperationServiceServer).ReconcileStartOperation(ctx, req.(*ReconcileStartOperationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // OperationService_ServiceDesc is the grpc.ServiceDesc for OperationService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1998,6 +2034,10 @@ var OperationService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "LookupOperation",
 			Handler:    _OperationService_LookupOperation_Handler,
+		},
+		{
+			MethodName: "ReconcileStartOperation",
+			Handler:    _OperationService_ReconcileStartOperation_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

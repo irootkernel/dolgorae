@@ -471,6 +471,7 @@ impl<C: LedgerClock + 'static, F: FaultInjector + 'static> Ledger<C, F> {
             ));
         }
         let root = root.into();
+        crate::run_deletion::require_live_at(&root, run_id).map_err(machine_as_security)?;
         let workspace_lease = crate::ledger_generation::WorkspaceLease::for_run(&root)?;
         let audit_path = root.join("audit.jsonl");
         let state_path = root.join("state.json");
@@ -2524,11 +2525,9 @@ impl ObservedLedger {
         run_id: Uuid,
         head: u64,
     ) -> Result<Self, LedgerError> {
-        Self::open_display(
-            &state_root.join("runs").join(run_id.to_string()),
-            run_id,
-            head,
-        )
+        let root = crate::run::run_root(state_root, run_id);
+        crate::run_deletion::require_live_at(&root, run_id).map_err(machine_as_security)?;
+        Self::open_display(&root, run_id, head)
     }
 
     /// Shared adapter admission for the same committed Run prefix.
@@ -2537,12 +2536,9 @@ impl ObservedLedger {
         run_id: Uuid,
         head: u64,
     ) -> Result<Self, crate::machine::MachineError> {
-        Self::open(
-            &state_root.join("runs").join(run_id.to_string()),
-            run_id,
-            head,
-        )
-        .map_err(|error| match error {
+        let root = crate::run::run_root(state_root, run_id);
+        crate::run_deletion::require_live_at(&root, run_id)?;
+        Self::open(&root, run_id, head).map_err(|error| match error {
             LedgerError::Capacity(reason) => crate::machine::MachineError::new(
                 "STORAGE_CAPACITY_EXCEEDED",
                 reason,

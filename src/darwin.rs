@@ -587,6 +587,33 @@ struct ProcBsdInfo {
     start_tvusec: u64,
 }
 
+#[repr(C)]
+struct PipeFdInfo {
+    flags: u32,
+    status: u32,
+    offset: i64,
+    kind: i32,
+    guard_flags: u32,
+    stat: libc::vinfo_stat,
+    handle: u64,
+    peer: u64,
+    pipe_status: i32,
+    reserved: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PipeEndpoint {
+    pub handle: u64,
+    pub peer: u64,
+    pub reads: bool,
+}
+
+impl PipeEndpoint {
+    pub fn connects(self, other: Self) -> bool {
+        self.handle == other.peer && self.peer == other.handle && self.reads != other.reads
+    }
+}
+
 #[link(name = "proc")]
 unsafe extern "C" {
     fn proc_pidpath(pid: libc::c_int, buffer: *mut libc::c_void, buffer_size: u32) -> libc::c_int;
@@ -769,9 +796,9 @@ fn resample_census_observed(
     })
 }
 
-fn resample_incoherent_census(
-    mut sample: impl FnMut() -> Result<Vec<ProcessCensusEntry>, std::io::Error>,
-) -> Result<Vec<ProcessCensusEntry>, std::io::Error> {
+fn resample_incoherent_census<T>(
+    mut sample: impl FnMut() -> Result<T, std::io::Error>,
+) -> Result<T, std::io::Error> {
     for _ in 0..2 {
         match sample() {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -1249,38 +1276,151 @@ impl DarwinSystem {
         }
     }
 
+    fn short_process_info(self, pid: u32) -> Result<ProcBsdShortInfo, std::io::Error> {
+        let mut info = MaybeUninit::<ProcBsdShortInfo>::zeroed();
+        let size = std::mem::size_of::<ProcBsdShortInfo>() as libc::c_int;
+        // SAFETY: no value is inspected until the kernel fills the exact buffer.
+        let read = unsafe {
+            proc_pidinfo(
+                pid as libc::c_int,
+                PROC_PIDT_SHORTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if read != size {
+            return Err(if read <= 0 {
+                std::io::Error::last_os_error()
+            } else {
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "short process census entry",
+                )
+            });
+        }
+        // SAFETY: the kernel filled the entire structure.
+        Ok(unsafe { info.assume_init() })
+    }
+
+    pub(crate) fn pipe_endpoint(self, pid: u32, fd: i32) -> Option<PipeEndpoint> {
+        const PROC_PIDFDPIPEINFO: i32 = 6;
+        let mut info = MaybeUninit::<PipeFdInfo>::zeroed();
+        let size = std::mem::size_of::<PipeFdInfo>() as i32;
+        // SAFETY: the buffer matches the Darwin pipe_fdinfo ABI.
+        let read = unsafe {
+            libc::proc_pidfdinfo(
+                pid as i32,
+                fd,
+                PROC_PIDFDPIPEINFO,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if read != size {
+            return None;
+        }
+        // SAFETY: the kernel filled the entire structure.
+        let info = unsafe { info.assume_init() };
+        let direction = info.flags & 3; // Darwin FREAD and FWRITE.
+        (matches!(direction, 1 | 2)
+            && info.handle != 0
+            && info.peer != 0
+            && info.handle != info.peer)
+            .then_some(PipeEndpoint {
+                handle: info.handle,
+                peer: info.peer,
+                reads: direction == 1,
+            })
+    }
+
+    pub(crate) fn pipe_endpoints(self, pid: u32) -> Option<Vec<PipeEndpoint>> {
+        const PROX_FDTYPE_PIPE: u32 = 6;
+        let mut entries = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0
+            };
+            128
+        ];
+        loop {
+            let size = (entries.len() * std::mem::size_of::<libc::proc_fdinfo>()) as i32;
+            // SAFETY: entries is initialized storage for exactly size bytes.
+            let read = unsafe {
+                proc_pidinfo(
+                    pid as i32,
+                    libc::PROC_PIDLISTFDS,
+                    0,
+                    entries.as_mut_ptr().cast(),
+                    size,
+                )
+            };
+            if read <= 0 || read > size || read % libc::PROC_PIDLISTFD_SIZE != 0 {
+                return None;
+            }
+            if read < size {
+                entries.truncate((read / libc::PROC_PIDLISTFD_SIZE) as usize);
+                return Some(
+                    entries
+                        .into_iter()
+                        .filter(|fd| fd.proc_fdtype == PROX_FDTYPE_PIPE)
+                        .filter_map(|fd| self.pipe_endpoint(pid, fd.proc_fd))
+                        .collect(),
+                );
+            }
+            if entries.len() >= 8192 {
+                return None;
+            }
+            entries.resize(
+                entries.len() * 2,
+                libc::proc_fdinfo {
+                    proc_fd: 0,
+                    proc_fdtype: 0,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn startup_setuid_ps(self, process: &ProcessCensusEntry, real_uid: u32) -> bool {
+        if process.uid != 0 || process.birth.is_some() {
+            return false;
+        }
+        match self.short_process_info(process.pid) {
+            Ok(short)
+                if short.pid == process.pid
+                    && short.parent_pid == process.parent_pid
+                    && short.process_group_id == process.process_group_id
+                    && short.uid == 0
+                    && short.saved_uid == 0
+                    && short.real_uid == real_uid
+                    && short.command.starts_with(&[b'p' as _, b's' as _, 0]) =>
+            {
+                let image_matches = self
+                    .live_process_path(process.pid)
+                    .is_some_and(|path| path == Path::new("/bin/ps"));
+                match self.short_process_info(process.pid) {
+                    Ok(current) => image_matches && current == short,
+                    Err(error) => error.raw_os_error() == Some(libc::ESRCH),
+                }
+            }
+            Err(error) => error.raw_os_error() == Some(libc::ESRCH),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn process_census_identity(
+        self,
+        pid: u32,
+    ) -> Result<ProcessCensusEntry, std::io::Error> {
+        resample_incoherent_census(|| self.process_census_entry(pid, &mut |_, _| {}))
+    }
+
     fn process_census_entry(
         self,
         pid: u32,
         observe: &mut impl FnMut(&ProcBsdShortInfo, &'static str),
     ) -> Result<ProcessCensusEntry, std::io::Error> {
-        let read_short = || {
-            let mut info = MaybeUninit::<ProcBsdShortInfo>::zeroed();
-            let size = std::mem::size_of::<ProcBsdShortInfo>() as libc::c_int;
-            // SAFETY: the buffer has the exact short-BSD size. No value is
-            // inspected until the kernel returns that complete size.
-            let read = unsafe {
-                proc_pidinfo(
-                    pid as libc::c_int,
-                    PROC_PIDT_SHORTBSDINFO,
-                    0,
-                    info.as_mut_ptr().cast(),
-                    size,
-                )
-            };
-            if read != size {
-                return Err(if read <= 0 {
-                    std::io::Error::last_os_error()
-                } else {
-                    std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "short process census entry",
-                    )
-                });
-            }
-            // SAFETY: all bytes were initialized by the exact-size read.
-            Ok(unsafe { info.assume_init() })
-        };
+        let read_short = || self.short_process_info(pid);
         let before = read_short()?;
         if before.pid != pid {
             return Err(std::io::Error::new(
@@ -1767,6 +1907,16 @@ impl DarwinSystem {
         if unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) }
             != 0
         {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exchange_paths(self, first: &Path, second: &Path) -> Result<(), std::io::Error> {
+        let first = c_path(first)?;
+        let second = c_path(second)?;
+        // SAFETY: both NUL-terminated path arguments remain live through rename.
+        if unsafe { libc::renamex_np(first.as_ptr(), second.as_ptr(), libc::RENAME_SWAP) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
@@ -2765,7 +2915,7 @@ mod tests {
         assert_eq!(calls, 3);
 
         let mut calls = 0;
-        let refused = resample_incoherent_census(|| {
+        let refused = resample_incoherent_census::<()>(|| {
             calls += 1;
             Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
@@ -2779,7 +2929,7 @@ mod tests {
 
         for code in [libc::EPERM, libc::EACCES, libc::EIO] {
             let mut calls = 0;
-            let refused = resample_incoherent_census(|| {
+            let refused = resample_incoherent_census::<()>(|| {
                 calls += 1;
                 Err(std::io::Error::from_raw_os_error(code))
             })
@@ -2788,7 +2938,7 @@ mod tests {
             assert_eq!(refused.raw_os_error(), Some(code));
         }
         let mut calls = 0;
-        let refused = resample_incoherent_census(|| {
+        let refused = resample_incoherent_census::<()>(|| {
             calls += 1;
             Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,

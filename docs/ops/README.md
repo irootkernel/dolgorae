@@ -406,6 +406,12 @@ separate roadmap obligations.
 
 ## Retained Close and executable changes
 
+When recovering a Run with `startup_ownership_incomplete`, retain its process
+and socket records and any Writer guard for operator investigation. The Run
+requires complete ownership evidence before automatic generation recovery or
+Writer release can proceed. The producer reports an operator action and
+refuses repeated RecoverRun and ReconcileRun requests for this blocker.
+
 A pending Writer release remains fenced while public Run/Writer reads expose
 recovery and Unknown, unverified access. Use the current Controller and fresh
 Run revision with public-v2 RecoverRun/ReconcileRun, retaining the original Close
@@ -416,6 +422,50 @@ absent, recovery refuses with the same cause; preserve the original state.
 A prepared release with retained scope/history can resume the same operation
 after Worker loss. Check public CLOSED, released Writer authority, complete
 owned-generation absence and Profile retirement separately before teardown.
+
+For a failure during Caller Thread startup, retain the original Run and its
+Controller, Worker generation, and diagnostics. Use `GetRun` and
+`GetWorkspaceWriterStatus` to inspect current authority. An incomplete startup
+witness cannot prove that generation's process scope absent. A later binary, an
+empty public Thread field, and an empty current process list do not supply that
+proof. If recovery remains unresolved, preserve the Run and its membership
+until the Operator chooses whether to abandon it through force deletion.
+After the same Run reaches CLOSED and its Writer and process scope are released,
+the Profile Operator can use the non-interrupting `profile server stop` path
+with the recorded `--confirm-server-key`.
+
+The native removal path for an independent terminal Run is
+`dolgorae run delete <run-id> --workspace <path> --controller-file <path> --confirm`.
+Use the current Controller and an executable that implements this command.
+Confirm the terminal seal, Writer `none`, complete owned-generation absence
+and retired Profile membership first. A successful reply contains
+`data.deleted: true`, and a subsequent Run status returns `RUN_NOT_FOUND`.
+Following a lost response, the same confirmed command resumes removal under
+the original UUID. It retains the allocation tombstone and the Codex Thread.
+Continue using a producer that understands the deletion tombstone in that
+workspace. Earlier producers cannot reuse the UUID and can refuse inventory
+operations that encounter its tombstone.
+To abandon an independent open or unresolved Run and clean up its resources,
+use the current Operator credential and the canonical workspace ID.
+
+```sh
+dolgorae run delete <run-id> --workspace <path> --force --confirm \
+  --confirm-workspace-id <workspace-id> --operator-file <path>
+```
+
+With complete ownership evidence, the command stops the verified generation.
+It publishes the Run tombstone, releases the Run's Writer and Profile
+membership, and removes the detached Run data. The Codex thread and Start
+receipt remain. Repeat the command after an interrupted cleanup.
+If the recorded Worker and Dedicated Server are absent but startup ownership
+is incomplete, the command still deletes the Run and revokes its Writer.
+`runtime_cleanup_pending: true` means the runtime locator remains for cleanup.
+Repeat the same command after a verified boot change to retire that locator.
+An Orchestrated Session Primary is eligible when its original Start and policy
+binding are retained and its session has no Specialist dependencies or
+Controller close intent. Session state `aborted` records the Operator's
+abandonment. Check the force-delete result before treating physical cleanup
+as complete.
 
 Caller policy verification records a private `dolgorae.writer-census-failure/v1`
 diagnostic when the parent's final workload-absence proof fails. It uses the
@@ -829,7 +879,18 @@ the same accepted startup reservation and lifecycle services as Machine startup.
 Keep its original scope, Controller generation and key after response loss.
 `OperationService.LookupOperation` reads the retained Start or Submit owner without
 resubmitting. A Start with no retained completion receipt stays unresolved; a
-missing reservation alone is not authoritative absence. Submit absence uses its
+missing reservation alone is not authoritative absence. A numeric-validation
+fix does not retroactively settle an already-unknown Start. If lookup has no Run
+reference, explicitly call `OperationService.ReconcileStartOperation` with the
+original authenticated operation reference after negotiating its method and
+current descriptor. It performs no Start or Submit. A verified unaccepted key
+returns `closed_without_acceptance`; keep its closure receipt and never reuse
+that key. An accepted or unresolved result retains its original Run recovery
+requirements. Incomplete or corrupt retained evidence prevents closure.
+Do not infer non-dispatch from an empty Run list, stop successful Profiles as a
+substitute for operation settlement, modify managed state, or redispatch while
+reconciliation remains unresolved. Any separate new request needs its own
+normal authorization and admission. Submit absence uses its
 existing complete ledger/namespace proof. Renegotiate after a gateway restart. Modern Session Close/Recover/Reconcile retain the aggregate
 close owner and its operation identity. Public-v1 Run methods keep their legacy
 contract; mixed listing omits modern entries, while workspace Writer status can

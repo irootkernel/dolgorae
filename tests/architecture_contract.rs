@@ -388,6 +388,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "delegation_service",
                 "domain",
                 "engagement",
+                "global_profile", // Isolated global-generation setup for the force-delete CLI fixture.
                 "host_invocation",
                 "jcs",
                 "machine",
@@ -798,6 +799,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "jcs",
                 "machine",
                 "projection",
+                "run",
+                "run_deletion",
                 "workspace",
                 "ledger_generation",
             ][..],
@@ -1148,6 +1151,18 @@ fn source_module_dependencies_match_the_approved_graph() {
                 // `profile` is test-only: the unit-test helper builds a binding.
                 "profile",
                 "projection",
+                "run_deletion",
+                "workspace",
+            ][..],
+        ),
+        (
+            "run_deletion",
+            &[
+                "darwin",
+                "delegation_identity",
+                "domain",
+                "machine",
+                "run",
                 "workspace",
             ][..],
         ),
@@ -1218,6 +1233,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 // snapshots by the existing workspace enumeration bound.
                 "review_target",
                 "run",
+                "run_deletion",
                 "runtime",
                 "session_policy",
                 "snapshot",
@@ -1573,6 +1589,7 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "jcs",
                 "machine",
                 "run",
+                "run_deletion",
                 "workspace",
             ][..],
         ),
@@ -1591,6 +1608,8 @@ fn source_module_dependencies_match_the_approved_graph() {
                 "ledger",
                 "machine",
                 "orchestration",
+                "run",
+                "run_deletion",
                 "snapshot",
                 "workspace",
                 "group_quota",
@@ -1715,7 +1734,37 @@ fn source_module_dependencies_match_the_approved_graph() {
             "pool",
             &["darwin", "domain", "machine", "paths", "run", "workspace"][..],
         ),
+        // Test-only orchestration of storage and semantic recovery owners.
+        (
+            "start_reconciliation_tests",
+            &[
+                "delegation_identity",
+                "domain",
+                "engagement",
+                "jcs",
+                "machine",
+                "operation",
+                "orchestration",
+                "run",
+                "run_deletion",
+                "semantic",
+                "workspace",
+            ][..],
+        ),
         ("worker/companion", &["darwin", "global_runtime"][..]),
+        ("worker/profile_tools", &["darwin"][..]),
+        (
+            "worker/startup_abort",
+            &[
+                "codex_socket",
+                "conformance",
+                "darwin",
+                "domain",
+                "jcs",
+                "run",
+                "writer",
+            ][..],
+        ),
     ]);
 
     check_source_dependencies(&repository_root().join("src"), &approved);
@@ -1778,6 +1827,24 @@ fn check_source_dependencies(root: &Path, approved: &BTreeMap<&str, &[&str]>) {
         approved.keys().map(|name| (*name).to_owned()).collect(),
         "approved architecture entries must match the recursive source inventory"
     );
+}
+
+#[test]
+fn startup_abort_seal_authority_is_owned_by_the_retirement_module() {
+    let root = repository_root().join("src");
+    let constructor = "from_retired_startup_abort(";
+    let callers = source_modules(&root)
+        .into_iter()
+        .filter(|path| path != &root.join("conformance.rs"))
+        .filter_map(|path| {
+            let count = fs::read_to_string(&path)
+                .unwrap()
+                .matches(constructor)
+                .count();
+            (count != 0).then_some((path.strip_prefix(&root).unwrap().to_owned(), count))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(callers, vec![(PathBuf::from("worker/startup_abort.rs"), 2)]);
 }
 
 #[test]
