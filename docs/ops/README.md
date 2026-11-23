@@ -1111,18 +1111,18 @@ an isolated negative peer; it does not replace the selected Podway reader.
 ### Final EPIC-021 H3 release candidate (2026-11-23)
 
 The completed EPIC-021 (`TASK-093`/`TASK-094`) final immutable H3 release
-candidate is `dolgorae-gul-e16-h3-8d529950e597` (base commit
-`a6d1ce0d54d6336f2cff0f2725f71f576103ea45`, source patch SHA-256
-`27013582d220e627ca1e46846cf25faea8eeffb467ec62d213d4157d6af39212`, executable
-SHA-256 `8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168`,
+candidate is `dolgorae-gul-e16-h3-8fb6a3578ae3` (superseding
+`dolgorae-gul-e16-h3-8d529950e597`, base commit
+`4e7f7d12c4fe93f51bd342c17b8e30b2612a5c44`, source patch SHA-256
+`0aa0bf22fae79f2ddae9ae62c93727065e65a7e782652bb3287da0092d5d4974`, executable
+SHA-256 `8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c`,
 public-v2 descriptor SHA-256
 `c34b1da680ef7f8edfd8eb744047b0981311a4076b3c05c3d4adb4986565f8f5`, unchanged
 H1 lock SHA-256
 `5900393481ed200c6ef4eadab96b034d679f3e4cc6b0d42b764c4211c94a862a`).
-Operator operational note for Codex `0.169.0`: keep Gul's selected session
-reasoning effort aligned with the Profile `CODEX_HOME/config.toml` default;
-overriding effort on `turn/start` causes Codex `0.169.0` to emit an extra
-`thread/settings/updated` notification before `turn/start` returns, which
-Dolgorae's fail-closed CallerWorkspace guard classifies as `CorrelationMismatch`
-(`outcome_unknown`). Relaxing non-policy effort-only updates is tracked as a
-post-v0.1.4 follow-up.
+User-selected session and per-turn reasoning effort overrides differing from
+the Profile `CODEX_HOME/config.toml` default are supported on Codex `>=0.169.0`:
+`TurnCoordinator` admits at most one matching effort-only
+`thread/settings/updated` notification during an active `Running` turn while
+keeping `cwd`, `approvalPolicy`, `sandboxPolicy`, `model`, `threadId`, idle,
+and duplicate notifications strictly fail-closed (`CorrelationMismatch`).

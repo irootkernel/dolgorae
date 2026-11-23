@@ -2027,6 +2027,9 @@ pub struct TurnCoordinator<S, J, A> {
     /// The effort the active Turn was started with, so its terminal reports
     /// what it actually ran at rather than the Run's default.
     active_turn_effort: Option<String>,
+    /// At most one effort-only `thread/settings/updated` notification emitted
+    /// by Codex >=0.169.0 when `turn/start` overrides the thread's prior effort.
+    pending_turn_effort_update: Option<String>,
     active_operation_id: Option<Uuid>,
     recovery_turn_id: Option<String>,
     recovery_lifecycle: Option<RunLifecycle>,
@@ -2204,6 +2207,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             writer_generation: None,
             active_turn_id: None,
             active_turn_effort: None,
+            pending_turn_effort_update: None,
             active_operation_id: None,
             recovery_turn_id: None,
             recovery_lifecycle: None,
@@ -2656,6 +2660,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
         if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
             self.caller_startup_failure = None;
+            self.pending_turn_effort_update = None;
             if self.state != CoordinatorState::Idle || !self.pending.is_empty() {
                 return Err(TurnError::TurnBusy);
             }
@@ -2850,6 +2855,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         latest_turn_id: Option<String>,
     ) {
         self.thread_id = thread_id;
+        self.pending_turn_effort_update = None;
         self.recovery_turn_id = active_turn_id.or(latest_turn_id);
         self.recovery_lifecycle = Some(lifecycle);
         self.state = match lifecycle {
@@ -3255,6 +3261,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.state = CoordinatorState::Paused;
         self.active_turn_id = None;
         self.active_turn_effort = None;
+        self.pending_turn_effort_update = None;
         self.active_operation_id = None;
         self.recovery_turn_id = None;
     }
@@ -3285,6 +3292,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.pending.clear();
         self.active_turn_id = None;
         self.active_turn_effort = None;
+        self.pending_turn_effort_update = None;
         self.active_operation_id = None;
         Ok(())
     }
@@ -3842,6 +3850,8 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         })?;
         self.active_turn_id = Some(turn_id.clone());
         self.active_turn_effort = Some(effort.clone());
+        self.pending_turn_effort_update =
+            (self.safety_policy == SessionSafetyPolicy::CallerWorkspace).then(|| effort.clone());
         self.state = CoordinatorState::Running;
         let accepted = AcceptedTurn {
             thread_id,
@@ -4135,6 +4145,33 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         Ok(thread_id)
     }
 
+    fn admit_turn_effort_settings_update(&mut self, params: &Value) -> bool {
+        if self.state != CoordinatorState::Running {
+            return false;
+        }
+        let Some(expected_effort) = self.pending_turn_effort_update.take() else {
+            return false;
+        };
+        if params.get("threadId").and_then(Value::as_str) != self.thread_id.as_deref() {
+            return false;
+        }
+        let Some(settings) = params.get("threadSettings") else {
+            return false;
+        };
+        let sandbox = self.sandbox.clone();
+        let approval = self.approval_policy.clone();
+        if self
+            .check_workspace_settings(settings, &sandbox, &approval)
+            .is_err()
+        {
+            return false;
+        }
+        if settings.get("model").and_then(Value::as_str) != Some(self.fixed_model.as_str()) {
+            return false;
+        }
+        settings.get("effort").and_then(Value::as_str) == Some(expected_effort.as_str())
+    }
+
     fn check_workspace_settings(
         &mut self,
         settings: &Value,
@@ -4267,6 +4304,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
         self.active_turn_id = None;
         self.active_turn_effort = None;
+        self.pending_turn_effort_update = None;
         self.active_operation_id = None;
         self.state = CoordinatorState::OutcomeUnknown;
         self.recovery_lifecycle = Some(RunLifecycle::OutcomeUnknown);
@@ -4372,8 +4410,12 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             "thread/settings/updated"
                 if self.safety_policy == SessionSafetyPolicy::CallerWorkspace =>
             {
-                // A settings notification outside the serialized update is stale
-                // or duplicated; never let it qualify a later transition.
+                if self.admit_turn_effort_settings_update(&params) {
+                    return Ok(None);
+                }
+                // Any idle, duplicate, foreign-thread, or policy/model/effort-drifting
+                // settings notification remains fail-closed; never let it qualify a
+                // later transition.
                 Err(self.lost_after_write(Uuid::now_v7(), TurnError::CorrelationMismatch))
             }
             "item/started" => {
@@ -5969,6 +6011,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.terminal_turn_ids.insert(turn_id.clone());
         self.active_turn_id = None;
         self.active_turn_effort = None;
+        self.pending_turn_effort_update = None;
         self.active_operation_id = None;
         self.pending.clear();
         self.state = CoordinatorState::Idle;
@@ -9824,6 +9867,166 @@ pub(crate) mod tests {
                 .is_err()
         );
         assert_eq!(coordinator.server.calls.len(), before);
+    }
+
+    #[test]
+    fn caller_turn_start_admits_single_matching_effort_settings_update_and_preserves_policy_guards()
+    {
+        let effort_notification =
+            |thread_id: &str, write: bool, cwd: &str, model: &str, effort: &str| {
+                serde_json::json!({
+                    "method": "thread/settings/updated",
+                    "params": {
+                        "threadId": thread_id,
+                        "threadSettings": {
+                            "cwd": cwd,
+                            "model": model,
+                            "effort": effort,
+                            "approvalPolicy": if write { "on-request" } else { "never" },
+                            "sandboxPolicy": turn_sandbox(
+                                if write { "workspace-write" } else { "read-only" },
+                                Path::new("/tmp/workspace"),
+                            ),
+                        },
+                    },
+                })
+            };
+        let make_request = |key: &str, effort: &str| TurnRequest {
+            write: false,
+            idempotency_key: key.to_owned(),
+            message: format!("run with {effort}"),
+            images: Vec::new(),
+            model: "gpt-5".to_owned(),
+            effort: Some(effort.to_owned()),
+            delivery: DeliveryMode::Submit,
+        };
+
+        // Positive: Turn 1 (effort=low) and Turn 2 (effort=high) each accept
+        // one matching effort-only settings update while Running and settle cleanly.
+        let mut coordinator = caller_coordinator();
+        coordinator.supported_efforts = ["low", "medium", "high"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+        for (idx, effort) in [(1, "low"), (2, "high")] {
+            let turn_id = format!("turn-{idx}");
+            coordinator
+                .server
+                .replies
+                .push_back(Ok(serde_json::json!({"turn": {"id": turn_id}})));
+            let accepted = coordinator
+                .start_turn(make_request(&format!("key-{idx}"), effort))
+                .unwrap();
+            assert_eq!(accepted.effort, effort);
+            assert_eq!(coordinator.state(), &CoordinatorState::Running);
+            assert!(
+                coordinator
+                    .ingest(effort_notification(
+                        "caller-thread",
+                        false,
+                        "/tmp/workspace",
+                        "gpt-5",
+                        effort,
+                    ))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(coordinator.state(), &CoordinatorState::Running);
+            let terminal = coordinator
+                .ingest(serde_json::json!({
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "caller-thread",
+                        "turn": {
+                            "id": turn_id,
+                            "status": "completed",
+                            "items": [{"type": "agentMessage", "phase": "final_answer", "text": "ok"}],
+                        },
+                    },
+                }))
+                .unwrap()
+                .unwrap();
+            assert_eq!(terminal.effort, effort);
+            assert_eq!(coordinator.state(), &CoordinatorState::Idle);
+        }
+
+        // Negative 1: A duplicate second notification in the same Turn fails closed.
+        coordinator
+            .server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn": {"id": "turn-dup"}})));
+        coordinator
+            .start_turn(make_request("key-dup", "low"))
+            .unwrap();
+        assert!(
+            coordinator
+                .ingest(effort_notification(
+                    "caller-thread",
+                    false,
+                    "/tmp/workspace",
+                    "gpt-5",
+                    "low",
+                ))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            coordinator.ingest(effort_notification(
+                "caller-thread",
+                false,
+                "/tmp/workspace",
+                "gpt-5",
+                "low",
+            )),
+            Err(TurnError::CorrelationMismatch)
+        );
+        assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+
+        // Negative 2: Any mismatch in threadId, policy/access, cwd, model, or effort fails closed.
+        for (label, notification) in [
+            (
+                "foreign_thread",
+                effort_notification("other-thread", false, "/tmp/workspace", "gpt-5", "low"),
+            ),
+            (
+                "policy_escalation",
+                effort_notification("caller-thread", true, "/tmp/workspace", "gpt-5", "low"),
+            ),
+            (
+                "cwd_drift",
+                effort_notification("caller-thread", false, "/tmp/other", "gpt-5", "low"),
+            ),
+            (
+                "model_drift",
+                effort_notification("caller-thread", false, "/tmp/workspace", "gpt-6", "low"),
+            ),
+            (
+                "effort_mismatch",
+                effort_notification("caller-thread", false, "/tmp/workspace", "gpt-5", "high"),
+            ),
+        ] {
+            let mut c = caller_coordinator();
+            c.supported_efforts = ["low", "medium", "high"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            c.initialize_thread(Uuid::now_v7()).unwrap();
+            c.server
+                .replies
+                .push_back(Ok(serde_json::json!({"turn": {"id": "turn-neg"}})));
+            c.start_turn(make_request("key-neg", "low")).unwrap();
+            assert_eq!(
+                c.ingest(notification),
+                Err(TurnError::CorrelationMismatch),
+                "{label} must fail closed"
+            );
+            assert_eq!(
+                c.state(),
+                &CoordinatorState::OutcomeUnknown,
+                "{label} must quarantine run"
+            );
+        }
     }
 
     #[test]

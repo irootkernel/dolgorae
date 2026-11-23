@@ -1,0 +1,28 @@
+{
+  "schema": "aquarium.promoted-evidence/v1",
+  "work_unit": {
+    "kind": "task",
+    "id": "TASK-088"
+  },
+  "purpose": "gate-c-qualification",
+  "target": {
+    "git_head": "4e7f7d12c4fe93f51bd342c17b8e30b2612a5c44",
+    "capture_kind": "release-binary",
+    "content_sha256": "sha256:8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c"
+  },
+  "source": {
+    "tool": "dolgorae-epic022-gate-c-verifier"
+  },
+  "payloads": [
+    {
+      "path": "evidence/aquarium/EPIC-022/gate-c-qualification/8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c/matrix.json",
+      "media_type": "application/json",
+      "sha256": "sha256:b30ba72a3c7d4c4e6c401b52f42fc795a7781f3bd367b5ab82e30ca9e5715dd5"
+    },
+    {
+      "path": "evidence/aquarium/EPIC-022/gate-c-qualification/8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c/cross-verification.json",
+      "media_type": "application/json",
+      "sha256": "sha256:4d5511e9ea6d9155423e54b549e063a7ed7ce3f926fff0d8a34a125c6cea3066"
+    }
+  ]
+}

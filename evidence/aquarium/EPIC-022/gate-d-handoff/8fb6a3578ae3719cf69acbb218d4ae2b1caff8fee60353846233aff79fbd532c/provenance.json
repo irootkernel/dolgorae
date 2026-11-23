@@ -1,0 +1,46 @@
+{
+  "schema": "dolgorae.gate-d-provenance/v1",
+  "work_unit": "TASK-089",
+  "gate": "Gate D",
+  "release_pair": {
+    "dolgorae_target_version": "v0.1.4",
+    "gul_target_version": "v0.1.0"
+  },
+  "unqualified_rebuilds": 0,
+  "dolgorae_h3": {
+    "candidate_id": "dolgorae-gul-e16-h3-8fb6a3578ae3",
+    "git_base": "4e7f7d12c4fe93f51bd342c17b8e30b2612a5c44",
+    "source_patch_sha256": "sha256:0aa0bf22fae79f2ddae9ae62c93727065e65a7e782652bb3287da0092d5d4974",
+    "binary_sha256": "sha256:8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c",
+    "binary_size_bytes": 27965632,
+    "public_v2_descriptor_sha256": "sha256:c34b1da680ef7f8edfd8eb744047b0981311a4076b3c05c3d4adb4986565f8f5",
+    "native_caller_pipeline_sha256": "sha256:4fd3ef3ed3ed4b938341f2c134f3e7a0a79fd7285e977a305331208f9513d044",
+    "verification_json_sha256": "sha256:ece83dfb8879e8a54bfa1bf129d7ec2460e910f7f895f8a6b0a9ff87b7cddb19",
+    "target_release_matches_candidate": true
+  },
+  "gul_h4": {
+    "git_base": "a13fd9da78ba5af72fb256f5e67278986e4e45d9",
+    "release_app_executable_sha256": "sha256:b9d1750e9ec564f73fc11c92dd8be30d25c84818e6b333c837c7eeb1a70b2506",
+    "release_info_plist_sha256": "sha256:c99a136b69400ad91e46357a2f23508ff887543794d8803aa282ef320cb5225d",
+    "release_package_manifest_sha256": "sha256:64e5fe8722e8ffd4c87763a1c816a6252a77083da913bc57bd010b28b8ec6194",
+    "candidate_app_executable_sha256": "sha256:6cd9901ae3fefc17a5dbc01823277bade5f0a8bfa32d7313290b343ffcf541d2",
+    "candidate_info_plist_sha256": "sha256:23960846f73663b54ba4be47a9a189f005c17008c8bec4bddbe3acf08be3e268",
+    "candidate_package_manifest_sha256": "sha256:c2745bd95d16b51c8823b75c8dda0bbfe764d7dc7df128281251d7cd69300242",
+    "frontend_manifest_sha256": "sha256:b5cc0b862adb9aa35364270dde1d1e8e58085839ece8c90b36a9195be8f43132",
+    "contract_lock_sha256": "sha256:acd95a6f7aa236bd6425ed68afad5f6942dfbac51e7f5b60680e7cabcc047360"
+  },
+  "immutable_h1": {
+    "git_commit": "0927cbf87b0a3ba37c8509016c99f14c3f9f3c29",
+    "lock_sha256": "sha256:5900393481ed200c6ef4eadab96b034d679f3e4cc6b0d42b764c4211c94a862a",
+    "archive_sha256": "sha256:9b8427b6958b6ef9323dfcea1a512ee3ba070a9e594076613abfc98849012e3c"
+  },
+  "pinned_codex": {
+    "version": "0.169.0",
+    "executable_sha256": "sha256:739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002",
+    "companion_sha256": "sha256:10feae2abe764bcf2273e241ace67aecc360eb8c28a82a2988bf1d8498a9bacf"
+  },
+  "linked_gate_c_manifest": {
+    "path": "evidence/aquarium/EPIC-022/gate-c-qualification/8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c/manifest.json",
+    "sha256": "sha256:7f8f4f0628dbec47cacc16437cd7259fef8ec747ded799637573cbdb89db9ee8"
+  }
+}

@@ -398,9 +398,10 @@ suspend physical-device/performance checkpoints, and replace actual 24-hour/OS-s
 with injected-time boundary tests plus a 30-minute three-client functional
 campaign) and a private disposable workspace. H3 MUST bind the qualified
 execution runtime; a replacement requires impact assessment and affected
-requalification. On Codex `0.169.0`, the selected reasoning effort MUST match
-the Profile's `config.toml` default so `turn/start` does not trigger an extra
-`thread/settings/updated` notification outside the serialized settings update.
+requalification. On Codex `>=0.169.0`, user-selected session and per-turn
+reasoning effort overrides differing from the Profile `config.toml` default are
+supported through single-shot, policy-verified `thread/settings/updated`
+admission while preserving fail-closed policy, model, idle, and duplicate guards.
 The first task reads a fixture containing `alpha`, requests an actual supported
 approval to run a single bounded local command that writes `beta` to a designated
 scratch output, and returns both values. Gul supplies that approval through its

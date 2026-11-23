@@ -27,13 +27,15 @@ EPIC-023 is COMPLETE with Master's whole-Epic acceptance; TASK-090, TASK-091 and
 TASK-092 are COMPLETE. EPIC-020 and TASK-076 through TASK-079 are COMPLETE.
 EPIC-009 is COMPLETE. EPIC-021 (TASK-084 through TASK-087, TASK-093, and
 TASK-094) is COMPLETE with the final immutable H3 candidate
-(`dolgorae-gul-e16-h3-8d529950e597`, binary SHA-256
-`8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168`, base commit
-`a6d1ce0d54d6336f2cff0f2725f71f576103ea45`, source patch SHA-256
-`27013582d220e627ca1e46846cf25faea8eeffb467ec62d213d4157d6af39212`);
+(`dolgorae-gul-e16-h3-8fb6a3578ae3`, binary SHA-256
+`8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c`, base commit
+`4e7f7d12c4fe93f51bd342c17b8e30b2612a5c44`, source patch SHA-256
+`0aa0bf22fae79f2ddae9ae62c93727065e65a7e782652bb3287da0092d5d4974`, superseding
+`8d529950e597` to admit single-shot policy-verified `turn/start` effort overrides
+on Codex `>=0.169.0`);
 EPIC-022 (TASK-088 and TASK-089) is COMPLETE with independent three-consumer
 qualification (combined Gate C, unlocking actual-Gul `MILESTONE-BH1` for exact
-H3 `8d529950e597` paired with Gul H4 `b6f459aef6a1` / `7e7c0c8f71c3`) and Gate D
+H3 `8fb6a3578ae3` paired with Gul H4 `b9d1750e9ec5` / `6cd9901ae3fe`) and Gate D
 release-ready handoff provenance recorded in
 [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md).
 TASK-067 is COMPLETE; TASK-068 through TASK-079 are COMPLETE;
@@ -2837,14 +2839,17 @@ mailboxes without Primary message relay.
 Status: `COMPLETE`
 
 Reopened for TASK-093 and TASK-094 and completed on 2026-11-23 with the final
-immutable H3 candidate (`dolgorae-gul-e16-h3-8d529950e597`, binary SHA-256
-`8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168`, base commit
-`a6d1ce0d54d6336f2cff0f2725f71f576103ea45`, source patch SHA-256
-`27013582d220e627ca1e46846cf25faea8eeffb467ec62d213d4157d6af39212`), preserving
-the immutable H1 lock (`5900393481ed200c6ef4eadab96b034d679f3e4cc6b0d42b764c4211c94a862a`)
-and original TASK-087/TASK-093 history. Independent review (`R-D` PASS), all six
-accountless native caller pipeline suites on Codex `0.169.0`, and the full
-repository gate (`make PYTHON_BIN=.venv/bin/python TEST_THREADS=2 test`, exit 0)
+immutable H3 candidate (`dolgorae-gul-e16-h3-8fb6a3578ae3`, binary SHA-256
+`8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c`, base commit
+`4e7f7d12c4fe93f51bd342c17b8e30b2612a5c44`, source patch SHA-256
+`0aa0bf22fae79f2ddae9ae62c93727065e65a7e782652bb3287da0092d5d4974`, superseding
+`8d529950e597` to admit single-shot policy-verified `turn/start` effort overrides
+on Codex `>=0.169.0`), preserving the immutable H1 lock
+(`5900393481ed200c6ef4eadab96b034d679f3e4cc6b0d42b764c4211c94a862a`) and original
+TASK-087/TASK-093 history. Independent review (`R-D` PASS), all six accountless
+native caller pipeline suites plus real Codex `0.169.0` effort-override
+verification, and the full repository gate
+(`make PYTHON_BIN=.venv/bin/python TEST_THREADS=2 test`, `1,757` unit tests, exit 0)
 passed on the exact unchanged H3 executable.
 
 Canonical Outcomes: [delegation runtime](../specs/dolgorae-v014-delegation-runtime.md),
@@ -3022,7 +3027,7 @@ Epic acceptance: Groups, merge, synthesis, mandatory Aquarium/Podway mappings/ru
 
 Status: `COMPLETE`
 
-Canonical Outcomes: [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md), [Gate C promoted evidence](../../evidence/aquarium/EPIC-022/gate-c-qualification/8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168/manifest.json), and [Gate D promoted evidence](../../evidence/aquarium/EPIC-022/gate-d-handoff/8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168/manifest.json) (retaining the shared [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md) for historical references until separately retired)
+Canonical Outcomes: [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md), [Gate C promoted evidence](../../evidence/aquarium/EPIC-022/gate-c-qualification/8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c/manifest.json), and [Gate D promoted evidence](../../evidence/aquarium/EPIC-022/gate-d-handoff/8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c/manifest.json) (retaining the shared [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md) for historical references until separately retired)
 
 Goal: Independently accept Aquarium, Podway and Gul compatibility against the final Dolgorae artifact and exact Gul pair before either product is released.
 
@@ -3037,9 +3042,9 @@ Status: `COMPLETE`
 
 Depends on: completed TASK-087 and corrective TASK-093/TASK-094/EPIC-021, plus H4 from Gul's completed product/qualification Epic, including the intended Gul v0.1.0 artifact and complete own campaign evidence. No concurrent active Gul Task or reopened historical Task is required.
 
-Outcome: Independently validated Gul's Phase 4 campaign and promoted H4 evidence package against immutable H3 (`8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168`), immutable H4 (`Gul.app` `b6f459aef6a1f3c224d1dbd5b16e44e6376ba7dfee72595b9e1008215c156088` and `Gul Candidate.app` `7e7c0c8f71c30b8bb474dbb7ddf946c1009b88cf3a184d77a857d2b7991d904d`), immutable H1 (`0927cbf87b0a3ba37c8509016c99f14c3f9f3c29`), and pinned Codex `0.169.0` (`739cda86...`), and accepted all 18 rows (`AQ-01..06`, `PW-01..06`, `GU-01..06`) with explicit fresh-vs-inherited provenance and limits. Independent read-only audit (`R-D`) returned `GATE_C_PASS` with zero blocking findings and zero unqualified rebuilds.
+Outcome: Independently validated Gul's Phase 4 campaign and promoted H4 evidence package against immutable H3 (`8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c`), immutable H4 (`Gul.app` `b9d1750e9ec564f73fc11c92dd8be30d25c84818e6b333c837c7eeb1a70b2506` and `Gul Candidate.app` `6cd9901ae3fefc17a5dbc01823277bade5f0a8bfa32d7313290b343ffcf541d2`), immutable H1 (`0927cbf87b0a3ba37c8509016c99f14c3f9f3c29`), and pinned Codex `0.169.0` (`739cda86...`), and accepted all 18 rows (`AQ-01..06`, `PW-01..06`, `GU-01..06`) with explicit fresh-vs-inherited provenance and limits. Independent read-only audit (`R-D`) returned `GATE_C_PASS` with zero blocking findings and zero unqualified rebuilds.
 
-Verification: Checked exact artifact/runtime/contract checksums, verified on-disk deterministic accountless native `release-lifecycle` (11 Responses requests, 1 MCP decision, 2 closed Runs) and `release-history` (250 consecutive turns, bounded paging, `event_cursor: "1760"`), verified bounded isolated real-account execution (1 `CAN_EDIT` Session, 2 Turns, UI `ACCEPT_ONCE` command approval writing exact 29-byte `3c37b85c...`, Gul restart/reconnect, follow-up, normal UI Close settling to Dolgorae `closed` / `writer=none` / `audit.jsonl` `680aa67b...` / 0 surviving processes), and rechecked Aquarium/Podway applicability alongside fresh H3 `make test` and 6/6 `native_caller_pipeline` suites. Recorded in [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md) and the [Gate C promoted evidence](../../evidence/aquarium/EPIC-022/gate-c-qualification/8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168/manifest.json).
+Verification: Checked exact artifact/runtime/contract checksums, verified deterministic accountless native `release-lifecycle` (11 Responses requests, 1 MCP decision, 2 closed Runs), `release-history` (250 consecutive turns, bounded paging), accountless Codex `0.169.0` effort-override (`config.toml=high`, `low` -> `medium` -> `high`), bounded isolated real-account execution with `effort="low"` differing from `config.toml` default `high` (1 `CAN_EDIT` Session, 2 Turns, UI `ACCEPT_ONCE` command approval writing exact 40-byte `465824fa...`, Gul restart/reconnect, follow-up, normal UI Close settling to Dolgorae `closed` / `writer=none` / `audit.jsonl` `355e6019...` / 0 surviving processes), and rechecked Aquarium/Podway applicability alongside fresh H3 `make test` (`1,757` unit + int + e2e) and 6/6 `native_caller_pipeline` suites. Recorded in [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md) and the [Gate C promoted evidence](../../evidence/aquarium/EPIC-022/gate-c-qualification/8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c/manifest.json).
 
 Handoff: Combined Gate C passed and actual-Gul `MILESTONE-BH1` unlocked for the exact H3/H4 pair. Gul's client/UX acceptance remains its owner's result; provider correctness remains Dolgorae-owned. Publication remains pending.
 
@@ -3049,9 +3054,9 @@ Status: `COMPLETE`
 
 Depends on: completed TASK-088, the complete accepted Aquarium/Podway/Gul matrix, H3/H4 artifacts and both products' required repository gates/final QA with applicable consumer qualification gates. Gul product Epic closeout does not wait for TASK-088 or TASK-089.
 
-Outcome: Verified the already prepared immutable H3 Dolgorae (`8d529950e597`) and H4 Gul (`b6f459aef6a1` / `7e7c0c8f71c3`) artifacts with zero unqualified rebuilds, synchronized `CHANGELOG.md` and release-readiness provenance, and published the Gate D release-ready handoff in [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md) and the [Gate D promoted evidence](../../evidence/aquarium/EPIC-022/gate-d-handoff/8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168/manifest.json).
+Outcome: Verified the already prepared immutable H3 Dolgorae (`8fb6a3578ae3`) and H4 Gul (`b9d1750e9ec5` / `6cd9901ae3fe`) artifacts with zero unqualified rebuilds, synchronized `CHANGELOG.md` and release-readiness provenance, and published the Gate D release-ready handoff in [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md) and the [Gate D promoted evidence](../../evidence/aquarium/EPIC-022/gate-d-handoff/8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c/manifest.json).
 
-Verification: All 18 mandatory matrix rows accepted, both complete repository gates passed (`make PYTHON_BIN=.venv/bin/python TEST_THREADS=2 test` in Dolgorae and serial `make test` + SOT/contract checks in Gul), independent reviews (`R-D`, `R-G`) passed, and binary SHA-256 invariance confirmed across Phase 3/4/5 with all known limits explicitly preserved (including the Codex `0.169.0` effort-matching constraint and suspended/amended checkpoints).
+Verification: All 18 mandatory matrix rows accepted, both complete repository gates passed (`make PYTHON_BIN=.venv/bin/python TEST_THREADS=2 test` in Dolgorae and serial `make test` + SOT/contract checks in Gul), independent reviews (`R-D`, `R-G`) passed, and binary SHA-256 invariance confirmed across Phase 3/4/5 with all known limits explicitly preserved.
 
 Handoff: Concrete release-ready handoff for separate release-handler workflows. Commits, pushes, tags, Releases and production cutover require their own authority.
 

@@ -13,7 +13,7 @@
 | Starting Gul revision | 2db9c4f12f88d5ee36810377248efcaf9bf4110c |
 | Gul planning revalidation | Current ADR-0057 maps Phase 2 to E15/T21 and Phase 4 to E16-T1..T16; original E15-T5..T20 remain Historical/Retired with complete scope mapping |
 | Release consumers | Aquarium, Podway and Gul; the complete three-consumer acceptance matrix is mandatory |
-| Current contract state | Checked public-v2 and Gul consumer-v2 contracts are bound by immutable H1 (`0927cbf8...`); all seven Epics (`EPIC-018` through `EPIC-022`) are `COMPLETE` on immutable H3 (`8d529950...`) + Gul H4 (`b6f459ae...` / `7e7c0c8f...`) per [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md); commits, tags, Releases, installation, and cutover remain separately authorized |
+| Current contract state | Checked public-v2 and Gul consumer-v2 contracts are bound by immutable H1 (`0927cbf8...`); all seven Epics (`EPIC-018` through `EPIC-022`) are `COMPLETE` on immutable H3 (`8fb6a357...`) + Gul H4 (`b9d1750e...` / `6cd9901a...`) per [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md); commits, tags, Releases, installation, and cutover remain separately authorized |
 | Execution authority | Initial adoption authorized documentation only; later execution requires its separately approved envelope. Implementation, reviews, runtime use, commits and publication retain their separate boundaries |
 
 The [documentation authority map](../README.md) governs this dossier. It owns

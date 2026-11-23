@@ -1,0 +1,75 @@
+{
+  "schema": "dolgorae.gate-d-release-readiness/v1",
+  "work_unit": "TASK-089",
+  "gate": "Gate D",
+  "verdict": "RELEASE_READY_HANDOFF",
+  "release_eligible_versions": {
+    "dolgorae": "v0.1.4",
+    "gul": "v0.1.0"
+  },
+  "milestones_satisfied": [
+    "MILESTONE-SR1",
+    "MILESTONE-IR1",
+    "MILESTONE-ES1",
+    "MILESTONE-BH1-P",
+    "MILESTONE-CW1",
+    "MILESTONE-BC1",
+    "MILESTONE-BH1"
+  ],
+  "repository_gates": {
+    "dolgorae_make_test": {
+      "passed": true,
+      "unit_tests": 1757,
+      "includes": [
+        "test-prepare",
+        "test-unit",
+        "test-int",
+        "test-e2e"
+      ],
+      "frozen_h1_validator_exit": 0,
+      "current_v2_validator_exit": 0
+    },
+    "dolgorae_native_caller_pipeline": {
+      "passed": true,
+      "suites_passed": 6,
+      "suites": [
+        "task094-session",
+        "interactions",
+        "command-approval",
+        "native-specialist",
+        "native-specialist-disabled",
+        "readonly-pool"
+      ]
+    },
+    "gul_make_test": {
+      "passed": true,
+      "serial_facade": true,
+      "sot_and_contract_checks": true
+    },
+    "combined_gate_c": {
+      "passed": true,
+      "matrix_rows_passed": 18,
+      "matrix_rows_total": 18,
+      "accountless_native_lifecycle_pass": true,
+      "accountless_native_history_250_turns_pass": true,
+      "bounded_isolated_real_account_pass": true,
+      "accountless_codex_0_169_0_effort_override_pass": true
+    }
+  },
+  "independent_reviews": {
+    "dolgorae_code_and_gate_c": "PASS (0 unresolved Medium+ findings)",
+    "gul_code_evidence_and_closeout": "PASS (0 unresolved Medium+ findings)"
+  },
+  "known_limits": [
+    "No provider downgrade guarantee is added.",
+    "Performance/latency benchmarks, load profiling, physical-device checks, and 24-hour/OS-sleep soak remain suspended/amended per Master's 2026-11-11 and 2026-11-17 directives.",
+    "External Aquarium and Podway host/CLI runs inherit unchanged-interface qualification from TASK-086/TASK-087/d40303b4df3a alongside fresh H3 contract and native caller pipeline verification."
+  ],
+  "retained_separate_authorities": [
+    "git staging, commit, and push",
+    "release tagging and GitHub Release publication",
+    "host installation and production data cutover",
+    "external Sorage transmission",
+    "consumer default-backend activation (Aquarium/Podway)"
+  ]
+}

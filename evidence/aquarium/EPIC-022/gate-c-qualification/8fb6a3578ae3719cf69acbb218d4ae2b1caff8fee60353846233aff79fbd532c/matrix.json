@@ -1,0 +1,233 @@
+{
+  "schema": "dolgorae.three-consumer-matrix-result/v1",
+  "work_unit": "TASK-088",
+  "gate": "Gate C",
+  "milestone_unlocked": "MILESTONE-BH1",
+  "verdict": "PASS",
+  "evaluated_at": "2026-11-23T07:22:00Z",
+  "independent_reviewer": "Dolgorae Independent Reviewer (R-D, read-only audit)",
+  "immutable_inputs": {
+    "h1_commit": "0927cbf87b0a3ba37c8509016c99f14c3f9f3c29",
+    "h1_lock_sha256": "sha256:5900393481ed200c6ef4eadab96b034d679f3e4cc6b0d42b764c4211c94a862a",
+    "h3_candidate_id": "dolgorae-gul-e16-h3-8fb6a3578ae3",
+    "h3_binary_sha256": "sha256:8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c",
+    "h3_public_v2_descriptor_sha256": "sha256:c34b1da680ef7f8edfd8eb744047b0981311a4076b3c05c3d4adb4986565f8f5",
+    "h4_release_executable_sha256": "sha256:b9d1750e9ec564f73fc11c92dd8be30d25c84818e6b333c837c7eeb1a70b2506",
+    "h4_candidate_executable_sha256": "sha256:6cd9901ae3fefc17a5dbc01823277bade5f0a8bfa32d7313290b343ffcf541d2",
+    "codex_version": "0.169.0",
+    "codex_executable_sha256": "sha256:739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002",
+    "codex_companion_sha256": "sha256:10feae2abe764bcf2273e241ace67aecc360eb8c28a82a2988bf1d8498a9bacf"
+  },
+  "rows": [
+    {
+      "id": "AQ-01",
+      "consumer": "Aquarium",
+      "verdict": "PASS",
+      "applicability": "inherited_external_plus_fresh_contract_and_native_caller",
+      "fresh_evidence": [
+        "make test (test_trusted_host_setup_cli.py, test_external_engagement_cli.py, test_h1_package.py) on H3 8fb6a3578ae3",
+        "6/6 accountless native_caller_pipeline suites on immutable H3 + Codex 0.169.0"
+      ],
+      "inherited_evidence": "TASK-086 (3de2b10) / TASK-087 (465ec4e) / d40303b4df3a (e676dabc...) external Codex/Claude stdio MCP route qualification under unchanged facade-v5 and host-hook contracts",
+      "limits": "Live external Claude and Codex MCP hosts were not re-executed on 8fb6a3578ae3; external MCP wire and hook schemas remained unchanged."
+    },
+    {
+      "id": "AQ-02",
+      "consumer": "Aquarium",
+      "verdict": "PASS",
+      "applicability": "inherited_external_plus_fresh_native_specialist",
+      "fresh_evidence": [
+        "native_caller_pipeline --native-specialist, --native-specialist --specialist-disabled, --readonly-pool on H3 8fb6a3578ae3",
+        "Full make test on H3 8fb6a3578ae3"
+      ],
+      "inherited_evidence": "TASK-086/TASK-087/d40303b4df3a ordinary-v3 (aquarium.executor-handoff/v3) Role/configuration/task/result identity and drift qualification (Aquarium db132845624c24bb4d0a889503b35a2a59b2571d)",
+      "limits": "Formal-v1 Worker/Judge hybrid remains out-of-scope per docs/specs/dolgorae-v014-current-consumer-qualification.md."
+    },
+    {
+      "id": "AQ-03",
+      "consumer": "Aquarium",
+      "verdict": "PASS",
+      "applicability": "inherited_external_plus_fresh_contract",
+      "fresh_evidence": [
+        "Full make test and contract validation on H3 8fb6a3578ae3"
+      ],
+      "inherited_evidence": "TASK-086/TASK-087/d40303b4df3a ordinary-v3 (aquarium.evaluator-assessment/v3) semantic/structural separation and stale/wrong/incomplete rejection",
+      "limits": "Default backend selection remains Aquarium-owned; dormant review backend remains dormant."
+    },
+    {
+      "id": "AQ-04",
+      "consumer": "Aquarium",
+      "verdict": "PASS",
+      "applicability": "inherited_external_plus_fresh_recovery",
+      "fresh_evidence": [
+        "native_caller_pipeline --task094-session recovery, PID-reuse, and interrupted-Start tests on H3 8fb6a3578ae3",
+        "Full make test on H3 8fb6a3578ae3"
+      ],
+      "inherited_evidence": "TASK-086/TASK-087/d40303b4df3a physical dispatch/result-loss recovery and quiescence proof",
+      "limits": "External host dispatch-loss harness was not re-run live on 8fb6a3578ae3; recovery ledger and lookup contracts remained unchanged or hardened."
+    },
+    {
+      "id": "AQ-05",
+      "consumer": "Aquarium",
+      "verdict": "PASS",
+      "applicability": "inherited_external_plus_fresh_interactions",
+      "fresh_evidence": [
+        "native_caller_pipeline --interactions and --command-approval on H3 8fb6a3578ae3",
+        "Real-account Gul command approval (ACCEPT_ONCE) on H3 + H4"
+      ],
+      "inherited_evidence": "TASK-086/TASK-087/d40303b4df3a external consumer-complete ownerless permission and MCP policy declines",
+      "limits": "External consumer-complete ownerless MCP harness was not re-run live on 8fb6a3578ae3."
+    },
+    {
+      "id": "AQ-06",
+      "consumer": "Aquarium",
+      "verdict": "PASS",
+      "applicability": "fresh_contract_and_skill_plus_inherited_post_cleanup",
+      "fresh_evidence": [
+        "make test (test_agent_skill_package.py, test_external_engagement_cli.py, test_h1_package.py, validate_frozen_h1.py) on H3 8fb6a3578ae3"
+      ],
+      "inherited_evidence": "TASK-087 post-cleanup candidate qualification; dormant review backend stays dormant",
+      "limits": "Installation and backend activation remain separate consumer-owned decisions."
+    },
+    {
+      "id": "PW-01",
+      "consumer": "Podway",
+      "verdict": "PASS",
+      "applicability": "inherited_live_cli_plus_fresh_contract",
+      "fresh_evidence": [
+        "make test (test_native_integrated_acceptance.py, validate_frozen_h1.py, validate_current_v2_contract.py) on H3 8fb6a3578ae3"
+      ],
+      "inherited_evidence": "TASK-086/TASK-087/d40303b4df3a live Podway 0.2.15/0.2.16 (DOLV3-001..009, WORKSPACE_CONTRACT_MISMATCH) under unchanged adapter v3, manifest v2, and Store v15 contracts",
+      "limits": "Live Podway CLI execution was not re-run on 8fb6a3578ae3; adapter v3 and Store v15 interfaces were unchanged."
+    },
+    {
+      "id": "PW-02",
+      "consumer": "Podway",
+      "verdict": "PASS",
+      "applicability": "inherited_live_cli_plus_fresh_managed_prep",
+      "fresh_evidence": [
+        "native_caller_pipeline --native-specialist managed preparation checks and full make test on H3 8fb6a3578ae3"
+      ],
+      "inherited_evidence": "TASK-086/TASK-087/d40303b4df3a dolgorae.external/1 and dolgorae.managed/1 receipt and digest known answers",
+      "limits": "Export schemas and digest domains were unchanged since TASK-087."
+    },
+    {
+      "id": "PW-03",
+      "consumer": "Podway",
+      "verdict": "PASS",
+      "applicability": "inherited_live_cli_plus_fresh_settlement",
+      "fresh_evidence": [
+        "native_caller_pipeline --task094-session and --native-specialist idle/release settlement proofs and full make test on H3 8fb6a3578ae3"
+      ],
+      "inherited_evidence": "TASK-086/TASK-087/d40303b4df3a max_rounds and retain/release accounting",
+      "limits": "Podway remains sole structural progression owner; Dolgorae never advances Podway."
+    },
+    {
+      "id": "PW-04",
+      "consumer": "Podway",
+      "verdict": "PASS",
+      "applicability": "inherited_live_cli_plus_fresh_contract",
+      "fresh_evidence": [
+        "Full make test on H3 8fb6a3578ae3"
+      ],
+      "inherited_evidence": "TASK-086/TASK-087/d40303b4df3a work-package to Dolgorae to receipt to explicit Primary progression flow",
+      "limits": "No automatic Podway progression; consumer retains structural acceptance."
+    },
+    {
+      "id": "PW-05",
+      "consumer": "Podway",
+      "verdict": "PASS",
+      "applicability": "inherited_live_cli_plus_fresh_recovery",
+      "fresh_evidence": [
+        "Full make test plus ReconcileStartOperation and idempotency regressions on H3 8fb6a3578ae3"
+      ],
+      "inherited_evidence": "TASK-086/TASK-087/d40303b4df3a cold-process lost-stdout lookup, stale-item fence, and non-redispatch",
+      "limits": "Live Podway CLI replay was not re-run on 8fb6a3578ae3; lookup and idempotency semantics remained unchanged or hardened."
+    },
+    {
+      "id": "PW-06",
+      "consumer": "Podway",
+      "verdict": "PASS",
+      "applicability": "inherited_live_cli_plus_fresh_contract",
+      "fresh_evidence": [
+        "Full make test on H3 8fb6a3578ae3"
+      ],
+      "inherited_evidence": "TASK-086/TASK-087/d40303b4df3a group/merge/synthesis provenance and negative group-as-one-Action refusal",
+      "limits": "Groups are never represented as one Podway Action without separate owner approval."
+    },
+    {
+      "id": "GU-01",
+      "consumer": "Gul",
+      "verdict": "PASS",
+      "applicability": "fresh_h3_h4_exact_pair",
+      "fresh_evidence": [
+        "Accountless native release-lifecycle on immutable H3 + H4 release binary + Codex 0.169.0",
+        "Bounded isolated real-account run on immutable H3 + H4 candidate app + Codex 0.169.0",
+        "validate_current_v2_contract.py (65 methods, 68 codes) and full serial Gul make test"
+      ],
+      "inherited_evidence": "None required; freshly verified on exact H3/H4 pair",
+      "limits": "Production admission requires Codex >=0.169.0 and matching H3 descriptor/hash."
+    },
+    {
+      "id": "GU-02",
+      "consumer": "Gul",
+      "verdict": "PASS",
+      "applicability": "fresh_h3_h4_exact_pair",
+      "fresh_evidence": [
+        "Accountless native release-lifecycle (lost responses, original-key lookup/replay, draft/attachment safety) on H3 + H4",
+        "Transient lookup retry and interrupted-Start reconciliation tests plus full Gul and Dolgorae make test"
+      ],
+      "inherited_evidence": "None required; freshly verified on exact H3/H4 pair",
+      "limits": "None for Codex 0.169.0 effort overrides; single-shot policy-verified effort-only thread/settings/updated notifications are admitted during active turn/start while preserving fail-closed policy/duplicate/idle guards."
+    },
+    {
+      "id": "GU-03",
+      "consumer": "Gul",
+      "verdict": "PASS",
+      "applicability": "fresh_h3_h4_exact_pair",
+      "fresh_evidence": [
+        "Accountless native release-lifecycle (typed approval/MCP, 11 Responses requests, 1 MCP decision) on H3 + H4",
+        "Accountless native release-history (250 consecutive turns, bounded 500-item paging, oversized original digests, event_cursor 1760) on H3 + H4",
+        "Bounded real-account UI command approval card verified relative cwd with zero host-path leaks"
+      ],
+      "inherited_evidence": "None required; freshly verified on exact H3/H4 pair",
+      "limits": "Vendor/OS Push delivery remains outside local fixture/native verification."
+    },
+    {
+      "id": "GU-04",
+      "consumer": "Gul",
+      "verdict": "PASS",
+      "applicability": "fresh_h3_h4_plus_amended_inherited_30min_soak",
+      "fresh_evidence": [
+        "Full Gul make test (6-stream allocator/fairness/10-minute idle polling and injected-time 24h boundary tests)"
+      ],
+      "inherited_evidence": "Predecessor 8904e66c 30-minute 3-client actual-runtime fault/reconnect/gateway-restart campaign (1800.005s, 3x121 reads) under Master's 2026-11-11 and 2026-11-17 amendments",
+      "limits": "Performance/latency benchmarks, load profiling, physical-device campaigns, and 24-hour/OS-sleep soak remain suspended/amended per Master's 2026-11-11 and 2026-11-17 directives."
+    },
+    {
+      "id": "GU-05",
+      "consumer": "Gul",
+      "verdict": "PASS",
+      "applicability": "fresh_h3_h4_exact_pair",
+      "fresh_evidence": [
+        "Accountless native release-lifecycle on immutable H3 (8fb6a3578ae3) + H4 (b9d1750e9ec5) + Codex 0.169.0 (native_pass=true, 2 closed runs, 0 remaining processes)",
+        "Accountless native release-history on immutable H3 + H4 + Codex 0.169.0 (native_pass=true, 250 turns, 1 closed run, 0 remaining processes)",
+        "Accountless real Codex 0.169.0 effort-override loopback test (config.toml=high, Turn 1=low -> Turn 2=medium -> Turn 3=high, clean close)",
+        "Bounded isolated real-account run with effort=low differing from config.toml default high (1 CAN_EDIT Session, 2 Turns, UI ACCEPT_ONCE command approval, exact 40-byte file sha256:465824fa..., Gul restart/reconnect, Turn 2 read-only follow-up, normal UI Close -> RUN_LIFECYCLE_CLOSED, Dolgorae state=closed, writer=none, event_cursor=36, audit.jsonl sha256:355e6019..., 0 surviving processes)"
+      ],
+      "inherited_evidence": "None required; freshly verified on exact H3/H4 pair",
+      "limits": "Session and per-turn effort overrides verified end-to-end on Codex 0.169.0; physical devices and suspended performance checkpoints remain outside this scope."
+    },
+    {
+      "id": "GU-06",
+      "consumer": "Gul",
+      "verdict": "PASS",
+      "applicability": "fresh_h4_packages_plus_amended_inherited_recovery_soak",
+      "fresh_evidence": [
+        "Immutable Gul.app (b9d1750e...) and Gul Candidate.app (6cd9901a...) built and verified for isolated loopback HTTPS smoke, CSP, lsof port containment, and clean SIGTERM shutdown"
+      ],
+      "inherited_evidence": "Predecessor 8904e66c v12/v13->v20 backup/restore rehearsal, 30-minute soak, and macOS first-run/controller-adoption checks under Master's 2026-11-11 and 2026-11-17 amendments",
+      "limits": "Physical iPhone/iPad, installed PWA, and production cutover remain separate/suspended boundaries."
+    }
+  ]
+}
