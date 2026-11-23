@@ -9,6 +9,19 @@ development commits.
 
 ### Added
 
+- Add `tools/validators/validate_current_v2_contract.py` and 11 checked schema examples for `managed-preparation-v1`, `run-deletion-v1`, `run-deletion-v2`, and `startup-abort-v1` while keeping immutable H1 intact.
+- Record independent `EPIC-022` Gate C (`TASK-088`, unlocking actual-Gul `MILESTONE-BH1`) and Gate D (`TASK-089`) release-ready handoff provenance for immutable H3 (`8d529950e597`) paired with Gul H4 (`b6f459aef6a1` / `7e7c0c8f71c3`) and pinned Codex `0.169.0` in `docs/specs/dolgorae-v014-gate-c-d-acceptance.md` and `evidence/aquarium/EPIC-022/`.
+
+### Fixed
+
+- Harden dedicated-lane startup child-process ancestry verification, `ReconcileStartOperation` closure/lookup handling, transient lookup retryability, and `force_delete_after_close` policy enforcement in the final H3 candidate (`8d529950e597`).
+
+### Known Limitations
+
+- When a Run's `turn/start` supplies a `reasoning_effort` differing from the Profile `CODEX_HOME/config.toml` default on Codex `0.169.0`, Codex emits an unexpected `thread/settings/updated` notification before `turn/start` replies; Dolgorae's fail-closed `CorrelationMismatch` guard classifies it as `outcome_unknown`. Match session effort to the Profile default for `v0.1.4` until post-`v0.1.4` effort-only relaxation is adopted.
+
+### Earlier v0.1.4 Additions
+
 - Allow qualified creation with Codex 0.169.0 or newer without per-version registration, retain unverified compatibility and executable/process identity checks, and observe ready qualified or successor Profile catalogs without starting servers.
 
 - Initialize public Primary native-only specialist access and derive read-only preparation from accepted Policy and Profile authority, preserving external host qualification and public contracts.

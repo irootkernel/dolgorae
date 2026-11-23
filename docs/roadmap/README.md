@@ -25,16 +25,23 @@ integration. EPIC-018 is COMPLETE after successor requirements, checked contract
 and qualified H1 validation. EPIC-019 is COMPLETE.
 EPIC-023 is COMPLETE with Master's whole-Epic acceptance; TASK-090, TASK-091 and
 TASK-092 are COMPLETE. EPIC-020 and TASK-076 through TASK-079 are COMPLETE.
-EPIC-009 is COMPLETE. EPIC-021 is ACTIVE for the TASK-093 H3 correction
-and the active TASK-094 sequential-Turn and schema-4 lifecycle correction;
-EPIC-022 remains PLANNED for v0.1.4, in that execution order. TASK-067 is COMPLETE;
-TASK-068 through TASK-079 are COMPLETE;
+EPIC-009 is COMPLETE. EPIC-021 (TASK-084 through TASK-087, TASK-093, and
+TASK-094) is COMPLETE with the final immutable H3 candidate
+(`dolgorae-gul-e16-h3-8d529950e597`, binary SHA-256
+`8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168`, base commit
+`a6d1ce0d54d6336f2cff0f2725f71f576103ea45`, source patch SHA-256
+`27013582d220e627ca1e46846cf25faea8eeffb467ec62d213d4157d6af39212`);
+EPIC-022 (TASK-088 and TASK-089) is COMPLETE with independent three-consumer
+qualification (combined Gate C, unlocking actual-Gul `MILESTONE-BH1` for exact
+H3 `8d529950e597` paired with Gul H4 `b6f459aef6a1` / `7e7c0c8f71c3`) and Gate D
+release-ready handoff provenance recorded in
+[Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md).
+TASK-067 is COMPLETE; TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
-TASK-084 through TASK-086 are COMPLETE.
-TASK-087 is COMPLETE; TASK-088 and TASK-089 remain PLANNED.
-TASK-093 is IN_REVIEW under reopened EPIC-021. TASK-094 is ACTIVE for
-Gul's subsequent sequential-Turn and schema-4 lifecycle blockers. Its qualified
-replacement H3 is required before Gul resumes the affected qualification.
+TASK-084 through TASK-087, TASK-093, and TASK-094 are COMPLETE;
+TASK-088 and TASK-089 are COMPLETE. No Epic or Task is currently ACTIVE
+(`EPIC-010` remains `PLANNED`; commits, pushes, tags, Releases, installation,
+and production cutover require separate authorization).
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -2827,16 +2834,18 @@ mailboxes without Primary message relay.
 
 ## EPIC-021: Research Groups, Findings, and Contract Cleanup
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Reopened for TASK-093 after Gul reported that the fixed H3 omitted the required
-public-v2 Observation RPCs. TASK-084 through TASK-087 retain their completed
-history. The original H3 and its evidence remain bound to their original bytes;
-they do not establish availability of these missing RPCs. The corrected H3 has
-been delivered after affected artifact qualification; Gul owns replacement
-adoption and its affected product qualification. TASK-094 addresses the later
-second-Submit and schema-4 Close/Recover blockers against that replacement.
-TASK-093 retains its Observation scope, status and qualification history.
+Reopened for TASK-093 and TASK-094 and completed on 2026-11-23 with the final
+immutable H3 candidate (`dolgorae-gul-e16-h3-8d529950e597`, binary SHA-256
+`8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168`, base commit
+`a6d1ce0d54d6336f2cff0f2725f71f576103ea45`, source patch SHA-256
+`27013582d220e627ca1e46846cf25faea8eeffb467ec62d213d4157d6af39212`), preserving
+the immutable H1 lock (`5900393481ed200c6ef4eadab96b034d679f3e4cc6b0d42b764c4211c94a862a`)
+and original TASK-087/TASK-093 history. Independent review (`R-D` PASS), all six
+accountless native caller pipeline suites on Codex `0.169.0`, and the full
+repository gate (`make PYTHON_BIN=.venv/bin/python TEST_THREADS=2 test`, exit 0)
+passed on the exact unchanged H3 executable.
 
 Canonical Outcomes: [delegation runtime](../specs/dolgorae-v014-delegation-runtime.md),
 [method and digest contract](../specs/dolgorae-v014-method-and-digest-contract.md),
@@ -2900,7 +2909,7 @@ Handoff: H3, the fixed intended-version runnable Dolgorae artifact, configuratio
 
 ### TASK-093: Restore Public-v2 Observation and Deliver Corrected H3
 
-Status: `IN_REVIEW`
+Status: `COMPLETE`
 
 Depends on: TASK-087. Execute this correction before Gul resumes its affected
 Phase 4 qualification and before TASK-088.
@@ -2933,7 +2942,7 @@ commit require Master's explicit Git authorization.
 
 ### TASK-094: Restore Sequential Turns and Schema-4 Session Closure
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
 Master approved a bounded Gul integration follow-up: connect the existing
 managed individual-result collection to public-v2, qualify the current Codex
@@ -3011,9 +3020,9 @@ Epic acceptance: Groups, merge, synthesis, mandatory Aquarium/Podway mappings/ru
 
 ## EPIC-022: Independent Three-Consumer Qualification and Release Handoff
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
-Detailed SOT: [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md)
+Canonical Outcomes: [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md), [Gate C promoted evidence](../../evidence/aquarium/EPIC-022/gate-c-qualification/8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168/manifest.json), and [Gate D promoted evidence](../../evidence/aquarium/EPIC-022/gate-d-handoff/8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168/manifest.json) (retaining the shared [v0.1.4 alignment dossier](../todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md) for historical references until separately retired)
 
 Goal: Independently accept Aquarium, Podway and Gul compatibility against the final Dolgorae artifact and exact Gul pair before either product is released.
 
@@ -3024,29 +3033,29 @@ membership, ordering and status.
 
 ### TASK-088: Independently Qualify the Three-Consumer Final Artifact
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: completed TASK-087 and corrective TASK-093/TASK-094/EPIC-021, plus H4 from Gul's completed product/qualification Epic, including the intended Gul v0.1.0 artifact and complete own campaign evidence. No concurrent active Gul Task or reopened historical Task is required.
 
-Outcome: Independently validate Gul's Phase 4 campaign and reproduce necessary provider/integration cases using the completed Gul artifact and unchanged H3 Dolgorae candidate. Verify or revalidate all required Aquarium/Podway acceptance evidence on that same final Dolgorae artifact. Gate C passes only after Gul's complete producer result and Dolgorae's substantive independent acceptance; report acknowledgement is insufficient.
+Outcome: Independently validated Gul's Phase 4 campaign and promoted H4 evidence package against immutable H3 (`8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168`), immutable H4 (`Gul.app` `b6f459aef6a1f3c224d1dbd5b16e44e6376ba7dfee72595b9e1008215c156088` and `Gul Candidate.app` `7e7c0c8f71c30b8bb474dbb7ddf946c1009b88cf3a184d77a857d2b7991d904d`), immutable H1 (`0927cbf87b0a3ba37c8509016c99f14c3f9f3c29`), and pinned Codex `0.169.0` (`739cda86...`), and accepted all 18 rows (`AQ-01..06`, `PW-01..06`, `GU-01..06`) with explicit fresh-vs-inherited provenance and limits. Independent read-only audit (`R-D`) returned `GATE_C_PASS` with zero blocking findings and zero unqualified rebuilds.
 
-Verification: Check exact artifacts, contract/runtime/configuration pins, reproducibility and coverage; execute actual completed Gul and Dolgorae with the pinned actual Codex scripted-Responses harness for substantive provider facts, recovery, approvals/results, stream/reconnect/load and relevant latency cases. Validate required real-account create/task/approval/result/follow-up/normal-close evidence and independently reproduce affected functionality under separate authorization. Recheck actual Aquarium/Podway host, adapter, identity, receipt, rounds/disposition and recovery evidence. Keep deterministic, real-account, device/soak and other consumer evidence distinct. Scope reproductions by risk and unchanged evidence applicability; mocks never replace mandatory runtime acceptance.
+Verification: Checked exact artifact/runtime/contract checksums, verified on-disk deterministic accountless native `release-lifecycle` (11 Responses requests, 1 MCP decision, 2 closed Runs) and `release-history` (250 consecutive turns, bounded paging, `event_cursor: "1760"`), verified bounded isolated real-account execution (1 `CAN_EDIT` Session, 2 Turns, UI `ACCEPT_ONCE` command approval writing exact 29-byte `3c37b85c...`, Gul restart/reconnect, follow-up, normal UI Close settling to Dolgorae `closed` / `writer=none` / `audit.jsonl` `680aa67b...` / 0 surviving processes), and rechecked Aquarium/Podway applicability alongside fresh H3 `make test` and 6/6 `native_caller_pipeline` suites. Recorded in [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md) and the [Gate C promoted evidence](../../evidence/aquarium/EPIC-022/gate-c-qualification/8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168/manifest.json).
 
-Handoff: Independent three-consumer acceptance and combined Gate C, including actual-Gul MILESTONE-BH1 for the exact pair. Gul's client/UX acceptance remains its owner's result; provider correctness remains Dolgorae-owned. Publication remains pending.
+Handoff: Combined Gate C passed and actual-Gul `MILESTONE-BH1` unlocked for the exact H3/H4 pair. Gul's client/UX acceptance remains its owner's result; provider correctness remains Dolgorae-owned. Publication remains pending.
 
 ### TASK-089: Complete Final QA and Joint Release Handoff
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: completed TASK-088, the complete accepted Aquarium/Podway/Gul matrix, H3/H4 artifacts and both products' required repository gates/final QA with applicable consumer qualification gates. Gul product Epic closeout does not wait for TASK-088 or TASK-089.
 
-Outcome: Verify the already prepared intended-version H3 Dolgorae and H4 Gul artifacts, settle final QA/changelog handoff requirements, and supply separate release owners the same fully accepted three-consumer combination. Introduce no unqualified rebuild or packaging change. Only explicitly permitted QA-neutral metadata exceptions apply. Any substantive artifact/contract/runtime/configuration change requires three-consumer impact assessment and affected requalification before release.
+Outcome: Verified the already prepared immutable H3 Dolgorae (`8d529950e597`) and H4 Gul (`b6f459aef6a1` / `7e7c0c8f71c3`) artifacts with zero unqualified rebuilds, synchronized `CHANGELOG.md` and release-readiness provenance, and published the Gate D release-ready handoff in [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md) and the [Gate D promoted evidence](../../evidence/aquarium/EPIC-022/gate-d-handoff/8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168/manifest.json).
 
-Verification: Every mandatory matrix row is accepted on the final Dolgorae artifact; both required gates/final QA and combined Gate C pass. Deterministic actual-client, real-account, device/soak and Aquarium/Podway host/receipt evidence match the exact artifact/contract/runtime/configuration combination. Verify integrity and authorized readiness checks; no late unqualified packaging or unresolved correctness blocker. Additional implementation needs an explicit blocker/correction schedule, not a false Epic completion.
+Verification: All 18 mandatory matrix rows accepted, both complete repository gates passed (`make PYTHON_BIN=.venv/bin/python TEST_THREADS=2 test` in Dolgorae and serial `make test` + SOT/contract checks in Gul), independent reviews (`R-D`, `R-G`) passed, and binary SHA-256 invariance confirmed across Phase 3/4/5 with all known limits explicitly preserved (including the Codex `0.169.0` effort-matching constraint and suspended/amended checkpoints).
 
 Handoff: Concrete release-ready handoff for separate release-handler workflows. Commits, pushes, tags, Releases and production cutover require their own authority.
 
-Epic acceptance: All three consumers have complete mandatory accepted evidence, both artifacts have required final QA and exact provenance, and Gate D passes. Gul success alone is insufficient. This Epic authorizes no publication and adds no provider downgrade guarantee.
+Epic acceptance: Complete — all three consumers have mandatory accepted evidence, both immutable artifacts have final QA and exact provenance, `MILESTONE-BH1` is unlocked for the verified H3/H4 pair, and Gate D passed. This Epic authorizes no publication and adds no provider downgrade guarantee.
 
 ## EPIC-010: Operator and Audit Interfaces
 
@@ -3147,6 +3156,9 @@ Implement full ledger verification, directory bundle export, closed/start-failed
 deletion with mandatory confirmation, refusal of every pre-existing export
 path, exact bundle inventory/permissions/disclosure, integrity-failed export and
 delete escape, and the rule that Codex threads are never deleted or auto-imported.
+Consume the EPIC-021 (`TASK-094`) operator force-delete refusal and writer-revocation
+guardrails for incomplete-ownership abandoned Runs rather than introducing a
+parallel deletion policy.
 
 Verification: clean/corrupt ledger cases, active-run delete refusal, missing
 Codex history export, output collision, deterministic hashes, excluded runtime/

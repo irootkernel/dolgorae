@@ -29,9 +29,11 @@ the five-phase whole-Epic execution graph and four normal handoffs. The
 [release-proof correction dossier](todo/TODO-DOLGORAE-RELEASE-PROOF-CORRECTION.md)
 defines EPIC-023's bounded corrected-H1/delta-H2/Gate-A exchange before
 EPIC-020 resumes. These planning documents establish no
-implemented capabilities or runtime acceptance. The
-[Gate A acceptance](specs/dolgorae-v014-gate-a-acceptance.md) records the later
+implemented capabilities or runtime acceptance. The [Gate A acceptance](specs/dolgorae-v014-gate-a-acceptance.md) records the later
 independent H2 contract/foundation acceptance and preserves its runtime limits. The
+[Gate C and Gate D acceptance](specs/dolgorae-v014-gate-c-d-acceptance.md) records
+`EPIC-022` independent three-consumer qualification (`MILESTONE-BH1`), final
+H3/H4 provenance, and release-ready handoff limits without mutating frozen H1. The
 [review-target strategy analysis](architecture-decision-records/review-strategy-analysis.md)
 is a supporting accepted design study, not runtime or completion evidence. The
 root [contribution guide](../CONTRIBUTING.md) is an entrypoint to implementation

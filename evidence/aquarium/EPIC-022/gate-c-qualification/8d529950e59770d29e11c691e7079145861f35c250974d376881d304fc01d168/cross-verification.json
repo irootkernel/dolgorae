@@ -1,0 +1,103 @@
+{
+  "schema": "dolgorae.gate-c-cross-verification/v1",
+  "work_unit": "TASK-088",
+  "gate": "Gate C",
+  "verdict": "GATE_C_PASS",
+  "milestone_unlocked": "MILESTONE-BH1",
+  "verified_at": "2026-11-23T05:09:22Z",
+  "blocking_findings": 0,
+  "unqualified_rebuilds": 0,
+  "verified_pair": {
+    "dolgorae_h3": {
+      "candidate_id": "dolgorae-gul-e16-h3-8d529950e597",
+      "git_base": "a6d1ce0d54d6336f2cff0f2725f71f576103ea45",
+      "source_patch_sha256": "sha256:27013582d220e627ca1e46846cf25faea8eeffb467ec62d213d4157d6af39212",
+      "binary_sha256": "sha256:8d529950e59770d29e11c691e7079145861f35c250974d376881d304fc01d168",
+      "binary_size_bytes": 27965648,
+      "public_v2_descriptor_sha256": "sha256:c34b1da680ef7f8edfd8eb744047b0981311a4076b3c05c3d4adb4986565f8f5",
+      "native_caller_pipeline_sha256": "sha256:23f8a5f3823abd1b8defdb01089612d0921f03b7088ce8a083936370ac755b96",
+      "verification_json_sha256": "sha256:0054c4f74ced4a33022271517d3ca708abf877de8d29624703fac9a3b1246978"
+    },
+    "gul_h4": {
+      "git_base": "fcf6e5fd6f061ee1222a2280ca8e27e22a4ac894",
+      "release_app_executable_sha256": "sha256:b6f459aef6a1f3c224d1dbd5b16e44e6376ba7dfee72595b9e1008215c156088",
+      "release_app_size_bytes": 49771666,
+      "release_info_plist_sha256": "sha256:c99a136b69400ad91e46357a2f23508ff887543794d8803aa282ef320cb5225d",
+      "release_package_manifest_sha256": "sha256:d1403e09e387b00e85d5b1235d3c32e5552e1fe841fdebc5f671ad4c53b564d2",
+      "candidate_app_executable_sha256": "sha256:7e7c0c8f71c30b8bb474dbb7ddf946c1009b88cf3a184d77a857d2b7991d904d",
+      "candidate_info_plist_sha256": "sha256:23960846f73663b54ba4be47a9a189f005c17008c8bec4bddbe3acf08be3e268",
+      "candidate_package_manifest_sha256": "sha256:b6a5a5bd6c423bb8b26ecd0b74748e8acb71d22afebfea755379df0c13a1c777",
+      "frontend_manifest_sha256": "sha256:b5cc0b862adb9aa35364270dde1d1e8e58085839ece8c90b36a9195be8f43132",
+      "contract_lock_sha256": "sha256:acd95a6f7aa236bd6425ed68afad5f6942dfbac51e7f5b60680e7cabcc047360",
+      "promoted_evidence_package": "gul:evidence/aquarium/E16-T16/external-handoff/b6f459aef6a1f3c224d1dbd5b16e44e6376ba7dfee72595b9e1008215c156088/manifest.json",
+      "promoted_payload_digests": {
+        "coverage.json": "sha256:da92bf3b37586431dccf73b54c83660ac30d3a9ebc8cb3528309b2ff4783fc3e",
+        "native-inputs.json": "sha256:aa879d1222cc4f1b08d7ba446d581ea42eb8fa9810b68f6ca382d1b17d496f6e",
+        "observations.json": "sha256:9f84d4aebb60735a19608f16da62ab6e05b76b930f443cde205aa2c810c26026",
+        "qualification.json": "sha256:740189db917d78ec59e3b5f97455785d1724bafecb1c19a0a03bf06579577a94"
+      }
+    },
+    "immutable_h1": {
+      "git_commit": "0927cbf87b0a3ba37c8509016c99f14c3f9f3c29",
+      "lock_sha256": "sha256:5900393481ed200c6ef4eadab96b034d679f3e4cc6b0d42b764c4211c94a862a",
+      "archive_sha256": "sha256:9b8427b6958b6ef9323dfcea1a512ee3ba070a9e594076613abfc98849012e3c",
+      "selected_members": 295,
+      "frozen_validation_exit": 0
+    },
+    "pinned_codex": {
+      "version": "0.169.0",
+      "executable_sha256": "sha256:739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002",
+      "companion_sha256": "sha256:10feae2abe764bcf2273e241ace67aecc360eb8c28a82a2988bf1d8498a9bacf"
+    }
+  },
+  "independently_verified_runtime_campaigns": {
+    "accountless_native_release_lifecycle": {
+      "native_pass": true,
+      "driver_exit": 0,
+      "responses_requests": 11,
+      "mcp_decisions": 1,
+      "public_runs_closed": 2,
+      "physical_absence": true,
+      "absence_samples": 5,
+      "driver_stdout_sha256": "sha256:4118a9f3e22648dd0fc47d0745892bcbdb2f5044860473e0a013752f77f36955",
+      "approval_sha256": "sha256:f555d0972e63be94a4f19759710c3714b2b6f96da4a6f2ccb137c063c6c379bc"
+    },
+    "accountless_native_release_history": {
+      "native_pass": true,
+      "driver_exit": 0,
+      "responses_requests": 250,
+      "public_runs_closed": 1,
+      "event_cursor": "1760",
+      "physical_absence": true,
+      "absence_samples": 5,
+      "driver_stdout_sha256": "sha256:90b2db9eaadfa427f4329f4ebb85b09515444e2f03ae9a4da88602c9a3dee43d",
+      "approval_sha256": "sha256:50dcb52c7c0a66262dad0c32c4723652472b5cc1cf7f0b626083f5288c98166f"
+    },
+    "bounded_isolated_real_account": {
+      "real_account_pass": true,
+      "sessions_created": 1,
+      "user_turns": 2,
+      "model": "gpt-6.2-sol",
+      "effort": "high",
+      "ui_approval_decision": "ACCEPT_ONCE",
+      "approved_file_bytes": 29,
+      "approved_file_sha256": "sha256:3c37b85cd7f25271b36036c8544f2e7c5dc9464dae2ec6c062feafb6688cc02b",
+      "gul_restart_and_reconnect_verified": true,
+      "normal_ui_close_verified": true,
+      "gul_sqlite_lifecycle": "RUN_LIFECYCLE_CLOSED",
+      "dolgorae_run_state": "closed",
+      "dolgorae_writer_authority": "none",
+      "dolgorae_server_lane": "absent",
+      "dolgorae_event_cursor": "36",
+      "audit_jsonl_records": 36,
+      "audit_jsonl_sha256": "sha256:680aa67be87426b685308785ecaddaf80adbffdea8501ecd331fff5b9309533f",
+      "surviving_owned_processes": 0
+    }
+  },
+  "operational_notes_and_limits": [
+    "Codex 0.169.0 emits an extra thread/settings/updated notification before turn/start replies when requested effort differs from the Profile config.toml default; Dolgorae fail-closed CorrelationMismatch guard treats unexpected settings updates as outcome_unknown. Match session effort to the Profile default; effort-only relaxation is deferred post-v0.1.4.",
+    "All verified runs pinned Codex 0.169.0 explicitly rather than relying on host PATH.",
+    "AQ-01..06 and PW-01..06 external host/CLI executions inherit unchanged-interface qualification from TASK-086/TASK-087/d40303b4df3a, supplemented by fresh 6/6 native caller pipeline suites and full make test on immutable H3.",
+    "Performance/latency benchmarks, load profiling, physical-device campaigns, and 24-hour/OS-sleep soak remain suspended/amended per Master's 2026-11-11 and 2026-11-17 directives."
+  ]
+}
