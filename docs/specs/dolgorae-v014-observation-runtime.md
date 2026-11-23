@@ -278,9 +278,14 @@ protected reference is absent, with crash-safe retained progress.
 ## Stream and RPC work
 
 The server admits eight concurrent unary jobs and four concurrent stream sampling
-jobs, with twelve blocking executor slots. Each RPC has a 30-second maximum
-response budget; a valid shorter `grpc-timeout` bounds admission and response
-waiting. Already admitted blocking work retains its slot until it exits. A
+jobs, with twelve blocking executor slots. Ordinary RPCs have a 30-second maximum
+response budget, while public-v2 lifecycle, startup, and Writer-release RPCs
+(`RunService.StartRun`, `RunService.CloseRun`, `RunService.RecoverRun`,
+`RunService.ReconcileRun`, and `WriterService.ReleaseWriter`) have a 70-second
+maximum response budget so server deadlines exceed Worker startup caps (50–60
+seconds) plus generation-retirement grace; a valid shorter `grpc-timeout` bounds
+admission and response waiting. Already admitted blocking work retains its slot
+until it exits. A
 response timeout reports the existing `TRANSPORT_FAILURE` policy for the named
 method, including uncertain mutation recovery, and cannot cancel or replay the
 accepted operation. Idle stream sampling backs off from 100 to 500 ms and returns

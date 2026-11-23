@@ -817,6 +817,8 @@ fn record_session_startup_failure(
     );
 }
 
+const MAX_PRIVATE_DIAGNOSTIC_LOG_BYTES: u64 = 1024 * 1024;
+
 pub(crate) fn append_private_diagnostic(path: &Path, diagnostic: &Value) {
     let Ok(mut log) = OpenOptions::new()
         .append(true)
@@ -831,6 +833,7 @@ pub(crate) fn append_private_diagnostic(path: &Path, diagnostic: &Value) {
     if !metadata.is_file()
         || metadata.uid() != DarwinSystem.current_uid()
         || metadata.mode() & 0o777 != 0o600
+        || metadata.len() >= MAX_PRIVATE_DIAGNOSTIC_LOG_BYTES
     {
         return;
     }
@@ -2799,13 +2802,18 @@ fn prove_live_worker_workload_absent(
         .startup_scope
         .as_ref()
         .is_some_and(|scope| scope.complete);
+    let companion = if allow_profile_tools && record.dedicated_server_identity.is_some() {
+        companion::capture(record)?
+    } else {
+        None
+    };
     prove_group_empty_samples_with_companion(
         record,
         true,
         false,
         diagnostic,
         None,
-        None,
+        companion.as_ref(),
         allow_profile_tools,
     )
 }
@@ -2942,10 +2950,132 @@ struct StartupWorkload {
     runtime_path: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TrackedChildStatus {
+    Absent,
+    LiveMatch,
+    IdentityDrift,
+}
+
+pub(crate) fn classify_tracked_child_identity(
+    child: &crate::darwin::ProcessCensusEntry,
+    kernel: &Result<crate::darwin::BsdProcessIdentity, std::io::Error>,
+) -> TrackedChildStatus {
+    if child.birth.is_none() {
+        return TrackedChildStatus::IdentityDrift;
+    }
+    match kernel {
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => TrackedChildStatus::Absent,
+        Ok(current) if current.pid == child.pid => {
+            if current.uid == child.uid
+                && Some((current.start_tvsec, current.start_tvusec)) == child.birth
+            {
+                if current.process_group_id == child.process_group_id
+                    && current.session_id == child.session_id
+                {
+                    TrackedChildStatus::LiveMatch
+                } else {
+                    TrackedChildStatus::IdentityDrift
+                }
+            } else {
+                TrackedChildStatus::Absent
+            }
+        }
+        // EPERM and any other unreadable lookup always fail closed.
+        _ => TrackedChildStatus::IdentityDrift,
+    }
+}
+
+fn prior_child_absent_for_reuse(
+    prior: &crate::darwin::ProcessCensusEntry,
+    replacement: &crate::darwin::ProcessCensusEntry,
+    lookup: &mut impl FnMut(u32) -> Result<crate::darwin::BsdProcessIdentity, std::io::Error>,
+) -> bool {
+    if prior.pid != replacement.pid
+        || prior.birth.is_none()
+        || replacement.birth.is_none()
+        || prior.birth == replacement.birth
+    {
+        return false;
+    }
+    match lookup(prior.pid) {
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => true,
+        Ok(current) if current.pid == prior.pid => {
+            current.uid != prior.uid
+                || Some((current.start_tvsec, current.start_tvusec)) != prior.birth
+        }
+        _ => false,
+    }
+}
+
+fn resolve_parent_ancestry(
+    by_pid: &BTreeMap<u32, &crate::darwin::ProcessCensusEntry>,
+    child: &crate::darwin::ProcessCensusEntry,
+    server: &DedicatedServerIdentity,
+    known_children: &BTreeMap<u32, crate::darwin::ProcessCensusEntry>,
+    require_immediate_parent_birth_order: bool,
+    lookup: &mut impl FnMut(u32) -> Result<crate::darwin::BsdProcessIdentity, std::io::Error>,
+) -> Option<Vec<crate::darwin::ProcessCensusEntry>> {
+    if child.uid != server.uid || child.birth.is_none() || child.pid == server.pid {
+        return None;
+    }
+    let mut chain = vec![*child];
+    while chain.len() < 32 {
+        let current = *chain.last().expect("non-empty ancestry");
+        let parent_pid = current.parent_pid;
+        if chain.iter().any(|entry| entry.pid == parent_pid) {
+            return None;
+        }
+        if parent_pid == server.pid {
+            let server_entry = by_pid.get(&server.pid).copied()?;
+            if server_census_matches(server_entry, server) {
+                chain.push(*server_entry);
+                return Some(chain);
+            }
+            return None;
+        }
+        if let Some(parent) = by_pid.get(&parent_pid).copied() {
+            if parent.uid != server.uid
+                || parent.birth.is_none()
+                || (require_immediate_parent_birth_order
+                    && chain.len() == 1
+                    && parent.birth > current.birth)
+            {
+                return None;
+            }
+            chain.push(*parent);
+        } else {
+            let known_parent = known_children.get(&parent_pid)?;
+            if known_parent.pid != parent_pid
+                || known_parent.uid != server.uid
+                || known_parent.birth.is_none()
+                || known_parent.birth > current.birth
+                || !matches!(lookup(known_parent.pid), Err(error) if error.raw_os_error() == Some(libc::ESRCH))
+            {
+                return None;
+            }
+            chain.push(*known_parent);
+        }
+    }
+    None
+}
+
 fn startup_ancestry(
     census: &[crate::darwin::ProcessCensusEntry],
     child: &crate::darwin::ProcessCensusEntry,
     server: &DedicatedServerIdentity,
+) -> Option<Vec<crate::darwin::ProcessCensusEntry>> {
+    startup_ancestry_with_known(census, child, server, &BTreeMap::new(), |_| {
+        Err(std::io::Error::from_raw_os_error(libc::EPERM))
+    })
+}
+
+fn startup_ancestry_with_known(
+    census: &[crate::darwin::ProcessCensusEntry],
+    child: &crate::darwin::ProcessCensusEntry,
+    server: &DedicatedServerIdentity,
+    known_children: &BTreeMap<u32, crate::darwin::ProcessCensusEntry>,
+    mut lookup: impl FnMut(u32) -> Result<crate::darwin::BsdProcessIdentity, std::io::Error>,
 ) -> Option<Vec<crate::darwin::ProcessCensusEntry>> {
     let by_pid = census
         .iter()
@@ -2955,24 +3085,38 @@ fn startup_ancestry(
     if !same_owned_child(observed, child) || observed.parent_pid != child.parent_pid {
         return None;
     }
-    let mut chain = Vec::new();
-    let mut next = observed;
-    loop {
-        if next.uid != server.uid
-            || next.birth.is_none()
-            || chain.len() >= 32
-            || chain
-                .iter()
-                .any(|entry: &crate::darwin::ProcessCensusEntry| entry.pid == next.pid)
-        {
-            return None;
-        }
-        chain.push(*next);
-        if next.pid == server.pid {
-            return (chain.len() > 1 && server_census_matches(next, server)).then_some(chain);
-        }
-        next = by_pid.get(&next.parent_pid).copied()?;
+    resolve_parent_ancestry(
+        &by_pid,
+        observed,
+        server,
+        known_children,
+        false,
+        &mut lookup,
+    )
+}
+
+fn startup_process_exited_before_census(
+    census: &[crate::darwin::ProcessCensusEntry],
+    process: &crate::darwin::ProcessCensusEntry,
+    server: &DedicatedServerIdentity,
+    known_children: &BTreeMap<u32, crate::darwin::ProcessCensusEntry>,
+    mut lookup: impl FnMut(u32) -> Result<crate::darwin::BsdProcessIdentity, std::io::Error>,
+) -> bool {
+    if census.iter().any(|entry| entry.pid == process.pid)
+        || process.pid == server.pid
+        || process.uid != server.uid
+        || process.birth.is_none()
+    {
+        return false;
     }
+    if !matches!(lookup(process.pid), Err(error) if error.raw_os_error() == Some(libc::ESRCH)) {
+        return false;
+    }
+    let by_pid = census
+        .iter()
+        .map(|entry| (entry.pid, entry))
+        .collect::<BTreeMap<_, _>>();
+    resolve_parent_ancestry(&by_pid, process, server, known_children, true, &mut lookup).is_some()
 }
 
 fn startup_ancestries_match(
@@ -3007,15 +3151,28 @@ fn startup_child_exited(
         return false;
     }
     // The second census can retain the child after its parent has disappeared.
-    // An exact exit only invalidates this sample. It never establishes scope ownership.
+    // An exact exit or exact-matching zombie only invalidates this sample;
+    // it never establishes scope ownership.
     let mut lookup = lookup;
-    let mut exited =
-        |pid| matches!(lookup(pid), Err(error) if error.raw_os_error() == Some(libc::ESRCH));
-    exited(child.pid)
+    let mut exited_or_zombie = |prior: &crate::darwin::ProcessCensusEntry| match lookup(prior.pid) {
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => true,
+        Ok(current) => {
+            current.zombie
+                && current.pid == prior.pid
+                && current.uid == prior.uid
+                && current.parent_pid == prior.parent_pid
+                && current.process_group_id == prior.process_group_id
+                && current.session_id == prior.session_id
+                && prior.birth.is_some()
+                && Some((current.start_tvsec, current.start_tvusec)) == prior.birth
+        }
+        Err(_) => false,
+    };
+    exited_or_zombie(child)
         && ancestors
             .iter()
             .filter(|prior| observation(prior).is_none())
-            .all(|prior| exited(prior.pid))
+            .all(exited_or_zombie)
 }
 
 impl StartupWorkload {
@@ -3054,6 +3211,28 @@ impl StartupWorkload {
         site: &'static str,
         diagnostic: &mut Option<&mut Value>,
     ) -> Result<(), WorkerProtocolError> {
+        self.observe_owned_with(
+            process,
+            server,
+            census,
+            site,
+            diagnostic,
+            || DarwinSystem.all_process_identities(),
+            |pid| DarwinSystem.bsd_process_identity(pid),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_owned_with(
+        &mut self,
+        process: &crate::darwin::ProcessCensusEntry,
+        server: &DedicatedServerIdentity,
+        census: &[crate::darwin::ProcessCensusEntry],
+        site: &'static str,
+        diagnostic: &mut Option<&mut Value>,
+        mut next_census: impl FnMut() -> Result<Vec<crate::darwin::ProcessCensusEntry>, std::io::Error>,
+        mut lookup: impl FnMut(u32) -> Result<crate::darwin::BsdProcessIdentity, std::io::Error>,
+    ) -> Result<(), WorkerProtocolError> {
         if self.transient_tool_probe(process, server, census)
             && self.children.get(&process.pid).is_none_or(|prior| {
                 prior.parent_pid == process.parent_pid
@@ -3065,24 +3244,37 @@ impl StartupWorkload {
             return Ok(());
         }
         if let Some(prior) = self.children.get(&process.pid) {
-            if !same_owned_child(prior, process) {
+            if same_owned_child(prior, process) {
+                return Ok(());
+            }
+            if !prior_child_absent_for_reuse(prior, process, &mut lookup) {
                 return Err(proof_refusal(
                     diagnostic,
                     "startup_child_identity",
                     serde_json::json!({"site":site,"expected":scope_observation(prior),"observed":scope_observation(process)}),
                 ));
             }
-            return Ok(());
         }
         self.dirty_sample = true;
-        let Some(first) = startup_ancestry(census, process, server) else {
+        let Some(first) =
+            startup_ancestry_with_known(census, process, server, &self.children, &mut lookup)
+        else {
+            if startup_process_exited_before_census(
+                census,
+                process,
+                server,
+                &self.children,
+                &mut lookup,
+            ) {
+                return Ok(());
+            }
             return Err(proof_refusal(
                 diagnostic,
                 "startup_child_ancestry",
                 serde_json::json!({"site":site,"observed":scope_observation(process),"expected_server":server}),
             ));
         };
-        let second_census = DarwinSystem.all_process_identities().map_err(|error| {
+        let second_census = next_census().map_err(|error| {
             proof_refusal(
                 diagnostic,
                 "startup_ancestry_census",
@@ -3092,7 +3284,15 @@ impl StartupWorkload {
         let second = second_census
             .iter()
             .find(|entry| entry.pid == process.pid)
-            .and_then(|entry| startup_ancestry(&second_census, entry, server));
+            .and_then(|entry| {
+                startup_ancestry_with_known(
+                    &second_census,
+                    entry,
+                    server,
+                    &self.children,
+                    &mut lookup,
+                )
+            });
         if second.is_none()
             && second_census
                 .iter()
@@ -3109,7 +3309,7 @@ impl StartupWorkload {
         let mut exit_checks = Vec::new();
         if second.is_none()
             && startup_child_exited(&first, &second_census, |pid| {
-                let result = DarwinSystem.bsd_process_identity(pid);
+                let result = lookup(pid);
                 if diagnostic.is_some() {
                     exit_checks.push(serde_json::json!({
                         "pid":pid,
@@ -3150,10 +3350,9 @@ impl StartupWorkload {
             })
             .collect::<Vec<_>>();
         for child in &owned {
-            if self
-                .children
-                .get(&child.identity.pid)
-                .is_some_and(|prior| !same_owned_child(prior, &child.identity))
+            if let Some(prior) = self.children.get(&child.identity.pid)
+                && !same_owned_child(prior, &child.identity)
+                && !prior_child_absent_for_reuse(prior, &child.identity, &mut lookup)
             {
                 return Err(proof_refusal(
                     diagnostic,
@@ -3174,11 +3373,19 @@ impl StartupWorkload {
                 for child in &owned {
                     if let Some(prior) = scope
                         .children
-                        .iter()
+                        .iter_mut()
                         .find(|prior| prior.identity.pid == child.identity.pid)
                     {
                         if !same_owned_child(&prior.identity, &child.identity) {
-                            return Err(WorkerProtocolError::InvalidIdentity);
+                            if prior_child_absent_for_reuse(
+                                &prior.identity,
+                                &child.identity,
+                                &mut lookup,
+                            ) {
+                                *prior = child.clone();
+                            } else {
+                                return Err(WorkerProtocolError::InvalidIdentity);
+                            }
                         }
                     } else {
                         scope.children.push(child.clone());
@@ -3193,9 +3400,7 @@ impl StartupWorkload {
             })?;
         }
         for child in owned {
-            self.children
-                .entry(child.identity.pid)
-                .or_insert(child.identity);
+            self.children.insert(child.identity.pid, child.identity);
         }
         Ok(())
     }
@@ -3741,8 +3946,17 @@ fn prove_group_empty_samples_with_companion(
         if let Some(wait) = startup.as_deref() {
             tracked.extend(wait.children.iter().map(|(pid, entry)| (*pid, *entry)));
         }
+        let child_recycled_in_census = |child: &crate::darwin::ProcessCensusEntry| {
+            child.birth.is_some()
+                && census.iter().any(|entry| {
+                    entry.pid == child.pid && entry.birth.is_some() && entry.birth != child.birth
+                })
+        };
         for group in tracked
             .values()
+            .filter(|child| {
+                !(child.process_group_id == child.pid && child_recycled_in_census(child))
+            })
             .map(|child| child.process_group_id)
             .collect::<std::collections::BTreeSet<_>>()
         {
@@ -3799,8 +4013,11 @@ fn prove_group_empty_samples_with_companion(
         }
         for entry in &census {
             if tracked.values().any(|child| {
-                entry.process_group_id == child.process_group_id
-                    || entry.session_id == child.session_id
+                let recycled = child_recycled_in_census(child);
+                (!(recycled && child.process_group_id == child.pid)
+                    && entry.process_group_id == child.process_group_id)
+                    || (!(recycled && child.session_id == child.pid)
+                        && entry.session_id == child.session_id)
             }) && entry.pid != record.identity.pid
                 && !companion::contains(companion, entry)
                 && !(startup.is_none() && tools.contains(entry.pid))
@@ -3836,17 +4053,14 @@ fn prove_group_empty_samples_with_companion(
         let mut present_child_count = 0_usize;
         let mut present_child_sample = Vec::new();
         for child in tracked.values() {
-            match DarwinSystem.bsd_process_identity(child.pid) {
-                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
-                Ok(current)
-                    if current.uid == child.uid
-                        && Some((current.start_tvsec, current.start_tvusec)) == child.birth
-                        && current.process_group_id == child.process_group_id
-                        && current.session_id == child.session_id =>
-                {
+            let kernel = DarwinSystem.bsd_process_identity(child.pid);
+            let status = classify_tracked_child_identity(child, &kernel);
+            match status {
+                TrackedChildStatus::LiveMatch => {
                     if tools.contains(child.pid) {
                         continue;
                     }
+                    let current = kernel.as_ref().expect("live match has kernel identity");
                     recorded_absent = false;
                     present_child_count += 1;
                     if diagnostic.is_some() && present_child_sample.len() < 4 {
@@ -3871,11 +4085,16 @@ fn prove_group_empty_samples_with_companion(
                     (tool_sample.as_mut(), &record.dedicated_server_identity)
                     && let Some(entry) = census.iter().find(|entry| entry.pid == child.pid)
                     && sample.defer_member(&tools, entry, server) => {}
-                current => {
+                TrackedChildStatus::Absent => {}
+                TrackedChildStatus::IdentityDrift => {
                     return Err(proof_refusal(
                         &mut diagnostic,
                         "startup_child_identity",
-                        serde_json::json!({"expected":child,"observed":current.as_ref().ok()}),
+                        serde_json::json!({
+                            "expected": child,
+                            "observed": kernel.as_ref().ok(),
+                            "os_error": kernel.as_ref().err().and_then(std::io::Error::raw_os_error),
+                        }),
                     ));
                 }
             }
@@ -4045,6 +4264,12 @@ fn dedicated_group_has_only_expected_leader_with_companion(
         .map(|identity| identity.pid)
         .collect::<Vec<_>>();
     enumerated.sort_unstable();
+    let tools = profile_tool_processes(
+        Some(server),
+        &census,
+        startup.as_deref(),
+        tool_sample.as_ref().map(|sample| sample.retained),
+    );
     if enumerated != members {
         match startup.as_deref_mut() {
             Some(wait) => wait.reconcile_group_membership(
@@ -4055,6 +4280,14 @@ fn dedicated_group_has_only_expected_leader_with_companion(
                 &mut diagnostic,
                 |pid| DarwinSystem.bsd_process_identity(pid),
             )?,
+            None if tool_sample.as_mut().is_some_and(|sample| {
+                sample.defer_server_group_membership_change(
+                    &tools,
+                    server,
+                    (&members, &enumerated),
+                    &census,
+                )
+            }) => {}
             None => {
                 proof_refusal(
                     &mut diagnostic,
@@ -4066,12 +4299,6 @@ fn dedicated_group_has_only_expected_leader_with_companion(
         }
     }
     companion::verify(companion, &census)?;
-    let tools = profile_tool_processes(
-        Some(server),
-        &census,
-        startup.as_deref(),
-        tool_sample.as_ref().map(|sample| sample.retained),
-    );
     let by_pid = census
         .iter()
         .map(|identity| (identity.pid, identity.parent_pid))
@@ -8880,12 +9107,24 @@ impl WorkerSession {
                     Some(serde_json::json!({"coordinator_error": format!("{error:?}")}));
                 WorkerProtocolError::AppServerUnavailable
             })?;
+            let startup_abort_eligible = replayed.lifecycle
+                == crate::domain::RunLifecycle::Starting
+                && replayed.thread_id.is_none()
+                && replayed.latest_turn_id.is_none();
+            let is_quiescence_timeout = |failure: Option<&Value>| {
+                failure
+                    .and_then(|value| value.pointer("/process_proof/predicate"))
+                    .and_then(Value::as_str)
+                    == Some("startup_quiescence_timeout")
+            };
+            let mut caller_runtime_path = None;
             if caller_workspace_session(manifest.schema_version, session) {
                 startup_phase = "runtime_qualification";
                 let owned = dedicated_server
                     .as_ref()
                     .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
                 let path = runtime_record_path(&runtime_root(state_root), facts.run_id)?;
+                caller_runtime_path = Some(path.clone());
                 let runtime = read_runtime_record(&path, uid)?;
                 let qualification = QualifiedCallerRuntime::from_owned_server(
                     &manifest,
@@ -8896,9 +9135,7 @@ impl WorkerSession {
                 )
                 .inspect_err(|error| {
                     if *error == WorkerProtocolError::StartupQuiescenceTimeout
-                        && replayed.lifecycle == crate::domain::RunLifecycle::Starting
-                        && replayed.thread_id.is_none()
-                        && replayed.latest_turn_id.is_none()
+                        && startup_abort_eligible
                     {
                         abort_checkpoint = startup_abort::capture(&manifest, session, &path)
                             .inspect_err(|error| {
@@ -8916,11 +9153,29 @@ impl WorkerSession {
                 coordinator
                     .qualify_caller_runtime(qualification)
                     .map_err(|error| {
+                        let quiescence_timeout =
+                            is_quiescence_timeout(coordinator.caller_startup_failure());
+                        if quiescence_timeout && startup_abort_eligible {
+                            abort_checkpoint = startup_abort::capture(&manifest, session, &path)
+                                .inspect_err(|error| {
+                                    record_session_startup_failure(
+                                        session,
+                                        "startup_abort_checkpoint",
+                                        *error,
+                                        None,
+                                    );
+                                })
+                                .unwrap_or(false);
+                        }
                         startup_details = Some(serde_json::json!({
                             "coordinator_error": error.diagnostic_kind(),
                             "caller_startup_failure": coordinator.caller_startup_failure(),
                         }));
-                        WorkerProtocolError::AppServerUnavailable
+                        if quiescence_timeout {
+                            WorkerProtocolError::StartupQuiescenceTimeout
+                        } else {
+                            WorkerProtocolError::AppServerUnavailable
+                        }
                     })?;
             }
             if manifest.schema_version >= 3
@@ -9063,11 +9318,33 @@ impl WorkerSession {
             coordinator
                 .complete_caller_runtime_startup()
                 .map_err(|error| {
+                    let quiescence_timeout =
+                        is_quiescence_timeout(coordinator.caller_startup_failure());
+                    if quiescence_timeout
+                        && let Some(path) = caller_runtime_path.as_deref()
+                        && startup_abort_eligible
+                        && coordinator.thread_id().is_none()
+                    {
+                        abort_checkpoint = startup_abort::capture(&manifest, session, path)
+                            .inspect_err(|error| {
+                                record_session_startup_failure(
+                                    session,
+                                    "startup_abort_checkpoint",
+                                    *error,
+                                    None,
+                                );
+                            })
+                            .unwrap_or(false);
+                    }
                     startup_details = Some(serde_json::json!({
                         "coordinator_error": error.diagnostic_kind(),
                         "caller_startup_failure": coordinator.caller_startup_failure(),
                     }));
-                    WorkerProtocolError::InvalidIdentity
+                    if quiescence_timeout {
+                        WorkerProtocolError::StartupQuiescenceTimeout
+                    } else {
+                        WorkerProtocolError::InvalidIdentity
+                    }
                 })?;
             Ok(coordinator)
         })();
@@ -14407,9 +14684,9 @@ pub fn remove_verified_absent_runtime(
     remove_proven_absent_runtime(runtime_record, &record)
 }
 
-/// Stop the current exact generation. Previous-boot generations are retired
-/// without consulting their PIDs after the caller checks the startup claims.
-pub(crate) fn stop_force_delete_runtime(
+/// Pre-check that `stop_force_delete_runtime` can safely inspect and signal the
+/// recorded generation before operator abandonment fences the session.
+pub(crate) fn can_stop_force_delete_runtime(
     record: &WorkerRuntimeRecord,
 ) -> Result<(), WorkerProtocolError> {
     let identity = &record.identity;
@@ -14423,79 +14700,539 @@ pub(crate) fn stop_force_delete_runtime(
     {
         return Err(WorkerProtocolError::InvalidIdentity);
     }
-    if classify_worker_identity(record) == ProcessIdentityVerdict::Match {
-        // Address the retained inode and identity directly. Frozen Shutdown
-        // gives the Worker the opportunity to settle effects it can observe.
-        let send_shutdown = || -> Result<ControlResponseV1, WorkerProtocolError> {
-            if record.observe_socket()? != record.socket_identity {
-                return Err(WorkerProtocolError::SocketIdentityMismatch);
-            }
-            let mut stream = DeadlineStream::connect(
-                &record.socket_path,
-                Instant::now() + Duration::from_secs(12),
+    if !matches!(
+        classify_worker_identity(record),
+        ProcessIdentityVerdict::Match | ProcessIdentityVerdict::Absent
+    ) {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    if record
+        .dedicated_server_identity
+        .as_ref()
+        .is_some_and(|server| {
+            !matches!(
+                classify_dedicated_server_identity(server),
+                ProcessIdentityVerdict::Match | ProcessIdentityVerdict::Absent
             )
-            .map_err(|_| WorkerProtocolError::Io)?;
-            write_frame(
-                &mut stream,
-                &ControlRequestV1::Shutdown {
-                    expected: identity.clone(),
-                },
-            )?;
-            read_frame(&mut std::io::BufReader::new(stream))
+        })
+    {
+        return Err(WorkerProtocolError::InvalidIdentity);
+    }
+    let _ = verified_owned_force_delete_targets(record, &mut None)?;
+    Ok(())
+}
+
+struct ForceDeleteOwnedTargets {
+    groups: std::collections::BTreeSet<u32>,
+    processes: Vec<crate::darwin::ProcessCensusEntry>,
+}
+
+enum ForceDeleteScopeSample {
+    Ready(ForceDeleteOwnedTargets),
+    TransientDisagreement,
+}
+
+fn descends_from_any(
+    mut pid: u32,
+    roots: &std::collections::BTreeSet<u32>,
+    parents: &BTreeMap<u32, u32>,
+) -> bool {
+    if roots.is_empty() {
+        return false;
+    }
+    for _ in 0..256 {
+        let Some(parent) = parents.get(&pid).copied() else {
+            return false;
         };
-        let _ = send_shutdown();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            observe_owned_worker_child(identity)?;
-            if classify_worker_identity(record) != ProcessIdentityVerdict::Match {
-                break;
-            }
-            thread::sleep(Duration::from_millis(100));
+        if roots.contains(&parent) {
+            return true;
         }
-        if classify_worker_identity(record) == ProcessIdentityVerdict::Match {
-            // Only an identified leader in a checked process scope can be
-            // signalled if its control socket fails to stop it.
-            let server_live = record
+        if parent <= 1 || parent == pid {
+            return false;
+        }
+        pid = parent;
+    }
+    false
+}
+
+/// Only leaders verified live with their exact recorded identity authorize
+/// process-group or session ownership. Absent or recycled leaders never admit
+/// arbitrary same-PGID/same-SID bystanders for `SIGKILL`.
+fn plan_force_delete_owned_targets(
+    record: &WorkerRuntimeRecord,
+    worker_live: bool,
+    server_live: bool,
+    census: &[crate::darwin::ProcessCensusEntry],
+    diagnostic: &mut Option<&mut Value>,
+) -> Result<ForceDeleteOwnedTargets, WorkerProtocolError> {
+    let identity = &record.identity;
+    let parents = census
+        .iter()
+        .map(|entry| (entry.pid, entry.parent_pid))
+        .collect::<BTreeMap<_, _>>();
+    let mut live_root_pids = std::collections::BTreeSet::new();
+    let mut live_owned_groups = std::collections::BTreeSet::new();
+    let mut live_owned_sessions = std::collections::BTreeSet::new();
+
+    if worker_live && let Some(entry) = census.iter().find(|entry| entry.pid == identity.pid) {
+        if entry.uid != identity.uid
+            || entry.birth != Some((identity.start_tvsec, identity.start_tvusec))
+            || entry.process_group_id != identity.process_group_id
+            || entry.session_id != identity.session_id
+        {
+            return Err(proof_refusal(
+                diagnostic,
+                "force_delete_worker_census_mismatch",
+                scope_observation(entry),
+            ));
+        }
+        live_root_pids.insert(identity.pid);
+        live_owned_groups.insert(identity.process_group_id);
+        live_owned_sessions.insert(identity.session_id);
+    }
+
+    if server_live
+        && let Some(server) = record.dedicated_server_identity.as_ref()
+        && let Some(entry) = census.iter().find(|entry| entry.pid == server.pid)
+    {
+        if !server_census_matches(entry, server) {
+            return Err(proof_refusal(
+                diagnostic,
+                "force_delete_server_census_mismatch",
+                scope_observation(entry),
+            ));
+        }
+        live_root_pids.insert(server.pid);
+        live_owned_groups.insert(server.process_group_id);
+        live_owned_sessions.insert(server.session_id);
+    }
+
+    let tracked_children = record
+        .startup_scope
+        .as_ref()
+        .map(|scope| scope.children.as_slice())
+        .unwrap_or(&[]);
+    for child in tracked_children {
+        let expected = &child.identity;
+        if let Some(entry) = census.iter().find(|entry| {
+            entry.pid == expected.pid
+                && entry.uid == expected.uid
+                && expected.birth.is_some()
+                && entry.birth == expected.birth
+        }) {
+            if !same_owned_child(entry, expected) {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "force_delete_tracked_child_drift",
+                    scope_observation(entry),
+                ));
+            }
+            live_root_pids.insert(entry.pid);
+            if expected.pid == expected.process_group_id {
+                live_owned_groups.insert(expected.process_group_id);
+            }
+            if expected.pid == expected.session_id {
+                live_owned_sessions.insert(expected.session_id);
+            }
+        }
+    }
+
+    let mut processes = Vec::new();
+    for entry in census {
+        let in_scope = live_root_pids.contains(&entry.pid)
+            || live_owned_groups.contains(&entry.process_group_id)
+            || live_owned_sessions.contains(&entry.session_id)
+            || descends_from_any(entry.pid, &live_root_pids, &parents);
+        if in_scope {
+            if entry.uid != identity.uid || entry.birth.is_none() {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "force_delete_process_unowned",
+                    scope_observation(entry),
+                ));
+            }
+            if !entry.zombie {
+                processes.push(*entry);
+            }
+        }
+    }
+    Ok(ForceDeleteOwnedTargets {
+        groups: live_owned_groups,
+        processes,
+    })
+}
+
+fn verified_owned_force_delete_targets(
+    record: &WorkerRuntimeRecord,
+    diagnostic: &mut Option<&mut Value>,
+) -> Result<ForceDeleteScopeSample, WorkerProtocolError> {
+    let identity = &record.identity;
+    let worker_live = match classify_worker_identity(record) {
+        ProcessIdentityVerdict::Match => true,
+        ProcessIdentityVerdict::Absent => false,
+        verdict => {
+            return Err(proof_refusal(
+                diagnostic,
+                "force_delete_worker_identity",
+                serde_json::json!({"verdict": verdict.as_str()}),
+            ));
+        }
+    };
+    let server_live = if let Some(server) = record.dedicated_server_identity.as_ref() {
+        match classify_dedicated_server_identity(server) {
+            ProcessIdentityVerdict::Match => true,
+            ProcessIdentityVerdict::Absent => false,
+            verdict => {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "force_delete_server_identity",
+                    serde_json::json!({"verdict": verdict.as_str()}),
+                ));
+            }
+        }
+    } else {
+        false
+    };
+    let census = DarwinSystem.all_process_identities().map_err(|error| {
+        proof_refusal(
+            diagnostic,
+            "force_delete_census_read",
+            serde_json::json!({"os_error": error.raw_os_error()}),
+        )
+    })?;
+    let planned =
+        plan_force_delete_owned_targets(record, worker_live, server_live, &census, diagnostic)?;
+
+    let mut groups = std::collections::BTreeSet::new();
+    for pgid in planned.groups {
+        let members = DarwinSystem.process_group_pids(pgid).map_err(|error| {
+            proof_refusal(
+                diagnostic,
+                "force_delete_group_read",
+                serde_json::json!({"pgid": pgid, "os_error": error.raw_os_error()}),
+            )
+        })?;
+        let mut enumerated = census
+            .iter()
+            .filter(|entry| entry.process_group_id == pgid)
+            .map(|entry| entry.pid)
+            .collect::<Vec<_>>();
+        enumerated.sort_unstable();
+        if members != enumerated {
+            return Ok(ForceDeleteScopeSample::TransientDisagreement);
+        }
+        if members.is_empty() {
+            continue;
+        }
+        let all_owned = census
+            .iter()
+            .filter(|entry| entry.process_group_id == pgid)
+            .all(|entry| entry.uid == identity.uid && entry.birth.is_some());
+        if !all_owned {
+            return Err(proof_refusal(
+                diagnostic,
+                "force_delete_group_unowned",
+                serde_json::json!({"pgid": pgid}),
+            ));
+        }
+        groups.insert(pgid);
+    }
+
+    Ok(ForceDeleteScopeSample::Ready(ForceDeleteOwnedTargets {
+        groups,
+        processes: planned.processes,
+    }))
+}
+
+fn signal_force_delete_owned_targets(
+    record: &WorkerRuntimeRecord,
+    targets: &ForceDeleteOwnedTargets,
+    diagnostic: &mut Option<&mut Value>,
+) -> Result<(), WorkerProtocolError> {
+    let identity = &record.identity;
+    // Signal verified owned process groups first so children in the group
+    // cannot spawn replacements while individual exact-PID signals proceed.
+    // On macOS/XNU, kill(-pgid, SIGKILL) returns EPERM when every remaining
+    // member in the group is already exiting/zombie; exact-PID signals and the
+    // subsequent full-scope absence proof still fail closed on any unowned PID.
+    for &pgid in &targets.groups {
+        match DarwinSystem.signal_process_group(pgid, libc::SIGKILL) {
+            Ok(()) => {}
+            Err(error) if matches!(error.raw_os_error(), Some(libc::ESRCH | libc::EPERM)) => {}
+            Err(error) => {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "force_delete_signal_group",
+                    serde_json::json!({
+                        "pgid": pgid,
+                        "os_error": error.raw_os_error(),
+                        "reason": error.to_string(),
+                    }),
+                ));
+            }
+        }
+    }
+    let mut ordered = targets.processes.clone();
+    ordered.sort_by_key(|process| {
+        let is_leader = process.pid == identity.pid
+            || record
                 .dedicated_server_identity
                 .as_ref()
-                .is_some_and(|server| {
-                    classify_dedicated_server_identity(server) == ProcessIdentityVerdict::Match
-                });
-            prove_group_empty(record, true, server_live)?;
-            if classify_worker_identity(record) != ProcessIdentityVerdict::Match {
-                return Err(WorkerProtocolError::InvalidIdentity);
+                .is_some_and(|server| process.pid == server.pid);
+        (is_leader, std::cmp::Reverse(process.pid))
+    });
+    for process in &ordered {
+        if process.pid == identity.pid {
+            continue;
+        }
+        match DarwinSystem.signal_exact_process(process, libc::SIGKILL) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+            Err(error) => {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "force_delete_signal_process",
+                    serde_json::json!({
+                        "process": scope_observation(process),
+                        "os_error": error.raw_os_error(),
+                        "reason": error.to_string(),
+                    }),
+                ));
             }
-            let leader = crate::darwin::ProcessCensusEntry {
-                pid: identity.pid,
-                parent_pid: 0,
-                uid: identity.uid,
-                process_group_id: identity.process_group_id,
-                session_id: identity.session_id,
-                birth: Some((identity.start_tvsec, identity.start_tvusec)),
-                zombie: false,
+        }
+    }
+    if classify_worker_identity(record) == ProcessIdentityVerdict::Match {
+        let leader = crate::darwin::ProcessCensusEntry {
+            pid: identity.pid,
+            parent_pid: 0,
+            uid: identity.uid,
+            process_group_id: identity.process_group_id,
+            session_id: identity.session_id,
+            birth: Some((identity.start_tvsec, identity.start_tvusec)),
+            zombie: false,
+        };
+        match DarwinSystem.signal_exact_process(&leader, libc::SIGKILL) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+            Err(error) => {
+                return Err(proof_refusal(
+                    diagnostic,
+                    "force_delete_signal_leader",
+                    serde_json::json!({
+                        "os_error": error.raw_os_error(),
+                        "reason": error.to_string(),
+                    }),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn retire_slot_owner_registration(
+    runtime_record: &Path,
+    owner: &WorkerIdentity,
+) -> Result<(), WorkerProtocolError> {
+    let owner_root = runtime_owner_root(runtime_record)?;
+    if boot_session_uuid(owner.uid)? != owner.boot_uuid {
+        crate::process_inventory::retire_prior_boot_run(owner_root, owner.run_id, owner.boot_uuid)
+            .map_err(|_| WorkerProtocolError::Io)?;
+        return Ok(());
+    }
+    let retirement = crate::process_inventory::Retirement {
+        kind: "worker",
+        owner_root,
+        boot_uuid: owner.boot_uuid,
+        run_id: Some(owner.run_id),
+    };
+    crate::process_inventory::retire_process(&retirement, &owner.recorded_process())
+        .map_err(|_| WorkerProtocolError::Io)
+}
+
+/// Prove that a slot-1 Worker recorded before any runtime locator was written
+/// is completely absent (no live worker or process-group/session descendants).
+pub(crate) fn prove_slot_owner_absent(owner: &WorkerIdentity) -> Result<(), WorkerProtocolError> {
+    owner.validate()?;
+    if boot_session_uuid(owner.uid)? != owner.boot_uuid {
+        return Ok(());
+    }
+    for sample in 0..5 {
+        if classify_process_identity(owner) != ProcessIdentityVerdict::Absent {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        let mut members = DarwinSystem
+            .process_group_pids(owner.process_group_id)
+            .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+        members.retain(|pid| *pid != owner.pid);
+        let census = DarwinSystem
+            .all_process_identities()
+            .map_err(|_| WorkerProtocolError::InvalidIdentity)?;
+        let mut enumerated = census
+            .iter()
+            .filter(|entry| {
+                entry.process_group_id == owner.process_group_id && entry.pid != owner.pid
+            })
+            .map(|entry| entry.pid)
+            .collect::<Vec<_>>();
+        enumerated.sort_unstable();
+        if enumerated != members || !members.is_empty() {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        let parents = census
+            .iter()
+            .map(|entry| (entry.pid, entry.parent_pid))
+            .collect::<BTreeMap<_, _>>();
+        let any_live_in_scope = census.iter().any(|entry| {
+            if entry.zombie
+                && entry.pid == owner.pid
+                && entry.uid == owner.uid
+                && entry.process_group_id == owner.process_group_id
+                && entry.session_id == owner.session_id
+                && entry.birth == Some((owner.start_tvsec, owner.start_tvusec))
+            {
+                return false;
+            }
+            entry.pid == owner.pid
+                || process_is_in_scope(
+                    entry,
+                    owner.pid,
+                    owner.process_group_id,
+                    owner.session_id,
+                    &parents,
+                )
+        });
+        if any_live_in_scope {
+            return Err(WorkerProtocolError::InvalidIdentity);
+        }
+        if sample < 4 {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    Ok(())
+}
+
+/// Stop the current exact generation. Previous-boot generations are retired
+/// without consulting their PIDs after the caller checks the startup claims.
+pub(crate) fn stop_force_delete_runtime(
+    record: &WorkerRuntimeRecord,
+) -> Result<(), WorkerProtocolError> {
+    stop_force_delete_runtime_observed(record, None)
+}
+
+fn stop_force_delete_runtime_observed(
+    record: &WorkerRuntimeRecord,
+    mut diagnostic: Option<&mut Value>,
+) -> Result<(), WorkerProtocolError> {
+    let identity = &record.identity;
+    if boot_session_uuid(identity.uid)? != identity.boot_uuid {
+        return Ok(());
+    }
+    if record
+        .startup_scope
+        .as_ref()
+        .is_none_or(|scope| !scope.complete)
+    {
+        return Err(proof_refusal(
+            &mut diagnostic,
+            "force_delete_scope_incomplete",
+            Value::Null,
+        ));
+    }
+    match classify_worker_identity(record) {
+        ProcessIdentityVerdict::Match => {
+            // Address the retained inode and identity directly. Frozen Shutdown
+            // gives the Worker the opportunity to settle effects it can observe.
+            let send_shutdown = || -> Result<ControlResponseV1, WorkerProtocolError> {
+                if record.observe_socket()? != record.socket_identity {
+                    return Err(WorkerProtocolError::SocketIdentityMismatch);
+                }
+                let mut stream = DeadlineStream::connect(
+                    &record.socket_path,
+                    Instant::now() + Duration::from_secs(12),
+                )
+                .map_err(|_| WorkerProtocolError::Io)?;
+                write_frame(
+                    &mut stream,
+                    &ControlRequestV1::Shutdown {
+                        expected: identity.clone(),
+                    },
+                )?;
+                read_frame(&mut std::io::BufReader::new(stream))
             };
-            match DarwinSystem.signal_exact_process(&leader, libc::SIGKILL) {
-                Ok(()) => {}
-                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
-                Err(_) => return Err(WorkerProtocolError::InvalidIdentity),
-            }
+            let _ = send_shutdown();
             let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
+            while Instant::now() < deadline {
                 observe_owned_worker_child(identity)?;
-                if classify_worker_identity(record) != ProcessIdentityVerdict::Match
-                    || Instant::now() >= deadline
-                {
+                if classify_worker_identity(record) != ProcessIdentityVerdict::Match {
                     break;
                 }
                 thread::sleep(Duration::from_millis(100));
             }
         }
+        ProcessIdentityVerdict::Absent => {}
+        verdict => {
+            return Err(proof_refusal(
+                &mut diagnostic,
+                "force_delete_initial_worker_verdict",
+                serde_json::json!({"verdict": verdict.as_str()}),
+            ));
+        }
     }
+
+    // If the worker or any verified owned descendant/group is still live,
+    // verify ownership and terminate the owned process groups & exact
+    // descendants FIRST, then prove absence afterward.
+    let force_deadline = Instant::now() + Duration::from_secs(5);
+    let mut signaled_force = false;
+    loop {
+        observe_owned_worker_child(identity)?;
+        match classify_worker_identity(record) {
+            ProcessIdentityVerdict::Match | ProcessIdentityVerdict::Absent => {}
+            verdict => {
+                return Err(proof_refusal(
+                    &mut diagnostic,
+                    "force_delete_loop_worker_verdict",
+                    serde_json::json!({"verdict": verdict.as_str()}),
+                ));
+            }
+        }
+        match verified_owned_force_delete_targets(record, &mut diagnostic)? {
+            ForceDeleteScopeSample::TransientDisagreement => {}
+            ForceDeleteScopeSample::Ready(targets) => {
+                if targets.processes.is_empty()
+                    && classify_worker_identity(record) == ProcessIdentityVerdict::Absent
+                {
+                    break;
+                }
+                signal_force_delete_owned_targets(record, &targets, &mut diagnostic)?;
+                signaled_force = true;
+            }
+        }
+        if Instant::now() >= force_deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
     if classify_worker_identity(record) != ProcessIdentityVerdict::Absent {
-        return Err(WorkerProtocolError::InvalidIdentity);
+        return Err(proof_refusal(
+            &mut diagnostic,
+            "force_delete_worker_still_live",
+            serde_json::json!({"verdict": classify_worker_identity(record).as_str()}),
+        ));
     }
     stop_orphaned_dedicated_server(record)?;
-    prove_worker_generation_absent(record).map(|_| ())
+    if signaled_force {
+        let settle_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < settle_deadline {
+            observe_owned_worker_child(identity)?;
+            if prove_worker_generation_absent(record).is_ok() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    prove_group_empty_observed(record, false, false, diagnostic).map(|_| ())
 }
 
 /// Called under the startup serializer after the complete generation has
@@ -19287,6 +20024,838 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn startup_ancestry_and_observe_owned_handle_toctou_and_fail_closed() {
+        let leader = crate::darwin::ProcessCensusEntry {
+            pid: 51582,
+            parent_pid: 51500,
+            uid: 501,
+            process_group_id: 51582,
+            session_id: 51582,
+            birth: Some((100, 1)),
+            zombie: false,
+        };
+        let parent = crate::darwin::ProcessCensusEntry {
+            pid: 55412,
+            parent_pid: leader.pid,
+            birth: Some((100, 2)),
+            ..leader
+        };
+        let child = crate::darwin::ProcessCensusEntry {
+            pid: 55439,
+            parent_pid: parent.pid,
+            birth: Some((100, 3)),
+            ..leader
+        };
+        let direct_child = crate::darwin::ProcessCensusEntry {
+            pid: 55440,
+            parent_pid: leader.pid,
+            birth: Some((100, 4)),
+            ..leader
+        };
+        let worker = identity();
+        let server = DedicatedServerIdentity {
+            pid: leader.pid,
+            process_group_id: leader.process_group_id,
+            session_id: leader.session_id,
+            uid: leader.uid,
+            start_tvsec: 100,
+            start_tvusec: 1,
+            executable_path: worker.executable_path,
+            executable_device: worker.executable_device,
+            executable_inode: worker.executable_inode,
+            executable_sha256: worker.executable_sha256,
+        };
+        let new_wait = || {
+            StartupWorkload::new(
+                Duration::from_secs(10),
+                PathBuf::from("/unused"),
+                SocketIdentity {
+                    device: 1,
+                    inode: 1,
+                },
+                server.uid,
+            )
+        };
+        let esrch = || Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+        let eperm = || Err(std::io::Error::from_raw_os_error(libc::EPERM));
+
+        // Positive 1: short-lived direct child exits (ESRCH) between lookup and fresh census.
+        let mut wait = new_wait();
+        wait.dirty_sample = false;
+        let fresh = vec![leader];
+        wait.observe_owned_with(
+            &direct_child,
+            &server,
+            &fresh,
+            "dedicated_membership",
+            &mut None,
+            || panic!("second census should not be taken for exited child"),
+            |pid| {
+                assert_eq!(pid, direct_child.pid);
+                esrch()
+            },
+        )
+        .unwrap();
+        assert!(wait.dirty_sample);
+        assert!(wait.children.is_empty());
+
+        // Positive 2: short-lived grandchild exits (ESRCH) whose verified self.children parent
+        // also exited (ESRCH) before fresh census.
+        let mut wait = new_wait();
+        wait.children.insert(parent.pid, parent);
+        wait.dirty_sample = false;
+        wait.observe_owned_with(
+            &child,
+            &server,
+            &[leader],
+            "dedicated_membership",
+            &mut None,
+            || panic!("second census should not be taken for exited grandchild"),
+            |pid| {
+                assert!(pid == child.pid || pid == parent.pid);
+                esrch()
+            },
+        )
+        .unwrap();
+        assert!(wait.dirty_sample);
+        assert!(!wait.children.contains_key(&child.pid));
+
+        // Positive 3: verified self.children parent exits (ESRCH) while live grandchild
+        // is observed in both census and second_census -> ancestry succeeds & child recorded.
+        let mut wait = new_wait();
+        wait.children.insert(parent.pid, parent);
+        let live_fresh = vec![child, leader];
+        wait.observe_owned_with(
+            &child,
+            &server,
+            &live_fresh,
+            "dedicated_membership",
+            &mut None,
+            || Ok(live_fresh.clone()),
+            |pid| {
+                assert_eq!(pid, parent.pid);
+                esrch()
+            },
+        )
+        .unwrap();
+        assert!(wait.dirty_sample);
+        assert_eq!(wait.children.get(&child.pid), Some(&child));
+
+        // Positive 4: startup_child_exited accepts exact-matching zombie child when
+        // intermediate parent exited (ESRCH), while rejecting non-zombie live child.
+        let first = [child, parent, leader];
+        let mut zombie_child_entry = child;
+        zombie_child_entry.zombie = true;
+        let zombie_bsd = crate::darwin::BsdProcessIdentity {
+            pid: child.pid,
+            parent_pid: child.parent_pid,
+            uid: child.uid,
+            process_group_id: child.process_group_id,
+            session_id: child.session_id,
+            start_tvsec: 100,
+            start_tvusec: 3,
+            zombie: true,
+        };
+        assert!(startup_child_exited(
+            &first,
+            &[zombie_child_entry, leader],
+            |pid| if pid == child.pid {
+                Ok(zombie_bsd)
+            } else {
+                esrch()
+            }
+        ));
+        let non_zombie_bsd = crate::darwin::BsdProcessIdentity {
+            zombie: false,
+            ..zombie_bsd
+        };
+        assert!(!startup_child_exited(&first, &[child, leader], |pid| {
+            if pid == child.pid {
+                Ok(non_zombie_bsd)
+            } else {
+                esrch()
+            }
+        }));
+
+        // Negative 1 (security): unowned parent's exited child -> Err(InvalidIdentity) startup_child_ancestry.
+        let mut wait = new_wait();
+        let mut details = Value::Null;
+        assert_eq!(
+            wait.observe_owned_with(
+                &child,
+                &server,
+                &[leader],
+                "dedicated_membership",
+                &mut Some(&mut details),
+                || Ok(vec![leader]),
+                |_| esrch(),
+            ),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+        assert_eq!(details["predicate"], "startup_child_ancestry");
+
+        // Negative 2 (security): EPERM lookup on exited child OR on exited self.children parent -> Err(InvalidIdentity).
+        let mut wait = new_wait();
+        let mut details = Value::Null;
+        assert_eq!(
+            wait.observe_owned_with(
+                &direct_child,
+                &server,
+                &[leader],
+                "dedicated_membership",
+                &mut Some(&mut details),
+                || Ok(vec![leader]),
+                |_| eperm(),
+            ),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+        assert_eq!(details["predicate"], "startup_child_ancestry");
+
+        let mut wait = new_wait();
+        wait.children.insert(parent.pid, parent);
+        assert_eq!(
+            wait.observe_owned_with(
+                &child,
+                &server,
+                &live_fresh,
+                "dedicated_membership",
+                &mut None,
+                || Ok(live_fresh.clone()),
+                |_| eperm(),
+            ),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+
+        // Negative 3 (security): recycled PID (birth mismatch / live process returned for
+        // exited self.children parent, or non-monotonic birth order) -> Err(InvalidIdentity).
+        let mut wait = new_wait();
+        wait.children.insert(parent.pid, parent);
+        let recycled_parent = crate::darwin::BsdProcessIdentity {
+            pid: parent.pid,
+            parent_pid: 1,
+            uid: server.uid,
+            process_group_id: parent.pid,
+            session_id: parent.pid,
+            start_tvsec: 200,
+            start_tvusec: 0,
+            zombie: false,
+        };
+        assert_eq!(
+            wait.observe_owned_with(
+                &child,
+                &server,
+                &live_fresh,
+                "dedicated_membership",
+                &mut None,
+                || Ok(live_fresh.clone()),
+                |_| Ok(recycled_parent),
+            ),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+
+        let mut wait = new_wait();
+        let newer_parent = crate::darwin::ProcessCensusEntry {
+            birth: Some((100, 9)),
+            ..parent
+        };
+        wait.children.insert(parent.pid, newer_parent);
+        assert_eq!(
+            wait.observe_owned_with(
+                &child,
+                &server,
+                &live_fresh,
+                "dedicated_membership",
+                &mut None,
+                || Ok(live_fresh.clone()),
+                |_| esrch(),
+            ),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+
+        // Negative 4 (security): server missing or mismatched in census -> Err(InvalidIdentity).
+        let mut wait = new_wait();
+        wait.children.insert(parent.pid, parent);
+        assert_eq!(
+            wait.observe_owned_with(
+                &direct_child,
+                &server,
+                &[],
+                "dedicated_membership",
+                &mut None,
+                || Ok(vec![]),
+                |_| esrch(),
+            ),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+        let mismatched_leader = crate::darwin::ProcessCensusEntry {
+            birth: Some((999, 1)),
+            ..leader
+        };
+        assert_eq!(
+            wait.observe_owned_with(
+                &child,
+                &server,
+                &[child, mismatched_leader],
+                "dedicated_membership",
+                &mut None,
+                || Ok(vec![child, mismatched_leader]),
+                |_| esrch(),
+            ),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+    }
+
+    #[test]
+    fn tracked_child_pid_reuse_is_absent_while_same_birth_drift_fails_closed() {
+        let child = crate::darwin::ProcessCensusEntry {
+            pid: 4000,
+            parent_pid: 1000,
+            uid: 501,
+            process_group_id: 1000,
+            session_id: 1000,
+            birth: Some((50, 10)),
+            zombie: false,
+        };
+        let exact_bsd = crate::darwin::BsdProcessIdentity {
+            pid: child.pid,
+            parent_pid: child.parent_pid,
+            uid: child.uid,
+            process_group_id: child.process_group_id,
+            session_id: child.session_id,
+            start_tvsec: 50,
+            start_tvusec: 10,
+            zombie: false,
+        };
+
+        assert_eq!(
+            classify_tracked_child_identity(
+                &child,
+                &Err(std::io::Error::from_raw_os_error(libc::ESRCH)),
+            ),
+            TrackedChildStatus::Absent
+        );
+        assert_eq!(
+            classify_tracked_child_identity(&child, &Ok(exact_bsd)),
+            TrackedChildStatus::LiveMatch
+        );
+
+        // PID recycled by a different process (different birth timestamp).
+        let recycled_birth = crate::darwin::BsdProcessIdentity {
+            start_tvsec: 51,
+            start_tvusec: 0,
+            ..exact_bsd
+        };
+        assert_eq!(
+            classify_tracked_child_identity(&child, &Ok(recycled_birth)),
+            TrackedChildStatus::Absent
+        );
+
+        // PID recycled by a different UID proven by Ok(current).
+        let recycled_uid = crate::darwin::BsdProcessIdentity {
+            uid: 0,
+            process_group_id: 4000,
+            session_id: 4000,
+            ..exact_bsd
+        };
+        assert_eq!(
+            classify_tracked_child_identity(&child, &Ok(recycled_uid)),
+            TrackedChildStatus::Absent
+        );
+
+        // Negative (F-3): EPERM MUST ALWAYS fail closed (IdentityDrift), never Absent.
+        assert_eq!(
+            classify_tracked_child_identity(
+                &child,
+                &Err(std::io::Error::from_raw_os_error(libc::EPERM)),
+            ),
+            TrackedChildStatus::IdentityDrift
+        );
+        let no_birth_child = crate::darwin::ProcessCensusEntry {
+            birth: None,
+            ..child
+        };
+        assert_eq!(
+            classify_tracked_child_identity(
+                &no_birth_child,
+                &Err(std::io::Error::from_raw_os_error(libc::EPERM)),
+            ),
+            TrackedChildStatus::IdentityDrift
+        );
+
+        // Negative: same (uid, birth) drifting pgid or sid must fail closed.
+        let drifted_pgid = crate::darwin::BsdProcessIdentity {
+            process_group_id: 9999,
+            ..exact_bsd
+        };
+        assert_eq!(
+            classify_tracked_child_identity(&child, &Ok(drifted_pgid)),
+            TrackedChildStatus::IdentityDrift
+        );
+        let drifted_sid = crate::darwin::BsdProcessIdentity {
+            session_id: 9999,
+            ..exact_bsd
+        };
+        assert_eq!(
+            classify_tracked_child_identity(&child, &Ok(drifted_sid)),
+            TrackedChildStatus::IdentityDrift
+        );
+
+        // StartupWorkload::observe_owned_with: dead prior child's PID reused by a new
+        // verified owned child succeeds; live same-birth pgid drift fails closed.
+        let worker = identity();
+        let leader = crate::darwin::ProcessCensusEntry {
+            pid: 1000,
+            parent_pid: 999,
+            uid: 501,
+            process_group_id: 1000,
+            session_id: 1000,
+            birth: Some((40, 1)),
+            zombie: false,
+        };
+        let server = DedicatedServerIdentity {
+            pid: leader.pid,
+            process_group_id: leader.process_group_id,
+            session_id: leader.session_id,
+            uid: leader.uid,
+            start_tvsec: 40,
+            start_tvusec: 1,
+            executable_path: worker.executable_path,
+            executable_device: worker.executable_device,
+            executable_inode: worker.executable_inode,
+            executable_sha256: worker.executable_sha256,
+        };
+        let mut wait = StartupWorkload::new(
+            Duration::from_secs(10),
+            PathBuf::from("/unused"),
+            SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            server.uid,
+        );
+        wait.children.insert(child.pid, child);
+
+        // Same-birth pgid drift -> rejected.
+        let drifted_child = crate::darwin::ProcessCensusEntry {
+            process_group_id: 9999,
+            ..child
+        };
+        assert_eq!(
+            wait.observe_owned_with(
+                &drifted_child,
+                &server,
+                &[drifted_child, leader],
+                "recorded_scope",
+                &mut None,
+                || Ok(vec![drifted_child, leader]),
+                |_| Ok(drifted_pgid),
+            ),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+
+        // Spoofed different birth while prior is still live in kernel -> rejected.
+        let reused_child = crate::darwin::ProcessCensusEntry {
+            birth: Some((55, 1)),
+            ..child
+        };
+        assert_eq!(
+            wait.observe_owned_with(
+                &reused_child,
+                &server,
+                &[reused_child, leader],
+                "recorded_scope",
+                &mut None,
+                || Ok(vec![reused_child, leader]),
+                |_| Ok(exact_bsd),
+            ),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+
+        // Prior is genuinely absent (kernel shows new birth) and new child descends from server -> accepted & replaced.
+        let new_bsd = crate::darwin::BsdProcessIdentity {
+            start_tvsec: 55,
+            start_tvusec: 1,
+            ..exact_bsd
+        };
+        wait.observe_owned_with(
+            &reused_child,
+            &server,
+            &[reused_child, leader],
+            "recorded_scope",
+            &mut None,
+            || Ok(vec![reused_child, leader]),
+            |_| Ok(new_bsd),
+        )
+        .unwrap();
+        assert_eq!(wait.children.get(&child.pid), Some(&reused_child));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stop_force_delete_runtime_handles_absent_worker_and_kills_owned_child_group() {
+        let root = std::env::temp_dir().join(format!("dolgorae-force-stop-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let child_pid_file = root.join("child.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                &format!(
+                    "/bin/sleep 60 & echo $! > \"{}\"; wait",
+                    child_pid_file.display()
+                ),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut leader = DarwinSystem.spawn_detached(&mut command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let child_pid: u32 = loop {
+            if let Ok(text) = fs::read_to_string(&child_pid_file)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "child pid file not written");
+            thread::sleep(Duration::from_millis(10));
+        };
+        let bsd = DarwinSystem.bsd_process_identity(leader.id()).unwrap();
+        let path = DarwinSystem.live_process_path(leader.id()).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let boot_uuid = Uuid::parse_str(&DarwinSystem.boot_session_uuid().unwrap()).unwrap();
+        let run_id = Uuid::now_v7();
+        let worker_id = WorkerIdentity {
+            workspace_id: "11".repeat(32),
+            run_id,
+            run_generation: 1,
+            boot_uuid,
+            pid: bsd.pid,
+            process_group_id: bsd.process_group_id,
+            session_id: bsd.session_id,
+            uid: bsd.uid,
+            start_tvsec: bsd.start_tvsec,
+            start_tvusec: bsd.start_tvusec,
+            executable_path: path.clone(),
+            executable_device: metadata.dev(),
+            executable_inode: metadata.ino(),
+            executable_sha256: file_sha256(&path).unwrap(),
+        };
+        let server_child_pid_file = root.join("server-child.pid");
+        let mut server_command = Command::new("/bin/sh");
+        server_command
+            .args([
+                "-c",
+                &format!(
+                    "/bin/sleep 60 & echo $! > \"{}\"; wait",
+                    server_child_pid_file.display()
+                ),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut dedicated_proc = DarwinSystem.spawn_detached(&mut server_command).unwrap();
+        let server_child_pid: u32 = loop {
+            if let Ok(text) = fs::read_to_string(&server_child_pid_file)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                break pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server child pid file not written"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        let server_bsd = DarwinSystem
+            .bsd_process_identity(dedicated_proc.id())
+            .unwrap();
+        let server_path = DarwinSystem.live_process_path(dedicated_proc.id()).unwrap();
+        let server_meta = fs::metadata(&server_path).unwrap();
+        let dedicated = DedicatedServerIdentity {
+            pid: server_bsd.pid,
+            process_group_id: server_bsd.process_group_id,
+            session_id: server_bsd.session_id,
+            uid: server_bsd.uid,
+            start_tvsec: server_bsd.start_tvsec,
+            start_tvusec: server_bsd.start_tvusec,
+            executable_path: server_path.clone(),
+            executable_device: server_meta.dev(),
+            executable_inode: server_meta.ino(),
+            executable_sha256: file_sha256(&server_path).unwrap(),
+        };
+        let mut scope = StartupScopeWitness::pending(worker_id.clone(), 1);
+        scope.dedicated_server_identity = Some(dedicated.clone());
+        scope.app_server_socket_identity = Some(SocketIdentity {
+            device: 1,
+            inode: 2,
+        });
+        scope.complete = true;
+        let record = WorkerRuntimeRecord {
+            schema_version: 2,
+            socket_path: worker_socket_path(
+                worker_id.uid,
+                &worker_id.workspace_id,
+                worker_id.run_id,
+            )
+            .unwrap(),
+            socket_identity: SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            control_socket_epoch: 1,
+            app_server_epoch: Some(1),
+            control_recovery_required: false,
+            startup_scope: Some(scope),
+            dedicated_server_identity: Some(dedicated),
+            dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+            mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+            binary_sha256: worker_id.executable_sha256.clone(),
+            identity: worker_id,
+        };
+        // Pre-check rejects incomplete startup scope.
+        let mut incomplete = record.clone();
+        incomplete.startup_scope.as_mut().unwrap().complete = false;
+        assert_eq!(
+            can_stop_force_delete_runtime(&incomplete),
+            Err(WorkerProtocolError::InvalidIdentity)
+        );
+        // Pre-check accepts verified live worker + dedicated server with active child groups.
+        can_stop_force_delete_runtime(&record).unwrap();
+
+        // Spawn reaper threads so detached children don't linger as zombies of this test process.
+        let reaper = thread::spawn(move || {
+            let _ = leader.wait();
+        });
+        let server_reaper = thread::spawn(move || {
+            let _ = dedicated_proc.wait();
+        });
+        let mut details = Value::Null;
+        stop_force_delete_runtime_observed(&record, Some(&mut details)).unwrap_or_else(|error| {
+            panic!("stop_force_delete_runtime failed: {error:?}: {details}")
+        });
+        reaper.join().unwrap();
+        server_reaper.join().unwrap();
+
+        // Worker child and dedicated server child must both now be kernel-absent.
+        for pid in [child_pid, server_child_pid] {
+            assert_eq!(
+                DarwinSystem
+                    .bsd_process_identity(pid)
+                    .err()
+                    .and_then(|e| e.raw_os_error()),
+                Some(libc::ESRCH)
+            );
+        }
+        // Re-running stop_force_delete_runtime on an already-Absent worker succeeds cleanly.
+        let mut details = Value::Null;
+        stop_force_delete_runtime_observed(&record, Some(&mut details)).unwrap_or_else(|error| {
+            panic!("stop_force_delete_runtime failed: {error:?}: {details}")
+        });
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn force_delete_target_planner_never_targets_recycled_same_uid_bystanders_or_groups() {
+        let mut worker = identity();
+        worker.pid = 100;
+        worker.process_group_id = 100;
+        worker.session_id = 100;
+        worker.start_tvsec = 10;
+        worker.start_tvusec = 1;
+        let uid = worker.uid;
+        let server = DedicatedServerIdentity {
+            pid: 200,
+            process_group_id: 200,
+            session_id: 200,
+            uid,
+            start_tvsec: 10,
+            start_tvusec: 2,
+            executable_path: worker.executable_path.clone(),
+            executable_device: worker.executable_device,
+            executable_inode: worker.executable_inode,
+            executable_sha256: worker.executable_sha256.clone(),
+        };
+        let server_entry = crate::darwin::ProcessCensusEntry {
+            pid: 200,
+            parent_pid: 100,
+            uid,
+            process_group_id: 200,
+            session_id: 200,
+            birth: Some((10, 2)),
+            zombie: false,
+        };
+        let group_leader_child = crate::darwin::ProcessCensusEntry {
+            pid: 300,
+            parent_pid: 200,
+            uid,
+            process_group_id: 300,
+            session_id: 200,
+            birth: Some((10, 3)),
+            zombie: false,
+        };
+        let sibling_in_child_group = crate::darwin::ProcessCensusEntry {
+            pid: 301,
+            parent_pid: 300,
+            uid,
+            process_group_id: 300,
+            session_id: 200,
+            birth: Some((10, 4)),
+            zombie: false,
+        };
+        let child_in_server_group = crate::darwin::ProcessCensusEntry {
+            pid: 302,
+            parent_pid: 200,
+            uid,
+            process_group_id: 200,
+            session_id: 200,
+            birth: Some((10, 5)),
+            zombie: false,
+        };
+        let mut scope = StartupScopeWitness::pending(worker.clone(), 1);
+        scope.dedicated_server_identity = Some(server.clone());
+        scope.app_server_socket_identity = Some(SocketIdentity {
+            device: 1,
+            inode: 2,
+        });
+        scope.complete = true;
+        scope.children = vec![
+            StartupOwnedChild {
+                identity: group_leader_child,
+                ancestry: vec![group_leader_child, server_entry],
+            },
+            StartupOwnedChild {
+                identity: sibling_in_child_group,
+                ancestry: vec![sibling_in_child_group, group_leader_child, server_entry],
+            },
+            StartupOwnedChild {
+                identity: child_in_server_group,
+                ancestry: vec![child_in_server_group, server_entry],
+            },
+        ];
+        let record = WorkerRuntimeRecord {
+            schema_version: 2,
+            socket_path: worker_socket_path(worker.uid, &worker.workspace_id, worker.run_id)
+                .unwrap(),
+            socket_identity: SocketIdentity {
+                device: 1,
+                inode: 1,
+            },
+            control_socket_epoch: 1,
+            app_server_epoch: Some(1),
+            control_recovery_required: false,
+            startup_scope: Some(scope),
+            dedicated_server_identity: Some(server),
+            dolgorae_version: env!("CARGO_PKG_VERSION").to_owned(),
+            mutation_protocol_version: WORKER_PROTOCOL_VERSION,
+            binary_sha256: worker.executable_sha256.clone(),
+            identity: worker,
+        };
+
+        // Trigger 1: server absent, tracked child shared server.pgid=200, unrelated U recycled PID 200
+        // -> tracked child MUST NOT re-insert pgid 200, and U MUST NOT be targeted!
+        let recycled_server_u = crate::darwin::ProcessCensusEntry {
+            pid: 200,
+            parent_pid: 1,
+            uid,
+            process_group_id: 200,
+            session_id: 200,
+            birth: Some((99, 1)),
+            zombie: false,
+        };
+        let planned =
+            plan_force_delete_owned_targets(&record, false, false, &[recycled_server_u], &mut None)
+                .unwrap();
+        assert!(planned.groups.is_empty());
+        assert!(planned.processes.is_empty());
+
+        // Trigger 2: group-leader child C1 (pid 300, pgid 300) exited and unrelated U recycled PID 300
+        // while sibling C2 shared pgid 300 -> pgid 300 MUST NOT be targeted, and U/U2 MUST NOT be targeted!
+        let recycled_child_u = crate::darwin::ProcessCensusEntry {
+            pid: 300,
+            parent_pid: 1,
+            uid,
+            process_group_id: 300,
+            session_id: 300,
+            birth: Some((99, 2)),
+            zombie: false,
+        };
+        let recycled_child_u2 = crate::darwin::ProcessCensusEntry {
+            pid: 400,
+            parent_pid: 300,
+            uid,
+            process_group_id: 300,
+            session_id: 300,
+            birth: Some((99, 3)),
+            zombie: false,
+        };
+        let planned = plan_force_delete_owned_targets(
+            &record,
+            false,
+            false,
+            &[recycled_child_u, recycled_child_u2, child_in_server_group],
+            &mut None,
+        )
+        .unwrap();
+        assert!(planned.groups.is_empty());
+        assert_eq!(planned.processes, vec![child_in_server_group]);
+
+        // Trigger 3: recycled leader U spawned U2 (pid 400, pgid 300, sid 300) and exited!
+        let orphan_u2 = crate::darwin::ProcessCensusEntry {
+            pid: 400,
+            parent_pid: 1,
+            uid,
+            process_group_id: 300,
+            session_id: 300,
+            birth: Some((99, 3)),
+            zombie: false,
+        };
+        let planned =
+            plan_force_delete_owned_targets(&record, false, false, &[orphan_u2], &mut None)
+                .unwrap();
+        assert!(planned.groups.is_empty());
+        assert!(planned.processes.is_empty());
+
+        // Positive: verified live server + verified live group-leader child DO authorize their groups & descendants.
+        let grandchild = crate::darwin::ProcessCensusEntry {
+            pid: 350,
+            parent_pid: 300,
+            uid,
+            process_group_id: 350,
+            session_id: 200,
+            birth: Some((10, 8)),
+            zombie: false,
+        };
+        let planned = plan_force_delete_owned_targets(
+            &record,
+            false,
+            true,
+            &[server_entry, group_leader_child, grandchild],
+            &mut None,
+        )
+        .unwrap();
+        assert!(planned.groups.contains(&200));
+        assert!(planned.groups.contains(&300));
+        assert_eq!(planned.processes.len(), 3);
+
+        // Private diagnostic log cap (F-4): refuse appending once >= 1 MiB.
+        let cap_root = std::env::temp_dir().join(format!("dolgorae-diag-cap-{}", Uuid::now_v7()));
+        fs::create_dir_all(&cap_root).unwrap();
+        let log_path = cap_root.join("dedicated-server-1.log");
+        fs::write(
+            &log_path,
+            vec![b'x'; MAX_PRIVATE_DIAGNOSTIC_LOG_BYTES as usize],
+        )
+        .unwrap();
+        fs::set_permissions(&log_path, fs::Permissions::from_mode(0o600)).unwrap();
+        append_private_diagnostic(&log_path, &serde_json::json!({"ignored": true}));
+        assert_eq!(
+            fs::metadata(&log_path).unwrap().len(),
+            MAX_PRIVATE_DIAGNOSTIC_LOG_BYTES
+        );
+        fs::remove_dir_all(cap_root).unwrap();
     }
 
     #[test]

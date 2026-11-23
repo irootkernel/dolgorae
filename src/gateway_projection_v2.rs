@@ -304,29 +304,43 @@ pub fn turn_projection(
     })
 }
 
-fn recovery(snapshot: &RunSnapshot) -> pb::RecoveryProjection {
-    if let Some(blocker) = snapshot.startup_ownership_blocker() {
+fn recovery_projection(
+    lifecycle: domain::RunLifecycle,
+    control_recovery_required: bool,
+    startup_ownership_blocker: Option<&str>,
+    generation_release_blocker: Option<&str>,
+    close_settling: bool,
+) -> pb::RecoveryProjection {
+    if let Some(blocker) = startup_ownership_blocker {
         return pb::RecoveryProjection {
             state: pb::RecoveryState::Required as i32,
             required_action: pb::RecoveryAction::OperatorRepair as i32,
             blocker_code: Some(blocker.to_owned()),
         };
     }
-    let mut recovery = recovery_for(
-        snapshot.projection.lifecycle,
-        snapshot
-            .runtime_record
-            .as_ref()
-            .is_some_and(|record| record.control_recovery_required),
-    );
+    let mut recovery = recovery_for(lifecycle, control_recovery_required);
     if recovery.state == pb::RecoveryState::NotRequired as i32
-        && let Some(blocker) = snapshot.generation_release_blocker()
+        && let Some(blocker) = generation_release_blocker
+        && !(close_settling && blocker == "generation_release_pending")
     {
         recovery.state = pb::RecoveryState::Required as i32;
         recovery.required_action = pb::RecoveryAction::RecoverRun as i32;
         recovery.blocker_code = Some(blocker.to_owned());
     }
     recovery
+}
+
+fn recovery(snapshot: &RunSnapshot, close_settling: bool) -> pb::RecoveryProjection {
+    recovery_projection(
+        snapshot.projection.lifecycle,
+        snapshot
+            .runtime_record
+            .as_ref()
+            .is_some_and(|record| record.control_recovery_required),
+        snapshot.startup_ownership_blocker(),
+        snapshot.generation_release_blocker(),
+        close_settling,
+    )
 }
 
 fn recovery_for(
@@ -397,6 +411,14 @@ fn policy(
 pub fn run_projection(
     snapshot: &RunSnapshot,
     facts: &ProjectionFacts,
+) -> Result<pb::RunProjection, MachineError> {
+    run_projection_with_close_settling(snapshot, facts, false)
+}
+
+pub(crate) fn run_projection_with_close_settling(
+    snapshot: &RunSnapshot,
+    facts: &ProjectionFacts,
+    close_settling: bool,
 ) -> Result<pb::RunProjection, MachineError> {
     let manifest = &snapshot.manifest;
     let state = &snapshot.projection;
@@ -511,7 +533,7 @@ pub fn run_projection(
                 blocker_code: Some("profile_membership_cleanup_required".to_owned()),
             }
         } else {
-            recovery(snapshot)
+            recovery(snapshot, close_settling)
         }),
         effective_policy: Some(effective_policy),
         writer_authority: Some(pb::WriterAuthorityProjection {
@@ -577,6 +599,15 @@ pub fn writer_state(
     facts: &ProjectionFacts,
     context: pb::ResponseContext,
 ) -> Result<pb::WriterState, MachineError> {
+    writer_state_with_close_settling(snapshot, facts, context, false)
+}
+
+pub(crate) fn writer_state_with_close_settling(
+    snapshot: &RunSnapshot,
+    facts: &ProjectionFacts,
+    context: pb::ResponseContext,
+    close_settling: bool,
+) -> Result<pb::WriterState, MachineError> {
     let writer = &snapshot.writer;
     if writer
         .holder
@@ -586,7 +617,7 @@ pub fn writer_state(
         return Err(missing("Writer owner Run snapshot"));
     }
     let policy = policy(snapshot, facts)?;
-    let recovery = recovery(snapshot);
+    let recovery = recovery(snapshot, close_settling);
     let background_execution_blocker = match facts
         .background
         .as_ref()
@@ -771,5 +802,125 @@ pub fn captured_instructions(
             composition: Some(bytes(&identity.composition)),
         }),
         instruction_identity_digest: value.instruction_identity_digest.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_close_settling_does_not_escalate_generation_release_pending() {
+        let settling = recovery_projection(
+            domain::RunLifecycle::Idle,
+            false,
+            None,
+            Some("generation_release_pending"),
+            true,
+        );
+        assert_eq!(settling.state, pb::RecoveryState::NotRequired as i32);
+        assert_eq!(settling.required_action, pb::RecoveryAction::None as i32);
+        assert!(settling.blocker_code.is_none());
+
+        let stalled = recovery_projection(
+            domain::RunLifecycle::Idle,
+            false,
+            None,
+            Some("generation_release_pending"),
+            false,
+        );
+        assert_eq!(stalled.state, pb::RecoveryState::Required as i32);
+        assert_eq!(
+            stalled.required_action,
+            pb::RecoveryAction::RecoverRun as i32
+        );
+        assert_eq!(
+            stalled.blocker_code.as_deref(),
+            Some("generation_release_pending")
+        );
+    }
+
+    #[test]
+    fn active_close_settling_preserves_genuine_recovery_invariants() {
+        let missing_scope = recovery_projection(
+            domain::RunLifecycle::Idle,
+            false,
+            None,
+            Some("generation_release_prepared_scope_missing"),
+            true,
+        );
+        assert_eq!(missing_scope.state, pb::RecoveryState::Required as i32);
+        assert_eq!(
+            missing_scope.required_action,
+            pb::RecoveryAction::RecoverRun as i32
+        );
+        assert_eq!(
+            missing_scope.blocker_code.as_deref(),
+            Some("generation_release_prepared_scope_missing")
+        );
+
+        let startup = recovery_projection(
+            domain::RunLifecycle::Idle,
+            false,
+            Some("startup_ownership_incomplete"),
+            Some("generation_release_pending"),
+            true,
+        );
+        assert_eq!(startup.state, pb::RecoveryState::Required as i32);
+        assert_eq!(
+            startup.required_action,
+            pb::RecoveryAction::OperatorRepair as i32
+        );
+        assert_eq!(
+            startup.blocker_code.as_deref(),
+            Some("startup_ownership_incomplete")
+        );
+
+        let control = recovery_projection(
+            domain::RunLifecycle::Idle,
+            true,
+            None,
+            Some("generation_release_pending"),
+            true,
+        );
+        assert_eq!(control.state, pb::RecoveryState::Required as i32);
+        assert_eq!(
+            control.required_action,
+            pb::RecoveryAction::RecoverRun as i32
+        );
+        assert_eq!(
+            control.blocker_code.as_deref(),
+            Some("control_socket_recovery_failed")
+        );
+
+        let start_failed = recovery_projection(
+            domain::RunLifecycle::StartFailed,
+            false,
+            None,
+            Some("generation_release_pending"),
+            true,
+        );
+        assert_eq!(start_failed.state, pb::RecoveryState::Required as i32);
+        assert_eq!(
+            start_failed.required_action,
+            pb::RecoveryAction::RecoverRun as i32
+        );
+        assert_eq!(start_failed.blocker_code.as_deref(), Some("start_failed"));
+
+        let reconcile = recovery_projection(
+            domain::RunLifecycle::ReconciliationRequired,
+            false,
+            None,
+            Some("generation_release_pending"),
+            true,
+        );
+        assert_eq!(
+            reconcile.state,
+            pb::RecoveryState::ReconciliationRequired as i32
+        );
+        assert_eq!(
+            reconcile.required_action,
+            pb::RecoveryAction::ReconcileRun as i32
+        );
     }
 }

@@ -1,0 +1,69 @@
+{
+  "schema": "dolgorae.managed-preparation-response/v1",
+  "operation": "prepare_provisioning",
+  "ok": true,
+  "scope": {
+    "scope_kind": "orchestrated_session",
+    "scope_ref": "01900000-0000-7000-8000-000000000011"
+  },
+  "sources": {
+    "common": {
+      "byte_length": 6,
+      "sha256": "sha256:309955e00850b8afeb148450c7208585a85f8b652d5c625c777726f44837f69c"
+    },
+    "role": {
+      "schema": "dolgorae.role-snapshot/v1",
+      "role_body": {
+        "byte_length": 22,
+        "sha256": "sha256:95d04f18cfa23937df28bf77bb1d9ba3f910783cf3f7477d2bb67e5011e8ae06"
+      },
+      "dependencies": [],
+      "selected_guidance": []
+    },
+    "instruction_identity": {
+      "schema": "dolgorae.instruction-identity/v1",
+      "core_version": 2,
+      "core": {
+        "byte_length": 4,
+        "sha256": "sha256:70ea1983c983deacc1b61805aea3d43648afd932f346fb2e5d9b15facd4035c2"
+      },
+      "common": {
+        "byte_length": 6,
+        "sha256": "sha256:309955e00850b8afeb148450c7208585a85f8b652d5c625c777726f44837f69c"
+      },
+      "role_snapshot_digest": "sha256:c3daa6389b4589848cfc4615fff24336ccd120f72c1fbae959e5df3c895fc169",
+      "dependency_order": [],
+      "guidance_order": [],
+      "composition_version": "core-common-role-dependencies-guidance-lf2/v1",
+      "composition": {
+        "byte_length": 36,
+        "sha256": "sha256:1d382b5e2df6dbe73b2000e5b77d9a9b7e1f3779e49344b95b82c278355bd384"
+      }
+    },
+    "configuration": {
+      "schema": "dolgorae.admitted-configuration/v1",
+      "profile_binding_schema": "dolgorae.global-profile-binding/v1",
+      "profile_binding_digest": "sha256:1900eab6c028483d7126599ee6f50de0d27907b5c65fa90524580b4b0f9852b0",
+      "model": "gpt-5.6-luna",
+      "effort": "low",
+      "purpose_kind": "review",
+      "purpose_label": null,
+      "required_capabilities": [],
+      "execution_lane": "dedicated",
+      "requested_access": "read_only",
+      "required_assurance": "verified_thread_scoped_control",
+      "native_subagent_policy": "disabled",
+      "instruction_identity_digest": "sha256:22bcd0acb32f5ab59a185a64240b0be873bf2a22a1676ba92f41dce22458ecd6"
+    }
+  },
+  "error": {
+    "schema": "dolgorae.successor-error/v1",
+    "code": "RECOVERY_REQUIRED",
+    "operation_kind": "assign_external_specialist_task",
+    "operation_ref": "01900000-0000-7000-8000-000000000068",
+    "effect": "unresolved",
+    "classification": "RecoveryNeeded",
+    "required_action": "recover_run",
+    "retry_new_key": false
+  }
+}

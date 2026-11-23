@@ -83,6 +83,8 @@ func knownErrorCode(code string) bool {
 		return true
 	case "ROUND_LIMIT_EXCEEDED":
 		return true
+	case "RUNTIME_PATH_INVALID":
+		return true
 	case "RUN_BUSY":
 		return true
 	case "RUN_NOT_FOUND":

@@ -5379,14 +5379,7 @@ fn delete_settled_run_at(
         {
             return Err(delete_refusal(run_id, "run_deletion_scope_unsupported"));
         }
-        writer.require_no_generation_release(run_id)?;
-        if writer.state != crate::writer::WriterAuthorityState::None
-            || writer.handoff.is_some()
-            || writer.holder.is_some()
-            || writer.transaction_id.is_some()
-        {
-            return Err(crate::writer::writer_busy(writer, run_id));
-        }
+        require_delete_writer_unreferenced(writer, run_id)?;
         let startup = RunStartupLock::open_existing(state_root, run_id)?;
         startup.acquire()?;
         let result = (|| {
@@ -5488,6 +5481,29 @@ fn delete_settled_run_at(
         startup.release_preserving_records();
         result
     })?
+}
+
+fn require_delete_writer_unreferenced(
+    writer: &crate::writer::WriterRecord,
+    run_id: Uuid,
+) -> Result<(), MachineError> {
+    writer.require_no_generation_release(run_id)?;
+    if writer
+        .holder
+        .as_ref()
+        .is_some_and(|holder| holder.run_id == run_id)
+        || writer.handoff.as_ref().is_some_and(|handoff| {
+            handoff.source_run_id == run_id || handoff.destination_run_id == run_id
+        })
+        || writer
+            .generation_release
+            .as_ref()
+            .is_some_and(|release| release.pending() && release.source.run_id == run_id)
+        || writer.transaction_id == Some(run_id)
+    {
+        return Err(crate::writer::writer_busy(writer, run_id));
+    }
+    Ok(())
 }
 
 fn require_delete_lifecycle(run_id: Uuid, lifecycle: RunLifecycle) -> Result<(), MachineError> {
@@ -5621,7 +5637,15 @@ fn force_delete_run_at(
                 (runtime.identity.run_generation, defer)
             }
             None => (
-                prove_missing_locator_generation_absent_held(state_root, run_id, &startup)?,
+                prove_force_delete_missing_locator_absent(
+                    state_root,
+                    workspace_id,
+                    run_id,
+                    &projection,
+                    &path,
+                    &startup,
+                    false,
+                )?,
                 false,
             ),
         };
@@ -5643,6 +5667,12 @@ fn force_delete_run_at(
         }
         Ok(())
     };
+    if let Some(runtime) = &runtime
+        && !defer_runtime
+    {
+        crate::worker::can_stop_force_delete_runtime(runtime)
+            .map_err(|error| error.machine_error(run_id, &path))?;
+    }
     abandon_primary()?;
     if let Some(runtime) = &runtime {
         if !defer_runtime {
@@ -5692,7 +5722,15 @@ fn force_delete_run_at(
         }
         let worker_generation = match runtime.as_ref().filter(|_| defer_runtime) {
             Some(runtime) => runtime.identity.run_generation,
-            None => prove_missing_locator_generation_absent_held(state_root, run_id, &startup)?,
+            None => prove_force_delete_missing_locator_absent(
+                state_root,
+                workspace_id,
+                run_id,
+                &projection,
+                &path,
+                &startup,
+                true,
+            )?,
         };
         let writer_generation = force_delete_writer_generation(
             current,
@@ -5700,6 +5738,12 @@ fn force_delete_run_at(
             worker_generation,
             &binding.server_key,
         )?;
+        let retirement_worker_generation = if worker_generation == 0 && writer_generation.is_some()
+        {
+            1
+        } else {
+            worker_generation
+        };
         let _maintenance =
             crate::ledger_generation::WorkspaceLease::for_run(&run_root(state_root, run_id))
                 .map_err(|_| force_delete_refusal(run_id, "workspace_maintenance_unavailable"))?;
@@ -5712,7 +5756,7 @@ fn force_delete_run_at(
                 operator_generation: operator.operator_generation,
                 profile: binding.selected_name.clone(),
                 server_key: binding.server_key.clone(),
-                worker_generation,
+                worker_generation: retirement_worker_generation,
                 writer_generation,
                 start_outcome,
                 deferred_runtime,
@@ -5828,6 +5872,76 @@ fn verify_force_delete_generation(
     Ok(defer)
 }
 
+fn prove_force_delete_missing_locator_absent(
+    state_root: &Path,
+    workspace_id: &str,
+    run_id: Uuid,
+    projection: &crate::projection::RunStateProjection,
+    path: &Path,
+    startup: &RunStartupLock,
+    retire_registration: bool,
+) -> Result<u64, MachineError> {
+    match prove_missing_locator_generation_absent_held(state_root, run_id, startup) {
+        Ok(generation) => Ok(generation),
+        Err(original) => {
+            if projection.run_generation != 0
+                || projection.lifecycle != RunLifecycle::Starting
+                || projection.thread_id.is_some()
+            {
+                return Err(original);
+            }
+            startup
+                .lock
+                .require_unowned_worker_range()
+                .map_err(|_| original.clone())?;
+            let runtime_dir = crate::worker::runtime_root(state_root);
+            if crate::worker::verified_absence_marker(&runtime_dir, run_id)
+                .map_err(|_| original.clone())?
+                .is_some()
+            {
+                return Err(original);
+            }
+            let uid = DarwinSystem.current_uid();
+            let slot0 = startup.lock.read_owner(0).map_err(|_| original.clone())?;
+            let slot1 = startup.lock.read_owner(1).map_err(|_| original.clone())?;
+            for owner in [&slot0, &slot1].into_iter().flatten() {
+                if owner.identity.run_id != run_id
+                    || owner.identity.workspace_id != workspace_id
+                    || owner.identity.uid != uid
+                    || owner.identity.run_generation != 1
+                {
+                    return Err(original);
+                }
+            }
+            let dedicated_socket = crate::worker::dedicated_server_socket_path(uid, run_id, 1)
+                .map_err(|_| original.clone())?;
+            crate::codex_socket::require_vacant(&dedicated_socket, uid)
+                .map_err(|_| original.clone())?;
+            if let Some(owner) = slot1 {
+                crate::worker::prove_slot_owner_absent(&owner.identity)
+                    .map_err(|_| original.clone())?;
+                if retire_registration {
+                    if crate::process_inventory::run_registration_count(run_id)? > 0 {
+                        crate::worker::retire_slot_owner_registration(path, &owner.identity)
+                            .map_err(|_| original.clone())?;
+                    }
+                    if crate::process_inventory::run_registration_count(run_id)? > 0 {
+                        return Err(original);
+                    }
+                }
+                return Ok(owner.identity.run_generation);
+            }
+            if slot0.is_some() {
+                if crate::process_inventory::run_registration_count(run_id)? > 0 {
+                    return Err(original);
+                }
+                return Ok(0);
+            }
+            Err(original)
+        }
+    }
+}
+
 fn force_delete_writer_generation(
     writer: &crate::writer::WriterRecord,
     run_id: Uuid,
@@ -5850,8 +5964,14 @@ fn force_delete_writer_generation(
     else {
         return Ok(None);
     };
-    if holder.run_generation != worker_generation
-        || holder.worker_generation != worker_generation
+    let pre_locator_initial_start = worker_generation == 0
+        && holder.run_generation == 1
+        && holder.worker_generation == 1
+        && holder.thread_id.is_none()
+        && holder.lifecycle == RunLifecycle::Starting;
+    if (!pre_locator_initial_start
+        && (holder.run_generation != worker_generation
+            || holder.worker_generation != worker_generation))
         || holder.profile_server_key != server_key
     {
         return Err(force_delete_refusal(run_id, "writer_generation_mismatch"));
@@ -6356,6 +6476,301 @@ mod force_delete_primary_tests {
         assert!(retry().unwrap());
         assert!(!path.exists());
         assert!(retry().unwrap());
+    }
+
+    #[test]
+    fn force_delete_writer_generation_accepts_pre_locator_initial_start_and_rejects_drift() {
+        use crate::writer::{WriterAuthorityState, WriterHolder, WriterRecord};
+        let run_id = Uuid::now_v7();
+        let server_key = "a".repeat(64);
+        let base_holder = WriterHolder {
+            run_id,
+            profile: "default".to_owned(),
+            controller_id: Uuid::now_v7(),
+            controller_generation: 1,
+            run_generation: 1,
+            worker_generation: 1,
+            profile_server_key: server_key.clone(),
+            profile_server_epoch: 1,
+            thread_id: None,
+            lifecycle: RunLifecycle::Starting,
+            active_turn_id: None,
+            pending_interaction_count: 0,
+            last_event_cursor: None,
+        };
+        let make_record = |holder: WriterHolder| {
+            let mut record = WriterRecord::empty(&"1".repeat(64));
+            record.state = WriterAuthorityState::Reserved;
+            record.writer_generation = 7;
+            record.transaction_id = Some(run_id);
+            record.holder = Some(holder);
+            record
+        };
+
+        // Pre-locator failed initial Writer Start (worker_generation == 0) is accepted.
+        let record = make_record(base_holder.clone());
+        assert_eq!(
+            force_delete_writer_generation(&record, run_id, 0, &server_key).unwrap(),
+            Some(7)
+        );
+
+        // Drift cases must still fail closed with writer_generation_mismatch.
+        for bad in [
+            WriterHolder {
+                thread_id: Some("thr_1".to_owned()),
+                ..base_holder.clone()
+            },
+            WriterHolder {
+                lifecycle: RunLifecycle::Idle,
+                ..base_holder.clone()
+            },
+            WriterHolder {
+                run_generation: 2,
+                ..base_holder.clone()
+            },
+            WriterHolder {
+                worker_generation: 2,
+                ..base_holder.clone()
+            },
+            WriterHolder {
+                profile_server_key: "b".repeat(64),
+                ..base_holder
+            },
+        ] {
+            let record = make_record(bad);
+            let error =
+                force_delete_writer_generation(&record, run_id, 0, &server_key).unwrap_err();
+            assert_eq!(error.details["reason"], "writer_generation_mismatch");
+        }
+    }
+
+    #[test]
+    fn force_delete_primary_recovers_pre_locator_writer_and_slot1_without_locator() {
+        use crate::writer::{WriterAuthorityState, WriterHolder, WriterStore};
+
+        // Case 1: Pre-locator failed initial Writer Start (no locator, no slot-0/slot-1).
+        let f1 = fixture(Err(AdapterFailure::Unknown));
+        let m1 = &f1.manifest;
+        let id1 = m1.run_id;
+        let state1 = f1.state();
+        let uid = DarwinSystem.current_uid();
+        let runtime1 = worker::runtime_root(&state1);
+        worker::prepare_runtime_root(&runtime1, uid).unwrap();
+        let binding1 = m1.global_profile_binding.as_ref().unwrap();
+        let writer1 = WriterStore::new(&state1, &m1.workspace_id, uid);
+        writer1
+            .transact(|record| {
+                record.state = WriterAuthorityState::Reserved;
+                record.writer_generation = 1;
+                record.transaction_id = Some(id1);
+                record.holder = Some(WriterHolder {
+                    run_id: id1,
+                    profile: binding1.selected_name.clone(),
+                    controller_id: m1.controller.identity.controller_id,
+                    controller_generation: m1.controller.identity.generation,
+                    run_generation: 1,
+                    worker_generation: 1,
+                    profile_server_key: binding1.server_key.clone(),
+                    profile_server_epoch: 1,
+                    thread_id: None,
+                    lifecycle: RunLifecycle::Starting,
+                    active_turn_id: None,
+                    pending_interaction_count: 0,
+                    last_event_cursor: None,
+                });
+                Ok(())
+            })
+            .unwrap();
+        assert!(!remove(&f1).unwrap());
+        assert_removed(&f1, RunLifecycle::Starting);
+        let released1 = writer1.load().unwrap();
+        assert_eq!(released1.state, WriterAuthorityState::None);
+        assert!(released1.holder.is_none());
+
+        // Case 2: Slot-1 written without runtime locator (worker exited cleanly before locator).
+        let f2 = fixture(Err(AdapterFailure::Unknown));
+        let m2 = &f2.manifest;
+        let id2 = m2.run_id;
+        let state2 = f2.state();
+        let runtime2 = worker::runtime_root(&state2);
+        worker::prepare_runtime_root(&runtime2, uid).unwrap();
+        let mut live_owner = worker::current_startup_owner(&m2.workspace_id, id2, 1).unwrap();
+        live_owner.slot = 1;
+        let startup2 =
+            StartupLockFile::open(&worker::startup_lock_path(&runtime2, id2), uid).unwrap();
+        startup2.write_owner(&live_owner).unwrap();
+        drop(startup2);
+        // While slot-1 references a live process, force-delete must fail closed without abandoning.
+        assert!(remove(&f2).is_err());
+        let store2 = OrchestrationStore::open_observer(&state2).unwrap();
+        assert_eq!(store2.session(id2).unwrap().status, "recovering");
+        drop(store2);
+
+        // Once slot-1 refers to an exited worker PID (no locator), force-delete proves absence & recovers Writer.
+        let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let exited_pid = exited.id();
+        assert!(exited.wait().unwrap().success());
+        let mut dead_owner = live_owner;
+        dead_owner.identity.pid = exited_pid;
+        dead_owner.identity.process_group_id = exited_pid;
+        dead_owner.identity.session_id = exited_pid;
+        let startup2 =
+            StartupLockFile::open(&worker::startup_lock_path(&runtime2, id2), uid).unwrap();
+        startup2.write_owner(&dead_owner).unwrap();
+        drop(startup2);
+        let binding2 = m2.global_profile_binding.as_ref().unwrap();
+        let writer2 = WriterStore::new(&state2, &m2.workspace_id, uid);
+        writer2
+            .transact(|record| {
+                record.state = WriterAuthorityState::BlockedUnknown;
+                record.writer_generation = 1;
+                record.transaction_id = Some(id2);
+                record.holder = Some(WriterHolder {
+                    run_id: id2,
+                    profile: binding2.selected_name.clone(),
+                    controller_id: m2.controller.identity.controller_id,
+                    controller_generation: m2.controller.identity.generation,
+                    run_generation: 1,
+                    worker_generation: 1,
+                    profile_server_key: binding2.server_key.clone(),
+                    profile_server_epoch: 1,
+                    thread_id: None,
+                    lifecycle: RunLifecycle::Starting,
+                    active_turn_id: None,
+                    pending_interaction_count: 0,
+                    last_event_cursor: None,
+                });
+                Ok(())
+            })
+            .unwrap();
+        assert!(!remove(&f2).unwrap());
+        assert_removed(&f2, RunLifecycle::Starting);
+        let released2 = writer2.load().unwrap();
+        assert_eq!(released2.state, WriterAuthorityState::None);
+        assert!(released2.holder.is_none());
+    }
+
+    #[test]
+    fn delete_settled_run_allows_unrelated_active_writer_and_blocks_referenced_run() {
+        use crate::writer::{
+            WriterAuthorityState, WriterHandoff, WriterHolder, WriterRecord, WriterStore,
+        };
+
+        let workspace_id = "11".repeat(32);
+        let target_run = Uuid::now_v7();
+        let other_run = Uuid::now_v7();
+        let holder_for = |run_id: Uuid| WriterHolder {
+            run_id,
+            profile: "default".to_owned(),
+            controller_id: Uuid::now_v7(),
+            controller_generation: 1,
+            run_generation: 1,
+            worker_generation: 1,
+            profile_server_key: "a".repeat(64),
+            profile_server_epoch: 1,
+            thread_id: Some("thr_active".to_owned()),
+            lifecycle: RunLifecycle::Idle,
+            active_turn_id: None,
+            pending_interaction_count: 0,
+            last_event_cursor: None,
+        };
+
+        // 1. Unrelated active Writer must NOT block ordinary deletion of target_run.
+        let mut unrelated = WriterRecord::empty(&workspace_id);
+        unrelated.state = WriterAuthorityState::Active;
+        unrelated.writer_generation = 2;
+        unrelated.holder = Some(holder_for(other_run));
+        assert!(require_delete_writer_unreferenced(&unrelated, target_run).is_ok());
+
+        // 2. Holder matching target_run -> WRITER_BUSY.
+        let mut same_holder = WriterRecord::empty(&workspace_id);
+        same_holder.state = WriterAuthorityState::Active;
+        same_holder.writer_generation = 2;
+        same_holder.holder = Some(holder_for(target_run));
+        assert_eq!(
+            require_delete_writer_unreferenced(&same_holder, target_run)
+                .unwrap_err()
+                .code,
+            "WRITER_BUSY"
+        );
+
+        // 3. Handoff naming target_run (source or destination) -> WRITER_BUSY.
+        let mut handoff_dest = unrelated.clone();
+        handoff_dest.state = WriterAuthorityState::HandoffPrepared;
+        handoff_dest.handoff = Some(WriterHandoff {
+            handoff_id: Uuid::now_v7(),
+            source_run_id: other_run,
+            destination_run_id: target_run,
+            expected_writer_generation: 2,
+            expires_at_unix_seconds: u64::MAX,
+            controller_id: Uuid::now_v7(),
+            controller_generation: 1,
+            source_retirement_started: false,
+            source_retired: false,
+        });
+        assert_eq!(
+            require_delete_writer_unreferenced(&handoff_dest, target_run)
+                .unwrap_err()
+                .code,
+            "WRITER_BUSY"
+        );
+
+        // 4. End-to-end delete_settled_run_at of a Closed standalone Run while an unrelated Writer is Active.
+        let mut fx = NativeFixture::with_primary_publication("fully_delegated", Some(Ok(())));
+        fx.manifest.aggregate_binding = None;
+        fx.manifest.start_operation_receipt = Some(None);
+        let state = fx.state();
+        let ws_id = fx.manifest.workspace_id.clone();
+        let run_id = fx.manifest.run_id;
+        let run_dir = run_root(&state, run_id);
+        std::fs::write(
+            run_dir.join("manifest.json"),
+            serde_json::to_vec(&fx.manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            run_dir.join("manifest.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let mut ledger = ConformantLedger::open(&run_dir, run_id).unwrap();
+        ledger
+            .mark_threadless_ready("2026-08-21T12:34:57.123456Z")
+            .unwrap();
+        ledger
+            .seal_closed("2026-08-21T12:34:58.123456Z", "closed cleanly")
+            .unwrap();
+        drop(ledger);
+        let uid = DarwinSystem.current_uid();
+        let runtime_dir = worker::runtime_root(&state);
+        worker::prepare_runtime_root(&runtime_dir, uid).unwrap();
+        drop(StartupLockFile::open(&worker::startup_lock_path(&runtime_dir, run_id), uid).unwrap());
+        membership_for_run(&state, &fx.manifest)
+            .unwrap()
+            .record(&ws_id, run_id, MembershipDisposition::Released)
+            .unwrap();
+        let writer_store = WriterStore::new(&state, &ws_id, uid);
+        writer_store
+            .transact(|record| {
+                record.state = WriterAuthorityState::Active;
+                record.writer_generation = 1;
+                record.holder = Some(holder_for(other_run));
+                Ok(())
+            })
+            .unwrap();
+        let carrier = CredentialCarrier::open_path(&fx.f.controller).unwrap();
+        delete_settled_run_at(&state, &ws_id, run_id, &carrier).unwrap();
+        assert_eq!(
+            RunStore::new(SystemWorkspacePlatform, &state)
+                .load_manifest(run_id)
+                .unwrap_err()
+                .code,
+            "RUN_NOT_FOUND"
+        );
+        // The unrelated active Writer remains completely intact.
+        let preserved = writer_store.load().unwrap();
+        assert_eq!(preserved.state, WriterAuthorityState::Active);
+        assert_eq!(preserved.holder.unwrap().run_id, other_run);
     }
 }
 
@@ -9952,14 +10367,20 @@ fn stop_lifecycle_generation(
     loop {
         crate::worker::observe_owned_worker_child(&record.identity)
             .map_err(|error| error.machine_error(run_id, runtime_record))?;
-        if crate::worker::prove_worker_generation_absent(&record).is_ok() {
+        if let Ok(proof) = crate::worker::prove_worker_generation_absent(&record) {
             let lock = RunStartupLock::open(state_root, run_id)?;
             lock.acquire()?;
             let result = (|| {
                 lock.lock
                     .require_unowned_worker_range()
                     .map_err(|error| worker_startup_range_error(error, run_id, lock.lock.path()))?;
-                retire_absent_generation_writer(state_root, &record)?;
+                let current = crate::worker::read_runtime_record(runtime_record, uid)
+                    .map_err(|error| error.machine_error(run_id, runtime_record))?;
+                if current != record {
+                    return Err(crate::worker::WorkerProtocolError::InvalidRuntimeRecord
+                        .machine_error(run_id, runtime_record));
+                }
+                retire_proven_absent_generation_writer(state_root, &record, &proof)?;
                 crate::worker::remove_verified_absent_runtime(runtime_record, uid)
                     .map_err(|error| error.machine_error(run_id, runtime_record))
             })();
@@ -9990,8 +10411,17 @@ fn retire_absent_generation_writer(
     record: &crate::worker::WorkerRuntimeRecord,
 ) -> Result<(), MachineError> {
     let run_id = record.identity.run_id;
-    crate::worker::prove_worker_generation_absent(record)
+    let proof = crate::worker::prove_worker_generation_absent(record)
         .map_err(|error| error.machine_error(run_id, state_root))?;
+    retire_proven_absent_generation_writer(state_root, record, &proof)
+}
+
+fn retire_proven_absent_generation_writer(
+    state_root: &Path,
+    record: &crate::worker::WorkerRuntimeRecord,
+    _proof: &crate::worker::BackgroundAbsenceEvidence,
+) -> Result<(), MachineError> {
+    let run_id = record.identity.run_id;
     let manifest = RunStore::new(SystemWorkspacePlatform, state_root).load_manifest(run_id)?;
     let caller = crate::run::is_caller_workspace_generation(manifest.schema_version);
     if manifest.workspace_id != record.identity.workspace_id {
@@ -14291,6 +14721,8 @@ fn observe_caller_ledger(
     observe_run_ledger(state_root, run_id, false)
 }
 
+const OBSERVE_RUN_LEDGER_CAPTURE_ATTEMPTS: usize = 3;
+
 pub(crate) fn observe_run_ledger(
     state_root: &Path,
     run_id: Uuid,
@@ -14303,31 +14735,88 @@ pub(crate) fn observe_run_ledger(
     MachineError,
 > {
     let store = RunStore::new(SystemWorkspacePlatform, state_root);
-    let projection = store.load_state_projection(run_id)?;
-    let head = projection.ledger_head.sequence;
-    let ledger = if require_complete {
-        crate::ledger::ObservedLedger::open_complete(&run_root(state_root, run_id), run_id, head)
-            .map_err(|_| {
-                audit_integrity(run_id, head, "complete operation history is unavailable")
-            })?
-    } else {
-        crate::ledger::ObservedLedger::open_run(state_root, run_id, head)?
-    };
-    if ledger.records().last().map(crate::audit::AuditRecord::hash)
-        != Some(projection.ledger_head.hash.as_str())
-    {
-        return Err(audit_integrity(
-            run_id,
-            head,
-            "caller audit prefix disagrees with the committed projection",
-        ));
+    let root = run_root(state_root, run_id);
+    observe_run_ledger_with(
+        OBSERVE_RUN_LEDGER_CAPTURE_ATTEMPTS,
+        run_id,
+        || store.load_state_projection(run_id),
+        |head| {
+            if require_complete {
+                Ok(crate::ledger::ObservedLedger::open_complete(
+                    &root, run_id, head,
+                ))
+            } else {
+                crate::run_deletion::require_live_at(&root, run_id)?;
+                Ok(crate::ledger::ObservedLedger::open(&root, run_id, head))
+            }
+        },
+    )
+}
+
+fn observe_run_ledger_with(
+    attempts: usize,
+    run_id: Uuid,
+    mut load_projection: impl FnMut() -> Result<crate::projection::RunStateProjection, MachineError>,
+    mut open_ledger: impl FnMut(
+        u64,
+    ) -> Result<
+        Result<crate::ledger::ObservedLedger, crate::ledger::LedgerError>,
+        MachineError,
+    >,
+) -> Result<
+    (
+        crate::projection::RunStateProjection,
+        crate::ledger::ObservedLedger,
+    ),
+    MachineError,
+> {
+    for _ in 0..attempts.max(1) {
+        let projection = load_projection()?;
+        let head = projection.ledger_head.sequence;
+        let ledger = match open_ledger(head)? {
+            Ok(ledger) => ledger,
+            Err(crate::ledger::LedgerError::CaptureConflict) => continue,
+            Err(crate::ledger::LedgerError::Capacity(reason)) => {
+                return Err(MachineError::new(
+                    "STORAGE_CAPACITY_EXCEEDED",
+                    reason,
+                    false,
+                    json!({"run_id": run_id, "required_action": "operator_checkpoint"}),
+                ));
+            }
+            Err(_) => {
+                return Err(audit_integrity(
+                    run_id,
+                    head,
+                    "complete operation history is unavailable",
+                ));
+            }
+        };
+        if ledger.records().last().map(crate::audit::AuditRecord::hash)
+            != Some(projection.ledger_head.hash.as_str())
+        {
+            let after = load_projection()?;
+            if after != projection {
+                continue;
+            }
+            return Err(audit_integrity(
+                run_id,
+                head,
+                "caller audit prefix disagrees with the committed projection",
+            ));
+        }
+        let after = load_projection()?;
+        if after != projection {
+            continue;
+        }
+        return Ok((projection, ledger));
     }
-    if store.load_state_projection(run_id)? != projection {
-        return Err(internal(
-            "caller committed projection changed during audit observation",
-        ));
-    }
-    Ok((projection, ledger))
+    let lifecycle = load_projection()?.lifecycle;
+    Err(run_state_conflict_error(
+        run_id,
+        lifecycle,
+        "capture_snapshot",
+    ))
 }
 
 fn run_state_conflict_error(run_id: Uuid, state: RunLifecycle, operation: &str) -> MachineError {
@@ -23337,9 +23826,9 @@ fn retire_absent_actor_runtime(
         }
         crate::worker::stop_orphaned_dedicated_server(record)
             .map_err(|e| e.machine_error(run, state_root))?;
-        crate::worker::prove_worker_generation_absent(record)
+        let proof = crate::worker::prove_worker_generation_absent(record)
             .map_err(|e| e.machine_error(run, state_root))?;
-        retire_absent_generation_writer(state_root, record)?;
+        retire_proven_absent_generation_writer(state_root, record, &proof)?;
         crate::worker::remove_verified_absent_runtime(&path, DarwinSystem.current_uid())
             .map_err(|e| e.machine_error(run, state_root))
     })();
@@ -28116,6 +28605,154 @@ mod tests {
                 .code,
             "AUDIT_INTEGRITY_FAILURE"
         );
+        drop(worker);
+        std::fs::remove_dir_all(state_root).unwrap();
+    }
+
+    #[test]
+    fn observe_run_ledger_retries_capture_conflict_and_returns_run_state_conflict_on_exhaustion() {
+        let state_root =
+            std::env::temp_dir().join(format!("observe-ledger-retry-{}", Uuid::now_v7()));
+        let run_id = Uuid::now_v7();
+        let root = run_root(&state_root, run_id);
+        std::fs::create_dir_all(root.join("recovery")).unwrap();
+        for directory in [
+            &state_root,
+            &state_root.join("runs"),
+            &root,
+            &root.join("recovery"),
+        ] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::write(root.join("audit.jsonl"), b"").unwrap();
+        std::fs::set_permissions(
+            root.join("audit.jsonl"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let mut worker = ConformantLedger::open_for_bootstrap(&root, run_id).unwrap();
+        worker
+            .bootstrap(&BootstrapRequest {
+                timestamp: "2026-08-21T12:34:56.123456Z".to_owned(),
+                workspace_id: "11".repeat(32),
+                intent: IdempotencyIntent {
+                    schema_version: 1,
+                    operation: IdempotencyOperation::StartRun,
+                    idempotency_key: "observe-retry-test".to_owned(),
+                    normalized_identity_sha256: "22".repeat(32),
+                    run_id,
+                },
+                record_kind: BootstrapRecordKind::RunCreated,
+                initial_access: "unknown".to_owned(),
+                default_effort: Some("low".to_owned()),
+            })
+            .unwrap();
+        worker
+            .mark_threadless_ready("2026-08-21T12:34:57.123456Z")
+            .unwrap();
+        let settled = worker.inner().projection().unwrap();
+        let head = settled.ledger_head.sequence;
+        let ledger = crate::ledger::ObservedLedger::open_complete(&root, run_id, head).unwrap();
+
+        // 1. Retries LedgerError::CaptureConflict and succeeds on attempt 2.
+        let mut open_calls = 0usize;
+        let (observed_proj, _) = observe_run_ledger_with(
+            OBSERVE_RUN_LEDGER_CAPTURE_ATTEMPTS,
+            run_id,
+            || Ok(settled.clone()),
+            |_| {
+                open_calls += 1;
+                if open_calls == 1 {
+                    Ok(Err(crate::ledger::LedgerError::CaptureConflict))
+                } else {
+                    Ok(Ok(ledger.clone()))
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(open_calls, 2);
+        assert_eq!(observed_proj, settled);
+
+        // 2. Retries moving projection (before != after) and succeeds once settled.
+        let mut load_calls = 0usize;
+        let mut moving = settled.clone();
+        moving.lifecycle = RunLifecycle::Running;
+        let (observed_proj, _) = observe_run_ledger_with(
+            OBSERVE_RUN_LEDGER_CAPTURE_ATTEMPTS,
+            run_id,
+            || {
+                load_calls += 1;
+                if load_calls == 1 {
+                    Ok(moving.clone())
+                } else {
+                    Ok(settled.clone())
+                }
+            },
+            |_| Ok(Ok(ledger.clone())),
+        )
+        .unwrap();
+        assert_eq!(observed_proj, settled);
+
+        // 3. Exhausting CaptureConflict returns RUN_STATE_CONFLICT (not AUDIT_INTEGRITY_FAILURE/INTERNAL_ERROR).
+        let error = observe_run_ledger_with(
+            OBSERVE_RUN_LEDGER_CAPTURE_ATTEMPTS,
+            run_id,
+            || Ok(settled.clone()),
+            |_| Ok(Err(crate::ledger::LedgerError::CaptureConflict)),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "RUN_STATE_CONFLICT");
+        assert_eq!(error.details["operation"], "capture_snapshot");
+
+        // 4. Exhausting continuous projection motion returns RUN_STATE_CONFLICT (not INTERNAL_ERROR).
+        let mut seq = 0u64;
+        let error = observe_run_ledger_with(
+            OBSERVE_RUN_LEDGER_CAPTURE_ATTEMPTS,
+            run_id,
+            || {
+                seq += 1;
+                let mut proj = settled.clone();
+                proj.run_generation = seq;
+                Ok(proj)
+            },
+            |_| Ok(Ok(ledger.clone())),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "RUN_STATE_CONFLICT");
+        assert_eq!(error.details["operation"], "capture_snapshot");
+
+        // 5. Real corruption (Integrity) still fails immediately with AUDIT_INTEGRITY_FAILURE.
+        let error = observe_run_ledger_with(
+            OBSERVE_RUN_LEDGER_CAPTURE_ATTEMPTS,
+            run_id,
+            || Ok(settled.clone()),
+            |_| {
+                Ok(Err(crate::ledger::LedgerError::Integrity(
+                    "corrupt".to_owned(),
+                )))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "AUDIT_INTEGRITY_FAILURE");
+
+        // 6. Failure of load_projection() on retry exhaustion propagates directly (F-7).
+        let mut calls = 0usize;
+        let error = observe_run_ledger_with(
+            OBSERVE_RUN_LEDGER_CAPTURE_ATTEMPTS,
+            run_id,
+            || {
+                calls += 1;
+                if calls <= OBSERVE_RUN_LEDGER_CAPTURE_ATTEMPTS {
+                    Ok(settled.clone())
+                } else {
+                    Err(crate::run::run_not_found(run_id))
+                }
+            },
+            |_| Ok(Err(crate::ledger::LedgerError::CaptureConflict)),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "RUN_NOT_FOUND");
+
         drop(worker);
         std::fs::remove_dir_all(state_root).unwrap();
     }

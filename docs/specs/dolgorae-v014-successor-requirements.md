@@ -391,10 +391,16 @@ backpressure and crash-boundary results against the bounds above. TASK-075 owns
 component baselines; Gul E16-T16 owns integrated measurements and TASK-088
 independently checks the final pair. Earlier component results do not certify Gul.
 
-The account-backed functionality scenario selects the Codex CLI 0.160.0 pin in
-the native qualification contract, an explicit `gpt-5.6-luna` / `low` Profile and
-a private disposable workspace. H3 MUST bind the qualified execution runtime;
-a replacement requires impact assessment and affected requalification.
+The account-backed functionality scenario selects the pinned Codex runtime in
+the native qualification contract (amended by Master on 2026-11-11 and
+2026-11-17 to permit Codex `>=0.169.0` Compatible/Unverified creation policy,
+suspend physical-device/performance checkpoints, and replace actual 24-hour/OS-sleep
+with injected-time boundary tests plus a 30-minute three-client functional
+campaign) and a private disposable workspace. H3 MUST bind the qualified
+execution runtime; a replacement requires impact assessment and affected
+requalification. On Codex `0.169.0`, the selected reasoning effort MUST match
+the Profile's `config.toml` default so `turn/start` does not trigger an extra
+`thread/settings/updated` notification outside the serialized settings update.
 The first task reads a fixture containing `alpha`, requests an actual supported
 approval to run a single bounded local command that writes `beta` to a designated
 scratch output, and returns both values. Gul supplies that approval through its

@@ -138,10 +138,14 @@ If the control transport fails after a Close admission, the producer uses
 the exact admission and terminal seal to check whether the Close committed.
 It can finish the admitted Close by verifying absence of the final generation
 and retiring Profile membership. This path never dispatches another Close.
-Public-v2 Close allows up to sixty seconds for the producer response because
-the operation can retire a Writer generation, verify its Reader successor,
-and close that successor. A shorter client deadline still bounds the response
-wait. Expiring that wait does not cancel an admitted Close.
+Public-v2 lifecycle, startup, and Writer-release RPCs (`RunService.StartRun`,
+`RunService.CloseRun`, `RunService.RecoverRun`, `RunService.ReconcileRun`, and
+`WriterService.ReleaseWriter`) allow up to seventy seconds for the producer
+response so server deadlines exceed Worker startup caps (50–60 seconds) plus
+generation-retirement grace, including retiring a Writer generation, verifying
+its Reader successor, and closing that successor. A shorter client deadline
+still bounds the response wait. Expiring that wait does not cancel an admitted
+operation.
 
 ### New successor operations
 

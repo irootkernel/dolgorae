@@ -55,6 +55,22 @@ func TestMutationUncertaintyCannotBecomeRefusal(t *testing.T) {
 	if client.MutationClassification(refused) != pb.FailureClassification_FAILURE_CLASSIFICATION_REJECTED {
 		t.Fatal("typed no-effect refusal lost")
 	}
+	runtimePathInvalid := proto.Clone(refused).(*pb.DolgoraeErrorDetail)
+	runtimePathInvalid.DolgoraeErrorCode = "RUNTIME_PATH_INVALID"
+	if client.MutationClassification(runtimePathInvalid) != pb.FailureClassification_FAILURE_CLASSIFICATION_REJECTED {
+		t.Fatal("known RUNTIME_PATH_INVALID refusal collapsed to unknown")
+	}
+	operatorRepair := &pb.DolgoraeErrorDetail{
+		DetailVersion:     2,
+		DolgoraeErrorCode: "RECOVERY_REQUIRED",
+		Action:            pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR,
+		OperationKind:     pb.OperationKind_OPERATION_KIND_RECOVER_RUN,
+		Classification:    pb.FailureClassification_FAILURE_CLASSIFICATION_RECOVERY_NEEDED,
+		Effect:            pb.EffectState_EFFECT_STATE_NONE,
+	}
+	if client.MutationClassification(operatorRepair) != pb.FailureClassification_FAILURE_CLASSIFICATION_RECOVERY_NEEDED {
+		t.Fatal("typed OPERATOR_REPAIR recovery classification lost")
+	}
 	for _, corrupt := range []func(*pb.DolgoraeErrorDetail){
 		func(d *pb.DolgoraeErrorDetail) { d.DolgoraeErrorCode = "FUTURE_CODE" },
 		func(d *pb.DolgoraeErrorDetail) { d.DolgoraeErrorCode = "" },
@@ -91,7 +107,8 @@ func TestMutationClassificationRequiresCompatibleAction(t *testing.T) {
 					allowed = action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RECONCILE_OPERATION ||
 						action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RECOVER_RUN ||
 						action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RESTORE_STATE ||
-						action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RESUME_MAINTENANCE
+						action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_RESUME_MAINTENANCE ||
+						action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR
 				}
 				detail := &pb.DolgoraeErrorDetail{DetailVersion: 2, DolgoraeErrorCode: "RECOVERY_REQUIRED",
 					OperationKind:  pb.OperationKind_OPERATION_KIND_START_RUN,

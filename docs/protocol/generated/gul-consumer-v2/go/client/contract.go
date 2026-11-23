@@ -161,6 +161,11 @@ func lookupRecoveryAction(action pb.RequiredClientAction) bool {
 	}
 }
 
+func mutationRecoveryAction(action pb.RequiredClientAction) bool {
+	return lookupRecoveryAction(action) ||
+		action == pb.RequiredClientAction_REQUIRED_CLIENT_ACTION_OPERATOR_REPAIR
+}
+
 func acceptedSubject(kind pb.OperationKind, subjects *pb.SubjectIdentities) bool {
 	if subjects == nil {
 		return false
@@ -219,7 +224,7 @@ func MutationClassification(detail *pb.DolgoraeErrorDetail) pb.FailureClassifica
 			return detail.GetClassification()
 		}
 	case pb.FailureClassification_FAILURE_CLASSIFICATION_RECOVERY_NEEDED:
-		if !lookupRecoveryAction(detail.GetAction()) {
+		if !mutationRecoveryAction(detail.GetAction()) {
 			return pb.FailureClassification_FAILURE_CLASSIFICATION_UNKNOWN
 		}
 		if detail.GetEffect() == pb.EffectState_EFFECT_STATE_NONE || detail.GetEffect() == pb.EffectState_EFFECT_STATE_ACCEPTED ||

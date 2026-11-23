@@ -84,12 +84,35 @@ pub(crate) fn protected_snapshot(
     }
     Ok((root, snapshot))
 }
+fn active_close_settling(root: &std::path::Path, snapshot: &RunSnapshot) -> bool {
+    snapshot
+        .manifest
+        .aggregate_binding
+        .as_ref()
+        .is_some_and(|binding| {
+            binding.aggregate_kind == domain::AggregateKind::OrchestratedSession
+                && binding.member_kind == crate::run::AggregateMemberKind::Primary
+        })
+        && crate::orchestration::OrchestrationStore::open_observer(root)
+            .and_then(|store| store.session_close(snapshot.manifest.run_id))
+            .ok()
+            .flatten()
+            .is_some_and(|close| {
+                crate::semantic::observed_close_progress(
+                    root,
+                    &snapshot.manifest.workspace_id,
+                    snapshot.manifest.run_id,
+                    &close.progress,
+                ) == "settling"
+            })
+}
 fn get(
     backend: &dyn ModernGatewayBackend,
     reference: &pb::RunRef,
 ) -> Result<pb::RunProjection, MachineError> {
-    let (_, snapshot, facts) = snapshot(backend, reference)?;
-    project::run_projection(&snapshot, &facts)
+    let (root, snapshot, facts) = snapshot(backend, reference)?;
+    let close_settling = active_close_settling(&root, &snapshot);
+    project::run_projection_with_close_settling(&snapshot, &facts, close_settling)
 }
 
 fn run_operation_context(
@@ -396,22 +419,36 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
     } else {
         "INTERNAL_ERROR"
     };
+    let reset_binding_recovery = wire_code == "RECOVERY_REQUIRED"
+        && error.details["reason"] == "controller_binding_newer_than_reset_journal";
+    let operation = (!reset_binding_recovery).then_some(operation).flatten();
+    let run_id = (!reset_binding_recovery).then_some(run_id).flatten();
     let startup_repair = wire_code == "RECOVERY_REQUIRED"
         && error.details["reason"] == crate::worker::STARTUP_OWNERSHIP_INCOMPLETE;
+    let reconcile_start_recovery =
+        method == "OperationService.ReconcileStartOperation" && wire_code == "RECOVERY_REQUIRED";
+    let restore_state = reset_binding_recovery
+        || reconcile_start_recovery
+        || error.details["required_action"] == "restore_state";
+    let resume_maintenance = error.details["required_action"] == "resume_maintenance";
     let accepted_start = method == "RunService.StartRun"
         && run_id.is_some()
         && error.details["reason"] != "run_deleted"
         && !matches!(wire_code, "WRITER_BUSY" | "IDEMPOTENCY_CONFLICT");
-    let accepted_submit =
-        method == "RunService.SubmitTurn" && error.details["public_v2_accepted"] == true;
-    let accepted_resolve = method == "InteractionService.ResolveInteraction"
+    let accepted_submit = !reset_binding_recovery
+        && method == "RunService.SubmitTurn"
         && error.details["public_v2_accepted"] == true;
-    let accepted_group = matches!(
-        method,
-        "GroupService.AssignGroup"
-            | "GroupService.MergeGroupResults"
-            | "GroupService.AssignSynthesis"
-    ) && error.details["public_v2_accepted"] == true;
+    let accepted_resolve = !reset_binding_recovery
+        && method == "InteractionService.ResolveInteraction"
+        && error.details["public_v2_accepted"] == true;
+    let accepted_group = !reset_binding_recovery
+        && matches!(
+            method,
+            "GroupService.AssignGroup"
+                | "GroupService.MergeGroupResults"
+                | "GroupService.AssignSynthesis"
+        )
+        && error.details["public_v2_accepted"] == true;
     let retained_close = matches!(
         method,
         "RunService.CloseRun" | "RunService.RecoverRun" | "RunService.ReconcileRun"
@@ -426,8 +463,12 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
     let accepted_close = retained_close
         && wire_code == "RECOVERY_REQUIRED"
         && error.details["progress"] != "outcome_unknown";
-    let accepted =
-        accepted_start || accepted_submit || accepted_resolve || accepted_group || accepted_close;
+    let accepted = !reset_binding_recovery
+        && (accepted_start
+            || accepted_submit
+            || accepted_resolve
+            || accepted_group
+            || accepted_close);
     let unknown = mutating
         && (!accepted || accepted_resolve)
         && matches!(
@@ -438,9 +479,17 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
                 | "INTERACTION_OUTCOME_UNKNOWN"
         );
     let recovery = recovery || accepted;
+    let unresolved_recovery = !unknown
+        && !accepted
+        && (reset_binding_recovery
+            || reconcile_start_recovery
+            || (recovery && restore_state && error.details["effect"] != "none")
+            || (recovery && error.details["effect"] == "unresolved"));
     let snapshot_rebase = operation_kind == pb::OperationKind::GetRun
         && wire_code == "RUN_STATE_CONFLICT"
         && error.details["operation"] == "capture_snapshot";
+    let read_unavailable =
+        effect_class == Some("R") && matches!(wire_code, "TRANSPORT_FAILURE" | "SERVER_SHUTDOWN");
     let stream_rebase = event_stream && wire_code == "RUN_STATE_CONFLICT";
     let stream_reconnect = event_stream
         && matches!(
@@ -469,7 +518,7 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
             .as_ref()
             .map(|operation| operation.idempotency_key.clone()),
         operation,
-        effect: if unknown {
+        effect: if unknown || unresolved_recovery {
             pb::EffectState::Unresolved
         } else if accepted {
             pb::EffectState::Accepted
@@ -483,7 +532,7 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
         } else {
             pb::FailureClassification::Rejected
         } as i32,
-        action: if stream_rebase || snapshot_rebase || close_snapshot {
+        action: if stream_rebase || snapshot_rebase || close_snapshot || read_unavailable {
             pb::RequiredClientAction::RefreshSnapshot
         } else if stream_reconnect {
             pb::RequiredClientAction::ReconnectFromCommittedCursor
@@ -491,6 +540,10 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
             pb::RequiredClientAction::ReconcileOperation
         } else if startup_repair {
             pb::RequiredClientAction::OperatorRepair
+        } else if restore_state {
+            pb::RequiredClientAction::RestoreState
+        } else if resume_maintenance {
+            pb::RequiredClientAction::ResumeMaintenance
         } else if recovery {
             pb::RequiredClientAction::RecoverRun
         } else if error.code == "POOL_CAPACITY_EXCEEDED" {
@@ -499,7 +552,11 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
             pb::RequiredClientAction::FixRequest
         } as i32,
         retry_classification: pb::RetryClassification::Forbidden as i32,
-        recovery_classification: if stream_rebase || snapshot_rebase || close_snapshot {
+        recovery_classification: if stream_rebase
+            || snapshot_rebase
+            || close_snapshot
+            || read_unavailable
+        {
             pb::RecoveryClassification::SnapshotRequired
         } else if unknown || accepted_submit || accepted_resolve {
             pb::RecoveryClassification::ReconcileRequired
@@ -545,15 +602,24 @@ pub(crate) fn error_status(error: &MachineError, method: &str) -> Status {
     Status::with_details(code, wire_code, rich.encode_to_vec().into())
 }
 
+const LIFECYCLE_RPC_BUDGET: std::time::Duration = std::time::Duration::from_secs(70);
+
+fn rpc_budget(method: &str) -> Option<std::time::Duration> {
+    matches!(
+        method,
+        "RunService.StartRun"
+            | "RunService.CloseRun"
+            | "RunService.RecoverRun"
+            | "RunService.ReconcileRun"
+            | "WriterService.ReleaseWriter"
+    )
+    .then_some(LIFECYCLE_RPC_BUDGET)
+}
+
 macro_rules! execute {
     ($self:ident,$request:ident,$method:literal,$backend:ident,$body:expr) => {{
-        let deadline = if $method == "RunService.CloseRun" {
-            crate::gateway::rpc_deadline_with_budget(
-                &$request,
-                $method,
-                error_status,
-                std::time::Duration::from_secs(60),
-            )?
+        let deadline = if let Some(budget) = rpc_budget($method) {
+            crate::gateway::rpc_deadline_with_budget(&$request, $method, error_status, budget)?
         } else {
             crate::gateway::rpc_deadline_with(&$request, $method, error_status)?
         };
@@ -967,7 +1033,7 @@ impl pb::runtime_service_server::RuntimeService for GatewayTransport {
                 contract_manifest_sha256:crate::jcs::sha256_hex(include_bytes!("../docs/protocol/dolgorae-gul-consumer-v2.json")),
                 supported_control_modes:vec![1,2],supported_transports:vec![2],
                 controller_carrier:Some(credential_capabilities(backend.get_capabilities(old::GetCapabilitiesRequest::default())?.controller_carrier.ok_or_else(||invalid("capabilities","missing credential contract"))?)),
-                features:Some(pb::RuntimeFeatureCapabilities {persistent_runs:true,reader_writer_access:true,threadless_acquire_write:true,first_write_via_submit_turn:true,durable_writer_authority:true,sticky_dedicated_lanes:true,artifact_retrieval:true,controller_binding:true,worker_controller_revalidation:true,safe_client_projection:true,public_local_socket:true,control_modes:true,assurance_negotiation:true,profile_diagnostics:true,..Default::default()}),
+                features:Some(pb::RuntimeFeatureCapabilities {persistent_runs:true,reader_writer_access:true,threadless_acquire_write:true,first_write_via_submit_turn:true,controller_timeline:true,durable_writer_authority:true,sticky_dedicated_lanes:true,event_replay:true,artifact_retrieval:true,controller_binding:true,worker_controller_revalidation:true,safe_client_projection:true,public_local_socket:true,control_modes:true,assurance_negotiation:true,profile_diagnostics:true,..Default::default()}),
                 assurance:Some(pb::AssuranceCapabilities {supported:vec![1],maximum_achievable:1,selected_before_run_allocation:true}),
                 lanes:Some(pb::LaneCapabilities {supported_lanes:vec![1,2],items:vec![pb::LaneCapability {lane:1,command_execution:pb::CommandExecutionSupport::BoundedBestEffort as i32,background_control:pb::BackgroundControlSupport::ProfileAggregateOnly as i32,per_run_process_cleanup:pb::ProcessCleanupSupport::Unavailable as i32,maximum_assurance:1,writer_support:false,lazy_first_input:false},pb::LaneCapability {lane:2,command_execution:pb::CommandExecutionSupport::Supported as i32,background_control:pb::BackgroundControlSupport::BestEffortPersonalAlpha as i32,per_run_process_cleanup:pb::ProcessCleanupSupport::BoundedProcessCensus as i32,maximum_assurance:1,writer_support:true,lazy_first_input:false}]}),
                 native_subagents:Some(pb::NativeSubagentCapabilities {lifecycle_observation:pb::SupportState::Unverified as i32,disable_enforcement:pb::SupportState::Supported as i32,quiescence_tracking:pb::SupportState::Unverified as i32,enabled:false,safe_reason:"successor configurations disable native subagents by default; enabled configurations require a dedicated lane".into()}),
@@ -1223,12 +1289,16 @@ impl pb::run_service_server::RunService for GatewayTransport {
                 .as_deref()
                 .map(|s| uuid(s, "controller_id"))
                 .transpose()?;
+            let root = backend.home().workspace_root(&view.workspace_id);
             let items = CoreSemanticService
                 .list_runs(&view, controller)?
                 .into_iter()
                 .map(|(snapshot, observation)| {
-                    let facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
-                    project::run_projection(&snapshot, &facts)
+                    let mut facts = ProjectionFacts::from_observation(&snapshot, &observation)?;
+                    facts.profile_cleanup_required =
+                        crate::semantic::profile_cleanup_required(&root, &snapshot);
+                    let close_settling = active_close_settling(&root, &snapshot);
+                    project::run_projection_with_close_settling(&snapshot, &facts, close_settling)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(pb::ListRunsResponse {
@@ -1478,14 +1548,20 @@ fn writer(
     )
     .load()?;
     if let Some(holder) = writer.holder.as_ref() {
-        let (_, snapshot, facts) = snapshot(
+        let (root, snapshot, facts) = snapshot(
             backend,
             &pb::RunRef {
                 workspace: Some(reference.clone()),
                 run_id: holder.run_id.to_string(),
             },
         )?;
-        project::writer_state(&snapshot, &facts, context(backend))
+        let close_settling = active_close_settling(&root, &snapshot);
+        project::writer_state_with_close_settling(
+            &snapshot,
+            &facts,
+            context(backend),
+            close_settling,
+        )
     } else {
         project::ownerless_writer_state(&writer, context(backend))
     }
@@ -1746,13 +1822,22 @@ impl pb::orchestration_service_server::OrchestrationService for GatewayTransport
                             && b.member_kind == crate::run::AggregateMemberKind::Primary
                     })
                     .ok_or_else(|| invalid("root_run", "not a Session root"))?;
-                let value = crate::orchestration::OrchestrationStore::open_observer(&root)?
+                let mut value = crate::orchestration::OrchestrationStore::open_observer(&root)?
                     .observe_session(snapshot.manifest.run_id)?;
                 if binding.operation_id != value.bootstrap_operation_id
                     || binding.policy_sha256.as_deref()
                         != Some(value.specialist_policy_sha256.as_str())
                 {
                     return Err(invalid("session", "accepted Session binding differs"));
+                }
+                if let Some(progress) = value.close_progress.as_mut() {
+                    *progress = crate::semantic::observed_close_progress(
+                        &root,
+                        &snapshot.manifest.workspace_id,
+                        snapshot.manifest.run_id,
+                        progress,
+                    )
+                    .to_owned();
                 }
                 Ok(pb::GetOrchestratedSessionResponse {
                     context: Some(context(backend)),
@@ -3962,5 +4047,278 @@ mod tests {
         );
         assert_eq!(detail.operation.unwrap().idempotency_key, "original-key");
         assert!(!format!("{status:?}").contains("private-canary"));
+    }
+
+    #[test]
+    fn lifecycle_rpc_budget_covers_startup_close_recovery_and_writer_release() {
+        for method in [
+            "RunService.StartRun",
+            "RunService.CloseRun",
+            "RunService.RecoverRun",
+            "RunService.ReconcileRun",
+            "WriterService.ReleaseWriter",
+        ] {
+            assert_eq!(
+                rpc_budget(method),
+                Some(std::time::Duration::from_secs(70)),
+                "{method}"
+            );
+        }
+        for method in [
+            "RunService.GetRun",
+            "RunService.SubmitTurn",
+            "WriterService.AcquireWriter",
+            "RuntimeService.GetCapabilities",
+        ] {
+            assert_eq!(rpc_budget(method), None, "{method}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_capabilities_advertises_event_replay_and_controller_timeline() {
+        use crate::protocol::public_v2::runtime_service_server::RuntimeService as _;
+        use std::os::unix::fs::DirBuilderExt as _;
+        use std::sync::Arc;
+
+        let root =
+            std::path::Path::new("/tmp").join(format!("dolgorae-v2-caps-{}", uuid::Uuid::now_v7()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let home = crate::paths::DolgoraeHome::from_canonical_home(canonical).unwrap();
+        let (_shutdown, receiver) = tokio::sync::watch::channel(false);
+        let transport = GatewayTransport::new(
+            Arc::new(crate::gateway_service::CoreGatewayBackend::new(
+                home,
+                uuid::Uuid::now_v7(),
+            )),
+            receiver,
+        );
+        let response = transport
+            .get_capabilities(Request::new(pb::GetCapabilitiesRequest {
+                context: Some(pb::RequestContext {
+                    protocol_version: 2,
+                    client_request_id: uuid::Uuid::now_v7().to_string(),
+                    client_instance_id: "v2-caps-test".into(),
+                }),
+                minimum_protocol_version: 2,
+                maximum_protocol_version: 2,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let _ = std::fs::remove_dir_all(&root);
+        let features = response.features.unwrap();
+        assert!(features.event_replay);
+        assert!(features.controller_timeline);
+        assert!(features.persistent_runs);
+        assert!(features.safe_client_projection);
+    }
+
+    #[test]
+    fn runtime_path_invalid_and_required_action_details_preserve_wire_contract() {
+        let path_err = MachineError::runtime_path_invalid(
+            std::path::Path::new("/private-canary-path"),
+            "unsafe mode",
+        );
+        let status = error_status(&path_err, "OperationService.ReconcileStartOperation");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        let projected = detail(&status, "runtime-path-invalid");
+        assert_eq!(projected.dolgorae_error_code, "RUNTIME_PATH_INVALID");
+        assert_eq!(projected.effect, pb::EffectState::None as i32);
+        assert_eq!(
+            projected.classification,
+            pb::FailureClassification::Rejected as i32
+        );
+        assert!(!format!("{status:?}").contains("private-canary-path"));
+
+        let identity = serde_json::json!({
+            "controller_kind": pb::ControllerKind::InteractiveClient as i32,
+            "principal_ref": format!("sha256:{}", "b".repeat(64)),
+            "controller_generation": 3,
+            "workspace_id": "a".repeat(64),
+            "idempotency_key": "original:unallocated-start",
+        });
+        let reconcile_err = preallocation_operation_error(
+            MachineError::new(
+                "RECOVERY_REQUIRED",
+                "retained workspace identity cannot prove startup reconciliation",
+                false,
+                serde_json::json!({"reason": "startup_namespace_identity_unverified"}),
+            ),
+            &identity,
+        );
+        let status = error_status(&reconcile_err, "OperationService.ReconcileStartOperation");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        let projected = detail(&status, "reconcile-start-restore-state");
+        assert_eq!(projected.dolgorae_error_code, "RECOVERY_REQUIRED");
+        assert_eq!(projected.operation_kind, pb::OperationKind::StartRun as i32);
+        assert_eq!(projected.effect, pb::EffectState::Unresolved as i32);
+        assert_eq!(
+            projected.classification,
+            pb::FailureClassification::RecoveryNeeded as i32
+        );
+        assert_eq!(
+            projected.action,
+            pb::RequiredClientAction::RestoreState as i32
+        );
+        assert_eq!(
+            projected.idempotency_key.as_deref(),
+            Some("original:unallocated-start")
+        );
+        assert!(projected.operation.is_some());
+
+        let restore_err = MachineError::new(
+            "RECOVERY_REQUIRED",
+            "state restoration required",
+            false,
+            serde_json::json!({"required_action": "restore_state"}),
+        );
+        let projected = detail(
+            &error_status(&restore_err, "OperationService.LookupOperation"),
+            "restore-state-detail",
+        );
+        assert_eq!(projected.effect, pb::EffectState::Unresolved as i32);
+        assert_eq!(
+            projected.classification,
+            pb::FailureClassification::RecoveryNeeded as i32
+        );
+        assert_eq!(
+            projected.action,
+            pb::RequiredClientAction::RestoreState as i32
+        );
+
+        let maint_err = MachineError::new(
+            "RECOVERY_REQUIRED",
+            "maintenance interrupted",
+            false,
+            serde_json::json!({"effect": "unresolved", "required_action": "resume_maintenance"}),
+        );
+        let projected = detail(
+            &error_status(&maint_err, "MaintenanceService.ApplyMaintenance"),
+            "resume-maintenance-detail",
+        );
+        assert_eq!(projected.effect, pb::EffectState::Unresolved as i32);
+        assert_eq!(
+            projected.classification,
+            pb::FailureClassification::RecoveryNeeded as i32
+        );
+        assert_eq!(
+            projected.action,
+            pb::RequiredClientAction::ResumeMaintenance as i32
+        );
+
+        let operator_repair_err = MachineError::new(
+            "RECOVERY_REQUIRED",
+            "startup ownership witness incomplete",
+            false,
+            serde_json::json!({"reason": crate::worker::STARTUP_OWNERSHIP_INCOMPLETE}),
+        );
+        let projected = detail(
+            &error_status(&operator_repair_err, "RunService.RecoverRun"),
+            "operator-repair-detail",
+        );
+        assert_eq!(projected.dolgorae_error_code, "RECOVERY_REQUIRED");
+        assert_eq!(projected.effect, pb::EffectState::None as i32);
+        assert_eq!(
+            projected.classification,
+            pb::FailureClassification::RecoveryNeeded as i32
+        );
+        assert_eq!(
+            projected.action,
+            pb::RequiredClientAction::OperatorRepair as i32
+        );
+    }
+
+    #[test]
+    fn read_only_rpc_unavailable_errors_request_snapshot_refresh() {
+        for method in [
+            "ObservationService.ListRunTimelineItems",
+            "RunService.GetRun",
+            "OrchestrationService.GetOrchestratedSession",
+        ] {
+            for code in ["TRANSPORT_FAILURE", "SERVER_SHUTDOWN"] {
+                let err =
+                    MachineError::new(code, "gateway unavailable", true, serde_json::json!({}));
+                let status = error_status(&err, method);
+                assert_eq!(status.code(), tonic::Code::Unavailable, "{method}/{code}");
+                let projected = detail(&status, "read-unavailable");
+                assert_eq!(projected.dolgorae_error_code, code);
+                assert_eq!(projected.effect, pb::EffectState::None as i32);
+                assert_eq!(
+                    projected.classification,
+                    pb::FailureClassification::Rejected as i32
+                );
+                assert_eq!(
+                    projected.action,
+                    pb::RequiredClientAction::RefreshSnapshot as i32
+                );
+                assert_eq!(
+                    projected.recovery_classification,
+                    pb::RecoveryClassification::SnapshotRequired as i32
+                );
+            }
+        }
+        let stream_err = MachineError::new(
+            "TRANSPORT_FAILURE",
+            "stream transport unavailable",
+            true,
+            serde_json::json!({}),
+        );
+        let stream_projected = detail(
+            &error_status(&stream_err, "ObservationService.WatchRunEvents"),
+            "stream-reconnect",
+        );
+        assert_eq!(
+            stream_projected.action,
+            pb::RequiredClientAction::ReconnectFromCommittedCursor as i32
+        );
+    }
+
+    #[test]
+    fn controller_binding_newer_than_reset_journal_strips_identities_and_requests_restore() {
+        let run_id = uuid::Uuid::now_v7();
+        let identity = domain::ControllerIdentity {
+            controller_id: uuid::Uuid::now_v7(),
+            kind: domain::ControllerKind::InteractiveClient,
+            instance_id: "reset-strip-test".into(),
+            subject_id: Some("user:test".into()),
+            generation: 2,
+        };
+        let operation =
+            run_operation_context(&identity, &"a".repeat(64), run_id, "original-key").unwrap();
+        let raw = crate::controller::recovery_required(
+            run_id,
+            2,
+            "controller_binding_newer_than_reset_journal",
+        );
+        let wrapped = operation_error(raw, &operation, true);
+        for method in [
+            "RunService.SubmitTurn",
+            "InteractionService.ResolveInteraction",
+            "GroupService.AssignGroup",
+            "OperationService.LookupOperation",
+            "OperationService.ReconcileStartOperation",
+        ] {
+            let status = error_status(&wrapped, method);
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{method}");
+            let projected = detail(&status, "reset-binding-strip");
+            assert_eq!(projected.dolgorae_error_code, "RECOVERY_REQUIRED");
+            assert_eq!(projected.effect, pb::EffectState::Unresolved as i32);
+            assert_eq!(
+                projected.classification,
+                pb::FailureClassification::RecoveryNeeded as i32
+            );
+            assert_eq!(
+                projected.action,
+                pb::RequiredClientAction::RestoreState as i32
+            );
+            assert!(projected.run_id.is_none());
+            assert!(projected.subjects.is_none());
+            assert!(projected.operation.is_none());
+            assert!(projected.idempotency_key.is_none());
+        }
     }
 }

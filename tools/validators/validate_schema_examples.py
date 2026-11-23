@@ -20,6 +20,10 @@ def schema_name(example_name: str) -> str:
     # Explicit v2 names validate successor payloads; executable E2E checks
     # validate the current machine/v2 producers.
     prefixes = {
+        "run-deletion-v1-": "dolgorae-run-deletion-v1.schema.json",
+        "run-deletion-v2-": "dolgorae-run-deletion-v2.schema.json",
+        "startup-abort-v1-": "dolgorae-startup-abort-v1.schema.json",
+        "managed-preparation-v1-": "dolgorae-managed-preparation-v1.schema.json",
         "start-operation-closure-v1-": "dolgorae-start-operation-closure-v1.schema.json",
         "v014-identity-": "dolgorae-v014-identities-v1.schema.json",
         "v014-state-": "dolgorae-successor-state-v1.schema.json",
@@ -80,6 +84,8 @@ def schema_name(example_name: str) -> str:
 
 
 def validation_schema(example_name: str, schema: dict[str, object]) -> dict[str, object]:
+    if example_name.startswith("managed-preparation-v1-response."):
+        return {"$ref": "https://dolgorae.local/schema/managed-preparation/v1#/$defs/response"}
     if example_name.startswith("successor-machine-v5-normalized."):
         return {"$ref": "https://dolgorae.local/schema/machine-output/v5#/$defs/normalized_fixture_suite"}
     if example_name == "successor-facade-v5-methods.valid.json":
@@ -111,6 +117,21 @@ def repaired_negative_example(
     example_name: str, instance: dict[str, object]
 ) -> dict[str, object]:
     repaired = copy.deepcopy(instance)
+    if example_name == "run-deletion-v1-tombstone.invalid-lifecycle.json":
+        repaired["lifecycle"] = "closed"
+        return repaired
+    if example_name == "run-deletion-v2-force.invalid-deferred-generation.json":
+        repaired["force"]["worker_generation"] = 1
+        return repaired
+    if example_name == "startup-abort-v1-witness.invalid-generation.json":
+        repaired["worker"]["run_generation"] = 1
+        return repaired
+    if example_name == "managed-preparation-v1-provisioning.invalid-role.json":
+        repaired["role_ref"] = "reviewer"
+        return repaired
+    if example_name == "managed-preparation-v1-response.invalid-ok-with-error.json":
+        del repaired["error"]
+        return repaired
     if example_name == "start-operation-closure-v1-record.invalid-kind.json":
         repaired["namespace"]["operation_kind"] = "start_run"
         return repaired
@@ -751,6 +772,10 @@ def main() -> int:
             *EXAMPLES.glob("successor-machine-v5-*.invalid-*.json"),
             *EXAMPLES.glob("successor-facade-v5-*.invalid-*.json"),
             *EXAMPLES.glob("start-operation-closure-v1-*.invalid-*.json"),
+            *EXAMPLES.glob("run-deletion-v1-*.invalid-*.json"),
+            *EXAMPLES.glob("run-deletion-v2-*.invalid-*.json"),
+            *EXAMPLES.glob("startup-abort-v1-*.invalid-*.json"),
+            *EXAMPLES.glob("managed-preparation-v1-*.invalid-*.json"),
         ]
     )
     recognized_examples = {

@@ -69,6 +69,7 @@ test-prepare:
 	$(PYTHON_BIN) tools/validators/validate_schema_examples.py
 	$(PYTHON_BIN) tools/validators/validate_public_descriptor.py
 	$(PYTHON_BIN) tools/validators/validate_frozen_h1.py
+	$(PYTHON_BIN) tools/validators/validate_current_v2_contract.py
 	$(PYTHON_BIN) tools/validators/generate_public_v2.py
 	cd docs/protocol/generated/gul-consumer-v2/go && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...
 	cd docs/protocol/generated/gul-consumer-v1/go && GOTOOLCHAIN=$(GO_VERSION) $(GO) test ./...

@@ -548,7 +548,9 @@ impl RunSnapshot {
             run_id,
             control_socket_epoch,
             false,
-            RunObservation::read,
+            |sources, ledger, policy| {
+                RunObservation::read(Some(state_root), sources, ledger, policy)
+            },
         )
     }
 
@@ -880,11 +882,18 @@ pub struct RunObservation {
 
 impl RunObservation {
     fn read(
+        diagnostic_state_root: Option<&Path>,
         sources: &CaptureSources,
         ledger: Option<&ObservedLedger>,
         effective_policy: &crate::domain::EffectivePolicy,
     ) -> Result<Self, MachineError> {
-        Self::read_with_identity(sources, ledger, effective_policy, false)
+        Self::read_with_identity(
+            diagnostic_state_root,
+            sources,
+            ledger,
+            effective_policy,
+            false,
+        )
     }
 
     fn read_display(
@@ -892,10 +901,11 @@ impl RunObservation {
         ledger: Option<&ObservedLedger>,
         effective_policy: &crate::domain::EffectivePolicy,
     ) -> Result<Self, MachineError> {
-        Self::read_with_identity(sources, ledger, effective_policy, true)
+        Self::read_with_identity(None, sources, ledger, effective_policy, true)
     }
 
     fn read_with_identity(
+        diagnostic_state_root: Option<&Path>,
         sources: &CaptureSources,
         ledger: Option<&ObservedLedger>,
         effective_policy: &crate::domain::EffectivePolicy,
@@ -928,19 +938,26 @@ impl RunObservation {
             .as_ref()
             .and_then(|record| record.dedicated_server_identity.as_ref())
             .map(classify_dedicated_server_identity);
-        let background =
-            if sources.manifest.execution_lane == crate::domain::ExecutionLane::SharedReadonly {
-                BackgroundObservation::NotApplicable
-            } else if sources.projection.thread_id.is_none() && server_identity.is_none() {
-                BackgroundObservation::Unstarted
-            } else if let Some(record) = &sources.runtime_record {
-                match crate::worker::prove_worker_workload_absent(record) {
-                    Ok(evidence) => BackgroundObservation::VerifiedAbsent(evidence),
-                    Err(_) => BackgroundObservation::Unverified,
+        let background = if sources.manifest.execution_lane
+            == crate::domain::ExecutionLane::SharedReadonly
+        {
+            BackgroundObservation::NotApplicable
+        } else if sources.projection.thread_id.is_none() && server_identity.is_none() {
+            BackgroundObservation::Unstarted
+        } else if let Some(record) = &sources.runtime_record {
+            let proof = match diagnostic_state_root {
+                Some(state_root) if !display => {
+                    crate::worker::prove_worker_workload_absent_with_diagnostic(state_root, record)
                 }
-            } else {
-                BackgroundObservation::Unverified
+                _ => crate::worker::prove_worker_workload_absent(record),
             };
+            match proof {
+                Ok(evidence) => BackgroundObservation::VerifiedAbsent(evidence),
+                Err(_) => BackgroundObservation::Unverified,
+            }
+        } else {
+            BackgroundObservation::Unverified
+        };
         let active_turn_status = sources
             .projection
             .active_turn_id

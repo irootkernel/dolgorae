@@ -1,0 +1,34 @@
+{
+  "schema_version": 2,
+  "workspace_id": "1111111111111111111111111111111111111111111111111111111111111111",
+  "run_id": "01900000-0000-7000-8000-000000000001",
+  "lifecycle": "outcome_unknown",
+  "controller": {
+    "identity": {
+      "controller_id": "01900000-0000-7000-8000-000000000002",
+      "kind": "interactive_client",
+      "instance_id": "gul:example",
+      "subject_id": "user:example",
+      "generation": 1
+    },
+    "capability_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "start_receipt": null,
+  "source": {
+    "device": 1,
+    "inode": 2002
+  },
+  "force": {
+    "operator_id": "01900000-0000-7000-8000-000000000099",
+    "operator_generation": 1,
+    "profile": "default",
+    "server_key": "3333333333333333333333333333333333333333333333333333333333333333",
+    "worker_generation": 1,
+    "writer_generation": 1,
+    "start_outcome": "unknown",
+    "deferred_runtime": {
+      "record_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "worker_identity_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    }
+  }
+}

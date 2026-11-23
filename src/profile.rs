@@ -3271,10 +3271,10 @@ fn observe_registered_profile(
     definition: &RuntimeProfile,
 ) -> Result<ProfileObservation, MachineError> {
     let snapshot = observe_snapshot_reused(context, name, definition)?;
-    if crate::global_runtime::creation_version_supported(&snapshot.codex_version) {
+    let qualified = if crate::global_runtime::creation_version_supported(&snapshot.codex_version) {
         // Display-only derivation reuses checked probe facts. Admission still
         // performs fresh preparation and records its own immutable binding.
-        let qualified = snapshot_from_probes(
+        Some(snapshot_from_probes(
             context,
             name,
             definition,
@@ -3291,24 +3291,39 @@ fn observe_registered_profile(
                 },
             },
             true,
-        )?;
+        )?)
+    } else {
+        None
+    };
+    select_registered_profile_observation(context, snapshot, qualified, |candidate| {
+        observe_profile_snapshot(context, name, candidate)
+    })
+}
+
+fn select_registered_profile_observation(
+    context: &Context,
+    snapshot: ProfileSnapshot,
+    qualified: Option<ProfileSnapshot>,
+    mut observe: impl FnMut(ProfileSnapshot) -> Result<ProfileObservation, MachineError>,
+) -> Result<ProfileObservation, MachineError> {
+    if let Some(qualified) = qualified {
+        let observed = observe(qualified.clone())?;
+        if observed.blockers.is_empty() {
+            return Ok(observed);
+        }
         for native_subagents in [true, false] {
             let successor = specialist_snapshot_policy(
                 &context.dolgorae_home_root,
                 qualified.clone(),
                 native_subagents,
             )?;
-            let observed = observe_profile_snapshot(context, name, successor)?;
+            let observed = observe(successor)?;
             if observed.blockers.is_empty() {
                 return Ok(observed);
             }
         }
-        let observed = observe_profile_snapshot(context, name, qualified)?;
-        if observed.blockers.is_empty() {
-            return Ok(observed);
-        }
     }
-    observe_profile_snapshot(context, name, snapshot)
+    observe(snapshot)
 }
 
 fn observe_profile_snapshot(
@@ -10679,5 +10694,101 @@ else:
             assert_eq!(error.code, "PROFILE_SERVER_BUSY", "for {lifecycle}");
             assert!(error.retryable);
         }
+    }
+
+    #[test]
+    fn observe_registered_profile_prefers_primary_qualified_before_specialist() {
+        let root = std::env::temp_dir().join(format!("dolgorae-prof-order-{}", Uuid::now_v7()));
+        secure_dir(&root).unwrap();
+        let context = Context {
+            registry_path: root.join("profiles.yaml"),
+            dolgorae_home_root: root.clone(),
+        };
+        let mut base = stopped_snapshot();
+        base.codex_version = "0.169.0".to_owned();
+        base.server_key = "1".repeat(64);
+        let mut qualified = base.clone();
+        qualified.server_key = "2".repeat(64);
+        let specialist_enabled =
+            specialist_snapshot_policy(&root, qualified.clone(), true).unwrap();
+        let specialist_disabled =
+            specialist_snapshot_policy(&root, qualified.clone(), false).unwrap();
+
+        let make_obs = |snapshot: ProfileSnapshot, ready: bool| ProfileObservation {
+            snapshot,
+            server_epoch: ready.then_some(1),
+            models: Vec::new(),
+            capabilities: capability_snapshot(None),
+            blockers: if ready {
+                Vec::new()
+            } else {
+                vec![ProfileObservationBlocker::ServerUnavailable]
+            },
+        };
+
+        // 1. When Primary qualified is ready (even if specialist is also ready),
+        // Primary qualified must be selected FIRST without probing specialists.
+        let mut probed = Vec::new();
+        let selected = select_registered_profile_observation(
+            &context,
+            base.clone(),
+            Some(qualified.clone()),
+            |candidate| {
+                probed.push(candidate.server_key.clone());
+                let ready = candidate.server_key == qualified.server_key
+                    || candidate.server_key == specialist_enabled.server_key;
+                Ok(make_obs(candidate, ready))
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.snapshot.server_key, qualified.server_key);
+        assert_eq!(probed, vec![qualified.server_key.clone()]);
+
+        // 2. When Primary qualified is unavailable, fall back to specialist(true)
+        // then specialist(false), and finally base snapshot.
+        let mut probed = Vec::new();
+        let selected = select_registered_profile_observation(
+            &context,
+            base.clone(),
+            Some(qualified.clone()),
+            |candidate| {
+                probed.push(candidate.server_key.clone());
+                let ready = candidate.server_key == specialist_disabled.server_key;
+                Ok(make_obs(candidate, ready))
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.snapshot.server_key, specialist_disabled.server_key);
+        assert_eq!(
+            probed,
+            vec![
+                qualified.server_key.clone(),
+                specialist_enabled.server_key.clone(),
+                specialist_disabled.server_key.clone(),
+            ]
+        );
+
+        let mut probed = Vec::new();
+        let selected = select_registered_profile_observation(
+            &context,
+            base.clone(),
+            Some(qualified.clone()),
+            |candidate| {
+                probed.push(candidate.server_key.clone());
+                Ok(make_obs(candidate, false))
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.snapshot.server_key, base.server_key);
+        assert_eq!(
+            probed,
+            vec![
+                qualified.server_key,
+                specialist_enabled.server_key,
+                specialist_disabled.server_key,
+                base.server_key,
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -653,6 +653,7 @@
       "material_errors": [
         "THREAD_RESIDENCY_CONFLICT",
         "BACKGROUND_EXECUTION_UNVERIFIED",
+        "RECOVERY_REQUIRED",
         "OUTCOME_UNKNOWN"
       ],
       "recovery": "Read updated state and exact generation before another explicitly selected reconciliation",

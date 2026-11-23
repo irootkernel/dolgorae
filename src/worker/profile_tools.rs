@@ -89,6 +89,10 @@ impl ToolProcesses {
         self.groups_by_pid.contains_key(&pid)
     }
 
+    pub(super) fn is_empty(&self) -> bool {
+        self.groups_by_pid.is_empty()
+    }
+
     pub(super) fn startup_ps(
         &self,
         process: &ProcessCensusEntry,
@@ -170,6 +174,44 @@ impl PolicySample<'_> {
                         entry.process_group_id == group && self.defer_member(tools, &entry, server)
                     }
                     Err(error) => error.raw_os_error() == Some(libc::ESRCH),
+                }
+            });
+        self.dirty |= only_transients;
+        only_transients
+    }
+
+    pub fn defer_server_group_membership_change(
+        &mut self,
+        tools: &ToolProcesses,
+        server: &DedicatedServerIdentity,
+        memberships: (&[u32], &[u32]),
+        census: &[ProcessCensusEntry],
+    ) -> bool {
+        let (listed, enumerated) = memberships;
+        let only_transients = listed
+            .iter()
+            .chain(enumerated)
+            .filter(|pid| {
+                listed.binary_search(pid).is_ok() != enumerated.binary_search(pid).is_ok()
+            })
+            .all(|pid| {
+                if *pid == server.pid {
+                    return false;
+                }
+                let observed = census
+                    .iter()
+                    .find(|entry| entry.pid == *pid)
+                    .copied()
+                    .map_or_else(|| DarwinSystem.process_census_identity(*pid), Ok);
+                match observed {
+                    Ok(entry) => {
+                        entry.process_group_id == server.process_group_id
+                            && entry.session_id == server.session_id
+                            && (self.defer_member(tools, &entry, server)
+                                || (entry.parent_pid == server.pid
+                                    && DarwinSystem.startup_setuid_ps(&entry, server.uid)))
+                    }
+                    Err(error) => error.raw_os_error() == Some(libc::ESRCH) && !tools.is_empty(),
                 }
             });
         self.dirty |= only_transients;
@@ -261,5 +303,47 @@ mod tests {
         server[1].reads = false;
         server[1].peer = 8;
         assert!(!standard_transport([input, output, error], &server));
+    }
+
+    #[test]
+    fn server_group_membership_deferral_rejects_leader_drift_and_unverified_members() {
+        let server = DedicatedServerIdentity {
+            pid: 200,
+            uid: 501,
+            process_group_id: 200,
+            session_id: 200,
+            start_tvsec: 10,
+            start_tvusec: 1,
+            executable_path: std::path::PathBuf::from("/usr/bin/true"),
+            executable_device: 1,
+            executable_inode: 1,
+            executable_sha256: "a".repeat(64),
+        };
+        let tools = ToolProcesses::default();
+        let mut sample = PolicySample {
+            retained: &[],
+            dirty: false,
+        };
+        // Leader membership drift must never be deferred.
+        assert!(!sample.defer_server_group_membership_change(&tools, &server, (&[200], &[]), &[]));
+        assert!(!sample.dirty);
+
+        // Ordinary non-tool child in server group must fail closed.
+        let stray = ProcessCensusEntry {
+            pid: 201,
+            parent_pid: 200,
+            uid: 501,
+            process_group_id: 200,
+            session_id: 200,
+            birth: Some((10, 2)),
+            zombie: false,
+        };
+        assert!(!sample.defer_server_group_membership_change(
+            &tools,
+            &server,
+            (&[200], &[200, 201]),
+            &[stray],
+        ));
+        assert!(!sample.dirty);
     }
 }
