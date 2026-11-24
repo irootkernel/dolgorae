@@ -2,7 +2,9 @@
 
 use crate::app_server::{JsonRpcConnection, TransportError};
 use crate::darwin::DarwinSystem;
-use crate::jcs::{PayloadRepresentation, canonicalize, parse, represent_payload};
+use crate::jcs::{
+    PayloadRepresentation, canonicalize, canonicalize_strict, parse, represent_payload,
+};
 use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
 use crate::workspace::{NativeSubagents, RuntimeProfile};
@@ -27,6 +29,7 @@ use uuid::Uuid;
 
 const MANIFEST: &str = include_str!("../docs/protocol/codex-0.157.0-required-subset.json");
 const MINIMUM_CODEX_VERSION: &str = "0.158.0";
+const UNCLASSIFIED_CONFIG_DIGESTS: &str = "_dolgorae_unclassified_sha256";
 const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: u64 = 8 * 1024 * 1024;
 /// One diagnostic record is bounded so a single observation can never
@@ -1180,7 +1183,12 @@ fn doctor(parsed: &Parsed, member_quiescer: ProfileMemberQuiescer) -> Result<Val
         ));
     }
     let (context, name, profile, _) = selected_profile_from(parsed)?;
-    let snapshot = match snapshot_for(&context, &name, &profile) {
+    let observe = if launch_probe {
+        snapshot_for
+    } else {
+        observe_snapshot
+    };
+    let snapshot = match observe(&context, &name, &profile) {
         Ok(snapshot) => snapshot,
         Err(error) if error.code == "COMPATIBILITY_REJECTED" => {
             return serde_json::to_value(DoctorResult {
@@ -1259,16 +1267,41 @@ fn doctor(parsed: &Parsed, member_quiescer: ProfileMemberQuiescer) -> Result<Val
             .as_ref()
             .map_or_else(Vec::new, |state| state.models.clone()),
         capabilities,
-        diagnostics: if snapshot.compatibility_verdict == CompatibilityVerdict::Unverified {
-            vec![json!({
-                "code": "CODEX_VERSION_UNVERIFIED",
-                "message": "the compatible Codex version is not registered as verified",
-            })]
-        } else {
-            Vec::new()
-        },
+        diagnostics: profile_compatibility_diagnostics(&snapshot),
     })
     .map_err(internal)
+}
+
+fn profile_compatibility_diagnostics(snapshot: &ProfileSnapshot) -> Vec<Value> {
+    let mut diagnostics = Vec::new();
+    if snapshot.compatibility_verdict == CompatibilityVerdict::Unverified {
+        diagnostics.push(json!({
+            "code": "CODEX_VERSION_UNVERIFIED",
+            "message": "the compatible Codex version is not registered as verified",
+        }));
+    }
+    if let Some(digests) = snapshot
+        .process_static_configuration
+        .get(UNCLASSIFIED_CONFIG_DIGESTS)
+        .and_then(Value::as_object)
+        .filter(|digests| !digests.is_empty())
+    {
+        let keys: Vec<_> = digests
+            .keys()
+            .filter(|key| key.len() <= 128)
+            .take(16)
+            .collect();
+        diagnostics.push(json!({
+            "code": "CODEX_CONFIGURATION_UNCLASSIFIED",
+            "message": "unclassified top-level keys use digest-only process_static isolation",
+            "details": {
+                "keys": keys,
+                "omitted_key_count": digests.len() - keys.len(),
+                "classification_hint": "classify each key in the Profile configuration manifest",
+            },
+        }));
+    }
+    diagnostics
 }
 
 fn server_status(parsed: &Parsed) -> Result<Value, MachineError> {
@@ -3568,13 +3601,43 @@ fn configuration_snapshot(
     }
     let home = Path::new(canonical_codex_home);
     let effective = read_toml_table_if_present(profile_name, &home.join("config.toml"))?;
-    for name in effective.keys() {
-        if name.contains("include") || !classification.contains_key(name) {
+    let mut unclassified = serde_json::Map::new();
+    for (name, value) in &effective {
+        if matches!(
+            name.as_str(),
+            "include" | "includes" | "include_path" | "include_paths" | "config_include"
+        ) || name.starts_with("_dolgorae_")
+        {
             return Err(compatibility(
                 profile_name,
                 "profile_configuration_classification",
-                format!("configuration field {name:?} has no closed classification"),
+                "configuration uses a reserved or file-inclusion key",
             ));
+        }
+        if !classification.contains_key(name) {
+            let unsupported = || {
+                compatibility(
+                    profile_name,
+                    "profile_configuration_classification",
+                    "unclassified configuration is outside the canonical JSON domain",
+                )
+            };
+            if !toml_has_direct_json_representation(value) {
+                return Err(unsupported());
+            }
+            let json = serde_json::to_string(value).map_err(|_| unsupported())?;
+            let canonical = parse(&json)
+                .and_then(|value| canonicalize_strict(&value))
+                .map_err(|_| unsupported())?;
+            let mut digest = Sha256::new();
+            digest.update(b"dolgorae-unclassified-config-v1\0");
+            digest.update(name.as_bytes());
+            digest.update(b"\0");
+            digest.update(canonical);
+            unclassified.insert(
+                name.clone(),
+                Value::String(format!("{:x}", digest.finalize())),
+            );
         }
     }
     let mut launch = BTreeMap::new();
@@ -3601,10 +3664,26 @@ fn configuration_snapshot(
             }
         }
     }
+    if !unclassified.is_empty() {
+        launch.insert(
+            UNCLASSIFIED_CONFIG_DIGESTS.to_owned(),
+            Value::Object(unclassified),
+        );
+    }
     Ok(ConfigurationSnapshot {
         launch,
         observation,
     })
+}
+
+fn toml_has_direct_json_representation(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Datetime(_) => false,
+        toml::Value::Float(number) => number.is_finite(),
+        toml::Value::Array(values) => values.iter().all(toml_has_direct_json_representation),
+        toml::Value::Table(fields) => fields.values().all(toml_has_direct_json_representation),
+        toml::Value::String(_) | toml::Value::Integer(_) | toml::Value::Boolean(_) => true,
+    }
 }
 
 fn read_toml_table_if_present(
@@ -3695,16 +3774,19 @@ fn version_verdict(
             "Codex version is older than the supported minimum",
         ));
     }
-    Ok(if tested_runtime_schema(profile_name, actual)?.is_some() {
-        CompatibilityVerdict::Tested
-    } else {
-        CompatibilityVerdict::Unverified
-    })
+    Ok(
+        if tested_runtime_schema(profile_name, version, &actual)?.is_some() {
+            CompatibilityVerdict::Tested
+        } else {
+            CompatibilityVerdict::Unverified
+        },
+    )
 }
 
 fn tested_runtime_schema(
     profile_name: &str,
-    version: (u64, u64, u64),
+    reported_version: &str,
+    version: &RuntimeVersion,
 ) -> Result<Option<Value>, MachineError> {
     let manifest: Value = serde_json::from_str(MANIFEST).map_err(internal)?;
     let minimum = &manifest["pinned_runtime_schema"];
@@ -3722,36 +3804,117 @@ fn tested_runtime_schema(
         let registered_version = schema["version"]
             .as_str()
             .ok_or_else(|| internal("verified runtime schema version is missing"))?;
-        if parse_version(profile_name, registered_version)? == version {
+        if !reported_version.contains(['-', '+'])
+            && parse_version(profile_name, registered_version)? == *version
+        {
             return Ok(Some(schema.clone()));
         }
     }
     Ok(None)
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeVersion {
+    core: (u64, u64, u64),
+    prerelease: Vec<String>,
+}
+
+impl Ord for RuntimeVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.core
+            .cmp(&other.core)
+            .then_with(|| self.prerelease.is_empty().cmp(&other.prerelease.is_empty()))
+            .then_with(|| {
+                for (left, right) in self.prerelease.iter().zip(&other.prerelease) {
+                    let numeric = |value: &str| value.bytes().all(|byte| byte.is_ascii_digit());
+                    let order = match (numeric(left), numeric(right)) {
+                        (true, true) => left.len().cmp(&right.len()).then_with(|| left.cmp(right)),
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        (false, false) => left.cmp(right),
+                    };
+                    if order != std::cmp::Ordering::Equal {
+                        return order;
+                    }
+                }
+                self.prerelease.len().cmp(&other.prerelease.len())
+            })
+    }
+}
+
+impl PartialOrd for RuntimeVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 pub(crate) fn parse_version(
     profile_name: &str,
     value: &str,
-) -> Result<(u64, u64, u64), MachineError> {
-    let parts = value.split('.').collect::<Vec<_>>();
-    if parts.len() != 3 {
-        return Err(compatibility(
+) -> Result<RuntimeVersion, MachineError> {
+    let invalid = || {
+        compatibility(
             profile_name,
             "codex_version",
-            "Codex version is not semantic x.y.z",
-        ));
+            "invalid Codex semantic version",
+        )
+    };
+    let (without_build, build) = value
+        .split_once('+')
+        .map_or((value, None), |(main, build)| (main, Some(build)));
+    let (core, prerelease) = without_build
+        .split_once('-')
+        .map_or((without_build, None), |(core, prerelease)| {
+            (core, Some(prerelease))
+        });
+    let valid_identifier = |id: &str| {
+        !id.is_empty()
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    };
+    if build.is_some_and(|build| !build.split('.').all(valid_identifier)) {
+        return Err(invalid());
     }
-    Ok((
-        parts[0].parse().map_err(|_| {
-            compatibility(profile_name, "codex_version", "invalid Codex major version")
-        })?,
-        parts[1].parse().map_err(|_| {
-            compatibility(profile_name, "codex_version", "invalid Codex minor version")
-        })?,
-        parts[2].parse().map_err(|_| {
-            compatibility(profile_name, "codex_version", "invalid Codex patch version")
-        })?,
-    ))
+    let prerelease = if let Some(prerelease) = prerelease {
+        let identifiers: Vec<_> = prerelease.split('.').map(str::to_owned).collect();
+        if identifiers.iter().any(|id| {
+            !valid_identifier(id)
+                || (id.len() > 1
+                    && id.starts_with('0')
+                    && id.bytes().all(|byte| byte.is_ascii_digit()))
+        }) {
+            return Err(invalid());
+        }
+        identifiers
+    } else {
+        Vec::new()
+    };
+    let mut components = core.split('.');
+    let mut component = || {
+        components
+            .next()
+            .filter(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|part| part.parse::<u64>().ok())
+            .ok_or_else(invalid)
+    };
+    let core = (component()?, component()?, component()?);
+    if components.next().is_some() {
+        return Err(invalid());
+    }
+    Ok(RuntimeVersion { core, prerelease })
+}
+
+impl ProfileSnapshot {
+    pub(crate) fn checked_review_snapshot_supported(&self) -> bool {
+        // The checked review response retains the exact version reported by Codex.
+        !self.codex_version.contains(['-', '+'])
+            && parse_version(&self.profile_name, &self.codex_version).is_ok()
+            && self
+                .process_static_configuration
+                .get(UNCLASSIFIED_CONFIG_DIGESTS)
+                .is_none_or(|value| value.as_object().is_some_and(serde_json::Map::is_empty))
+    }
 }
 
 fn generate_schema(
@@ -4022,7 +4185,11 @@ fn verify_exact_bundle_digests(
     version: &str,
     stable_digest: &str,
 ) -> Result<(), MachineError> {
-    let Some(pinned) = tested_runtime_schema(profile_name, parse_version(profile_name, version)?)?
+    let Some(pinned) = tested_runtime_schema(
+        profile_name,
+        version,
+        &parse_version(profile_name, version)?,
+    )?
     else {
         return Ok(());
     };
@@ -6819,23 +6986,114 @@ pub fn append_profile_diagnostic(
     append_diagnostic_record(profile_root, kind, details, projection)
 }
 
+pub(crate) fn append_settings_noop_diagnostic(
+    profile_root: &Path,
+    run_generation: u64,
+    server_key: &str,
+    server_epoch: u64,
+) -> Result<(), MachineError> {
+    verify_private_directory(profile_root)?;
+    let (profiles_root, aggregate_lock) = open_diagnostic_directory(profile_root)?;
+    DarwinSystem
+        .lock_exclusive_nonblocking(&aggregate_lock)
+        .map_err(io_error)?;
+    let mut file = open_diagnostic_append(profile_root)?;
+    DarwinSystem
+        .lock_exclusive_nonblocking(&file)
+        .map_err(io_error)?;
+    let line = diagnostic_line(
+        "thread_settings_update_noop",
+        json!({"run_generation":run_generation,"server_key":server_key,"server_epoch":server_epoch}),
+        DiagnosticProjection::Operational,
+    )?;
+    let previous_length = file.metadata().map_err(io_error)?.len();
+    let mut bytes = previous_length.saturating_add(line.len() as u64);
+    if bytes > MAX_DIAGNOSTIC_BYTES {
+        return Err(profile_diagnostics_capacity());
+    }
+    for entry in fs::read_dir(profiles_root).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let name = entry.file_name();
+        let path = entry.path();
+        if !name.to_str().is_some_and(|name| {
+            name.len() == 64
+                && name
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        }) || path == profile_root
+        {
+            continue;
+        }
+        verify_private_directory(&path)?;
+        if let Some(journal) = crate::workspace::open_secure_file_if_present(
+            &path.join("diagnostics.jsonl"),
+            DarwinSystem.current_uid(),
+        )? {
+            bytes = bytes.saturating_add(journal.metadata().map_err(io_error)?.len());
+        }
+        if bytes > MAX_DIAGNOSTIC_BYTES {
+            return Err(profile_diagnostics_capacity());
+        }
+    }
+    if let Err(error) = file.write_all(&line) {
+        // The journal lock prevents another append from interleaving with a
+        // partial write, so the optional record can be removed safely.
+        file.set_len(previous_length).map_err(io_error)?;
+        return Err(io_error(error));
+    }
+    file.sync_all().map_err(io_error)
+}
+
 fn append_diagnostic_record(
     root: &Path,
     kind: &str,
     details: Value,
     projection: DiagnosticProjection,
 ) -> Result<(), MachineError> {
+    let line = diagnostic_line(kind, details, projection)?;
+    let (_, aggregate_lock) = open_diagnostic_directory(root)?;
+    DarwinSystem
+        .lock_exclusive(&aggregate_lock)
+        .map_err(io_error)?;
+    let mut file = open_diagnostic_append(root)?;
+    DarwinSystem.lock_exclusive(&file).map_err(io_error)?;
+    append_diagnostic_line(&mut file, &line)
+}
+
+/// All writers lock the profile directory before their own journal. The
+/// optional writer must see a stable aggregate across sibling server keys.
+fn open_diagnostic_directory(profile_root: &Path) -> Result<(&Path, File), MachineError> {
+    let profiles_root = profile_root.parent().ok_or_else(|| {
+        MachineError::runtime_path_invalid(profile_root, "Profile root has no parent")
+    })?;
+    verify_private_directory(profiles_root)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(profiles_root)
+        .map_err(io_error)?;
+    Ok((profiles_root, file))
+}
+
+fn open_diagnostic_append(root: &Path) -> Result<File, MachineError> {
     let path = root.join("diagnostics.jsonl");
     if path.exists() {
         verify_private_regular_file(&path, 0o600)?;
     }
-    let mut file = OpenOptions::new()
+    OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
-        .map_err(io_error)?;
+        .map_err(io_error)
+}
+
+fn diagnostic_line(
+    kind: &str,
+    details: Value,
+    projection: DiagnosticProjection,
+) -> Result<Vec<u8>, MachineError> {
     let value = json!({
         "schema_version": 1,
         "diagnostic_id": Uuid::now_v7(),
@@ -6843,17 +7101,30 @@ fn append_diagnostic_record(
         "projection": projection.as_str(),
         "details": details,
     });
-    let line = serde_json::to_vec(&value).map_err(internal)?;
+    let mut line = serde_json::to_vec(&value).map_err(internal)?;
     if line.len() > MAX_DIAGNOSTIC_RECORD_BYTES {
         return Err(MachineError::invalid_argument(
             "details",
             "diagnostic record exceeds its bound",
         ));
     }
-    file.write_all(&line).map_err(io_error)?;
-    file.write_all(b"\n").map_err(io_error)?;
+    line.push(b'\n');
+    Ok(line)
+}
+
+fn append_diagnostic_line(file: &mut File, line: &[u8]) -> Result<(), MachineError> {
+    file.write_all(line).map_err(io_error)?;
     file.sync_all().map_err(io_error)?;
     Ok(())
+}
+
+fn profile_diagnostics_capacity() -> MachineError {
+    MachineError::new(
+        "STORAGE_CAPACITY_EXCEEDED",
+        "Profile diagnostics exceed the observation bound",
+        false,
+        json!({"resource":"profile_diagnostics"}),
+    )
 }
 
 fn lock_file(path: &Path) -> Result<File, MachineError> {
@@ -7587,12 +7858,7 @@ pub(crate) fn public_diagnostics(
             .map_err(io_error)?;
         total += bytes.len() as u64;
         if total > MAX_DIAGNOSTIC_BYTES {
-            return Err(MachineError::new(
-                "STORAGE_CAPACITY_EXCEEDED",
-                "Profile diagnostics exceed the observation bound",
-                false,
-                json!({"resource":"profile_diagnostics"}),
-            ));
+            return Err(profile_diagnostics_capacity());
         }
         if !bytes.is_empty() && !bytes.ends_with(b"\n") {
             return Err(internal("Profile diagnostic append is incomplete"));
@@ -7653,6 +7919,139 @@ pub(crate) fn public_diagnostics(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optional_settings_audit_preserves_projection_and_aggregate_capacity() {
+        use super::*;
+
+        let root = std::env::temp_dir().join(format!("dolgorae-settings-audit-{}", Uuid::now_v7()));
+        let key = "a".repeat(64);
+        let first = root.join(&key);
+        let sibling = root.join("b".repeat(64));
+        let other_key = "c".repeat(64);
+        let last = root.join(&other_key);
+        for directory in [&first, &sibling, &last] {
+            secure_dir(directory).unwrap();
+        }
+        append_settings_noop_diagnostic(&first, 2, &key, 3).unwrap();
+        let contents = fs::read(first.join("diagnostics.jsonl")).unwrap();
+        let record: Value = serde_json::from_slice(&contents).unwrap();
+        assert_eq!(record["kind"], "thread_settings_update_noop");
+        assert_eq!(
+            project_diagnostic(record.clone(), "operational")["details"],
+            json!({"run_generation":2,"server_key":key,"server_epoch":3})
+        );
+        assert!(
+            project_diagnostic(record, "minimal")
+                .get("details")
+                .is_none()
+        );
+
+        let one_line = contents.len() as u64;
+        open_diagnostic_append(&sibling)
+            .unwrap()
+            .set_len(MAX_DIAGNOSTIC_BYTES - 2 * one_line)
+            .unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let attempt = |directory: &Path, server_key: &str| {
+            barrier.wait();
+            append_settings_noop_diagnostic(directory, 2, server_key, 3)
+        };
+        std::thread::scope(|scope| {
+            let a = scope.spawn(|| attempt(&first, &key));
+            let b = scope.spawn(|| attempt(&last, &other_key));
+            let results = [a.join().unwrap(), b.join().unwrap()];
+            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        });
+        assert_eq!(
+            append_settings_noop_diagnostic(&first, 2, &key, 3)
+                .unwrap_err()
+                .code,
+            "STORAGE_CAPACITY_EXCEEDED"
+        );
+        let bytes: u64 = [&first, &sibling, &last]
+            .iter()
+            .filter_map(|directory| fs::metadata(directory.join("diagnostics.jsonl")).ok())
+            .map(|metadata| metadata.len())
+            .sum();
+        assert_eq!(bytes, MAX_DIAGNOSTIC_BYTES);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn optional_settings_audit_serializes_with_required_sibling_append() {
+        let root = std::env::temp_dir().join(format!("dolgorae-mixed-audit-{}", Uuid::now_v7()));
+        let profiles = root.join("profiles");
+        let key = "a".repeat(64);
+        let optional = profiles.join(&key);
+        let required = profiles.join("b".repeat(64));
+        for directory in [&optional, &required] {
+            secure_dir(directory).unwrap();
+        }
+        let optional_line = diagnostic_line(
+            "thread_settings_update_noop",
+            json!({"run_generation":2,"server_key":key,"server_epoch":3}),
+            DiagnosticProjection::Operational,
+        )
+        .unwrap();
+        let required_details = json!({"pid":42});
+        let required_line = diagnostic_line(
+            "server_ready",
+            required_details.clone(),
+            DiagnosticProjection::Minimal,
+        )
+        .unwrap();
+        assert!(required_line.len() <= optional_line.len());
+        let initial = MAX_DIAGNOSTIC_BYTES - optional_line.len() as u64;
+        let (_, directory_probe) = open_diagnostic_directory(&optional).unwrap();
+        std::thread::scope(|scope| {
+            let journal = open_diagnostic_append(&required).unwrap();
+            journal.set_len(initial).unwrap();
+            DarwinSystem.lock_exclusive(&journal).unwrap();
+            let writer =
+                scope.spawn(|| append_diagnostic(&required, "server_ready", required_details));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let serialized = loop {
+                match DarwinSystem.lock_exclusive_nonblocking(&directory_probe) {
+                    Ok(()) => DarwinSystem.unlock(&directory_probe).unwrap(),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break true,
+                    Err(error) => panic!("could not check directory lock: {error}"),
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::yield_now();
+            };
+            let skipped = serialized
+                && append_settings_noop_diagnostic(&optional, 2, &key, 3).is_err()
+                && !optional.join("diagnostics.jsonl").exists();
+            drop(journal);
+            writer.join().unwrap().unwrap();
+            assert!(
+                skipped,
+                "a required sibling append must hold the shared lock"
+            );
+        });
+        assert_eq!(
+            append_settings_noop_diagnostic(&optional, 2, &key, 3)
+                .unwrap_err()
+                .code,
+            "STORAGE_CAPACITY_EXCEEDED"
+        );
+        assert_eq!(
+            fs::metadata(required.join("diagnostics.jsonl"))
+                .unwrap()
+                .len(),
+            initial + required_line.len() as u64
+        );
+        assert_eq!(
+            fs::metadata(optional.join("diagnostics.jsonl"))
+                .unwrap()
+                .len(),
+            0
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn profile_list_fixture() -> (
         std::path::PathBuf,
         crate::paths::DolgoraeHome,
@@ -8293,8 +8692,9 @@ mod tests {
 
     #[test]
     fn an_operational_diagnostic_keeps_its_details_out_of_the_minimal_projection() {
-        let root =
+        let fixture =
             std::env::temp_dir().join(format!("dolgorae-diagnostic-projection-{}", Uuid::now_v7()));
+        let root = fixture.join("profiles").join("a".repeat(64));
         append_profile_diagnostic(
             &root,
             "foreign_thread_request_ignored",
@@ -8335,7 +8735,7 @@ mod tests {
             42
         );
 
-        fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(fixture).unwrap();
     }
 
     use super::*;
@@ -8396,7 +8796,7 @@ mod tests {
     }
 
     #[test]
-    fn configuration_classification_is_closed_and_separates_runtime_observation() {
+    fn configuration_classification_is_conservative_and_separates_runtime_observation() {
         let root = std::env::temp_dir().join(format!("dolgorae-config-test-{}", Uuid::now_v7()));
         secure_dir(&root).unwrap();
         let profile = RuntimeProfile {
@@ -8428,23 +8828,118 @@ mod tests {
             snapshot.observation["desktop"]["followUpQueueMode"],
             "queue"
         );
+        let capture = |settings: &str| {
+            fs::write(&config, settings).unwrap();
+            configuration_snapshot("default", &profile.codex_home)
+        };
+        let snapshot = capture(
+            "include_feature_toggle = true\nfuture = {z = 'secret-canary', a = [1, false]}\n",
+        )
+        .unwrap();
+        let digests = &snapshot.launch[UNCLASSIFIED_CONFIG_DIGESTS];
+        assert_eq!(
+            digests["include_feature_toggle"],
+            sha256_hex(b"dolgorae-unclassified-config-v1\0include_feature_toggle\0true")
+        );
+        assert_eq!(digests["future"], sha256_hex(
+            b"dolgorae-unclassified-config-v1\0future\0{\"a\":[1,false],\"z\":\"secret-canary\"}"
+        ));
+        assert!(
+            !serde_json::to_string(&snapshot.launch)
+                .unwrap()
+                .contains("secret-canary")
+        );
+        assert!(!snapshot.observation.contains_key("future"));
+        let reordered = capture(
+            "future = {a = [1, false], z = \"secret-canary\"}\ninclude_feature_toggle = true\n",
+        )
+        .unwrap();
+        assert_eq!(snapshot.launch, reordered.launch);
+        let numeric = |value: &str| {
+            capture(&format!("future = {value}\n")).unwrap().launch[UNCLASSIFIED_CONFIG_DIGESTS]
+                ["future"]
+                .clone()
+        };
+        assert_eq!(numeric("7"), numeric("7.0"));
+        assert_eq!(numeric("7"), numeric("7e0"));
+        assert_ne!(numeric("7"), numeric("8"));
         for unsupported in [
-            "unknown_future_field = true\n",
-            "allow_symlinked_codex_home = true\n",
-            "cloud = { skills = { enabled = true } }\n",
-            "mcp_enterprise_managed_auth = { enabled = true }\n",
-            "model_post_turn_compact_threshold_percent = 80\n",
-            "thread_unload_delay_secs = 60\n",
+            "include = []\n",
+            "includes = []\n",
+            "include_path = 'file'\n",
+            "include_paths = []\n",
+            "config_include = 'file'\n",
+            "_dolgorae_other = true\n",
+            "_dolgorae_unclassified_sha256 = {}\n",
+            "future = [\n",
         ] {
-            fs::write(&config, unsupported).unwrap();
             assert_eq!(
-                configuration_snapshot("default", &profile.codex_home)
-                    .unwrap_err()
-                    .code,
+                capture(unsupported).unwrap_err().code,
                 "COMPATIBILITY_REJECTED"
             );
         }
+        for unsupported in [
+            "future = [inf]\n",
+            "future = {schedule = [2000-01-01]}\n",
+            "future = {limits = [9223372036854775807]}\n",
+        ] {
+            let error = capture(unsupported).unwrap_err();
+            assert_eq!(error.code, "COMPATIBILITY_REJECTED");
+            assert_eq!(
+                error.details,
+                json!({
+                    "profile": "default",
+                    "check": "profile_configuration_classification",
+                    "expected": "conformance with Codex >= 0.158.0",
+                    "actual": "unclassified configuration is outside the canonical JSON domain",
+                })
+            );
+        }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_semver_precedence_and_schema_pins_are_separate() {
+        let version = |text| parse_version("default", text).unwrap();
+        let order = [
+            "0.158.0-rc.1",
+            "0.158.0",
+            "0.169.0-rc.9",
+            "0.169.0-rc.10",
+            "0.169.0",
+            "0.170.0-alpha",
+            "0.170.0-alpha.1",
+            "0.170.0-alpha.184467440737095516160",
+            "0.170.0-alpha.x",
+            "0.170.0",
+        ];
+        for pair in order.windows(2) {
+            assert!(version(pair[0]) < version(pair[1]), "{pair:?}");
+        }
+        assert_eq!(version("0.166.0+anything.001"), version("0.166.00"));
+        for invalid in [
+            "0.169",
+            "0.169.0.1",
+            "0.169.0-",
+            "0.169.0-01",
+            "0.169.0-x..y",
+            "0.169.0+",
+            "0.169.0+one+two",
+            "0.169.0-β",
+        ] {
+            assert!(parse_version("default", invalid).is_err(), "{invalid}");
+        }
+        assert!(version_verdict("default", "0.158.0-rc.1").is_err());
+        assert_eq!(
+            version_verdict("default", "0.166.00").unwrap(),
+            CompatibilityVerdict::Tested
+        );
+        for unverified in ["0.166.0-rc.1", "0.166.0+local", "0.170.0-alpha.1"] {
+            assert_eq!(
+                version_verdict("default", unverified).unwrap(),
+                CompatibilityVerdict::Unverified
+            );
+        }
     }
 
     #[test]

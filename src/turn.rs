@@ -38,6 +38,7 @@ pub const MAX_SOLICITED_TURN_BYTES: usize =
 /// How many foreign-thread server requests are recorded before correlation is
 /// treated as broken rather than merely noisy.
 pub const MAX_IGNORED_FOREIGN_REQUESTS: usize = 64;
+const MAX_SETTINGS_NOOP_AUDIT_ATTEMPTS: u8 = 8;
 /// How much of one foreign-thread routing field is retained.
 ///
 /// The values come from a shared app-server this Run does not control, so each
@@ -1396,6 +1397,8 @@ pub trait ForeignDiagnostics: Send {
         ignored: &IgnoredForeignRequest,
         lane: ForeignLane<'_>,
     ) -> Result<(), TurnError>;
+
+    fn record_settings_noop(&self, lane: ForeignLane<'_>) -> Result<(), TurnError>;
 }
 
 /// Bounded history commitment: complete original Turn bytes and terminal count.
@@ -2027,9 +2030,6 @@ pub struct TurnCoordinator<S, J, A> {
     /// The effort the active Turn was started with, so its terminal reports
     /// what it actually ran at rather than the Run's default.
     active_turn_effort: Option<String>,
-    /// At most one effort-only `thread/settings/updated` notification emitted
-    /// by Codex >=0.169.0 when `turn/start` overrides the thread's prior effort.
-    pending_turn_effort_update: Option<String>,
     active_operation_id: Option<Uuid>,
     recovery_turn_id: Option<String>,
     recovery_lifecycle: Option<RunLifecycle>,
@@ -2045,6 +2045,7 @@ pub struct TurnCoordinator<S, J, A> {
     /// past the recording bound, or because the profile journal refused the
     /// write.  Counted rather than silently lost, and never this Run's fault.
     undiagnosed_foreign: u64,
+    settings_noop_audit_attempts: u8,
     streamed_history_bytes: u64,
     idempotency: BTreeMap<String, IdempotencyRecord>,
     unresolved_idempotency: BTreeMap<String, String>,
@@ -2207,7 +2208,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             writer_generation: None,
             active_turn_id: None,
             active_turn_effort: None,
-            pending_turn_effort_update: None,
             active_operation_id: None,
             recovery_turn_id: None,
             recovery_lifecycle: None,
@@ -2220,6 +2220,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             completed_item_count: 0,
             ignored_foreign: Vec::new(),
             undiagnosed_foreign: 0,
+            settings_noop_audit_attempts: 0,
             streamed_history_bytes: 0,
             idempotency: BTreeMap::new(),
             unresolved_idempotency: BTreeMap::new(),
@@ -2660,7 +2661,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
         if self.safety_policy == SessionSafetyPolicy::CallerWorkspace {
             self.caller_startup_failure = None;
-            self.pending_turn_effort_update = None;
             if self.state != CoordinatorState::Idle || !self.pending.is_empty() {
                 return Err(TurnError::TurnBusy);
             }
@@ -2855,7 +2855,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         latest_turn_id: Option<String>,
     ) {
         self.thread_id = thread_id;
-        self.pending_turn_effort_update = None;
         self.recovery_turn_id = active_turn_id.or(latest_turn_id);
         self.recovery_lifecycle = Some(lifecycle);
         self.state = match lifecycle {
@@ -3261,7 +3260,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.state = CoordinatorState::Paused;
         self.active_turn_id = None;
         self.active_turn_effort = None;
-        self.pending_turn_effort_update = None;
         self.active_operation_id = None;
         self.recovery_turn_id = None;
     }
@@ -3292,7 +3290,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.pending.clear();
         self.active_turn_id = None;
         self.active_turn_effort = None;
-        self.pending_turn_effort_update = None;
         self.active_operation_id = None;
         Ok(())
     }
@@ -3850,8 +3847,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         })?;
         self.active_turn_id = Some(turn_id.clone());
         self.active_turn_effort = Some(effort.clone());
-        self.pending_turn_effort_update =
-            (self.safety_policy == SessionSafetyPolicy::CallerWorkspace).then(|| effort.clone());
         self.state = CoordinatorState::Running;
         let accepted = AcceptedTurn {
             thread_id,
@@ -4145,31 +4140,24 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         Ok(thread_id)
     }
 
-    fn admit_turn_effort_settings_update(&mut self, params: &Value) -> bool {
-        if self.state != CoordinatorState::Running {
-            return false;
-        }
-        let Some(expected_effort) = self.pending_turn_effort_update.take() else {
+    fn settings_update_is_noop(&self, params: &Value) -> bool {
+        let Some(thread_id) = self.thread_id.as_deref() else {
             return false;
         };
-        if params.get("threadId").and_then(Value::as_str) != self.thread_id.as_deref() {
+        if params.get("threadId").and_then(Value::as_str) != Some(thread_id) {
             return false;
         }
         let Some(settings) = params.get("threadSettings") else {
             return false;
         };
-        let sandbox = self.sandbox.clone();
-        let approval = self.approval_policy.clone();
-        if self
-            .check_workspace_settings(settings, &sandbox, &approval)
-            .is_err()
-        {
-            return false;
-        }
-        if settings.get("model").and_then(Value::as_str) != Some(self.fixed_model.as_str()) {
-            return false;
-        }
-        settings.get("effort").and_then(Value::as_str) == Some(expected_effort.as_str())
+        let expected_effort = self
+            .active_turn_effort
+            .as_deref()
+            .unwrap_or(&self.default_effort);
+        self.workspace_settings_refusal(settings, &self.sandbox, &self.approval_policy)
+            .is_none()
+            && settings.get("model").and_then(Value::as_str) == Some(self.fixed_model.as_str())
+            && settings.get("effort").and_then(Value::as_str) == Some(expected_effort)
     }
 
     fn check_workspace_settings(
@@ -4178,13 +4166,28 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         sandbox: &str,
         approval: &str,
     ) -> Result<(), TurnError> {
-        let policy = settings
-            .get("sandboxPolicy")
-            .ok_or(TurnError::CorrelationMismatch)?;
+        if let Some(predicate) = self.workspace_settings_refusal(settings, sandbox, approval) {
+            self.record_caller_startup_predicate(predicate);
+            return Err(TurnError::CorrelationMismatch);
+        }
+        Ok(())
+    }
+
+    fn workspace_settings_refusal(
+        &self,
+        settings: &Value,
+        sandbox: &str,
+        approval: &str,
+    ) -> Option<&'static str> {
+        let policy = &settings["sandboxPolicy"];
         let write = sandbox == "workspace-write";
-        let roots_match = policy.get("writableRoots").is_some_and(|roots| {
-            roots == &serde_json::json!([]) || roots == &serde_json::json!([self.cwd])
-        });
+        let roots_match = match policy.get("writableRoots") {
+            None => !write,
+            Some(roots) => {
+                roots == &serde_json::json!([])
+                    || (write && roots == &serde_json::json!([self.cwd]))
+            }
+        };
         let predicates = [
             (
                 "thread_settings_cwd",
@@ -4205,7 +4208,7 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                     .get("networkAccess")
                     .is_some_and(|value| value != &Value::Bool(false)),
             ),
-            ("thread_settings_writable_roots", write && !roots_match),
+            ("thread_settings_writable_roots", !roots_match),
             (
                 "thread_settings_exclude_slash_tmp",
                 write
@@ -4221,11 +4224,9 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
                         .is_some_and(|value| value != &Value::Bool(false)),
             ),
         ];
-        if let Some((predicate, _)) = predicates.into_iter().find(|(_, refused)| *refused) {
-            self.record_caller_startup_predicate(predicate);
-            return Err(TurnError::CorrelationMismatch);
-        }
-        Ok(())
+        predicates
+            .into_iter()
+            .find_map(|(predicate, refused)| refused.then_some(predicate))
     }
 
     /// Create and durably bind a thread before the first task Turn. Brokered
@@ -4304,7 +4305,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         }
         self.active_turn_id = None;
         self.active_turn_effort = None;
-        self.pending_turn_effort_update = None;
         self.active_operation_id = None;
         self.state = CoordinatorState::OutcomeUnknown;
         self.recovery_lifecycle = Some(RunLifecycle::OutcomeUnknown);
@@ -4410,12 +4410,20 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
             "thread/settings/updated"
                 if self.safety_policy == SessionSafetyPolicy::CallerWorkspace =>
             {
-                if self.admit_turn_effort_settings_update(&params) {
+                if self.settings_update_is_noop(&params) {
+                    if self.settings_noop_audit_attempts < MAX_SETTINGS_NOOP_AUDIT_ATTEMPTS {
+                        self.settings_noop_audit_attempts += 1;
+                        // A matching notification says nothing changed. Its optional
+                        // diagnostic cannot invalidate the current Run or Turn.
+                        let _ = self.foreign_diagnostics.record_settings_noop(ForeignLane {
+                            run_generation: self.run_generation,
+                            server_key: &self.server_key,
+                            server_epoch: self.server_epoch,
+                        });
+                    }
                     return Ok(None);
                 }
-                // Any idle, duplicate, foreign-thread, or policy/model/effort-drifting
-                // settings notification remains fail-closed; never let it qualify a
-                // later transition.
+                // An unrequested change may invalidate the Run's committed lane.
                 Err(self.lost_after_write(Uuid::now_v7(), TurnError::CorrelationMismatch))
             }
             "item/started" => {
@@ -6011,7 +6019,6 @@ impl<S: AppServer, J: DurableTurnJournal, A: ResponseArtifactStore> TurnCoordina
         self.terminal_turn_ids.insert(turn_id.clone());
         self.active_turn_id = None;
         self.active_turn_effort = None;
-        self.pending_turn_effort_update = None;
         self.active_operation_id = None;
         self.pending.clear();
         self.state = CoordinatorState::Idle;
@@ -7271,6 +7278,7 @@ pub(crate) mod tests {
     #[derive(Clone, Default)]
     struct RecordingDiagnostics {
         records: Arc<Mutex<Vec<RecordedObservation>>>,
+        settings_noops: Arc<Mutex<Vec<(u64, String, u64)>>>,
         broken: bool,
     }
 
@@ -7297,6 +7305,20 @@ pub(crate) mod tests {
                 server_key: lane.server_key.to_owned(),
                 server_epoch: lane.server_epoch,
             });
+            Ok(())
+        }
+
+        fn record_settings_noop(&self, lane: ForeignLane<'_>) -> Result<(), TurnError> {
+            self.settings_noops.lock().unwrap().push((
+                lane.run_generation,
+                lane.server_key.to_owned(),
+                lane.server_epoch,
+            ));
+            if self.broken {
+                return Err(TurnError::Journal(
+                    "diagnostic journal is broken".to_owned(),
+                ));
+            }
             Ok(())
         }
     }
@@ -8700,6 +8722,17 @@ pub(crate) mod tests {
             })
         );
         assert_eq!(params["approvalPolicy"], "on-request");
+        assert!(params.get("developerInstructions").is_none());
+        let (_, thread) = coordinator
+            .server
+            .calls
+            .iter()
+            .find(|(method, _)| method == "thread/start")
+            .expect("writer thread request");
+        assert_eq!(
+            thread["developerInstructions"],
+            coordinator.developer_instructions
+        );
     }
 
     fn caller_coordinator() -> TurnCoordinator<FakeServer, MemoryJournal, MemoryArtifactStore> {
@@ -9870,8 +9903,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn caller_turn_start_admits_single_matching_effort_settings_update_and_preserves_policy_guards()
-    {
+    fn caller_settings_updates_audit_noops_and_fail_closed_on_drift() {
         let effort_notification =
             |thread_id: &str, write: bool, cwd: &str, model: &str, effort: &str| {
                 serde_json::json!({
@@ -9882,6 +9914,7 @@ pub(crate) mod tests {
                             "cwd": cwd,
                             "model": model,
                             "effort": effort,
+                            "optionalFutureField": {"value": true},
                             "approvalPolicy": if write { "on-request" } else { "never" },
                             "sandboxPolicy": turn_sandbox(
                                 if write { "workspace-write" } else { "read-only" },
@@ -9901,14 +9934,29 @@ pub(crate) mod tests {
             delivery: DeliveryMode::Submit,
         };
 
-        // Positive: Turn 1 (effort=low) and Turn 2 (effort=high) each accept
-        // one matching effort-only settings update while Running and settle cleanly.
+        let diagnostics = RecordingDiagnostics::default();
         let mut coordinator = caller_coordinator();
+        coordinator.foreign_diagnostics = Box::new(diagnostics.clone());
         coordinator.supported_efforts = ["low", "medium", "high"]
             .into_iter()
             .map(str::to_owned)
             .collect();
         coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+        let initial_journal_len = coordinator.journal.entries.len();
+        let default_effort = coordinator.default_effort.clone();
+        assert_eq!(
+            coordinator.ingest(effort_notification(
+                "caller-thread",
+                false,
+                "/tmp/workspace",
+                "gpt-5",
+                &default_effort,
+            )),
+            Ok(None)
+        );
+        assert_eq!(coordinator.state(), &CoordinatorState::Idle);
+        assert_eq!(coordinator.journal.entries.len(), initial_journal_len);
+        assert_eq!(diagnostics.settings_noops.lock().unwrap().len(), 1);
         for (idx, effort) in [(1, "low"), (2, "high")] {
             let turn_id = format!("turn-{idx}");
             coordinator
@@ -9920,18 +9968,20 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(accepted.effort, effort);
             assert_eq!(coordinator.state(), &CoordinatorState::Running);
-            assert!(
-                coordinator
-                    .ingest(effort_notification(
+            let journal_len = coordinator.journal.entries.len();
+            for _ in 0..2 {
+                assert_eq!(
+                    coordinator.ingest(effort_notification(
                         "caller-thread",
                         false,
                         "/tmp/workspace",
                         "gpt-5",
                         effort,
-                    ))
-                    .unwrap()
-                    .is_none()
-            );
+                    )),
+                    Ok(None)
+                );
+            }
+            assert_eq!(coordinator.journal.entries.len(), journal_len);
             assert_eq!(coordinator.state(), &CoordinatorState::Running);
             let terminal = coordinator
                 .ingest(serde_json::json!({
@@ -9951,39 +10001,26 @@ pub(crate) mod tests {
             assert_eq!(coordinator.state(), &CoordinatorState::Idle);
         }
 
-        // Negative 1: A duplicate second notification in the same Turn fails closed.
-        coordinator
-            .server
-            .replies
-            .push_back(Ok(serde_json::json!({"turn": {"id": "turn-dup"}})));
-        coordinator
-            .start_turn(make_request("key-dup", "low"))
-            .unwrap();
-        assert!(
-            coordinator
-                .ingest(effort_notification(
-                    "caller-thread",
-                    false,
-                    "/tmp/workspace",
-                    "gpt-5",
-                    "low",
-                ))
-                .unwrap()
-                .is_none()
-        );
+        assert_eq!(diagnostics.settings_noops.lock().unwrap().len(), 5);
+        let idle_drift = if default_effort == "high" {
+            "low"
+        } else {
+            "high"
+        };
         assert_eq!(
             coordinator.ingest(effort_notification(
                 "caller-thread",
                 false,
                 "/tmp/workspace",
                 "gpt-5",
-                "low",
+                idle_drift,
             )),
             Err(TurnError::CorrelationMismatch)
         );
         assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+        assert_eq!(diagnostics.settings_noops.lock().unwrap().len(), 5);
 
-        // Negative 2: Any mismatch in threadId, policy/access, cwd, model, or effort fails closed.
+        // A drift probe does not create or replace startup failure evidence.
         for (label, notification) in [
             (
                 "foreign_thread",
@@ -10016,6 +10053,7 @@ pub(crate) mod tests {
                 .replies
                 .push_back(Ok(serde_json::json!({"turn": {"id": "turn-neg"}})));
             c.start_turn(make_request("key-neg", "low")).unwrap();
+            let startup_failure_snapshot = c.caller_startup_failure.clone();
             assert_eq!(
                 c.ingest(notification),
                 Err(TurnError::CorrelationMismatch),
@@ -10026,6 +10064,121 @@ pub(crate) mod tests {
                 &CoordinatorState::OutcomeUnknown,
                 "{label} must quarantine run"
             );
+            assert_eq!(
+                c.caller_startup_failure, startup_failure_snapshot,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn caller_settings_audit_attempts_are_bounded_even_when_writes_fail() {
+        let diagnostics = RecordingDiagnostics {
+            broken: true,
+            ..RecordingDiagnostics::default()
+        };
+        let mut coordinator = caller_coordinator();
+        coordinator.foreign_diagnostics = Box::new(diagnostics.clone());
+        coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+        let mut no_op = settings_notification(false);
+        no_op["params"]["threadSettings"]["model"] = serde_json::json!(coordinator.fixed_model);
+        no_op["params"]["threadSettings"]["effort"] = serde_json::json!(coordinator.default_effort);
+        let journal = coordinator.journal.entries.clone();
+        assert_eq!(coordinator.ingest(no_op.clone()), Ok(None));
+        assert_eq!(coordinator.state(), &CoordinatorState::Idle);
+        assert_eq!(coordinator.journal.entries, journal);
+
+        coordinator
+            .server
+            .replies
+            .push_back(Ok(serde_json::json!({"turn": {"id": "turn-audit"}})));
+        let mut request = request("audit-busy", DeliveryMode::Submit);
+        request.model = coordinator.fixed_model.clone();
+        request.effort = None;
+        coordinator.start_turn(request).unwrap();
+        let journal = coordinator.journal.entries.clone();
+        for _ in 0..=MAX_SETTINGS_NOOP_AUDIT_ATTEMPTS {
+            assert_eq!(coordinator.ingest(no_op.clone()), Ok(None));
+        }
+        assert_eq!(coordinator.state(), &CoordinatorState::Running);
+        assert_eq!(coordinator.active_turn_id(), Some("turn-audit"));
+        assert_eq!(coordinator.journal.entries, journal);
+        assert_eq!(
+            *diagnostics.settings_noops.lock().unwrap(),
+            vec![
+                (
+                    coordinator.run_generation,
+                    coordinator.server_key.clone(),
+                    coordinator.server_epoch
+                );
+                usize::from(MAX_SETTINGS_NOOP_AUDIT_ATTEMPTS)
+            ]
+        );
+    }
+
+    #[test]
+    fn caller_settings_noop_rejects_readonly_roots_and_write_sandbox_drift() {
+        for (write, field, value) in [
+            (
+                false,
+                "writableRoots",
+                serde_json::json!(["/tmp/workspace"]),
+            ),
+            (true, "writableRoots", serde_json::json!(["/"])),
+            (true, "networkAccess", serde_json::json!(true)),
+            (true, "excludeSlashTmp", serde_json::json!(true)),
+            (true, "excludeTmpdirEnvVar", serde_json::json!(true)),
+        ] {
+            let mut coordinator = caller_coordinator();
+            coordinator.initialize_thread(Uuid::now_v7()).unwrap();
+            let mut notification = settings_notification(write);
+            if write {
+                coordinator.sandbox = "workspace-write".to_owned();
+                coordinator.approval_policy = "on-request".to_owned();
+            }
+            let settings = &mut notification["params"]["threadSettings"];
+            settings["model"] = serde_json::json!(coordinator.fixed_model);
+            settings["effort"] = serde_json::json!(coordinator.default_effort);
+            assert!(coordinator.settings_update_is_noop(&notification["params"]));
+            notification["params"]["threadSettings"]["sandboxPolicy"][field] = value;
+            let failure = coordinator.caller_startup_failure.clone();
+            assert_eq!(
+                coordinator.ingest(notification),
+                Err(TurnError::CorrelationMismatch),
+                "{field}"
+            );
+            assert_eq!(coordinator.state(), &CoordinatorState::OutcomeUnknown);
+            assert_eq!(coordinator.caller_startup_failure, failure);
+        }
+    }
+
+    #[test]
+    fn caller_settings_noop_preserves_quarantined_recovered_state() {
+        let mut coordinator = caller_coordinator();
+        let mut notification = settings_notification(false);
+        notification["params"]["threadSettings"]["model"] =
+            serde_json::json!(coordinator.fixed_model);
+        notification["params"]["threadSettings"]["effort"] =
+            serde_json::json!(coordinator.default_effort);
+        assert!(!coordinator.settings_update_is_noop(&notification["params"]));
+
+        for (lifecycle, state) in [
+            (RunLifecycle::Paused, CoordinatorState::Paused),
+            (
+                RunLifecycle::WaitingInteraction,
+                CoordinatorState::OutcomeUnknown,
+            ),
+        ] {
+            coordinator.restore_durable_state(
+                lifecycle,
+                Some("caller-thread".to_owned()),
+                None,
+                None,
+            );
+            let journal = coordinator.journal.entries.clone();
+            assert_eq!(coordinator.ingest(notification.clone()), Ok(None));
+            assert_eq!(coordinator.state(), &state);
+            assert_eq!(coordinator.journal.entries, journal);
         }
     }
 
@@ -12090,6 +12243,12 @@ pub(crate) mod tests {
                 .start_turn(request("key", DeliveryMode::Submit))
                 .unwrap();
             assert_eq!(coordinator.server.calls[2].0, expected_method);
+            assert_eq!(
+                coordinator.server.calls[2].1["developerInstructions"],
+                coordinator.developer_instructions
+            );
+            let (_, turn) = coordinator.server.calls.last().unwrap();
+            assert!(turn.get("developerInstructions").is_none());
             assert!(matches!(
                 coordinator.journal().entries[2],
                 JournalEntry::ThreadBound {

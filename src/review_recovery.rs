@@ -176,7 +176,11 @@ pub(crate) fn execute_with_source_contract(
     let resolved = ResolvedGlobalProfile::resolve(&home, profile)?;
     let binding = match &invocation {
         Invocation::Legacy(_) | Invocation::Scoped(..) | Invocation::Task(_) => {
-            resolved.prepare(&home)?
+            let binding = resolved.prepare(&home)?;
+            if !binding.launch_snapshot.checked_review_snapshot_supported() {
+                return Err(crate::direct_review_target::reading_boundary_unsupported());
+            }
+            binding
         }
         Invocation::Direct(request) => {
             let binding = resolved.prepare_qualified(&home)?;

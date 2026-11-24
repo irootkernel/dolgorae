@@ -739,15 +739,17 @@ Project configuration uses pinned `serde_yaml_ng` 0.10 behind typed adapters
 that reject duplicate and unknown keys. YAML values are never used as untyped
 protocol or ledger input. EPIC-002 admits three additional narrowly bound
 safe-Rust mechanisms: `sha1` only for RFC 6455's mandated WebSocket accept-key
-calculation, `toml` only for bounded private Codex configuration inputs that are
-immediately converted into the closed profile classification, and `zeroize`
+calculation, `toml` only for bounded private Codex configuration inputs.
+Known keys enter the defined Profile classes. Unclassified keys enter the
+launch snapshot as strict-JCS digests under ADR-043. Use `zeroize`
 only for secret credential buffers. They do not replace Dolgorae's SHA-256/JCS,
 owned JSON ingest, or typed YAML boundaries.
 
 The dependency conformance fixtures are executable and named: the WebSocket
-upgrade accept-key and framing cases in `app_server::tests`, the closed TOML
-classification and invalid-input cases in `profile::tests` plus the Profile CLI
-matrix, and the carrier zeroization/strict-ingest boundary in
+upgrade accept-key and framing cases in `app_server::tests`, the TOML
+classification case
+`profile::tests::configuration_classification_is_conservative_and_separates_runtime_observation`
+and the Profile CLI matrix, and the carrier zeroization/strict-ingest boundary in
 `controller::tests::strict_controller_creation_and_authorization_hide_secret`.
 Changing any of those mechanism bindings requires this ADR and its named
 fixture set to change together.
@@ -3003,8 +3005,10 @@ while keeping `codex app-server` and all checked `public-v1`, `public-v2`,
    deterministic domain-separated SHA-256 digests
    (`_dolgorae_unclassified_sha256` over `"dolgorae-unclassified-config-v1\0" ||
    utf8(name) || "\0" || JCS(value)`) inside `process_static_configuration` plus
-   bounded key-name-only diagnostics carrying a classification hint. Unlike
-   ADR-016's secret user-input answers (which use opaque first-success receipts),
+   bounded key-name-only diagnostics carrying a classification hint. The digest
+   input must fit canonical JSON without payload adaptation. TOML dates and times
+   and numbers outside that domain fail compatibility without disclosing values.
+   ADR-016 uses opaque first-success receipts for secret user-input answers.
    `config.toml` launch isolation must compute a deterministic `server_key`
    during ADR-015's offline side-effect-free `profile doctor` without creating
    stateful HMAC key files whose loss or reset would invalidate `server_key`s;
@@ -3022,15 +3026,19 @@ while keeping `codex app-server` and all checked `public-v1`, `public-v2`,
    SemVer §11 precedence (`0.158.0-rc.1 < 0.158.0`, `0.169.0-rc.1 < 0.169.0 <
    0.170.0-alpha.1`, `rc.9 < rc.10`, ignoring `+build` for precedence while
    preserving leading-zero numeric component parsing and exact reported snapshot
-   strings), require non-prerelease exact match for `tested` runtime registry
-   lookup, and refuse `-prerelease`/`+build` runtimes before launch on H1-locked
+   strings), require an exact numeric release match without either suffix for
+   `tested` runtime registry lookup, and refuse `-prerelease`/`+build` runtimes
+   before launch on H1-locked
    checked one-shot Specialist Review (`^[0-9]+\.[0-9]+\.[0-9]+$`). Remove the
    `absent: true` assertion on `TurnStartParams.developerInstructions` while
    continuing to omit that field on outbound `turn/start` requests, and treat
    `thread/settings/updated` notifications as audited no-ops via a
    side-effect-free check over `threadId`, all workspace/sandbox predicates,
    `model`, and current authoritative `effort` (active-turn override or session
-   effort) while keeping drift fail-closed.
+   effort) while keeping drift fail-closed. A matching no-op can produce an
+   operational Profile diagnostic within the Coordinator's bounded attempt
+   budget and the aggregate journal read bound. Diagnostic availability does
+   not determine Run state.
 3. **Dedicated admission rollover, review ownership propagation, and
    non-downgrade guard (`TASK-096`)**: carry forward ADR-015's retained
    profile-singleton lifecycle mechanics under ADR-019's topology — specifically

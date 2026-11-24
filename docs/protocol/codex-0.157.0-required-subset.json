@@ -67,7 +67,7 @@
     "configuration_policy": {
       "raw_file_digest_in_server_key": false,
       "closed_classification": ["process_static", "operator_migratable", "runtime_mutable", "ignored"],
-      "unknown_field": "compatibility_rejected",
+      "unknown_field": "conservative_process_static",
       "active_server_key": "frozen_for_lifetime",
       "classification_status": "verified_by_TASK-005"
     },
@@ -154,7 +154,6 @@
     {"file":"v2/TurnStartParams.json","pointer":"/required","contains":["threadId","input"]},
     {"file":"v2/TurnStartParams.json","pointer":"/properties/threadId/type","equals":"string"},
     {"file":"v2/TurnStartParams.json","pointer":"/properties/input/type","equals":"array"},
-    {"file":"v2/TurnStartParams.json","pointer":"/properties/developerInstructions","absent":true},
     {"file":"v2/TurnStartParams.json","pointer":"/definitions/ReasoningEffort/type","equals":"string"},
     {"file":"v2/TurnStartParams.json","pointer":"/definitions/SandboxPolicy","one_of_property_enum_contains":{"property":"type","values":["readOnly","workspaceWrite"]}},
     {"file":"v2/TurnStartParams.json","pointer":"/definitions/AskForApproval","one_of_enum_contains":["untrusted","on-request","never"]},

@@ -6,7 +6,7 @@
 | --- | --- |
 | Role | Adopted execution dossier for `EPIC-024` (`TASK-095` through `TASK-098`) |
 | Adopted | 2026-11-24, under Master's approved `v0.1.4` scope expansion |
-| Consumer Epic | `EPIC-024` (`PLANNED`) |
+| Consumer Epic | `EPIC-024` (`ACTIVE`) |
 | Release pair | Dolgorae `v0.1.4` and Gul `v0.1.0` |
 | Lifecycle owner | [Roadmap](../roadmap/README.md); consult it for current execution status |
 | Behavior owners | [Product specification](../specs/README.md), [delegation runtime](../specs/dolgorae-v014-delegation-runtime.md), and [three-consumer acceptance](../specs/dolgorae-consumer-acceptance-v014.md) |
@@ -142,7 +142,11 @@ Execute sequentially in roadmap order: `TASK-095` -> `TASK-096` -> `TASK-097`
      with zero stateful key files) and store only JCS-sorted
      `_dolgorae_unclassified_sha256: { "<key>": "<64-hex>" }` inside
      `process_static_configuration`, plus bounded key-name-only Profile
-     diagnostics carrying a classification hint. In
+     diagnostics carrying a classification hint. Reject values that cannot be
+     represented directly in canonical JSON, including nested TOML dates and times,
+     non-finite floats, and numbers that would require a payload adaptation.
+     Preserve JCS equivalence for accepted numeric values and omit refused
+     values from diagnostics. In
      `checked_review_configuration_supported` (`checked_review_supported` and
      `accepted_checked_review_supported`), refuse any non-empty
      `_dolgorae_unclassified_sha256` map before Reviewer allocation so
@@ -154,9 +158,10 @@ Execute sequentially in roadmap order: `TASK-095` -> `TASK-096` -> `TASK-097`
      pre-release strictly below its final release (`0.158.0-rc.1 < 0.158.0`,
      `0.169.0-rc.1 < 0.169.0 < 0.170.0-alpha.1`, `rc.9 < rc.10`), and ignore
      `+build` metadata for precedence while keeping the exact reported string in
-     `ProfileSnapshot.codex_version`. Require no pre-release suffix and exact
-     canonical version match for `tested_runtime_schema` (`0.166.0-rc.1` stays
-     `unverified`). Refuse `-prerelease` or `+build` runtimes before launch on
+     `ProfileSnapshot.codex_version`. Require an exact numeric release match
+     without either suffix for `tested_runtime_schema`. Both
+     `0.166.0-rc.1` and `0.166.0+local` stay `unverified`, and `0.166.00` retains
+     the `0.166.0` schema pins. Refuse `-prerelease` or `+build` runtimes before launch on
      checked one-shot Specialist Review (`dolgorae-specialist-review-tool-v2.schema.json`,
      H1-locked `^[0-9]+\.[0-9]+\.[0-9]+$`) without falsifying version strings.
   3. Remove the negative `absent: true` constraint on
@@ -174,7 +179,11 @@ Execute sequentially in roadmap order: `TASK-095` -> `TASK-096` -> `TASK-097`
      equals the currently authoritative effort (the active turn's committed
      override while that turn runs, otherwise the Run's session effort),
      tolerating unknown additive `threadSettings` fields while keeping any drift
-     or foreign-thread notification fail-closed.
+     or foreign-thread notification fail-closed. Accepted no-ops use the
+     `thread_settings_update_noop` Profile diagnostic without retaining the
+     notification payload. Attempt this write up to eight times per Coordinator
+     lifetime. Skip it on contention or insufficient aggregate journal capacity
+     and preserve Run state after any audit failure.
 - **Verification**: unit and integration matrices for unclassified `config.toml`
   keys (`server_key` isolation, side-effect-free `profile doctor`, secret-canary
   absence across `state.json`, binding history, Run manifests, whole-Run export,

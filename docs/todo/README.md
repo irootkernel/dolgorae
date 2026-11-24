@@ -59,7 +59,7 @@ replaces the roadmap link with `Canonical Outcomes`.
   EPIC-020 resumes; runtime implementation remains in TASK-076/077.
 - Post-Gate-D upgrade-resilience expansion:
   [Runtime upgrade resilience and setup-bound host admission](TODO-RUNTIME-UPGRADE-RESILIENCE.md),
-  owned by PLANNED EPIC-024 and TASK-095..098 within unreleased v0.1.4. It
+  owned by ACTIVE EPIC-024 and TASK-095..098 within unreleased v0.1.4. It
   preserves historical EPIC-022 provenance on H3 `8fb6a3578ae3` while gating
   v0.1.4 publication on a superseding H3/H4 pair and refreshed Gate C/D.
 - Consumers: EPIC-018, EPIC-019, EPIC-023, EPIC-020, EPIC-009, EPIC-021 and EPIC-022 (plus EPIC-024 via its dedicated dossier).
@@ -106,7 +106,7 @@ replaces the roadmap link with `Canonical Outcomes`.
 ### Runtime upgrade resilience and setup-bound host admission
 
 - Dossier: [Runtime upgrade resilience and setup-bound host admission](TODO-RUNTIME-UPGRADE-RESILIENCE.md).
-- Adopted owner: PLANNED EPIC-024 and TASK-095 through TASK-098, assigned to
+- Adopted owner: ACTIVE EPIC-024 and TASK-095 through TASK-098, assigned to
   unreleased v0.1.4 (and cumulative v0.2.0 ahead of EPIC-010).
 - Work: deterministic domain-separated SHA-256 `process_static` capture
   (`_dolgorae_unclassified_sha256`, refused for checked one-shot review) and

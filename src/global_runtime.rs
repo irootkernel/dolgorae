@@ -455,11 +455,12 @@ impl GlobalProfileBinding {
 
     fn checked_review_configuration_supported(&self) -> bool {
         let snapshot = &self.launch_snapshot;
-        (snapshot.enabled_features == ["multi_agent"]
-            || snapshot
-                .disabled_features
-                .iter()
-                .any(|feature| feature == "multi_agent"))
+        snapshot.checked_review_snapshot_supported()
+            && (snapshot.enabled_features == ["multi_agent"]
+                || snapshot
+                    .disabled_features
+                    .iter()
+                    .any(|feature| feature == "multi_agent"))
             && [
                 "mcp_servers",
                 "apps",
@@ -2447,6 +2448,9 @@ mod tests {
             "0.167.2",
             "0.168.9",
             CURRENT_CODEX_VERSION,
+            "0.169.0-rc.1",
+            "0.169.0+build.01",
+            "0.170.0-alpha.1",
             "0.170.0",
             "1.0.0",
             "not-a-version",
@@ -2531,7 +2535,12 @@ mod tests {
                     eligible,
                     "{version}/{sha}"
                 );
-                assert_eq!(review.admit_profile(&qualified).is_ok(), eligible);
+                let checked = eligible && !version.contains(['-', '+']);
+                assert_eq!(review.admit_profile(&qualified).is_ok(), checked);
+                assert_eq!(
+                    qualified.accepted_checked_review_supported(),
+                    checked || accepted
+                );
                 assert_eq!(
                     qualified.accepted_caller_workspace_supported(),
                     eligible || accepted
@@ -2571,6 +2580,28 @@ mod tests {
                 assert!(!damaged.accepted_caller_workspace_supported());
             }
         }
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn digest_only_configuration_allows_ordinary_admission_but_not_checked_review() {
+        let (parent, _) = home();
+        let definition = definition(&parent);
+        let mut snapshot = snapshot("reviewer", &definition, &"a".repeat(64));
+        snapshot.codex_version = CURRENT_CODEX_VERSION.to_owned();
+        snapshot.process_static_configuration.insert(
+            "_dolgorae_unclassified_sha256".to_owned(),
+            json!({"include_feature_toggle":"a".repeat(64)}),
+        );
+        let unqualified = ResolvedGlobalProfile::from_definition("reviewer", definition)
+            .unwrap()
+            .bind(snapshot)
+            .unwrap();
+        let qualified = crate::profile::qualified_test_binding(&unqualified);
+        assert!(qualified.caller_workspace_supported());
+        assert!(qualified.accepted_caller_workspace_supported());
+        assert!(!qualified.checked_review_supported());
+        assert!(!qualified.accepted_checked_review_supported());
         fs::remove_dir_all(parent).unwrap();
     }
 

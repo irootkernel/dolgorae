@@ -39,16 +39,15 @@ H3 `8fb6a3578ae3` paired with Gul H4 `b9d1750e9ec5` / `6cd9901ae3fe`) and Gate D
 release-ready handoff provenance recorded in
 [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md).
 Master subsequently expanded unreleased `v0.1.4` with `EPIC-024` (`TASK-095`
-through `TASK-098`, `PLANNED`) to remove remaining Codex/Claude runtime-upgrade
+through `TASK-098`) to remove remaining Codex/Claude runtime-upgrade
 fragility and deliver a superseding H3/H4 pair with refreshed Gate C and Gate D
 acceptance before `v0.1.4` publication.
 TASK-067 is COMPLETE; TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
 TASK-084 through TASK-087, TASK-093, and TASK-094 are COMPLETE;
-TASK-088 and TASK-089 are COMPLETE; TASK-095 through TASK-098 are PLANNED. No
-Epic or Task is currently ACTIVE
-(`EPIC-024`, `EPIC-010`, and `EPIC-011` remain `PLANNED`; commits, pushes, tags,
-Releases, installation, and production cutover require separate authorization).
+TASK-088 and TASK-089 are COMPLETE. EPIC-024 is ACTIVE. TASK-095 is COMPLETE;
+TASK-096 through TASK-098, EPIC-010, and EPIC-011 remain PLANNED. Commits, pushes,
+tags, Releases, installation, and production cutover require separate authorization.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -145,7 +144,7 @@ installed runtime. New Epics adopted later do not enter the `v0.2.0` boundary
 unless this table is explicitly revised.
 EPIC-016 remains required for v0.1.3. The v0.1.4 sequence is EPIC-017,
 EPIC-018, EPIC-019, EPIC-023, EPIC-020, EPIC-009, EPIC-021, and EPIC-022
-(completed), followed by EPIC-024 (`PLANNED` post-Gate-D runtime-upgrade
+(completed), followed by EPIC-024 (`ACTIVE` post-Gate-D runtime-upgrade
 resilience and superseding H3/H4 requalification).
 The new v0.1.4 work is a cumulative prerequisite of later release candidates;
 this adoption does not mark EPIC-010 or EPIC-011 complete or claim Personal
@@ -3077,7 +3076,7 @@ Epic acceptance: Complete — all three consumers have mandatory accepted eviden
 
 ## EPIC-024: Runtime Upgrade Resilience and Setup-Bound Host Admission
 
-Status: `PLANNED`
+Status: `ACTIVE`
 
 Detailed SOT: [Runtime upgrade resilience dossier](../todo/TODO-RUNTIME-UPGRADE-RESILIENCE.md)
 
@@ -3097,7 +3096,7 @@ release: `v0.1.4` (and cumulative `v0.2.0`). Authorities:
 
 ### TASK-095: Digest-Only Unclassified Configuration Admission and Resilient Version/Schema Checks
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Update `configuration_snapshot` and `codex-0.157.0-required-subset.json`
 (`unknown_field: "conservative_process_static"`, noting that this manifest edit

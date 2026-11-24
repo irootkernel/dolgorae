@@ -57,13 +57,15 @@ directly.
 
    Inspect `data.compatibility` and every diagnostic even when the envelope is
    successful. On builds with conservative unclassified-key admission (`EPIC-024`
-   / `TASK-095`+), bounded key-name-only diagnostics for unclassified top-level
-   `CODEX_HOME/config.toml` keys indicate `server_key` isolation for ordinary
-   Runs rather than a compatibility failure (do not read or edit
-   `CODEX_HOME/config.toml` to silence them, though checked `specialist review`
-   still refuses unclassified keys), whereas earlier builds and explicit
-   file-inclusion or reserved keys (`include`, `includes`, `include_path`,
-   `include_paths`, `config_include`, `_dolgorae_*`) fail compatibility. Add
+   / `TASK-095`+), `CODEX_CONFIGURATION_UNCLASSIFIED` lists a bounded set of key
+   names. Each unclassified value contributes only a digest to the ordinary Run
+   server key. Leave `CODEX_HOME/config.toml` untouched during diagnostic-only
+   work. Checked `specialist review` refuses this configuration. Earlier
+   builds also refuse unclassified keys. Explicit file-inclusion keys
+   (`include`, `includes`, `include_path`, `include_paths`, `config_include`)
+   and reserved `_dolgorae_*` keys still fail compatibility. Unclassified values
+   must fit canonical JSON without loss of numeric precision or a type change.
+   The compatibility diagnostic omits the rejected value. Add
    `--launch-probe` only with explicit authorization for a live Codex
    compatibility probe. The probe may temporarily start a Profile Server;
    `--leave-running` is a separate explicit decision.

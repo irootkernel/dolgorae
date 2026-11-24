@@ -425,15 +425,15 @@ The one-shot Specialist Review live acceptance gate uses the omitted-setting
 `gpt-6-sol` / `high` defaults. The scoped-review live gate separately checks an
 explicit `gpt-5.6-luna` / `low` Profile configuration.
 
-Codex App Server 0.158.0 is the minimum runtime version. Under `EPIC-024`
-(`TASK-095`), version parsing accepts standard SemVer `MAJOR.MINOR.PATCH`
+Codex App Server 0.158.0 is the minimum runtime version. Version parsing
+accepts SemVer `MAJOR.MINOR.PATCH`
 with optional `-prerelease` and `+build` suffixes under SemVer §11 precedence
 (preserving existing leading-zero numeric component parsing, ordering pre-release
 identifiers strictly below their corresponding final `MAJOR.MINOR.PATCH` release
 with numeric-before-ASCII dot-identifier precedence such as `rc.9 < rc.10`, and
 ignoring `+build` metadata for precedence while preserving the exact reported
 version string in `ProfileSnapshot.codex_version`). `tested` runtime registry
-matching requires no pre-release suffix and exact canonical version equality, and
+matching requires an exact numeric release without either suffix, and
 checked one-shot Specialist Review (`dolgorae-specialist-review-tool-v2.schema.json`,
 H1-locked `^[0-9]+\.[0-9]+\.[0-9]+$`) refuses `-prerelease` or `+build` runtimes
 before launch rather than falsifying version strings. The checked 0.157.0
@@ -928,26 +928,29 @@ endpoint overrides are `process_static`: changing either value changes the
 server launch contract and requires a new physical generation.
 `cli_auth_credentials_store` is also `process_static`: a generation retains
 its credential storage policy, including an explicit file-only policy.
-Unknown fields and unclassified include mechanisms fail compatibility until
-`TASK-095` activates digest-only conservative unclassified admission: explicit
-file-inclusion directives (`include`, `includes`, `include_path`,
-`include_paths`, `config_include`, plus reserved `_dolgorae_*` sentinel keys),
-malformed TOML, and unsafe or oversized files continue to fail compatibility,
-whereas unclassified top-level `CODEX_HOME/config.toml` keys enter
+Explicit file-inclusion directives (`include`, `includes`, `include_path`,
+`include_paths`, `config_include`), reserved `_dolgorae_*` keys, malformed TOML,
+and unsafe or oversized files fail compatibility. Unclassified top-level
+`CODEX_HOME/config.toml` keys enter
 `process_static_configuration` only as JCS-sorted deterministic domain-separated
 SHA-256 digests (`_dolgorae_unclassified_sha256` over
 `"dolgorae-unclassified-config-v1\0" || utf8(name) || "\0" || JCS(value)`,
 keeping bare `profile doctor` offline and side-effect-free while isolating
 `server_key` across value changes without persisting raw values in `state.json`,
 Run manifests, binding history, exports, or diagnostics) alongside bounded
-key-name-only Profile diagnostics carrying a classification hint. Checked
-one-shot `specialist review` (`checked_review_supported` /
+key-name-only `CODEX_CONFIGURATION_UNCLASSIFIED` diagnostics carrying a
+classification hint. An unclassified value must fit canonical JSON without
+losing information or changing type. This excludes TOML dates and times,
+non-finite floats, and numbers whose standard JCS rendering changes their
+numeric value, including when nested in tables or arrays. Compatibility
+diagnostics for these failures omit the value. Checked one-shot
+`specialist review` (`checked_review_supported` /
 `accepted_checked_review_supported`) refuses any non-empty
 `_dolgorae_unclassified_sha256` map before Reviewer allocation so unexercised
 upstream extension surfaces cannot bypass review provenance, whereas ordinary
 caller-workspace, Gul, Orchestrated Session, and Specialist Runs admit it. Only
-normalized process-static (including `_dolgorae_unclassified_sha256` entries
-under `TASK-095`) and explicitly accepted migratable fields enter the launch
+normalized process-static (including `_dolgorae_unclassified_sha256` entries)
+and explicitly accepted migratable fields enter the launch
 contract. Runtime-mutated trust and operational state are recorded as an
 initial observation but their enclosing file's raw digest MUST NOT enter
 `server_key` or compatible-generation admission comparisons. Persisted Run
@@ -5400,7 +5403,7 @@ The driver must report the observed version, and an exact identity mismatch
 refuses the campaign before a model Turn.
 
 Missing generation support, required schema, lifecycle behavior, or identity
-causes fail-closed rejection. Under `TASK-095`, optional additive fields on
+causes fail-closed rejection. Optional additive fields on
 `TurnStartParams` (such as an unused `developerInstructions` property) do not
 fail required-subset comparison while Dolgorae continues supplying
 generation-immutable developer instructions at thread start/resume/fork and
@@ -5410,8 +5413,13 @@ and sandbox settings predicate set (`cwd`, `approvalPolicy`, `sandboxPolicy`
 `type`, `networkAccess`, `writableRoots`, `excludeSlashTmp`, and
 `excludeTmpdirEnvVar`), `model`, and current authoritative `effort` (active-turn
 override while running, otherwise session effort) via a side-effect-free check
-are recorded as audited no-ops (tolerating unknown additive `threadSettings`
-fields) while any unrequested drift or foreign-thread notification fails closed.
+are no-ops. The Coordinator attempts up to eight `thread_settings_update_noop`
+diagnostic writes during its lifetime. A contended journal, insufficient
+capacity under the shared 8 MiB diagnostic read bound, or a failed write may
+leave a no-op unrecorded without changing Run state. Unknown additive
+`threadSettings` fields and omitted boolean policy defaults are tolerated.
+A read-only policy may omit `writableRoots` or supply an empty list.
+Unrequested drift and foreign-thread notifications fail closed.
 Unknown additive fields and notifications are
 recorded and tolerated. Unknown server requests are recorded, receive JSON-RPC
 method-not-found, and do not stop the generation; unparseable frames fail

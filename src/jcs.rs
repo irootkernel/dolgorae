@@ -198,8 +198,24 @@ impl<'de> Deserialize<'de> for RawObject {
 }
 
 pub fn canonicalize(value: &LosslessJson) -> Result<Vec<u8>, JcsError> {
+    render_canonical(value, adapt_number)
+}
+
+/// Canonical JSON without adapting out-of-domain numbers into payload markers.
+pub(crate) fn canonicalize_strict(value: &LosslessJson) -> Result<Vec<u8>, JcsError> {
+    render_canonical(value, |number| {
+        canonical_number(number)?.ok_or_else(|| {
+            JcsError::InvalidNumber("outside the canonical JSON numeric domain".into())
+        })
+    })
+}
+
+fn render_canonical(
+    value: &LosslessJson,
+    render_number: fn(&str) -> Result<String, JcsError>,
+) -> Result<Vec<u8>, JcsError> {
     let mut output = String::new();
-    write_canonical(value, &mut output)?;
+    write_canonical(value, &mut output, render_number)?;
     Ok(output.into_bytes())
 }
 
@@ -474,11 +490,15 @@ fn adapt_numbers(value: LosslessJson) -> LosslessJson {
     }
 }
 
-fn write_canonical(value: &LosslessJson, output: &mut String) -> Result<(), JcsError> {
+fn write_canonical(
+    value: &LosslessJson,
+    output: &mut String,
+    render_number: fn(&str) -> Result<String, JcsError>,
+) -> Result<(), JcsError> {
     match value {
         LosslessJson::Null => output.push_str("null"),
         LosslessJson::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
-        LosslessJson::Number(number) => output.push_str(&adapt_number(number)?),
+        LosslessJson::Number(number) => output.push_str(&render_number(number)?),
         LosslessJson::String(value) => output.push_str(&serde_json::to_string(value)?),
         LosslessJson::Array(values) => {
             output.push('[');
@@ -486,7 +506,7 @@ fn write_canonical(value: &LosslessJson, output: &mut String) -> Result<(), JcsE
                 if index > 0 {
                     output.push(',');
                 }
-                write_canonical(value, output)?;
+                write_canonical(value, output, render_number)?;
             }
             output.push(']');
         }
@@ -507,7 +527,7 @@ fn write_canonical(value: &LosslessJson, output: &mut String) -> Result<(), JcsE
                 }
                 output.push_str(&serde_json::to_string(key)?);
                 output.push(':');
-                write_canonical(value, output)?;
+                write_canonical(value, output, render_number)?;
             }
             output.push('}');
         }
@@ -516,18 +536,18 @@ fn write_canonical(value: &LosslessJson, output: &mut String) -> Result<(), JcsE
 }
 
 fn adapt_number(original: &str) -> Result<String, JcsError> {
+    Ok(canonical_number(original)?.unwrap_or_else(|| marker_number(original)))
+}
+
+fn canonical_number(original: &str) -> Result<Option<String>, JcsError> {
     let value = original
         .parse::<f64>()
         .map_err(|_| JcsError::InvalidNumber(original.to_owned()))?;
     if !value.is_finite() {
-        return Ok(marker_number(original));
+        return Ok(None);
     }
     let rendered = ecmascript_number(value)?;
-    if decimal_identity(original) == decimal_identity(&rendered) {
-        Ok(rendered)
-    } else {
-        Ok(marker_number(original))
-    }
+    Ok((decimal_identity(original) == decimal_identity(&rendered)).then_some(rendered))
 }
 
 fn marker_number(original: &str) -> String {

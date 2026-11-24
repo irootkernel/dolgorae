@@ -1142,6 +1142,9 @@ pub(crate) fn prepare_reviewer(
     if !global_profile_binding.caller_workspace_supported() {
         return Err(workspace_startup_unsupported());
     }
+    if !global_profile_binding.checked_review_supported() {
+        return Err(crate::direct_review_target::reading_boundary_unsupported());
+    }
     global_profile_binding.record_qualified(&home)?;
     let state_root = workspace_state_root(&view)?;
     prepare_reviewer_with_binding(view, state_root, global_profile_binding, None)
@@ -1164,6 +1167,12 @@ pub(crate) fn prepare_reviewer_with_binding(
     global_profile_binding: GlobalProfileBinding,
     review_owner: Option<&crate::profile::ReviewServerOwner>,
 ) -> Result<PreparedReviewer, MachineError> {
+    if !global_profile_binding
+        .launch_snapshot
+        .checked_review_snapshot_supported()
+    {
+        return Err(crate::direct_review_target::reading_boundary_unsupported());
+    }
     let profile_name = &global_profile_binding.selected_name;
     let state = match review_owner {
         Some(owner) => {

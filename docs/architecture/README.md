@@ -4055,16 +4055,20 @@ exact executable and configuration admissions remain separate.
 The verdict is written to every run generation.
 
 Runtime code tolerates additive data but never infers lifecycle progress from
-uncorrelated or unknown messages. Under `EPIC-024` (`TASK-095`), version parsing
-adopts SemVer §11 pre-release/build precedence (with non-prerelease exact match
-for `tested` registry lookup and pre-release/build refusal on H1-locked checked
-one-shot review), required-subset comparison drops the negative absence check on
-optional `TurnStartParams.developerInstructions` without sending that field on
-`turn/start`, and `TurnCoordinator` records `thread/settings/updated`
-notifications passing a side-effect-free check over `threadId`, all workspace and
-sandbox predicates, `model`, and current authoritative `effort` as audited
-no-ops while keeping drift fail-closed. This preserves compatibility
-without claiming that a schema probe can guarantee all future runtime behavior.
+uncorrelated or unknown messages. Version comparison follows SemVer §11.
+Only suffix-free releases can match the `tested` registry or meet the H1-locked
+checked one-shot review version constraint. Required-subset comparison allows
+additive `TurnStartParams.developerInstructions`, and outbound `turn/start`
+omits the field. `TurnCoordinator` verifies `threadId`, workspace and sandbox
+settings, `model`, and current authoritative `effort` to recognize a no-op.
+The verifier leaves startup refusal state untouched. The Coordinator makes
+at most eight diagnostic attempts per lifetime. All Profile diagnostic writes
+take the Profiles directory lock before the journal lock. Required writes
+wait for the locks. Optional writes skip contended locks and check the
+aggregate diagnostic bytes across Profile keys while both locks are held.
+They append only operational lane metadata. A missed diagnostic preserves Run
+state.
+Drift fails closed.
 
 ### TASK-072 ledger generation ownership
 

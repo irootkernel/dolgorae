@@ -30,6 +30,10 @@ impl ForeignDiagnostics for RejectForeign {
     fn record(&self, _: &IgnoredForeignRequest, _: ForeignLane<'_>) -> Result<(), TurnError> {
         Err(TurnError::CorrelationMismatch)
     }
+
+    fn record_settings_noop(&self, _: ForeignLane<'_>) -> Result<(), TurnError> {
+        Err(TurnError::CorrelationMismatch)
+    }
 }
 fn fixture_root(root: &Path) {
     let metadata = fs::symlink_metadata(root).unwrap();

@@ -14075,6 +14075,16 @@ impl ForeignDiagnostics for ProfileForeignDiagnostics {
         )
         .map_err(|error| TurnError::Journal(error.message))
     }
+
+    fn record_settings_noop(&self, lane: ForeignLane<'_>) -> Result<(), TurnError> {
+        crate::profile::append_settings_noop_diagnostic(
+            &self.profile_root,
+            lane.run_generation,
+            lane.server_key,
+            lane.server_epoch,
+        )
+        .map_err(|error| TurnError::Journal(error.message))
+    }
 }
 
 /// Where this Run's Runtime Profile keeps its durable diagnostic journal.
@@ -28162,6 +28172,22 @@ runpy.run_path(directory+'/__main__.py',run_name='__main__')
                 .mode()
                 & 0o777,
             0o600
+        );
+
+        sink.record_settings_noop(ForeignLane {
+            run_generation: 2,
+            server_key: &server_key,
+            server_epoch: 5,
+        })
+        .unwrap();
+        let all_diagnostics = fs::read_to_string(profile_root.join("diagnostics.jsonl")).unwrap();
+        assert!(all_diagnostics.starts_with(&journal));
+        let noop: Value = serde_json::from_str(all_diagnostics.lines().last().unwrap()).unwrap();
+        assert_eq!(noop["kind"], "thread_settings_update_noop");
+        assert_eq!(noop["projection"], "operational");
+        assert_eq!(
+            noop["details"],
+            serde_json::json!({"run_generation":2,"server_key":server_key,"server_epoch":5})
         );
         fs::remove_dir_all(&dolgorae_home).unwrap();
     }

@@ -119,6 +119,12 @@ if "generate-json-schema" in args:
         value = json.loads(target.read_text(encoding="utf-8"))
         value["x-test-digest-mismatch"] = True
         target.write_text(json.dumps(value), encoding="utf-8")
+    if control.get("schema") == "additive-turn-developer-instructions":
+        output = pathlib.Path(args[args.index("--out") + 1])
+        target = output / "v2" / "TurnStartParams.json"
+        value = json.loads(target.read_text(encoding="utf-8"))
+        value["properties"]["developerInstructions"] = {{"type": ["string", "null"]}}
+        target.write_text(json.dumps(value), encoding="utf-8")
     if control.get("schema") == "experimental-digest-mismatch" and "--experimental" in args:
         output = pathlib.Path(args[args.index("--out") + 1])
         target = output / "v2" / "ModelListResponse.json"
@@ -449,6 +455,17 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         if [profile["name"] for profile in listed["data"]["profiles"]] != ["default"]:
             raise AssertionError("failed profile add changed the registry")
 
+        unclassified_canary = "synthetic-profile-extension-canary-a9c26c71"
+        config_path = codex_home / "config.toml"
+        config = (
+            'include_future_toggle = true\n'
+            f'future_extension = {{ secret = "{unclassified_canary}" }}\n'
+        )
+        config_path.write_text(config, encoding="utf-8")
+        config_path.chmod(0o600)
+        registry_before_doctor = registry_path.read_bytes()
+        binding_history = home / ".dolgorae" / "profile-bindings.json"
+        bindings_before_doctor = binding_history.read_bytes()
         exact = run(binary, home, "profile", "doctor", "default")
         exact_envelope = envelope(exact)
         if exact.returncode != 0:
@@ -457,12 +474,41 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
         assert_valid(exact_envelope, machine, "profile-doctor Machine envelope")
         if exact_data["compatibility"] != compatibility or exact_data["codex_version"] != selected_version:
             raise AssertionError(f"selected compatibility returned wrong facts: {exact.stdout}")
+        expected_codes = ["CODEX_CONFIGURATION_UNCLASSIFIED"]
+        if compatibility == "unverified":
+            expected_codes.insert(0, "CODEX_VERSION_UNVERIFIED")
         diagnostics = exact_data["diagnostics"]
-        if compatibility == "tested":
-            if diagnostics:
-                raise AssertionError(f"tested version reported compatibility warnings: {exact.stdout}")
-        elif [item["code"] for item in diagnostics] != ["CODEX_VERSION_UNVERIFIED"]:
-            raise AssertionError(f"newer version lost its qualification warning: {exact.stdout}")
+        if (
+            [item["code"] for item in diagnostics] != expected_codes
+            or diagnostics[-1]["details"]["keys"] != ["future_extension", "include_future_toggle"]
+            or unclassified_canary in exact.stdout
+        ):
+            raise AssertionError("Profile doctor did not emit key-name-only diagnostics")
+        long_name = "a" * 129
+        extra_names = [f"extra_{index:02d}" for index in range(17)]
+        config_path.write_text(
+            config + "".join(f"{name} = true\n" for name in [*extra_names, long_name]),
+            encoding="utf-8",
+        )
+        bounded = envelope(run(binary, home, "profile", "doctor", "default"))["data"]["diagnostics"][-1]
+        if (
+            bounded["code"] != "CODEX_CONFIGURATION_UNCLASSIFIED"
+            or bounded["details"]["keys"] != extra_names[:16]
+            or bounded["details"]["omitted_key_count"] != 4
+            or not bounded["details"]["classification_hint"]
+        ):
+            raise AssertionError("unclassified key diagnostics did not honor the name and count bounds")
+        config_path.write_text(config.replace(unclassified_canary, "other-value"), encoding="utf-8")
+        changed = envelope(run(binary, home, "profile", "doctor", "default"))["data"]
+        if changed["server_key"] == exact_data["server_key"]:
+            raise AssertionError("unclassified value change did not isolate the server key")
+        config_path.write_text(config, encoding="utf-8")
+        if (
+            registry_path.read_bytes() != registry_before_doctor
+            or binding_history.read_bytes() != bindings_before_doctor
+            or (home / ".dolgorae" / "profiles").exists()
+        ):
+            raise AssertionError("bare doctor wrote durable Profile state")
         never_started_root = home / ".dolgorae" / "profiles" / exact_data["server_key"]
         never_started_verify = run(
             binary, home, "profile", "membership", "verify", "default"
@@ -513,6 +559,57 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"newer compatible version failed: {newer.stdout}")
         if envelope(newer)["data"]["diagnostics"][0]["code"] != "CODEX_VERSION_UNVERIFIED":
             raise AssertionError(f"newer version lost its qualification warning: {newer.stdout}")
+
+        for version in ("0.166.0-rc.1", "0.166.0+local"):
+            set_mode(fake, version=version, schema="additive-turn-developer-instructions")
+            additive = run(binary, home, "profile", "doctor", "default")
+            data = envelope(additive)["data"]
+            if additive.returncode != 0 or data["compatibility"] != "unverified" or data["codex_version"] != version:
+                raise AssertionError("additive schema or exact unverified version was rejected")
+
+        # The release runtime is eligible for ordinary workspace admission.
+        # The unclassified config alone must prevent checked Reviewer allocation.
+        set_mode(fake, version="0.169.0")
+        runtime = envelope(run(binary, home, "runtime", "capabilities", "--profile", "default"))
+        caller_workspace = runtime["data"]["caller_workspace"]
+        if (
+            caller_workspace["modern_startup"]["state"] != "supported"
+            or caller_workspace["checked_candidate_reads"]["state"] != "unavailable"
+        ):
+            raise AssertionError("release runtime did not exercise the unclassified review guard")
+        workspace_state = home / ".dolgorae" / "workspaces" / workspace_id
+        before_review = set(workspace_state.rglob("*"))
+        bindings_before_review = binding_history.read_bytes()
+        unclassified = run(
+            binary, home, "specialist", "review", "--workspace", str(workspace),
+            "--profile", "default", "--target-kind", "head", "--format", "json",
+        )
+        if (
+            unclassified.returncode == 0
+            or envelope(unclassified)["error"]["code"] != "REVIEW_READING_BOUNDARY_UNSUPPORTED"
+            or set(workspace_state.rglob("*")) != before_review
+            or binding_history.read_bytes() != bindings_before_review
+            or (home / ".dolgorae" / "profiles").exists()
+        ):
+            raise AssertionError("checked review allocated or launched for unclassified release configuration")
+
+        config_path.unlink()
+        try:
+            for version in ("0.170.0-rc.1", "0.169.0+local"):
+                set_mode(fake, version=version)
+                checked = run(
+                    binary, home, "specialist", "review", "--workspace", str(workspace),
+                    "--profile", "default", "--target-kind", "head", "--format", "json",
+                )
+                if (
+                    checked.returncode == 0
+                    or envelope(checked)["error"]["code"] != "REVIEW_READING_BOUNDARY_UNSUPPORTED"
+                    or (home / ".dolgorae" / "profiles").exists()
+                ):
+                    raise AssertionError("checked review did not refuse the version before launch")
+        finally:
+            config_path.write_text(config, encoding="utf-8")
+            config_path.chmod(0o600)
 
         set_mode(fake, version="0.157.1")
         below_minimum = run(binary, home, "profile", "doctor", "default")
@@ -874,6 +971,29 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             raise AssertionError(f"profile stop Run allocation failed: {started_member.stdout}")
         live_member_id = envelope(started_member)["data"]["run_id"]
 
+        # The same digest-only snapshot reaches the server and ordinary Run.
+        manifest_path = (
+            home / ".dolgorae" / "workspaces" / workspace_id / "runs" / live_member_id / "manifest.json"
+        )
+        if b"_dolgorae_unclassified_sha256" not in state_path.read_bytes():
+            raise AssertionError("running Profile lost the configuration digests")
+        for observed in (state_path, binding_history, manifest_path):
+            if unclassified_canary.encode() in observed.read_bytes():
+                raise AssertionError(f"unclassified value escaped into {observed.name}")
+
+        # A config edit with a live member changes admission identity without
+        # changing the recorded incumbent, even when the value is unclassified.
+        state_before_edit = state_path.read_bytes()
+        config_path.write_text(config.replace(unclassified_canary, "other-value"), encoding="utf-8")
+        try:
+            changed_start = run(binary, home, "profile", "server", "start", "default")
+            if changed_start.returncode != 4 or envelope(changed_start)["error"]["code"] != "PROFILE_SERVER_BUSY":
+                raise AssertionError(f"config edit crossed a live membership fence: {changed_start.stdout}")
+            if state_path.read_bytes() != state_before_edit:
+                raise AssertionError("config edit rewrote the live server snapshot")
+        finally:
+            config_path.write_text(config, encoding="utf-8")
+
         # A confirmed interrupt is the explicit evidence that authorizes it,
         # and the interrupt is recorded with the members it cost.
         interrupted = run(
@@ -925,6 +1045,9 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
             / live_member_id
             / "audit.jsonl"
         )
+        for observed in (profile_root / "diagnostics.jsonl", run_audit):
+            if unclassified_canary.encode() in observed.read_bytes():
+                raise AssertionError(f"unclassified value escaped into {observed.name}")
         overrides = [
             record
             for record in (
