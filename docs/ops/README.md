@@ -538,19 +538,31 @@ Use Codex CLI `0.164.0`
 (`d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf`) and Claude
 Code `2.1.310`
 (`ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd`) for
-TASK-077 qualification. Verify the executable hash before use and select an
-explicit absolute path. The [runtime qualification
+historical TASK-077 qualification until `EPIC-024` (`TASK-097`) delivers
+caller-scoped (`External` and caller-scoped `Managed`) minimum-version (`Codex >=
+0.169.0`, `Claude >= 2.1.310`) hardened non-executing `verify_executable` setup
+binding and split-digest (`schema_version: 2` with `migrated_from_v1_digest`
+receipt continuity) online `owner-executable-refresh` (requiring no Dolgorae
+server shutdown and not blocked by open durable engagements — gated on exclusive
+`host.lock`, no `STAGING`/sidecar/`*.pending` files, and zero unsettled
+`attempted = 1` `native_calls` rows; optional `--allow-downgrade` down to the
+route floor). Verify the executable hash before use and select an explicit
+absolute path. The [runtime qualification
 owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
-separates these current executable pins from the historical H1 route
-identifiers. Original accepted bindings retain their executable; missing or
-changed bytes require recovery without fallback. Generic Profile doctor probes,
-start/restart/stop and migration retain tested/unverified compatibility admission;
-new qualified-mechanism admissions require Codex 0.169.0 or newer without
-per-version or hash registration. Untested versions remain unverified; actual
+separates these executable rules from the historical H1 route identifiers.
+Original accepted bindings retain their executable; missing or changed bytes
+require recovery (or explicit `TASK-097` online `owner-executable-refresh` after
+`RECOVERY_REQUIRED` for caller-scoped host stores) without silent fallback.
+Generic Profile doctor probes,
+start/restart/stop and migration retain tested/unverified compatibility
+admission; new qualified-mechanism admissions require Codex 0.169.0 or newer
+without per-version or hash registration, with `TASK-095`/`TASK-096` owning
+conservative unclassified `config.toml` admission and zero-member quiescent
+same-or-newer upgrade rollover. Untested versions remain unverified; actual
 schema, configuration, model, effort, lane and executable/process identity
-checks still apply. A failed migration restores the
-original snapshot under its durable migration owner. Installation, native
-execution and account use retain their separate authorization boundaries.
+checks still apply. A failed migration restores the original snapshot under its
+durable migration owner. Installation, native execution and account use retain
+their separate authorization boundaries.
 
 ### Explicit administrative member recovery
 

@@ -14,6 +14,15 @@ GitHub Releases, host installation, production cutover, external Sorage
 transmission, or consumer default-backend activation. Those boundaries retain
 separate explicit authorization.
 
+Post-`EPIC-022` `v0.1.4` scope expansion (2026-11-24): Master subsequently
+adopted `EPIC-024` (`TASK-095` through `TASK-098`, `PLANNED`) into the
+unreleased `v0.1.4` boundary to remove remaining Codex/Claude runtime-upgrade
+fragility. All checksums and verdicts below remain authoritative historical
+provenance for completed `EPIC-022` (`8fb6a3578ae3` / `b9d1750e9ec5`), while
+actual `v0.1.4` and Gul `v0.1.0` release eligibility now additionally requires
+completing `EPIC-024` and recording its superseding H3/H4 Gate C and Gate D
+acceptance in `TASK-098`.
+
 ## Immutable Release-Pair Inputs
 
 Zero unqualified rebuilds occurred during `TASK-088` or `TASK-089`. Every

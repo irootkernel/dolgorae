@@ -54,10 +54,15 @@ replaces the roadmap link with `Canonical Outcomes`.
 
 - Dossier: [Dolgorae v0.1.4 release alignment](TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md).
 - Correction dossier: [Delegation release proof](TODO-DOLGORAE-RELEASE-PROOF-CORRECTION.md),
-  owned by PLANNED EPIC-023 and TASK-090..092. It preserves original H1 and
+  owned by COMPLETE EPIC-023 and TASK-090..092. It preserves original H1 and
   requires a new package plus Gul delta H2 and independent Gate A before
   EPIC-020 resumes; runtime implementation remains in TASK-076/077.
-- Consumers: EPIC-018, EPIC-019, EPIC-023, EPIC-020, EPIC-009, EPIC-021 and EPIC-022.
+- Post-Gate-D upgrade-resilience expansion:
+  [Runtime upgrade resilience and setup-bound host admission](TODO-RUNTIME-UPGRADE-RESILIENCE.md),
+  owned by PLANNED EPIC-024 and TASK-095..098 within unreleased v0.1.4. It
+  preserves historical EPIC-022 provenance on H3 `8fb6a3578ae3` while gating
+  v0.1.4 publication on a superseding H3/H4 pair and refreshed Gate C/D.
+- Consumers: EPIC-018, EPIC-019, EPIC-023, EPIC-020, EPIC-009, EPIC-021 and EPIC-022 (plus EPIC-024 via its dedicated dossier).
 - Work: modern public/Gul contracts, reviewed corrections, durable delegation,
   complete internal collaboration, findings/groups, and mandatory Aquarium,
   Podway and Gul acceptance on the exact Dolgorae v0.1.4 artifact. The
@@ -97,3 +102,23 @@ replaces the roadmap link with `Canonical Outcomes`.
 - Historical EPIC-008/v0.1.3 provider eligibility stays unchanged. The new
   candidate-first joint release boundary is adopted for v0.1.4 and must be
   reconciled in its successor contract by TASK-067.
+
+### Runtime upgrade resilience and setup-bound host admission
+
+- Dossier: [Runtime upgrade resilience and setup-bound host admission](TODO-RUNTIME-UPGRADE-RESILIENCE.md).
+- Adopted owner: PLANNED EPIC-024 and TASK-095 through TASK-098, assigned to
+  unreleased v0.1.4 (and cumulative v0.2.0 ahead of EPIC-010).
+- Work: deterministic domain-separated SHA-256 `process_static` capture
+  (`_dolgorae_unclassified_sha256`, refused for checked one-shot review) and
+  key-name-only diagnostics for unclassified non-inclusion `CODEX_HOME/config.toml`
+  keys, SemVer §11 version precedence (with H1 checked-review pre-release
+  refusal), removal of brittle `absent: true` `TurnStartParams` subset checks,
+  side-effect-free no-op `thread/settings/updated` tolerance, dedicated-entrypoint
+  zero-member quiescent same-or-newer upgrade rollover and review-ownership
+  propagation for Profile Servers, caller-scoped (`External` and caller-scoped
+  `Managed`) minimum-version hardened non-executing setup binding plus
+  split-digest `schema_version: 2` online `owner-executable-refresh` and
+  `v1`/`v2` compatible `adapter_version` continuity in `trusted_host`, and
+  superseding H3/H4 three-consumer Gate C/D requalification.
+- Lifecycle: all four Tasks start PLANNED. Keep historical EPIC-022 Gate C/D
+  evidence intact while gating v0.1.4 publication on TASK-098.

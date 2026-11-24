@@ -244,8 +244,13 @@ fresh process/history/writer proof; never redispatch the accepted operation.
 
    `profile doctor` reports its verdict in `data.compatibility` and diagnostics;
    envelope `ok:true` means the check ran, not that the profile is compatible.
-   Read [configuration.md](references/configuration.md) when a profile or
-   Specialist Policy must be created or changed.
+   Checked one-shot `specialist review` requires a canonical `MAJOR.MINOR.PATCH`
+   release version with zero unclassified `CODEX_HOME/config.toml` keys and
+   refuses `-prerelease` or `+build` runtimes before launch even on builds
+   (`EPIC-024` / `TASK-095`+) whose general Profile and Run admission accepts
+   SemVer suffixes and conservative unclassified keys. Read
+   [configuration.md](references/configuration.md) when a profile or Specialist
+   Policy must be created or changed.
 4. Treat a review as an external, potentially costly operation. Run it only
    when the user requested Dolgorae review:
 

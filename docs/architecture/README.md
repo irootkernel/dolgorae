@@ -2675,7 +2675,19 @@ or policy acceptance does not authorize a new member or task. Generic Profile
 lifecycle and binding history retain tested/unverified compatibility admission. Migration compensation retains its original snapshot
 and durable owner. Earlier external-host evidence uses Codex
 0.164.0 and Claude Code 2.1.310 with the exact executable hashes in that owner;
-it is not transferred to the current Profile candidate.
+it is not transferred to the current Profile candidate. Planned `EPIC-024`
+(`TASK-095` through `TASK-098`) adds deterministic domain-separated SHA-256
+`process_static` capture (`_dolgorae_unclassified_sha256`, refused for checked
+one-shot review) and key-name-only diagnostics for unclassified non-inclusion
+`config.toml` keys (`TASK-095`), dedicated-entrypoint zero-member quiescent
+same-or-newer upgrade rollover and review-ownership propagation (`TASK-096`),
+caller-scoped (`External + Some` and `Managed + Some`) route minimum-version
+(`Codex >= 0.169.0`, `Claude >= 2.1.310`) hardened non-executing setup binding
+plus split-digest `schema_version: 2` online `owner-executable-refresh`
+(preserving `migrated_from_v1_digest` lineage across all five consumer modules)
+and `v1`/`v2` compatible `adapter_version` continuity in `trusted_host`
+(`TASK-097`), and superseding `v0.1.4` H3/H4 Gate C/D requalification
+(`TASK-098`).
 
 ### Public managed task collection
 
@@ -4043,8 +4055,16 @@ exact executable and configuration admissions remain separate.
 The verdict is written to every run generation.
 
 Runtime code tolerates additive data but never infers lifecycle progress from
-uncorrelated or unknown messages. This preserves compatibility without claiming
-that a schema probe can guarantee all future runtime behavior.
+uncorrelated or unknown messages. Under `EPIC-024` (`TASK-095`), version parsing
+adopts SemVer §11 pre-release/build precedence (with non-prerelease exact match
+for `tested` registry lookup and pre-release/build refusal on H1-locked checked
+one-shot review), required-subset comparison drops the negative absence check on
+optional `TurnStartParams.developerInstructions` without sending that field on
+`turn/start`, and `TurnCoordinator` records `thread/settings/updated`
+notifications passing a side-effect-free check over `threadId`, all workspace and
+sandbox predicates, `model`, and current authoritative `effort` as audited
+no-ops while keeping drift fail-closed. This preserves compatibility
+without claiming that a schema probe can guarantee all future runtime behavior.
 
 ### TASK-072 ledger generation ownership
 
@@ -4457,12 +4477,26 @@ runtime; the registry owner then rechecks the definition while recording.
 error when qualified one-shot preparation refuses before reservation.
 Observe-only qualified catalogs inspect that exact candidate generation without
 publishing history or changing physical state. Qualified shared readiness uses
-the existing deny-rollover path, as review already does. Shared and Dedicated
-launches consume the retained snapshot argv. Recovery uses accepted bindings
-without resealing them or resolving a replacement definition.
+the existing deny-rollover path until `TASK-096` introduces a dedicated
+`ensure_qualified_global_server_for_admission` entrypoint (`UpgradeWhenQuiescent`
+under `candidate_version >= incumbent_version` wired at new `StartRun` in
+`semantic.rs:3505`, new qualified external/brokered Specialist `StartRun` in
+`semantic.rs:8789`, and fresh MCP `prepare_reviewer` in `semantic.rs:1134/1172`
+via an explicit server-readiness parameter on `prepare_reviewer_with_binding`)
+and threads `review_owner` through `automatic_quiescent_migration` ->
+`start_snapshot_for_migration` (`Reserved` at new-epoch reservation, `Ready` at
+commit, and `Preexisting` on concurrent-winner attach) in
+`ensure_global_server_for_review`; `ensure_qualified_global_server` stays `Deny`
+for `ensure_retained_global_server` and `--confirm-server-key`, `profile doctor
+--launch-probe` and downgrades remain `Deny`, and generic `ensure_global_server`
+(`Allow`) refuses retiring a strictly newer incumbent version (requiring
+explicit Operator stop/migrate before older legacy Run recovery). Shared and
+Dedicated launches consume the retained snapshot argv. Recovery uses accepted
+bindings without resealing them or resolving a replacement definition.
 Retained qualified bindings keep deny-rollover readiness through member start,
 reservation replay and Run recovery. Pre-policy accepted bindings retain their
-original readiness behavior; recovery does not upgrade their launch policy.
+original readiness behavior except for the non-downgrade guard against a newer
+incumbent; recovery does not upgrade their launch policy.
 
 Explicit `profile server start|stop --confirm-server-key` can select the
 Caller-qualified or successor launch. The main process freshly checks the selected

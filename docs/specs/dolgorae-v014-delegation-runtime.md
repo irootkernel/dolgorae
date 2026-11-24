@@ -1313,6 +1313,44 @@ checksums alone do not establish runtime behavior. The H1 host qualification
 remains the historical design-time record. Its route identifiers retain their
 checked encoding; actual executable versions and checksums remain explicit.
 
+For `EPIC-024` (`TASK-097`, `PLANNED`), across the 4-cell `(OwnerKind x
+caller_scope)` matrix in `trusted_host`, both caller-scoped variants
+(`External + caller_scope: Some` for external MCP hosts and `Managed +
+caller_scope: Some` for caller-scoped delegated sessions such as Podway) replace
+those compiled-in single-binary SHA-256 pins with operator-attested route
+minimum-version floors (`Codex >= 0.169.0` under wire route `codex-0.160.0` and
+`Claude >= 2.1.310` under wire route `claude-code-2.1.295`) plus hardened
+non-executing `verify_executable` setup binding (adding uid/root ownership and
+non-group/world-writable checks to `O_NOFOLLOW`, full-path `canonicalize`, and
+pre/post `dev/ino/len/mtime` bracket around SHA-256, never launching the host
+binary during setup or refresh) in `schema_version: 2` `owner.json` records,
+whereas `Managed + caller_scope: None` retains exact root-Run `launch_snapshot`
+equality (refresh refused) and `External + caller_scope: None` remains refused.
+`schema_version: 2` separates stable `owner_identity_digest` (excluding
+`executable` and `adapter_version`) from `executable_binding` (`executable`,
+`executable_epoch`, and pinned descriptor metadata for fast-path
+`load`/`revalidate` returning existing checked `RECOVERY_REQUIRED` with internal
+`details.reason = "host_executable_refresh_required"` on drift, with full
+SHA-256 checked at setup, refresh, and `launch_recipe`) plus immutable
+`migrated_from_v1_digest` on `v1 -> v2` refresh so all five consumer modules
+(`host_invocation` at SQLite `metadata.schema_version = 1` without mutating
+`invocations.sqlite` on refresh, `managed_specialist`, `native_consumer`,
+`native_preparation`, `source_binding`) accept `{owner_identity_digest,
+migrated_from_v1_digest}` for prior records via a single atomic `owner.json`
+publish while writing `owner_identity_digest` on newly initialized `v2` stores
+and records. Both `schema_version: 1` and `schema_version: 2` stores accept
+compatible `recorded_adapter_version <= CARGO_PKG_VERSION` within the same
+`adapter_id`, and unchanged `v1` stores (`Codex 0.164.0` / `Claude 2.1.310`)
+remain valid for lookup and recovery against their recorded binary. Online
+`owner-executable-refresh` (requiring live Operator and matching Controller
+descriptors without stopping Dolgorae servers or requiring the overwritten prior
+binary on disk; gated on exclusive `host.lock`, no `STAGING`/sidecar/`*.pending`
+files, and zero unsettled `attempted = 1` `native_calls` rows while durable open
+engagements never block refresh; optional `--allow-downgrade` down to the route
+floor) publishes updated `schema_version: 2` `owner.json` atomically while
+preserving all receipts and K-lookup continuity. Until `TASK-097` completes, the
+`TASK-077` compiled-in caller-scoped pins remain the active source guard.
+
 New qualified caller-workspace startup/policy, instruction-discovery and
 checked-review admissions, and member/task acceptances depending on those
 mechanisms, require Codex 0.169.0 or newer before their acceptance commits or

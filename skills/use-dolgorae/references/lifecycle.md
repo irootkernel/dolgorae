@@ -31,8 +31,17 @@ dolgorae profile server status <name>
 `profile server start` may launch a long-lived local Codex App Server and
 requires explicit intent. Stop and restart require a separate Operator
 credential; when either operation interrupts live members, it also requires the
-exact confirmed server key. Migration requires a separate Operator credential
-and both the exact old and new confirmed server keys, whether or not
+exact confirmed server key. On builds with quiescent upgrade rollover (`EPIC-024`
+/ `TASK-096`+), new qualified and successor server-starting admissions (new
+`StartRun`, external or brokered Specialist `StartRun`, and fresh CLI or MCP
+`specialist review`) automatically roll over a `ready` shared server on the same
+`CODEX_HOME` only when zero live, starting, uncertain, or orphan members remain
+and `candidate >= incumbent`. Earlier builds, version downgrades (including
+legacy Run recovery against a newer idle server), active or orphan membership,
+`profile doctor --launch-probe`, explicit `--confirm-server-key` commands, and
+retained execution of already-accepted Run snapshots remain non-rolling;
+replacing a contract across those boundaries requires a separate Operator
+migration with both the exact old and new confirmed server keys, whether or not
 `--interrupt` is used. Obtain keys and membership facts from current public
 status and diagnostics, never from a path name or old output.
 

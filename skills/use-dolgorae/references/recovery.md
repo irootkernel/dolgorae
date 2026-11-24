@@ -105,10 +105,17 @@ an explicitly documented recovery action.
 - `PROFILE_CONFIG_INVALID`, `PROFILE_NOT_FOUND`, and
   `PROFILE_ALREADY_EXISTS` require correcting or explicitly replacing
   configuration; they are not transient retries.
-- `PROFILE_SERVER_BUSY`, migration fences, incomplete membership, launch
-  conflicts, or unverifiable process identity require current status,
-  diagnostics, and membership evidence. Do not kill a process or remove a lock,
-  socket, journal, or registry entry manually.
+- `PROFILE_SERVER_BUSY`, `PROFILE_MIGRATION_REQUIRED`, migration fences,
+  incomplete membership, launch conflicts, or unverifiable process identity
+  require current status, diagnostics, and membership evidence. Even on builds
+  with quiescent upgrade rollover (`EPIC-024` / `TASK-096`+), automatic rollover
+  applies only at zero members and `candidate >= incumbent` (across new
+  qualified/review server-starting admissions and generic `Allow` starts);
+  downgrades (including pre-policy legacy recovery against a newer idle server),
+  live or orphan members, `profile doctor --launch-probe`,
+  `--confirm-server-key`, and retained qualified/successor Run bindings never
+  roll over automatically. Do not kill a process or remove a lock, socket,
+  journal, or registry entry manually.
 - Bare `profile doctor` is offline. Use `--launch-probe`, server control,
   membership tombstone, state reset, or operator-authorized migration only when
   that exact intervention is requested and its current preconditions are known.

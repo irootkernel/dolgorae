@@ -425,7 +425,18 @@ The one-shot Specialist Review live acceptance gate uses the omitted-setting
 `gpt-6-sol` / `high` defaults. The scoped-review live gate separately checks an
 explicit `gpt-5.6-luna` / `low` Profile configuration.
 
-Codex App Server 0.158.0 is the minimum runtime version. The checked 0.157.0
+Codex App Server 0.158.0 is the minimum runtime version. Under `EPIC-024`
+(`TASK-095`), version parsing accepts standard SemVer `MAJOR.MINOR.PATCH`
+with optional `-prerelease` and `+build` suffixes under SemVer §11 precedence
+(preserving existing leading-zero numeric component parsing, ordering pre-release
+identifiers strictly below their corresponding final `MAJOR.MINOR.PATCH` release
+with numeric-before-ASCII dot-identifier precedence such as `rc.9 < rc.10`, and
+ignoring `+build` metadata for precedence while preserving the exact reported
+version string in `ProfileSnapshot.codex_version`). `tested` runtime registry
+matching requires no pre-release suffix and exact canonical version equality, and
+checked one-shot Specialist Review (`dolgorae-specialist-review-tool-v2.schema.json`,
+H1-locked `^[0-9]+\.[0-9]+\.[0-9]+$`) refuses `-prerelease` or `+build` runtimes
+before launch rather than falsifying version strings. The checked 0.157.0
 schema bundle remains the required-subset comparison baseline. The exact
 0.158.0 stable and experimental bundle digests are pinned separately in that
 manifest. The supported minimum and the verified runtime versions are separate.
@@ -917,9 +928,27 @@ endpoint overrides are `process_static`: changing either value changes the
 server launch contract and requires a new physical generation.
 `cli_auth_credentials_store` is also `process_static`: a generation retains
 its credential storage policy, including an explicit file-only policy.
-Unknown fields and unclassified include mechanisms fail compatibility. Only
-normalized process-static and explicitly accepted migratable fields enter the
-launch contract. Runtime-mutated trust and operational state are recorded as an
+Unknown fields and unclassified include mechanisms fail compatibility until
+`TASK-095` activates digest-only conservative unclassified admission: explicit
+file-inclusion directives (`include`, `includes`, `include_path`,
+`include_paths`, `config_include`, plus reserved `_dolgorae_*` sentinel keys),
+malformed TOML, and unsafe or oversized files continue to fail compatibility,
+whereas unclassified top-level `CODEX_HOME/config.toml` keys enter
+`process_static_configuration` only as JCS-sorted deterministic domain-separated
+SHA-256 digests (`_dolgorae_unclassified_sha256` over
+`"dolgorae-unclassified-config-v1\0" || utf8(name) || "\0" || JCS(value)`,
+keeping bare `profile doctor` offline and side-effect-free while isolating
+`server_key` across value changes without persisting raw values in `state.json`,
+Run manifests, binding history, exports, or diagnostics) alongside bounded
+key-name-only Profile diagnostics carrying a classification hint. Checked
+one-shot `specialist review` (`checked_review_supported` /
+`accepted_checked_review_supported`) refuses any non-empty
+`_dolgorae_unclassified_sha256` map before Reviewer allocation so unexercised
+upstream extension surfaces cannot bypass review provenance, whereas ordinary
+caller-workspace, Gul, Orchestrated Session, and Specialist Runs admit it. Only
+normalized process-static (including `_dolgorae_unclassified_sha256` entries
+under `TASK-095`) and explicitly accepted migratable fields enter the launch
+contract. Runtime-mutated trust and operational state are recorded as an
 initial observation but their enclosing file's raw digest MUST NOT enter
 `server_key` or compatible-generation admission comparisons. Persisted Run
 bindings retain their original observations and digests; later runtime-mutable
@@ -927,9 +956,11 @@ observations MUST NOT prevent reuse of the same launch contract.
 The key remains fixed for the lifetime; a later process-static
 change fixes that lifetime to its recorded snapshot. A generation-starting
 command MAY replace it automatically only after complete membership and exact
-process evidence prove that no Run remains attached; otherwise the change
-requires operator migration. Pinned probes own the classification and
-hot-reload verdict for every field used by v1.
+process evidence prove that no Run remains attached (under `TASK-096`,
+additionally requiring `candidate_version >= incumbent_version` across both
+qualified/successor `UpgradeWhenQuiescent` and generic `Allow` rollovers);
+otherwise the change requires operator migration. Pinned probes own the
+classification and hot-reload verdict for every field used by v1.
 
 The singleton `server_key` is the domain-separated SHA-256 of that object, never
 the profile display name or incidental caller state. A compatible profile
@@ -1211,9 +1242,29 @@ concrete provisioning blockers without requiring per-version approval.
 Original-key replay, release, closure and recovery retain the accepted binding,
 including qualified 0.159.3, 0.164.0 and 0.167.2 records. Existing snapshots are
 never resealed. Actual executable and process identities remain checked against
-that binding. Generic Profile lifecycle and binding-history observation retain
-their existing schema minimum and tested/unverified compatibility admission,
-including doctor probes and migration.
+that binding. Under `EPIC-024` (`TASK-096`), new qualified and successor
+server-starting admissions (new caller-workspace/Orchestrated Session `StartRun`,
+new qualified external/brokered Specialist `StartRun`, fresh MCP
+`dolgorae_review`, and fresh CLI `specialist review` with `ReviewServerOwnership`
+threaded through migration into `Reserved`/`Ready`/`Preexisting` states; offline
+provisioning validate/install starts no server) permit automatic zero-member
+quiescent rollover on the same canonical `CODEX_HOME` when the incumbent
+singleton is `ready`, complete membership on both keys and exact
+process/drainer/socket proofs establish zero live, starting, uncertain, or
+orphan members, no stop reservation or `migration_blocked` fence exists, and
+SemVer §11 precedence satisfies `candidate_version >= incumbent_version`.
+Version downgrades (`candidate_version < incumbent_version`), live or orphan
+members, `profile doctor --launch-probe`, explicit `--confirm-server-key`
+lifecycle selection, and retained qualified/successor execution
+(`ensure_retained_global_server`) of already-accepted Run bindings remain
+non-rolling. Legacy non-qualified (`generic`) Profile lifecycle and
+binding-history observation retain their existing `Allow` rollover and
+tested/unverified compatibility admission except that generic `Allow` MUST NOT
+automatically retire a strictly newer `ready` incumbent (`candidate_version <
+incumbent_version`) on the same `CODEX_HOME`; recovering a pre-policy legacy Run
+bound to an older Codex version while a newer idle server owns that home
+therefore returns `PROFILE_MIGRATION_REQUIRED` until an Operator explicitly stops
+or migrates the server.
 
 ### Managed individual task collection
 
@@ -5349,7 +5400,19 @@ The driver must report the observed version, and an exact identity mismatch
 refuses the campaign before a model Turn.
 
 Missing generation support, required schema, lifecycle behavior, or identity
-causes fail-closed rejection. Unknown additive fields and notifications are
+causes fail-closed rejection. Under `TASK-095`, optional additive fields on
+`TurnStartParams` (such as an unused `developerInstructions` property) do not
+fail required-subset comparison while Dolgorae continues supplying
+generation-immutable developer instructions at thread start/resume/fork and
+omits `developerInstructions` on outbound `turn/start` requests; likewise,
+`thread/settings/updated` notifications matching `threadId`, the full workspace
+and sandbox settings predicate set (`cwd`, `approvalPolicy`, `sandboxPolicy`
+`type`, `networkAccess`, `writableRoots`, `excludeSlashTmp`, and
+`excludeTmpdirEnvVar`), `model`, and current authoritative `effort` (active-turn
+override while running, otherwise session effort) via a side-effect-free check
+are recorded as audited no-ops (tolerating unknown additive `threadSettings`
+fields) while any unrequested drift or foreign-thread notification fails closed.
+Unknown additive fields and notifications are
 recorded and tolerated. Unknown server requests are recorded, receive JSON-RPC
 method-not-found, and do not stop the generation; unparseable frames fail
 closed. All app-server messages are correlated with request ID, thread
@@ -6461,6 +6524,11 @@ unqualified rebuild or packaging change follows acceptance; only existing
 explicitly permitted QA-neutral metadata exceptions apply. Substantive changes
 require evidence-impact assessment across all consumers and requalification.
 Defects require explicit corrective scheduling and block incomplete closeout.
+Master's adopted `EPIC-024` (`TASK-095` through `TASK-098`) extends the
+unreleased `v0.1.4` boundary and requires a superseding H3 candidate, affected
+Aquarium/Podway/Gul H4 requalification, and refreshed Gate C and Gate D
+acceptance (`TASK-098`) before either product publishes, while preserving
+completed `EPIC-022` records as historical provenance.
 Release workflows, publication, installation and runtime authorization remain
 separate. Required external work must be resolved before Epic closeout; calling it
 optional or handoff-only does not satisfy acceptance.

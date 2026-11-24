@@ -287,7 +287,7 @@ proves process absence.
 
 ## ADR-005: Snapshot Profile Identity and Use CODEX_HOME as Account Boundary
 
-Status: Accepted, amended by ADR-024, ADR-025, and ADR-035
+Status: Accepted, amended by ADR-024, ADR-025, ADR-035, and ADR-043
 
 ### Context
 
@@ -308,12 +308,21 @@ compatibility manifest, features, launch digest, server key, and expected
 `initialize` response whose `codexHome` differs. Never rebind a run or fork
 across profiles.
 
-Treat server-key-changing version/configuration acceptance as an operator-only
-profile migration across complete membership, not a run controller flag. Raw
-digests of runtime-mutable configuration do not enter server identity; unknown
-configuration fails compatibility until classified. Accepted migrations append
-old/new generation contracts and preserve rollback or `migration_blocked`
-evidence.
+Treat server-key-changing version/configuration acceptance across live or
+orphan members, or across a version downgrade, as an operator-only profile
+migration across complete membership (serialized on the ADR-016 operator
+capability), not a run controller flag. Zero-member quiescent upgrade rollover
+under the ADR-019 singleton topology follows the retained lock-order and
+migration-fence rules carried forward in ADR-043. Raw digests of
+runtime-mutable configuration do not enter server identity; under ADR-043
+(`TASK-095`), explicit file-inclusion directives (`include`, `includes`,
+`include_path`, `include_paths`, `config_include`) and reserved `_dolgorae_*`
+keys fail compatibility while unclassified top-level `config.toml` keys enter
+`process_static_configuration` only as deterministic domain-separated SHA-256
+digests (`_dolgorae_unclassified_sha256`, never raw values; refused for checked
+one-shot review) alongside bounded key-name-only diagnostics. Accepted
+migrations append old/new generation contracts and preserve rollback or
+`migration_blocked` evidence.
 
 ### Consequences
 
@@ -2795,6 +2804,9 @@ records the tested layers, physical host-loss recovery and reproduction.
 Both pinned actual hosts must receive independent acceptance of the complete
 matrix before this decision can support freeze.
 Failure keeps H1 unqualified; it cannot activate a fallback or reduce scope.
+Subsequent post-prototype external-host admission and authenticated idle
+executable refresh are governed by ADR-043 (`EPIC-024` / `TASK-097`) while
+preserving this protected hook/stdio identity contract and checked route tags.
 
 ### Consequences and rejected alternatives
 
@@ -2940,3 +2952,191 @@ change is explicitly selected by package lock. Downgrading a migrated generation
 - Mutate `H1` in place under the historical `TASK-068` / `TASK-069` acceptance:
   changed schema and lock bytes require a distinct reproducible package and a
   delta `H2` / `Gate A` addendum.
+
+## ADR-043: Relax Additive Host Configuration, Quiescent Upgrade Rollover, and Setup-Bound Host Pins for Runtime Upgrade Resilience
+
+Status: Accepted
+
+### Context
+
+Keeping `codex app-server` as Dolgorae's structured execution transport
+preserves `dolgorae.gul-consumer/v2` timeline separation, typed Controller
+interactions, operational event streaming, and crash reconciliation that a
+terminal/PTY wrapper (`herdr-core`) cannot provide without degrading public
+contracts. Although `TASK-094` (`28b7f74`, `ce04889`) replaced exact-hash
+caller-workspace creation pins with `Codex >= 0.169.0`, dynamic sibling
+companion hashing, and single-shot active-turn effort overrides, four strict
+guards still make routine upstream Codex and Claude CLI upgrades break local
+operation:
+
+1. `configuration_snapshot` rejects any unclassified top-level key in
+   `$CODEX_HOME/config.toml` (`unknown_field = compatibility_rejected`), so
+   upstream CLI releases that persist a new user setting immediately block all
+   Profile operations.
+2. `ensure_qualified_global_server` and `ensure_global_server_for_review` pass
+   `QuiescentRolloverPolicy::Deny`, forcing manual Operator intervention
+   (`PROFILE_MIGRATION_REQUIRED`) after every Codex binary update even when the
+   shared server has zero live or orphan Run members.
+3. `src/trusted_host.rs` still hardcodes external MCP host admission to exact
+   `Codex 0.164.0` (`d8990e3e...`) and `Claude 2.1.310` (`ffb64331...`) binary
+   digests, preventing External Specialist Engagement MCP setup on `Codex >=
+   0.169.0` or upgraded Claude Code installations.
+4. `parse_version` rejects valid SemVer pre-release/build suffixes,
+   `codex-0.157.0-required-subset.json` requires `developerInstructions` to be
+   absent from `TurnStartParams`, and benign no-op `thread/settings/updated`
+   notifications outside an effort override fail closed.
+
+### Decision
+
+Adopt [EPIC-024](../roadmap/README.md#epic-024-runtime-upgrade-resilience-and-setup-bound-host-admission)
+(`TASK-095` through `TASK-098`) within the unreleased `v0.1.4` release boundary
+while keeping `codex app-server` and all checked `public-v1`, `public-v2`,
+`Machine`, `facade`, and `H1` wire contracts unchanged:
+
+1. **Digest-only `process_static` admission of unclassified `config.toml` keys
+   (`TASK-095`)**: replace `contains("include")` with an explicit denylist
+   (`include`, `includes`, `include_path`, `include_paths`, `config_include`,
+   and reserved `_dolgorae_*` sentinel keys) while keeping malformed TOML,
+   symlink/permission violations, and oversized file rejections. Never persist
+   raw unclassified values in `ProfileSnapshot`, `state.json`, Run manifests,
+   binding history, exports, or diagnostics; instead record JCS-sorted
+   deterministic domain-separated SHA-256 digests
+   (`_dolgorae_unclassified_sha256` over `"dolgorae-unclassified-config-v1\0" ||
+   utf8(name) || "\0" || JCS(value)`) inside `process_static_configuration` plus
+   bounded key-name-only diagnostics carrying a classification hint. Unlike
+   ADR-016's secret user-input answers (which use opaque first-success receipts),
+   `config.toml` launch isolation must compute a deterministic `server_key`
+   during ADR-015's offline side-effect-free `profile doctor` without creating
+   stateful HMAC key files whose loss or reset would invalidate `server_key`s;
+   unkeyed domain-separated SHA-256 keeps raw high-entropy tokens or credentials
+   out of durable state while accepting low-entropy scalar testability as a
+   documented residual risk. Require `checked_review_configuration_supported`
+   (`checked_review_supported` / `accepted_checked_review_supported`) to refuse
+   any non-empty `_dolgorae_unclassified_sha256` map before Reviewer allocation
+   so unclassified upstream extension surfaces cannot bypass checked-review
+   provenance, while ordinary caller-workspace/Gul/Specialist Runs admit it.
+   Update `codex-0.157.0-required-subset.json` and `profile::tests` together per
+   ADR-014, noting that changing the manifest digest recomputes `server_key`.
+2. **Resilient SemVer §11, subset-schema, and side-effect-free no-op settings
+   handling (`TASK-095`)**: parse `MAJOR.MINOR.PATCH[-prerelease][+build]` under
+   SemVer §11 precedence (`0.158.0-rc.1 < 0.158.0`, `0.169.0-rc.1 < 0.169.0 <
+   0.170.0-alpha.1`, `rc.9 < rc.10`, ignoring `+build` for precedence while
+   preserving leading-zero numeric component parsing and exact reported snapshot
+   strings), require non-prerelease exact match for `tested` runtime registry
+   lookup, and refuse `-prerelease`/`+build` runtimes before launch on H1-locked
+   checked one-shot Specialist Review (`^[0-9]+\.[0-9]+\.[0-9]+$`). Remove the
+   `absent: true` assertion on `TurnStartParams.developerInstructions` while
+   continuing to omit that field on outbound `turn/start` requests, and treat
+   `thread/settings/updated` notifications as audited no-ops via a
+   side-effect-free check over `threadId`, all workspace/sandbox predicates,
+   `model`, and current authoritative `effort` (active-turn override or session
+   effort) while keeping drift fail-closed.
+3. **Dedicated admission rollover, review ownership propagation, and
+   non-downgrade guard (`TASK-096`)**: carry forward ADR-015's retained
+   profile-singleton lifecycle mechanics under ADR-019's topology — specifically
+   acquiring `home.lock` then binary-ordered `old/new server.lock`, fencing via
+   `migration.json`, verifying zero live/starting/uncertain/orphan members on
+   both keys plus exact process/drainer/socket identities, and executing
+   lock-free replacement with rollback or `migration_blocked` compensation
+   (while ADR-016 continues to govern Operator/Controller capability
+   serialization). Keep `ensure_qualified_global_server` on `Deny` for
+   `ensure_retained_global_server` and `--confirm-server-key`, wire a separate
+   `ensure_qualified_global_server_for_admission` (`UpgradeWhenQuiescent`) at
+   the exact new-admission sites (`semantic.rs:3505` new `StartRun`,
+   `semantic.rs:8789` new qualified external/brokered Specialist `StartRun`, and
+   `semantic.rs:1134/1172` fresh MCP `prepare_reviewer` via an explicit
+   server-readiness parameter on `prepare_reviewer_with_binding`), and thread
+   `review_owner` through `automatic_quiescent_migration` ->
+   `start_snapshot_for_migration` (`Reserved` at new-epoch reservation, `Ready`
+   at commit, `Preexisting` on concurrent-winner attach) for CLI
+   `ensure_global_server_for_review`. Enforce SemVer §11 `candidate_version >=
+   incumbent_version` on both `UpgradeWhenQuiescent` and legacy generic `Allow`
+   (meaning pre-policy legacy Run recovery against a newer idle incumbent
+   returns `PROFILE_MIGRATION_REQUIRED` until an Operator explicitly stops or
+   migrates that server).
+4. **Caller-scoped 4-cell host matrix, hardened non-executing `verify_executable`,
+   and split-digest `schema_version: 2` refresh (`TASK-097`)**: across `(OwnerKind
+   x caller_scope)` in `src/trusted_host.rs`, apply operator-attested route
+   floors (`Codex >= 0.169.0` under `codex-0.160.0`; `Claude >= 2.1.310` under
+   `claude-code-2.1.295`), hardened non-executing `verify_executable` (adding
+   uid/root ownership and non-group/world-writable checks to `O_NOFOLLOW`,
+   full-path `canonicalize`, and pre/post `dev/ino/len/mtime` SHA-256 bracket at
+   setup, refresh, and `launch_recipe`; pinned metadata fast-path on
+   `load`/`revalidate` returning existing checked `RECOVERY_REQUIRED` with
+   internal `details.reason = "host_executable_refresh_required"` on drift so
+   zero new wire error codes are introduced), `schema_version: 2` split digests,
+   and online `owner-executable-refresh` to both `External + caller_scope: Some`
+   and `Managed + caller_scope: Some` stores, while keeping `Managed +
+   caller_scope: None` on exact root-Run `launch_snapshot` equality (refresh
+   refused) and keeping `External + caller_scope: None` refused. In
+   `schema_version: 2`, split stable `owner_identity_digest` (excluding
+   `executable` and `adapter_version`) from `executable_binding` plus immutable
+   `migrated_from_v1_digest` on `v1 -> v2` refresh so all five persisted-digest
+   consumers (`host_invocation` at SQLite `metadata.schema_version = 1` without
+   mutating `invocations.sqlite` on refresh, `managed_specialist`,
+   `native_consumer`, `native_preparation`, `source_binding`) accept
+   `{owner_identity_digest, migrated_from_v1_digest}` for prior records via a
+   single atomic `owner.json` publish while writing `owner_identity_digest` on
+   newly initialized `v2` stores and records. Relax `adapter_version` validation
+   to `recorded_adapter_version <= CARGO_PKG_VERSION` across both `v1` and `v2`
+   stores, retain unchanged `v1` (`0.164.0` / `2.1.310`) recovery, and gate
+   online `owner-executable-refresh` (authenticating stored `OwnerRecord` +
+   Operator + Controller without requiring the overwritten prior binary on disk;
+   optional `--allow-downgrade` down to the route floor) on concrete `HostStore`
+   quiescence: exclusive `host.lock`, no `STAGING`/sidecar/`*.pending` files,
+   and zero unsettled `attempted = 1` `native_calls` rows (durable open External
+   Engagements and hired Specialists never block refresh).
+5. **Superseding `v0.1.4` candidate and Gate C/D requalification
+   (`TASK-098`)**: preserve `EPIC-022`'s historical `8fb6a3578ae3` /
+   `b9d1750e9ec5` records, build a superseding `v0.1.4` H3 artifact after
+   `TASK-095`..`TASK-097`, requalify Aquarium, Podway (including caller-scoped
+   `Managed` refresh/receipts), and Gul H4 paths (including historical-H3
+   in-place upgrade under both quiescent rollover and live-member operator
+   migration), and require refreshed Gate C and Gate D acceptance before release.
+
+### Consequences
+
+- Routine Codex and Claude CLI upgrades no longer stall idle shared Profile
+  Servers, unclassified `config.toml` keys on ordinary Runs, or caller-scoped
+  (`External` and Podway `Managed`) MCP setups; after an external host binary
+  upgrade on disk, each caller-scoped `owner.json` store fails closed with
+  `RECOVERY_REQUIRED` (`details.reason = "host_executable_refresh_required"`)
+  until one online authenticated `owner-executable-refresh` runs (with open
+  engagements and Dolgorae servers remaining online and all consumer receipts
+  preserved). Because setup and refresh never execute the host binary,
+  minimum-version floors validate the operator-attested version string while
+  `verify_executable` cryptographically binds the exact binary bytes.
+- Checked one-shot `specialist review` retains strict zero-unclassified-extension
+  and canonical `x.y.z` provenance; qualified, successor, and review bindings
+  retain immutable snapshot and single-writer guarantees; and legacy generic
+  `Allow` refuses silently downgrading a newer idle server on the same
+  `CODEX_HOME` (requiring explicit Operator stop/migrate before legacy downgrade
+  recovery).
+- Accepted residual coupling and privacy boundaries remain explicit: `codex
+  app-server generate-json-schema`, `--enable multi_agent`, and structural JSON
+  Schema nullable-type representations in `codex-0.157.0-required-subset.json`
+  still fail closed if upstream removes or restructures them; and while unkeyed
+  `_dolgorae_unclassified_sha256` digests keep raw high-entropy tokens out of
+  persisted state and exports, low-entropy scalar values in unclassified
+  `config.toml` keys remain offline-testable from exported manifests (secrets
+  must continue to live in dedicated credential stores rather than `config.toml`).
+- Untested newer Codex versions remain `Unverified` until separately qualified
+  for `tested` registration, and `v0.1.4` release waits for `EPIC-024`
+  completion and refreshed H3/H4 Gate C/D evidence.
+
+### Rejected alternatives
+
+- Replace `codex app-server` with `herdr-core` PTY execution: rejected because
+  PTY scrollback and OSC 7501 status codes cannot satisfy Gul's structured
+  timeline, typed approval resolution, event streaming, or thread-read recovery
+  contracts.
+- Ignore unclassified `config.toml` keys in `server_key` (`ignored`): rejected
+  because an unrecognized static setting (such as a new endpoint, sandbox, or
+  plugin toggle) could silently share a running server started under different
+  static configuration.
+- Permit automatic rollover across live members or version downgrades: rejected
+  because active members belong to potentially distinct Controllers and
+  downgrading a shared runtime requires explicit Operator intent.
+- Defer `EPIC-024` past `v0.1.4` or omit `trusted_host`: rejected by Master
+  because both Gul sessions and External Specialist Engagements must ship
+  without brittle exact-binary upgrade blockers in `v0.1.4`.

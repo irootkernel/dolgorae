@@ -56,8 +56,16 @@ directly.
    ```
 
    Inspect `data.compatibility` and every diagnostic even when the envelope is
-   successful. Add `--launch-probe` only with explicit authorization for a live
-   Codex compatibility probe. The probe may temporarily start a Profile Server;
+   successful. On builds with conservative unclassified-key admission (`EPIC-024`
+   / `TASK-095`+), bounded key-name-only diagnostics for unclassified top-level
+   `CODEX_HOME/config.toml` keys indicate `server_key` isolation for ordinary
+   Runs rather than a compatibility failure (do not read or edit
+   `CODEX_HOME/config.toml` to silence them, though checked `specialist review`
+   still refuses unclassified keys), whereas earlier builds and explicit
+   file-inclusion or reserved keys (`include`, `includes`, `include_path`,
+   `include_paths`, `config_include`, `_dolgorae_*`) fail compatibility. Add
+   `--launch-probe` only with explicit authorization for a live Codex
+   compatibility probe. The probe may temporarily start a Profile Server;
    `--leave-running` is a separate explicit decision.
 
 Profile names are create-exclusive. `PROFILE_ALREADY_EXISTS` is not permission

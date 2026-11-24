@@ -38,12 +38,17 @@ qualification (combined Gate C, unlocking actual-Gul `MILESTONE-BH1` for exact
 H3 `8fb6a3578ae3` paired with Gul H4 `b9d1750e9ec5` / `6cd9901ae3fe`) and Gate D
 release-ready handoff provenance recorded in
 [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md).
+Master subsequently expanded unreleased `v0.1.4` with `EPIC-024` (`TASK-095`
+through `TASK-098`, `PLANNED`) to remove remaining Codex/Claude runtime-upgrade
+fragility and deliver a superseding H3/H4 pair with refreshed Gate C and Gate D
+acceptance before `v0.1.4` publication.
 TASK-067 is COMPLETE; TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
 TASK-084 through TASK-087, TASK-093, and TASK-094 are COMPLETE;
-TASK-088 and TASK-089 are COMPLETE. No Epic or Task is currently ACTIVE
-(`EPIC-010` remains `PLANNED`; commits, pushes, tags, Releases, installation,
-and production cutover require separate authorization).
+TASK-088 and TASK-089 are COMPLETE; TASK-095 through TASK-098 are PLANNED. No
+Epic or Task is currently ACTIVE
+(`EPIC-024`, `EPIC-010`, and `EPIC-011` remain `PLANNED`; commits, pushes, tags,
+Releases, installation, and production cutover require separate authorization).
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -128,8 +133,8 @@ stated in its owning Epic.
 | `v0.1.1` | Root Transition Preview | The fixed-home prerequisite from `TASK-017`; the full Task completes in the `v0.1.2` cycle | `MILESTONE-SR1`, `MILESTONE-IR1` |
 | `v0.1.2` | Milestone Preview | `EPIC-006` and `EPIC-013` complete, including the preceding `EPIC-005` safety layer | Through `MILESTONE-ES1` |
 | `v0.1.3` | Milestone Preview | `EPIC-008` and `EPIC-016` complete, including all twelve provider Tasks, all four independent review Tasks, and both Epic acceptance gates; preceding `EPIC-007`, `EPIC-014`, and `EPIC-015` and `dolgorae.gul-consumer/v1` included; real Gul is not a prerequisite | Through `MILESTONE-ES1`, plus `MILESTONE-BH1-P`; excludes actual-Gul BH1 acceptance |
-| `v0.1.4` | Milestone Preview | Completed `EPIC-017`, then `EPIC-018`, `EPIC-019`, `EPIC-020`, `EPIC-009`, `EPIC-021`, and `EPIC-022` across the five-phase whole-Epic schedule; complete Aquarium/Podway/Gul acceptance, both repository gates, sequential combined Gate C and exact-artifact final QA before either release | Prior milestones under their accepted successor contracts, `MILESTONE-CW1`, `MILESTONE-BC1`, and actual-Gul `MILESTONE-BH1` only after TASK-088 passes |
-| `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` plus `EPIC-013`, `EPIC-016`, and `EPIC-017` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
+| `v0.1.4` | Milestone Preview | Completed `EPIC-017`, `EPIC-018`, `EPIC-019`, `EPIC-023`, `EPIC-020`, `EPIC-009`, `EPIC-021`, and `EPIC-022`, followed by `EPIC-024` (`TASK-095` through `TASK-098`); complete Aquarium/Podway/Gul acceptance, both repository gates, sequential combined Gate C and exact-artifact final QA on the superseding `TASK-098` H3/H4 pair before either release | Prior milestones under their accepted successor contracts, `MILESTONE-CW1`, `MILESTONE-BC1`, and actual-Gul `MILESTONE-BH1` revalidated on the superseding `TASK-098` H3/H4 pair |
+| `v0.2.0` | Personal Alpha and first customer-supported release | Every currently planned product Epic from `EPIC-005` through `EPIC-011` plus `EPIC-013`, `EPIC-016`, `EPIC-017`, and the `v0.1.4` sequence through `EPIC-024` complete, including `EPIC-010` operator and audit interfaces | Through `MILESTONE-PA1` |
 
 The `v0.1.x` releases are cumulative previews and do not claim Personal Alpha
 readiness, the complete target specification, or customer support. Read-only
@@ -138,8 +143,10 @@ of v0.1.4 or v0.2.0. A completion boundary makes a version eligible for release;
 release, change the changelog, authorize a tag or publication, or prove an
 installed runtime. New Epics adopted later do not enter the `v0.2.0` boundary
 unless this table is explicitly revised.
-EPIC-016 remains required for v0.1.3. The v0.1.4 sequence is EPIC-017
-(completed), EPIC-018, EPIC-019, EPIC-020, EPIC-009, EPIC-021, and EPIC-022.
+EPIC-016 remains required for v0.1.3. The v0.1.4 sequence is EPIC-017,
+EPIC-018, EPIC-019, EPIC-023, EPIC-020, EPIC-009, EPIC-021, and EPIC-022
+(completed), followed by EPIC-024 (`PLANNED` post-Gate-D runtime-upgrade
+resilience and superseding H3/H4 requalification).
 The new v0.1.4 work is a cumulative prerequisite of later release candidates;
 this adoption does not mark EPIC-010 or EPIC-011 complete or claim Personal
 Alpha readiness.
@@ -183,6 +190,12 @@ v0.1.0 artifact during Phase 4. TASK-089 introduces no unqualified rebuild.
 Substantive changes require an evidence-impact assessment across all consumers
 and affected requalification. Only existing explicitly permitted QA-neutral
 metadata exceptions apply. Neither product may be published before Gate D.
+After EPIC-022 completed on historical H3 `8fb6a3578ae3`, Master adopted
+EPIC-024 into unreleased v0.1.4; under this substantive-change rule, EPIC-024
+(`TASK-098`) produces a superseding H3 candidate, assesses and requalifies
+affected Aquarium, Podway, and Gul H4 paths, and records refreshed Gate C and
+Gate D acceptance before publication while retaining EPIC-022's historical
+provenance.
 Separate release workflows and authorization own publication.
 
 The shared dossier remains linked until the last of its seven consumer Epics
@@ -3061,6 +3074,206 @@ Verification: All 18 mandatory matrix rows accepted, both complete repository ga
 Handoff: Concrete release-ready handoff for separate release-handler workflows. Commits, pushes, tags, Releases and production cutover require their own authority.
 
 Epic acceptance: Complete — all three consumers have mandatory accepted evidence, both immutable artifacts have final QA and exact provenance, `MILESTONE-BH1` is unlocked for the verified H3/H4 pair, and Gate D passed. This Epic authorizes no publication and adds no provider downgrade guarantee.
+
+## EPIC-024: Runtime Upgrade Resilience and Setup-Bound Host Admission
+
+Status: `PLANNED`
+
+Detailed SOT: [Runtime upgrade resilience dossier](../todo/TODO-RUNTIME-UPGRADE-RESILIENCE.md)
+
+Goal: Remove brittle Codex and Claude upgrade blockers across local Profile
+configuration, idle shared Profile Server rollover, protocol subset/version
+validation, and External Specialist MCP host admission without changing
+Dolgorae's public wire contracts, immutable H1 lock, or active-Run safety
+guarantees, then requalify a superseding `v0.1.4` release candidate across
+Aquarium, Podway, and Gul.
+
+Delivery order: After completed `EPIC-022` and before `EPIC-010`. Assigned
+release: `v0.1.4` (and cumulative `v0.2.0`). Authorities:
+[product specification](../specs/README.md),
+[delegation runtime](../specs/dolgorae-v014-delegation-runtime.md),
+[architecture](../architecture/README.md), and
+[ADR-043](../architecture-decision-records/README.md#adr-043-relax-additive-host-configuration-quiescent-upgrade-rollover-and-setup-bound-host-pins-for-runtime-upgrade-resilience).
+
+### TASK-095: Digest-Only Unclassified Configuration Admission and Resilient Version/Schema Checks
+
+Status: `PLANNED`
+
+Update `configuration_snapshot` and `codex-0.157.0-required-subset.json`
+(`unknown_field: "conservative_process_static"`, noting that this manifest edit
+changes `compatibility_manifest_sha256` and recomputes `server_key`) so
+unclassified top-level keys in `$CODEX_HOME/config.toml` enter
+`process_static_configuration` only as JCS-sorted deterministic domain-separated
+SHA-256 digests (`_dolgorae_unclassified_sha256` over
+`"dolgorae-unclassified-config-v1\0" || utf8(name) || "\0" || JCS(value)`,
+keeping bare `profile doctor` offline and side-effect-free without stateful key
+files and never persisting raw values in `state.json`, Run manifests, binding
+history, exports, or diagnostics) with bounded key-name-only Profile diagnostics
+and classification hints, while replacing `contains("include")` with an explicit
+denylist (`include`, `includes`, `include_path`, `include_paths`,
+`config_include`, and reserved `_dolgorae_*` keys), keeping malformed TOML and
+unsafe/oversized file rejections, and requiring
+`checked_review_configuration_supported` (`checked_review_supported` /
+`accepted_checked_review_supported`) to refuse non-empty
+`_dolgorae_unclassified_sha256` before Reviewer allocation while ordinary
+caller-workspace/Gul/Specialist Runs admit it. Extend `parse_version` to SemVer
+§11 `MAJOR.MINOR.PATCH[-prerelease][+build]` (`0.158.0-rc.1 < 0.158.0`,
+`0.169.0-rc.1 < 0.169.0 < 0.170.0-alpha.1`, `rc.9 < rc.10`, `+build` ignored for
+precedence, leading-zero numeric parsing preserved), require non-prerelease
+exact match for `tested` registry lookup, and refuse `-prerelease`/`+build`
+runtimes on H1-locked checked one-shot Specialist Review. Remove `absent: true`
+on `v2/TurnStartParams.json#/properties/developerInstructions` while omitting
+`developerInstructions` on outbound `turn/start`, admit `thread/settings/updated`
+frames via a side-effect-free check over `threadId`, all workspace/sandbox
+predicates, `model`, and current authoritative `effort` as audited no-ops while
+keeping drift fail-closed, and keep the source-distributed in-repo
+`skills/use-dolgorae/` guidance (`SKILL.md`, `references/configuration.md`)
+aligned without mutating host-installed skills.
+
+Verification: unit and integration matrices for unclassified `config.toml` keys
+(`server_key` isolation, side-effect-free `profile doctor`, secret-canary
+absence across `state.json`, binding history, Run manifests, exports, and
+diagnostics, explicit `include`/`_dolgorae_*` rejection vs `include_*` toggle
+admission, checked-review refusal on non-empty `_dolgorae_unclassified_sha256`
+vs ordinary-Run admission, and live-member unclassified-key write behavior),
+SemVer §11 precedence + `tested` registry + H1 checked-review pre-release
+refusal, additive `TurnStartParams` fixtures, side-effect-free no-op versus
+drifting `thread/settings/updated` notifications, `ADR-014` conformance
+fixtures, the complete default repository gate, and independent adversarial
+review.
+
+### TASK-096: Quiescent Upgrade Rollover for Qualified and Successor Profile Servers
+
+Status: `PLANNED`
+
+Depends on: `TASK-095`.
+
+Keep `ensure_qualified_global_server` on `QuiescentRolloverPolicy::Deny` for
+`ensure_retained_global_server` (`semantic.rs:3407, 3503, 17788`,
+`prepare_legacy_reviewer`) and `--confirm-server-key` (`profile.rs:1371`),
+introduce `ensure_qualified_global_server_for_admission`
+(`UpgradeWhenQuiescent`) wired at the exact new-admission sites (`semantic.rs:3505`
+new `StartRun`, `semantic.rs:8789` new qualified external/brokered Specialist
+`StartRun`, and `semantic.rs:1134/1172` fresh MCP `prepare_reviewer` via an
+explicit server-readiness parameter on `prepare_reviewer_with_binding`), and
+enable `UpgradeWhenQuiescent` in `ensure_global_server_for_review`
+(`review_recovery.rs:212` -> `semantic.rs:1170`) by threading `review_owner`
+through `automatic_quiescent_migration` -> `start_snapshot_for_migration`
+(`Reserved` at new-epoch reservation, `Ready` at commit, and `Preexisting` on
+the concurrent-winner attach branch). Under the retained singleton lock order
+(`home.lock` then binary-ordered `old/new server.lock`, carried forward in
+`ADR-043`), automatically retire a `ready` incumbent and migrate the canonical
+`CODEX_HOME` only when complete membership on both keys and exact
+process/drainer/socket proofs establish zero live, starting, uncertain, or
+orphan Run members, no stop reservation or `migration_blocked` fence exists, and
+SemVer §11 precedence satisfies `candidate_version >= incumbent_version` (also
+preventing legacy generic `Allow` from retiring a strictly newer incumbent, so
+pre-policy legacy recovery against a newer idle server requires explicit
+Operator stop/migrate). Preserve migration compensation (`rolled_back` /
+`migration_blocked`) and binding-history rules, retain `Deny` for downgrades,
+live/orphan members, `profile doctor --launch-probe`, `--confirm-server-key`,
+and retained Run execution, and keep the source-distributed in-repo
+`skills/use-dolgorae/` lifecycle/recovery guidance (`references/lifecycle.md`,
+`references/recovery.md`) aligned without mutating host-installed skills.
+
+Verification: deterministic fault-barrier and multi-process E2E tests for idle
+version upgrades (`0.169.0` -> `0.169.1` / `0.170.0`) across CLI `StartRun`,
+external/brokered Specialist `StartRun`, CLI `specialist review`, and MCP
+`dolgorae_review`, manifest-change same-version rollover, downgrade refusal
+(including pre-policy legacy recovery against a newer idle incumbent and its
+Operator migration path), live/orphan member refusal, retained qualified Run
+bindings never entering rollover, review rollover
+`Reserved`/`Ready`/`Preexisting` ownership + crash recovery +
+`retire_review_server` cleanup, mid-rollover crash rollback and
+`migration_blocked` operator recovery, the complete default repository gate, and
+independent adversarial review.
+
+### TASK-097: Minimum-Version, Non-Executing Setup-Bound Admission, and Split-Digest Refresh for Caller-Scoped Specialist Hosts
+
+Status: `PLANNED`
+
+Depends on: `TASK-095`.
+
+Across the 4-cell `(OwnerKind x caller_scope)` matrix in `src/trusted_host.rs`,
+apply operator-attested route minimum-version floors (`HostRoute::Codex >=
+0.169.0` under wire route `codex-0.160.0`; `HostRoute::Claude >= 2.1.310` under
+wire route `claude-code-2.1.295`), hardened non-executing `verify_executable`
+setup binding (adding uid/root ownership and non-group/world-writable checks to
+`O_NOFOLLOW`, full-path `canonicalize`, and pre/post `dev/ino/len/mtime`
+bracket around SHA-256, never launching the host binary), `schema_version: 2`
+split digests, and online `owner-executable-refresh` to both `External +
+caller_scope: Some` and `Managed + caller_scope: Some` stores, while keeping
+`Managed + caller_scope: None` bound to exact root-Run `launch_snapshot`
+equality (refresh refused) and keeping `External + caller_scope: None` refused.
+In `schema_version: 2`, separate `owner_identity_digest` (excluding `executable`
+and `adapter_version`) from `executable_binding` (full SHA-256 at setup,
+refresh, and `launch_recipe`; pinned `dev/ino/len/mtime` fast-path on
+`load`/`revalidate` returning existing checked `RECOVERY_REQUIRED` with internal
+`details.reason = "host_executable_refresh_required"` on drift so zero new wire
+error codes are introduced) plus immutable `migrated_from_v1_digest` on `v1 ->
+v2` refresh so all five consumer modules (`host_invocation` at SQLite
+`metadata.schema_version = 1` without mutating `invocations.sqlite` on refresh,
+`managed_specialist`, `native_consumer`, `native_preparation`, `source_binding`)
+accept `{owner_identity_digest, migrated_from_v1_digest}` for prior records via
+a single atomic `owner.json` publish while writing `owner_identity_digest` on
+new `v2` stores and records. Relax `adapter_version` validation to
+`recorded_adapter_version <= CARGO_PKG_VERSION` across both `v1` and `v2` stores
+and preserve unchanged `v1` (`0.164.0` / `2.1.310`) recovery. Gate online
+`owner-executable-refresh` (authenticating stored `OwnerRecord` + live Operator
++ Controller without requiring the overwritten prior binary on disk, optional
+`--allow-downgrade` down to the route floor) on concrete `HostStore` quiescence:
+exclusive `host.lock`, no `STAGING`/sidecar/`*.pending` files, and zero
+unsettled `attempted = 1` `native_calls` rows (durable open External Engagements
+and hired Specialists never block refresh).
+
+Verification: unit, stdio fault-proxy, and native host-invocation E2E suites
+covering all four `(OwnerKind x caller_scope)` cells, zero host-binary execution
+during setup/refresh, hardened `verify_executable` rejections,
+`RECOVERY_REQUIRED` (`host_executable_refresh_required` reason) drift detection,
+online `owner-executable-refresh` with open hired engagements and overwritten
+prior binary (`v1 -> v2` `migrated_from_v1_digest` replay across all five
+consumer modules, `--allow-downgrade` gate, unsettled `attempted = 1` refusal),
+`v1` and `v2` `adapter_version <= CARGO_PKG_VERSION` continuity, legacy `0.164.0`
+store recovery, the complete default repository gate, and independent adversarial
+review.
+
+### TASK-098: Superseding v0.1.4 H3 Candidate, Three-Consumer Requalification, and Refreshed Gate C/D Handoff
+
+Status: `PLANNED`
+
+Depends on: `TASK-096` and `TASK-097`.
+
+Package a superseding intended-version `v0.1.4` H3 Dolgorae candidate with zero
+wire drift against immutable `H1` (`0927cbf8...`) and
+`dolgorae-public-v2.descriptor.pb` (`c34b1da6...`) and isolated skill-package
+verification (`make validate-agent-skills`, without mutating host-installed
+skills). Assess impact and execute mandatory three-consumer requalification
+across Aquarium (`AQ-01..06`, including fresh upgraded external Codex/Claude MCP
+host and online refresh with open engagements), Podway (`PW-01..06`, including
+caller-scoped `Managed` adapter/receipt/refresh/recovery verification), and Gul
+(`GU-01..06`, including Gul H4 adoption of the superseding H3 binary,
+deterministic `release-lifecycle` and 250-turn `release-history`, in-place
+upgrade from historical H3 `8fb6a3578ae3` across both quiescent rollover and
+live-Gul-member operator-migration paths, digest-only unclassified `config.toml`
+checks, and separately authorized bounded isolated real-account verification).
+Complete independent cross-verification (`R-D` and `R-G`), publish bounded
+`aquarium.promoted-evidence/v1` Gate C and Gate D packages under
+`evidence/aquarium/EPIC-024/`, synchronize
+[Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md)
+and `CHANGELOG.md` while preserving historical `EPIC-022` records, and close out
+the Epic dossier.
+
+Verification: both repositories' complete gates pass with zero unqualified
+rebuilds on the exact superseding H3/H4 artifacts, `validate_frozen_h1.py` and
+`validate_current_v2_contract.py` pass, all 18 consumer rows pass independent
+review, and promoted Gate C/D manifests verify cleanly.
+
+Epic acceptance: All four Tasks pass their completion gates; upgraded Codex and
+Claude installations operate across Gul sessions, Specialist workflows, and
+External Specialist MCP without compiled-in hash edits or idle manual server
+migrations; immutable Run bindings, single-writer safety, and H1/public-v2 wire
+contracts remain intact; and refreshed Gate C and Gate D acceptance is recorded
+for the superseding `v0.1.4` / Gul `v0.1.0` release pair.
 
 ## EPIC-010: Operator and Audit Interfaces
 
