@@ -1147,7 +1147,12 @@ pub(crate) fn prepare_reviewer(
     }
     global_profile_binding.record_qualified(&home)?;
     let state_root = workspace_state_root(&view)?;
-    prepare_reviewer_with_binding(view, state_root, global_profile_binding, None)
+    prepare_reviewer_with_binding(
+        view,
+        state_root,
+        global_profile_binding,
+        ReviewerServerReadiness::Admission,
+    )
 }
 
 pub(crate) fn prepare_legacy_reviewer(
@@ -1158,14 +1163,21 @@ pub(crate) fn prepare_legacy_reviewer(
     let home = DolgoraeHome::system()?;
     let binding = ResolvedGlobalProfile::resolve(&home, profile_name)?.prepare(&home)?;
     let state_root = workspace_state_root(&view)?;
-    prepare_reviewer_with_binding(view, state_root, binding, None)
+    prepare_reviewer_with_binding(view, state_root, binding, ReviewerServerReadiness::Retained)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ReviewerServerReadiness<'a> {
+    Retained,
+    Admission,
+    Owned(&'a crate::profile::ReviewServerOwner),
 }
 
 pub(crate) fn prepare_reviewer_with_binding(
     view: WorkspaceView,
     state_root: PathBuf,
     global_profile_binding: GlobalProfileBinding,
-    review_owner: Option<&crate::profile::ReviewServerOwner>,
+    readiness: ReviewerServerReadiness<'_>,
 ) -> Result<PreparedReviewer, MachineError> {
     if !global_profile_binding
         .launch_snapshot
@@ -1174,11 +1186,16 @@ pub(crate) fn prepare_reviewer_with_binding(
         return Err(crate::direct_review_target::reading_boundary_unsupported());
     }
     let profile_name = &global_profile_binding.selected_name;
-    let state = match review_owner {
-        Some(owner) => {
+    let state = match readiness {
+        ReviewerServerReadiness::Owned(owner) => {
             crate::profile::ensure_global_server_for_review(&global_profile_binding, owner)?
         }
-        None => crate::profile::ensure_retained_global_server(&global_profile_binding)?,
+        ReviewerServerReadiness::Admission => {
+            crate::profile::ensure_qualified_global_server_for_admission(&global_profile_binding)?
+        }
+        ReviewerServerReadiness::Retained => {
+            crate::profile::ensure_retained_global_server(&global_profile_binding)?
+        }
     };
     let configuration = &global_profile_binding
         .launch_snapshot
@@ -1204,7 +1221,7 @@ pub(crate) fn prepare_reviewer_with_binding(
     plan.agent_configuration.schema_version = 2;
     plan.agent_configuration.runtime_profile_snapshot_sha256 = global_profile_binding.digest()?;
     Ok(PreparedReviewer {
-        pinned_server: review_owner.map(|_| state),
+        pinned_server: matches!(readiness, ReviewerServerReadiness::Owned(_)).then_some(state),
         view,
         state_root,
         plan,
@@ -3511,7 +3528,7 @@ fn start_caller_run_generation<I: CallerStartGeneration>(
             let state = if member.is_some() {
                 crate::profile::ensure_retained_global_server(&binding)?
             } else {
-                crate::profile::ensure_qualified_global_server(&binding)?
+                crate::profile::ensure_qualified_global_server_for_admission(&binding)?
             };
             let (model, effort) = validate_caller_start_catalog(&request, &state)?;
             let profile_snapshot = run_profile_snapshot(&binding.launch_snapshot)?;
@@ -8793,12 +8810,40 @@ fn start_run_typed(
             "the selected global Profile differs from the prepared consumer binding",
         ));
     }
-    let state = select_start_server(reviewer, || {
-        if external.is_some() || brokered.is_some() {
-            crate::profile::ensure_retained_global_server(&global_profile_binding)
-        } else {
-            crate::profile::ensure_global_server(&global_profile_binding)
+    let state_root = home.workspace_root(&view.workspace_id);
+    let reservations = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
+    let (reservation_directory, reservation_operation) = if fork.is_some() {
+        ("run-fork", "fork_run")
+    } else {
+        ("run-start", "start_run")
+    };
+    let load_allocation = || -> Result<_, MachineError> {
+        let guard = reservations.lock_allocation(reservation_directory, &idempotency_key)?;
+        let prior = reservations.load_operation(
+            reservation_directory,
+            reservation_operation,
+            &idempotency_key,
+        )?;
+        Ok((guard, prior))
+    };
+    let qualified_specialist = (external.is_some() || brokered.is_some())
+        && global_profile_binding.uses_qualified_launch_policy();
+    let (presented, qualified_allocation) = if qualified_specialist {
+        // An accepted allocation must keep retained Profile policy. Hold this
+        // guard through publication so an equal retry sees any new reservation.
+        let presented = presented_controller_from_carrier(&carrier, 1)?;
+        (Some(presented), Some(load_allocation()?))
+    } else {
+        (None, None)
+    };
+    let state = select_start_server(reviewer, || match &qualified_allocation {
+        Some((_, Some(_))) => {
+            crate::profile::ensure_qualified_global_server(&global_profile_binding)
         }
+        Some((_, None)) => {
+            crate::profile::ensure_qualified_global_server_for_admission(&global_profile_binding)
+        }
+        None => crate::profile::ensure_global_server(&global_profile_binding),
     })?;
     let model = model.unwrap_or_else(|| state.default_model.clone());
     if !state.models.contains(&model) {
@@ -8827,9 +8872,11 @@ fn start_run_typed(
             "a Run pins nonempty instructions of at most 65536 bytes",
         ));
     }
-    let presented_controller = presented_controller_from_carrier(&carrier, 1)?;
+    let presented_controller = match presented {
+        Some(presented) => presented,
+        None => presented_controller_from_carrier(&carrier, 1)?,
+    };
     let binding = presented_controller.binding;
-    let state_root = workspace_state_root(&view)?;
     let orchestration_policy = if let Some(launch) = presented_controller.orchestration_launch {
         if reviewer.is_some()
             || external.is_some()
@@ -8994,18 +9041,10 @@ fn start_run_typed(
             .as_bytes(),
         );
     }
-    let reservations = StartReservationStore::new(SystemWorkspacePlatform, &state_root);
-    let (reservation_directory, reservation_operation) = if fork.is_some() {
-        ("run-fork", "fork_run")
-    } else {
-        ("run-start", "start_run")
+    let (_allocation, prior_reservation) = match qualified_allocation {
+        Some(held) => held,
+        None => load_allocation()?,
     };
-    let _allocation = reservations.lock_allocation(reservation_directory, &idempotency_key)?;
-    let prior_reservation = reservations.load_operation(
-        reservation_directory,
-        reservation_operation,
-        &idempotency_key,
-    )?;
     let reservation = match prior_reservation {
         Some(held) => held,
         None => reservations.reserve(&StartReservation {

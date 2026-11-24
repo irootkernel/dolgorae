@@ -392,9 +392,23 @@ pub fn ensure_global_server(
     Ok(state)
 }
 
-/// Qualified admission cannot replace another contract for this CODEX_HOME.
+/// Retained qualified execution cannot replace another contract for this CODEX_HOME.
 pub(crate) fn ensure_qualified_global_server(
     binding: &crate::global_runtime::GlobalProfileBinding,
+) -> Result<ServerState, MachineError> {
+    ensure_qualified_server(binding, QuiescentRolloverPolicy::Deny)
+}
+
+/// A fresh qualified admission can replace only an eligible quiescent contract.
+pub(crate) fn ensure_qualified_global_server_for_admission(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+) -> Result<ServerState, MachineError> {
+    ensure_qualified_server(binding, QuiescentRolloverPolicy::UpgradeWhenQuiescent)
+}
+
+fn ensure_qualified_server(
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    rollover_policy: QuiescentRolloverPolicy,
 ) -> Result<ServerState, MachineError> {
     binding.validate_for_recovery()?;
     let home = DolgoraeHome::system()?;
@@ -406,7 +420,7 @@ pub(crate) fn ensure_qualified_global_server(
         &context,
         &binding.launch_snapshot,
         None,
-        QuiescentRolloverPolicy::Deny,
+        rollover_policy,
         None,
         &mut OperatorHandoff::none(),
     )
@@ -467,10 +481,44 @@ pub(crate) fn ensure_global_server_for_review(
         &context,
         &binding.launch_snapshot,
         None,
-        QuiescentRolloverPolicy::Deny,
+        QuiescentRolloverPolicy::UpgradeWhenQuiescent,
         Some(owner),
         &mut OperatorHandoff::none(),
     )
+}
+
+// The private E2E fixture drives the same two production phases with a pause
+// after PREPARE has released its locks. No product command can pause here.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn review_rollover_fixture(
+    home: &DolgoraeHome,
+    binding: &crate::global_runtime::GlobalProfileBinding,
+    owner: &ReviewServerOwner,
+    after_prepare: impl FnOnce(&str) -> Result<(), MachineError>,
+) -> Result<ServerState, MachineError> {
+    binding.validate_for_recovery()?;
+    validate_review_server_owner(owner)?;
+    let context = Context {
+        registry_path: home.root().join("profiles.yaml"),
+        dolgorae_home_root: home.root().to_path_buf(),
+    };
+    let snapshot = &binding.launch_snapshot;
+    let paths = LifecyclePaths::open(&context, snapshot)?;
+    let StartPrepared::QuiescentRollover(old_server_key) = prepare_start(
+        &paths,
+        snapshot,
+        None,
+        Some(owner),
+        &mut OperatorHandoff::none(),
+    )?
+    else {
+        return Err(internal(
+            "fixture preparation did not observe the incumbent",
+        ));
+    };
+    after_prepare(&old_server_key)?;
+    automatic_quiescent_migration(&context, snapshot, &old_server_key, Some(owner))
 }
 
 /// Observe only existing ownership and lifecycle files. This deliberately does
@@ -1221,7 +1269,7 @@ fn doctor(parsed: &Parsed, member_quiescer: ProfileMemberQuiescer) -> Result<Val
         let state_path = profile_state_path(&context, &snapshot);
         probed_state = read_state_if_running(&state_path)?;
         if probed_state.is_none() {
-            probed_state = Some(start_snapshot_for_probe(
+            probed_state = Some(start_snapshot_without_rollover(
                 &context,
                 &snapshot,
                 &mut OperatorHandoff::none(),
@@ -1411,7 +1459,7 @@ fn server_start(parsed: &Parsed) -> Result<Value, MachineError> {
                     server_key: binding.server_key.clone(),
                     launch_snapshot_sha256: binding.launch_snapshot_sha256.clone(),
                 })?;
-            start_snapshot(
+            start_snapshot_without_rollover(
                 &context,
                 &binding.launch_snapshot,
                 &mut OperatorHandoff::none(),
@@ -1665,6 +1713,7 @@ fn server_migrate(
             migration_path: &migration_path,
             migration: &mut migration,
             interrupt: parsed.flag("--interrupt"),
+            review_owner: None,
         },
         &mut stop_operator,
         || parsed.authorize_operator("profile.server.migrate"),
@@ -1772,6 +1821,7 @@ struct MigrationExecution<'a> {
     migration_path: &'a Path,
     migration: &'a mut Value,
     interrupt: bool,
+    review_owner: Option<&'a ReviewServerOwner>,
 }
 
 fn execute_migration(
@@ -1788,6 +1838,7 @@ fn execute_migration(
         migration_path,
         migration,
         interrupt,
+        review_owner,
     } = execution;
     if let Err(failure) = stop_snapshot_for_migration(
         context,
@@ -1846,6 +1897,7 @@ fn execute_migration(
         context,
         new_snapshot,
         migration_id,
+        review_owner,
         &mut start_operator,
     ) {
         Ok(state) => state,
@@ -2072,6 +2124,7 @@ fn compensate_stopped_migration(
         context,
         &old_state.snapshot,
         migration_id,
+        None,
         &mut OperatorHandoff::none(),
     );
     migration["phase"] = Value::String(
@@ -2094,6 +2147,7 @@ fn automatic_quiescent_migration(
     context: &Context,
     new_snapshot: &ProfileSnapshot,
     old_server_key: &str,
+    review_owner: Option<&ReviewServerOwner>,
 ) -> Result<ServerState, MachineError> {
     require_canonical_persisted_server_key(old_server_key)?;
     require_canonical_persisted_server_key(&new_snapshot.server_key)?;
@@ -2115,21 +2169,19 @@ fn automatic_quiescent_migration(
         &new_root,
         &new_snapshot.server_key,
     )?;
-    crate::global_runtime::GlobalMembershipStore::from_root(
-        &context.dolgorae_home_root,
-        &new_snapshot.profile_name,
-        old_server_key,
-    )?
-    .require_quiescent_under_server_lock(&new_snapshot.profile_name, "automatic_migrate")?;
-    crate::global_runtime::GlobalMembershipStore::from_root(
+    let new_membership = crate::global_runtime::GlobalMembershipStore::from_root(
         &context.dolgorae_home_root,
         &new_snapshot.profile_name,
         &new_snapshot.server_key,
-    )?
-    .require_quiescent_under_server_lock(&new_snapshot.profile_name, "automatic_migrate")?;
+    )?;
     verify_migration_fence(
         &migration_path,
         None,
+        &new_snapshot.profile_name,
+        &new_snapshot.server_key,
+    )?;
+    crate::global_profile::require_recorded_binding_under_lifecycle_locks(
+        &context.dolgorae_home_root,
         &new_snapshot.profile_name,
         &new_snapshot.server_key,
     )?;
@@ -2142,10 +2194,19 @@ fn automatic_quiescent_migration(
             Value::Null,
         )
     })?;
+    if active.canonical_codex_home != new_snapshot.canonical_codex_home {
+        return Err(profile_mismatch(
+            &new_snapshot.profile_name,
+            "home_active_codex_home",
+            json!(new_snapshot.canonical_codex_home),
+            json!(active.canonical_codex_home),
+        ));
+    }
     if active.server_key == new_snapshot.server_key
         && active.lifecycle == "ready"
         && active.transition_token.is_none()
     {
+        new_membership.load_under_server_lock(&new_root)?;
         let new_state = read_state_if_running(&new_root.join("state.json"))?.ok_or_else(|| {
             profile_mismatch(
                 &new_snapshot.profile_name,
@@ -2154,7 +2215,31 @@ fn automatic_quiescent_migration(
                 json!(false),
             )
         })?;
-        return attach_running(new_snapshot, &new_state, Some(&active));
+        if new_state.lifecycle != "ready"
+            || new_state.snapshot.canonical_codex_home != new_snapshot.canonical_codex_home
+            || new_state.snapshot.launch_contract_sha256 != new_snapshot.launch_contract_sha256
+        {
+            return Err(profile_mismatch(
+                &new_snapshot.profile_name,
+                "automatic_rollover_requested_contract",
+                json!({
+                    "canonical_codex_home": new_snapshot.canonical_codex_home,
+                    "lifecycle": "ready",
+                    "launch_contract_sha256": new_snapshot.launch_contract_sha256,
+                }),
+                json!({
+                    "canonical_codex_home": new_state.snapshot.canonical_codex_home,
+                    "lifecycle": new_state.lifecycle,
+                    "launch_contract_sha256": new_state.snapshot.launch_contract_sha256,
+                }),
+            ));
+        }
+        let attached = attach_running(new_snapshot, &new_state, Some(&active))?;
+        if let Some(owner) = review_owner {
+            require_unprepared_review_server(&new_root, new_snapshot, owner)?;
+            record_preexisting_review_server(&new_root, owner, &attached)?;
+        }
+        return Ok(attached);
     }
     if active.server_key != old_server_key
         || active.lifecycle != "ready"
@@ -2177,7 +2262,8 @@ fn automatic_quiescent_migration(
             json!(false),
         )
     })?;
-    if old_state.server_key != old_server_key
+    if old_state.lifecycle != "ready"
+        || old_state.server_key != old_server_key
         || old_state.snapshot.canonical_codex_home != new_snapshot.canonical_codex_home
         || active.server_epoch != old_state.server_epoch
         || active.pid != Some(old_state.pid)
@@ -2199,47 +2285,51 @@ fn automatic_quiescent_migration(
             }),
         ));
     }
+    let profile = &new_snapshot.profile_name;
+    if parse_version(profile, &new_snapshot.codex_version)?
+        < parse_version(profile, &old_state.snapshot.codex_version)?
+    {
+        return Err(MachineError::new(
+            "PROFILE_MIGRATION_REQUIRED",
+            "automatic rollover cannot replace a newer incumbent",
+            false,
+            json!({
+                "profile": profile,
+                "previous_server_key": old_server_key,
+                "new_server_key": new_snapshot.server_key,
+                "drift_fields": ["codex_version"],
+                "required_action": "profile_server_migrate_with_operator",
+            }),
+        ));
+    }
+    if old_state.pid != old_state.pgid
+        || old_state.uid != DarwinSystem.current_uid()
+        || old_state.drainer_pid != old_state.drainer_pgid
+        || old_state.drainer_uid != DarwinSystem.current_uid()
+        || !process_identity_matches_on_boot(
+            old_state.boot_session_uuid,
+            old_state.drainer_pid,
+            old_state.drainer_uid,
+            old_state.drainer_pgid,
+            &old_state.drainer_fingerprint,
+        )
+    {
+        return Err(profile_server_busy(
+            profile,
+            old_server_key,
+            "automatic rollover requires the exact recorded server group and log drainer",
+        ));
+    }
     verify_recorded_socket(&old_state.snapshot.profile_name, &old_state)?;
-
-    let old_scope = MembershipScope {
-        profile: old_state.snapshot.profile_name.clone(),
-        server_key: old_server_key.to_owned(),
-    };
-    let old_index = crate::global_runtime::GlobalMembershipStore::from_root(
+    crate::global_runtime::GlobalMembershipStore::from_root(
         &context.dolgorae_home_root,
-        &old_state.snapshot.profile_name,
+        profile,
         old_server_key,
     )?
-    .load_under_server_lock(&old_root)?;
-    if old_index.revision != old_state.membership_revision {
-        return Err(old_scope.incomplete("membership journal and server state revisions differ"));
-    }
-    let orphans = old_index
-        .members
-        .values()
-        .filter(|member| {
-            membership_orphan_reason(&context.dolgorae_home_root, old_server_key, member).is_some()
-        })
-        .count();
-    if orphans != 0 {
-        return Err(old_scope.incomplete(format!(
-            "automatic rollover source has {} orphan members",
-            orphans
-        )));
-    }
-    let members = old_index
-        .members
-        .values()
-        .filter(|member| {
-            member.disposition != crate::global_runtime::MembershipDisposition::Released
-        })
-        .map(|member| json!({"workspace_id": member.workspace_id, "run_id": member.run_id}))
-        .collect::<Vec<_>>();
-    if !members.is_empty() {
-        return Err(old_scope.incomplete(format!(
-            "automatic rollover would interrupt {} live run member(s); use operator-authorized profile server migrate",
-            members.len()
-        )));
+    .require_quiescent_under_server_lock(profile, "automatic_migrate")?;
+    new_membership.require_quiescent_under_server_lock(profile, "automatic_migrate")?;
+    if let Some(owner) = review_owner {
+        require_unprepared_review_server(&new_root, new_snapshot, owner)?;
     }
 
     let migration_id = Uuid::now_v7();
@@ -2264,6 +2354,7 @@ fn automatic_quiescent_migration(
             migration_path: &migration_path,
             migration: &mut migration,
             interrupt: false,
+            review_owner,
         },
         &mut OperatorHandoff::none(),
         || Ok(OperatorHandoff::none()),
@@ -4341,7 +4432,7 @@ fn start_snapshot(
     )
 }
 
-fn start_snapshot_for_probe(
+fn start_snapshot_without_rollover(
     context: &Context,
     snapshot: &ProfileSnapshot,
     operator: &mut OperatorHandoff,
@@ -4360,6 +4451,7 @@ fn start_snapshot_for_migration(
     context: &Context,
     snapshot: &ProfileSnapshot,
     migration_id: Uuid,
+    review_owner: Option<&ReviewServerOwner>,
     operator: &mut OperatorHandoff,
 ) -> Result<ServerState, MachineError> {
     start_snapshot_inner(
@@ -4367,7 +4459,7 @@ fn start_snapshot_for_migration(
         snapshot,
         Some(migration_id),
         QuiescentRolloverPolicy::Deny,
-        None,
+        review_owner,
         operator,
     )
 }
@@ -4376,6 +4468,7 @@ fn start_snapshot_for_migration(
 enum QuiescentRolloverPolicy {
     Allow,
     Deny,
+    UpgradeWhenQuiescent,
 }
 
 /// The Runtime Profile singleton start, split into the three phases ADR-016's
@@ -4414,14 +4507,16 @@ fn start_snapshot_inner(
     let reservation = match prepare_start(&paths, snapshot, migration_id, review_owner, operator)? {
         StartPrepared::Attached(state) => return Ok(*state),
         StartPrepared::QuiescentRollover(old_server_key) => {
-            if rollover_policy == QuiescentRolloverPolicy::Deny {
-                return Err(profile_launch_conflict(
+            return match rollover_policy {
+                QuiescentRolloverPolicy::Deny => Err(profile_launch_conflict(
                     &snapshot.profile_name,
                     &old_server_key,
                     "this start policy does not permit replacing a different active launch contract",
-                ));
-            }
-            return automatic_quiescent_migration(context, snapshot, &old_server_key);
+                )),
+                QuiescentRolloverPolicy::Allow | QuiescentRolloverPolicy::UpgradeWhenQuiescent => {
+                    automatic_quiescent_migration(context, snapshot, &old_server_key, review_owner)
+                }
+            };
         }
         StartPrepared::Reserved(reservation) => reservation,
     };
@@ -4533,31 +4628,14 @@ fn prepare_start(
         &snapshot.profile_name,
         &snapshot.server_key,
     )?;
-    if let Some(owner) = review_owner
-        && read_review_ownership(&paths.root, &snapshot.server_key, owner)?.is_some()
-    {
-        return Err(profile_server_busy(
-            &snapshot.profile_name,
-            &snapshot.server_key,
-            "this review already has a durable server preparation record",
-        ));
+    if let Some(owner) = review_owner {
+        require_unprepared_review_server(&paths.root, snapshot, owner)?;
     }
     let active = read_home_active(&paths.active_path)?;
     if let Some(state) = read_state_if_running(&paths.state_path)? {
         let attached = attach_running(snapshot, &state, active.as_ref())?;
         if let Some(owner) = review_owner {
-            write_review_ownership(
-                &paths.root,
-                &ReviewServerOwnership {
-                    schema_version: 1,
-                    owner: owner.clone(),
-                    server_key: snapshot.server_key.clone(),
-                    server_epoch: attached.server_epoch,
-                    launch_token: None,
-                    phase: ReviewOwnershipPhase::Preexisting,
-                    state: Some(attached.clone()),
-                },
-            )?;
+            record_preexisting_review_server(&paths.root, owner, &attached)?;
         }
         drop(server_lock);
         drop(home_lock);
@@ -4684,6 +4762,40 @@ fn prepare_start(
         socket,
         review_owner: review_owner.cloned(),
     }))
+}
+
+fn require_unprepared_review_server(
+    root: &Path,
+    snapshot: &ProfileSnapshot,
+    owner: &ReviewServerOwner,
+) -> Result<(), MachineError> {
+    if read_review_ownership(root, &snapshot.server_key, owner)?.is_some() {
+        return Err(profile_server_busy(
+            &snapshot.profile_name,
+            &snapshot.server_key,
+            "this review already has a durable server preparation record",
+        ));
+    }
+    Ok(())
+}
+
+fn record_preexisting_review_server(
+    root: &Path,
+    owner: &ReviewServerOwner,
+    state: &ServerState,
+) -> Result<(), MachineError> {
+    write_review_ownership(
+        root,
+        &ReviewServerOwnership {
+            schema_version: 1,
+            owner: owner.clone(),
+            server_key: state.server_key.clone(),
+            server_epoch: state.server_epoch,
+            launch_token: None,
+            phase: ReviewOwnershipPhase::Preexisting,
+            state: Some(state.clone()),
+        },
+    )
 }
 
 /// Verifies that a recorded running server is still the one this contract
@@ -9179,21 +9291,18 @@ mod tests {
         assert!(!repair_stale_migration_fence(&context, &home, &"c".repeat(64)).unwrap());
         assert!(!repair_stale_migration_fence(&context, &home, &"e".repeat(64)).unwrap());
 
-        atomic_replace(
-            &migration_path,
-            serde_json::to_vec_pretty(&json!({
+        for phase in ["prepared", "applying"] {
+            let in_flight = serde_json::to_vec_pretty(&json!({
                 "migration_id": Uuid::now_v7(),
-                "phase": "applying",
+                "phase": phase,
                 "old_server_key": "c".repeat(64),
                 "new_server_key": "d".repeat(64),
             }))
-            .unwrap()
-            .as_slice(),
-        )
-        .unwrap();
-        assert!(!repair_stale_migration_fence(&context, &home, &"c".repeat(64)).unwrap());
-        let in_flight: Value = serde_json::from_slice(&fs::read(&migration_path).unwrap()).unwrap();
-        assert_eq!(in_flight["phase"], "applying");
+            .unwrap();
+            atomic_replace(&migration_path, &in_flight).unwrap();
+            assert!(!repair_stale_migration_fence(&context, &home, &"c".repeat(64)).unwrap());
+            assert_eq!(fs::read(&migration_path).unwrap(), in_flight);
+        }
 
         atomic_replace(
             &migration_path,
@@ -10942,6 +11051,22 @@ else:
         let new_root = support.join("profiles").join(&new_key);
         secure_dir(&old_root).unwrap();
         secure_dir(&new_root).unwrap();
+        atomic_replace(
+            &support.join("profile-bindings.json"),
+            &serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "bindings": {
+                    (format!("{}:{new_key}", snapshot.profile_name)): {
+                        "selected_name": snapshot.profile_name,
+                        "definition_sha256": "e".repeat(64),
+                        "server_key": new_key,
+                        "launch_snapshot_sha256": "f".repeat(64),
+                    },
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let socket = PathBuf::from(format!("/tmp/ddr-{}.sock", Uuid::now_v7()));
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let socket_metadata = fs::symlink_metadata(&socket).unwrap();
@@ -10964,22 +11089,83 @@ else:
             &serde_json::to_vec_pretty(&state).unwrap(),
         )
         .unwrap();
-        write_home_active(
-            &home.join("active.json"),
-            &HomeActive {
-                schema_version: 1,
-                canonical_codex_home: snapshot.canonical_codex_home.clone(),
-                server_key: new_key,
-                server_epoch: state.server_epoch,
-                lifecycle: "ready".to_owned(),
-                pid: Some(state.pid),
-                transition_token: None,
-            },
+        let membership = crate::global_runtime::GlobalMembershipStore::from_root(
+            &support,
+            &snapshot.profile_name,
+            &new_key,
         )
         .unwrap();
+        let workspace_id = "c".repeat(64);
+        let run_id = Uuid::now_v7();
+        let index = membership
+            .record(
+                &workspace_id,
+                run_id,
+                crate::global_runtime::MembershipDisposition::Active,
+            )
+            .unwrap();
+        let run_root = support
+            .join("workspaces")
+            .join(&workspace_id)
+            .join("runs")
+            .join(run_id.to_string());
+        secure_dir(&run_root).unwrap();
+        atomic_replace(
+            &run_root.join("manifest.json"),
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "workspace_id": workspace_id,
+                "run_id": run_id,
+                "global_profile_binding": {"schema_version": 2, "server_key": new_key},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let member = &index.members[&format!("{workspace_id}:{run_id}")];
+        assert_eq!(membership_orphan_reason(&support, &new_key, member), None);
+        state.membership_revision = index.revision;
+        let owner = ReviewServerOwner {
+            workspace_id: "a".repeat(64),
+            request_ref: Uuid::now_v7(),
+        };
+        let mut active = HomeActive {
+            schema_version: 1,
+            canonical_codex_home: "/different-home".to_owned(),
+            server_key: new_key,
+            server_epoch: state.server_epoch,
+            lifecycle: "ready".to_owned(),
+            pid: Some(state.pid),
+            transition_token: None,
+        };
+        let active_path = home.join("active.json");
+        write_home_active(&active_path, &active).unwrap();
+        let mismatch =
+            automatic_quiescent_migration(&context, &snapshot, &old_key, Some(&owner)).unwrap_err();
+        assert_eq!(mismatch.details["field"], "home_active_codex_home");
+        active.canonical_codex_home = snapshot.canonical_codex_home.clone();
+        write_home_active(&active_path, &active).unwrap();
+        let mut unmatched = snapshot.clone();
+        unmatched.launch_contract_sha256 = "d".repeat(64);
+        let mismatch = automatic_quiescent_migration(&context, &unmatched, &old_key, Some(&owner))
+            .unwrap_err();
+        assert_eq!(
+            mismatch.details["field"],
+            "automatic_rollover_requested_contract"
+        );
+        assert!(
+            read_review_ownership(&new_root, &snapshot.server_key, &owner)
+                .unwrap()
+                .is_none()
+        );
 
-        let attached = automatic_quiescent_migration(&context, &snapshot, &old_key).unwrap();
+        let attached =
+            automatic_quiescent_migration(&context, &snapshot, &old_key, Some(&owner)).unwrap();
         assert_eq!(attached, state);
+        let claim = read_review_ownership(&new_root, &snapshot.server_key, &owner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.phase, ReviewOwnershipPhase::Preexisting);
+        assert_eq!(claim.state, Some(state));
 
         drop(listener);
         fs::remove_file(socket).unwrap();

@@ -45,9 +45,10 @@ acceptance before `v0.1.4` publication.
 TASK-067 is COMPLETE; TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
 TASK-084 through TASK-087, TASK-093, and TASK-094 are COMPLETE;
-TASK-088 and TASK-089 are COMPLETE. EPIC-024 is ACTIVE. TASK-095 is COMPLETE;
-TASK-096 through TASK-098, EPIC-010, and EPIC-011 remain PLANNED. Commits, pushes,
-tags, Releases, installation, and production cutover require separate authorization.
+TASK-088 and TASK-089 are COMPLETE. EPIC-024 is ACTIVE. TASK-095 and TASK-096
+are COMPLETE. TASK-097, TASK-098, EPIC-010, and EPIC-011 remain PLANNED.
+Commits, pushes, tags, Releases, installation, and production cutover require
+separate authorization.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -3143,7 +3144,7 @@ review.
 
 ### TASK-096: Quiescent Upgrade Rollover for Qualified and Successor Profile Servers
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: `TASK-095`.
 

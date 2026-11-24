@@ -2675,19 +2675,20 @@ or policy acceptance does not authorize a new member or task. Generic Profile
 lifecycle and binding history retain tested/unverified compatibility admission. Migration compensation retains its original snapshot
 and durable owner. Earlier external-host evidence uses Codex
 0.164.0 and Claude Code 2.1.310 with the exact executable hashes in that owner;
-it is not transferred to the current Profile candidate. Planned `EPIC-024`
-(`TASK-095` through `TASK-098`) adds deterministic domain-separated SHA-256
+it is not transferred to the current Profile candidate. `EPIC-024` introduces
+deterministic domain-separated SHA-256
 `process_static` capture (`_dolgorae_unclassified_sha256`, refused for checked
 one-shot review) and key-name-only diagnostics for unclassified non-inclusion
-`config.toml` keys (`TASK-095`), dedicated-entrypoint zero-member quiescent
-same-or-newer upgrade rollover and review-ownership propagation (`TASK-096`),
-caller-scoped (`External + Some` and `Managed + Some`) route minimum-version
-(`Codex >= 0.169.0`, `Claude >= 2.1.310`) hardened non-executing setup binding
-plus split-digest `schema_version: 2` online `owner-executable-refresh`
+`config.toml` keys (`TASK-095`) and quiescent rollover and review ownership on
+eligible same-version or newer starts with zero Run members (`TASK-096`).
+The planned `TASK-097` covers hardened non-executing setup binding at the
+caller-scoped (`External + Some` and `Managed + Some`) route minimum versions
+(`Codex >= 0.169.0`, `Claude >= 2.1.310`), split-digest `schema_version: 2`
+online `owner-executable-refresh`
 (preserving `migrated_from_v1_digest` lineage across all five consumer modules)
-and `v1`/`v2` compatible `adapter_version` continuity in `trusted_host`
-(`TASK-097`), and superseding `v0.1.4` H3/H4 Gate C/D requalification
-(`TASK-098`).
+and `v1`/`v2` compatible `adapter_version` continuity in `trusted_host`.
+The planned `TASK-098` covers Gate C and Gate D requalification for the
+superseding `v0.1.4` H3/H4 pair.
 
 ### Public managed task collection
 
@@ -4480,22 +4481,26 @@ runtime; the registry owner then rechecks the definition while recording.
 `review_recovery` uses `direct_review_target`'s existing unsupported-boundary
 error when qualified one-shot preparation refuses before reservation.
 Observe-only qualified catalogs inspect that exact candidate generation without
-publishing history or changing physical state. Qualified shared readiness uses
-the existing deny-rollover path until `TASK-096` introduces a dedicated
-`ensure_qualified_global_server_for_admission` entrypoint (`UpgradeWhenQuiescent`
-under `candidate_version >= incumbent_version` wired at new `StartRun` in
-`semantic.rs:3505`, new qualified external/brokered Specialist `StartRun` in
-`semantic.rs:8789`, and fresh MCP `prepare_reviewer` in `semantic.rs:1134/1172`
-via an explicit server-readiness parameter on `prepare_reviewer_with_binding`)
-and threads `review_owner` through `automatic_quiescent_migration` ->
-`start_snapshot_for_migration` (`Reserved` at new-epoch reservation, `Ready` at
-commit, and `Preexisting` on concurrent-winner attach) in
-`ensure_global_server_for_review`; `ensure_qualified_global_server` stays `Deny`
-for `ensure_retained_global_server` and `--confirm-server-key`, `profile doctor
---launch-probe` and downgrades remain `Deny`, and generic `ensure_global_server`
-(`Allow`) refuses retiring a strictly newer incumbent version (requiring
-explicit Operator stop/migrate before older legacy Run recovery). Shared and
-Dedicated launches consume the retained snapshot argv. Recovery uses accepted
+publishing history or changing physical state.
+`ensure_qualified_global_server_for_admission` selects
+`UpgradeWhenQuiescent` for new caller-workspace `StartRun`, qualified external
+and brokered Specialist typed `StartRun`, and fresh MCP adapter
+preparation. Typed Specialist starts authenticate the Controller and check the
+durable reservation under the allocation lock before choosing readiness. A
+retained reservation selects `Deny`, and the same lock covers publication or
+replay. `prepare_reviewer_with_binding` distinguishes these starts from
+retained and review-owned readiness. For an owned review,
+`automatic_quiescent_migration` carries ownership into
+`start_snapshot_for_migration`. Reservation writes `Reserved`, COMMIT writes
+`Ready`, and attaching to the exact winner records `Preexisting`. This attach
+revalidates the recorded Profile binding and replays the winner's membership
+under the lifecycle locks. Compensation restores the incumbent without
+assigning it to the review.
+`ensure_qualified_global_server` retains `Deny`. Confirmed-key starts and
+doctor launch probes also decline rollover. Both automatic policies require a
+same-or-newer Codex version. A pre-policy binding that would retire a newer
+incumbent requires an Operator stop or migration. Shared and Dedicated launches
+consume the retained snapshot argv. Recovery uses accepted
 bindings without resealing them or resolving a replacement definition.
 Retained qualified bindings keep deny-rollover readiness through member start,
 reservation replay and Run recovery. Pre-policy accepted bindings retain their

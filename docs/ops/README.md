@@ -556,12 +556,13 @@ require recovery (or explicit `TASK-097` online `owner-executable-refresh` after
 Generic Profile doctor probes,
 start/restart/stop and migration retain tested/unverified compatibility
 admission; new qualified-mechanism admissions require Codex 0.169.0 or newer
-without per-version or hash registration, with `TASK-095`/`TASK-096` owning
-conservative unclassified `config.toml` admission and zero-member quiescent
-same-or-newer upgrade rollover. Untested versions remain unverified; actual
-schema, configuration, model, effort, lane and executable/process identity
-checks still apply. A failed migration restores the original snapshot under its
-durable migration owner. Installation, native execution and account use retain
+without per-version or hash registration. Fresh eligible starts can roll over a
+quiescent Profile Server to a same-or-newer version. Untested versions remain
+unverified and actual schema, configuration, model, effort, lane and
+executable/process identity checks still apply. A failed migration attempts to
+restore the original snapshot under the durable migration owner. When
+restoration cannot be proved, the migration stays `migration_blocked` for
+explicit Operator recovery. Installation, native execution and account use retain
 their separate authorization boundaries.
 
 ### Explicit administrative member recovery

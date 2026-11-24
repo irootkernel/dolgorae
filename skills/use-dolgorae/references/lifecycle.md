@@ -32,11 +32,11 @@ dolgorae profile server status <name>
 requires explicit intent. Stop and restart require a separate Operator
 credential; when either operation interrupts live members, it also requires the
 exact confirmed server key. On builds with quiescent upgrade rollover (`EPIC-024`
-/ `TASK-096`+), new qualified and successor server-starting admissions (new
-`StartRun`, external or brokered Specialist `StartRun`, and fresh CLI or MCP
-`specialist review`) automatically roll over a `ready` shared server on the same
-`CODEX_HOME` only when zero live, starting, uncertain, or orphan members remain
-and `candidate >= incumbent`. Earlier builds, version downgrades (including
+/ `TASK-096`+), fresh qualified and successor Run starts, external or brokered
+Specialist typed `StartRun`, CLI `specialist review`, and MCP adapter
+preparation can replace a `ready` server in the same `CODEX_HOME`.
+No live, starting, uncertain, or orphan members can remain, and version
+precedence must satisfy `candidate >= incumbent`. Earlier builds, downgrades (including
 legacy Run recovery against a newer idle server), active or orphan membership,
 `profile doctor --launch-probe`, explicit `--confirm-server-key` commands, and
 retained execution of already-accepted Run snapshots remain non-rolling;
@@ -44,6 +44,7 @@ replacing a contract across those boundaries requires a separate Operator
 migration with both the exact old and new confirmed server keys, whether or not
 `--interrupt` is used. Obtain keys and membership facts from current public
 status and diagnostics, never from a path name or old output.
+The legacy MCP adapter keeps its pinned `mcp_unavailable` tool disposition.
 
 For an explicitly selected Caller-qualified generation, use the exact key from
 the owning caller's checked current preparation or accepted binding:

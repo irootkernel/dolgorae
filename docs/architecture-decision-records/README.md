@@ -3050,15 +3050,18 @@ while keeping `codex app-server` and all checked `public-v1`, `public-v2`,
    serialization). Keep `ensure_qualified_global_server` on `Deny` for
    `ensure_retained_global_server` and `--confirm-server-key`, wire a separate
    `ensure_qualified_global_server_for_admission` (`UpgradeWhenQuiescent`) at
-   the exact new-admission sites (`semantic.rs:3505` new `StartRun`,
-   `semantic.rs:8789` new qualified external/brokered Specialist `StartRun`, and
-   `semantic.rs:1134/1172` fresh MCP `prepare_reviewer` via an explicit
-   server-readiness parameter on `prepare_reviewer_with_binding`), and thread
+   the new caller-workspace `StartRun`, qualified external and brokered
+   Specialist typed `StartRun`, and fresh MCP `prepare_reviewer`. The explicit
+   readiness parameter on `prepare_reviewer_with_binding` distinguishes fresh
+   preparation from retained execution. The adapter keeps its pinned
+   `mcp_unavailable` tool disposition. Thread
    `review_owner` through `automatic_quiescent_migration` ->
    `start_snapshot_for_migration` (`Reserved` at new-epoch reservation, `Ready`
    at commit, `Preexisting` on concurrent-winner attach) for CLI
-   `ensure_global_server_for_review`. Enforce SemVer §11 `candidate_version >=
-   incumbent_version` on both `UpgradeWhenQuiescent` and legacy generic `Allow`
+   `ensure_global_server_for_review`. A caller can attach to the exact ready
+   winner with existing members because attachment retires no server. Enforce
+   SemVer §11 `candidate_version >= incumbent_version` on both
+   `UpgradeWhenQuiescent` and legacy generic `Allow`
    (meaning pre-policy legacy Run recovery against a newer idle incumbent
    returns `PROFILE_MIGRATION_REQUIRED` until an Operator explicitly stops or
    migrates that server).

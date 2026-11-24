@@ -94,10 +94,23 @@ def create_fake_codex(
 import pathlib
 import subprocess
 import sys
+import time
 
 args = sys.argv[1:]
 control_path = pathlib.Path(__file__).with_name("codex-mode.json")
 control = json.loads(control_path.read_text(encoding="utf-8")) if control_path.exists() else {{}}
+
+def wait_at_gate(path):
+    if not path:
+        return
+    gate = pathlib.Path(path)
+    gate.with_suffix(".entered").touch()
+    deadline = time.monotonic() + 30
+    while not gate.with_suffix(".release").exists():
+        if time.monotonic() >= deadline:
+            raise SystemExit(3)
+        time.sleep(0.025)
+
 if args == ["--version"]:
     print("codex-cli " + control.get("version", {json.dumps(native_codex.codex_version(real_codex))}))
     raise SystemExit(0)
@@ -136,10 +149,19 @@ if "app-server" in args and "--listen" in args:
     target = args[args.index("--listen") + 1]
     if not target.startswith("unix://"):
         raise SystemExit(2)
+    wait_at_gate(control.get("startup_gate"))
+    if control.get("startup_fail"):
+        raise SystemExit(4)
     sys.path.insert(0, {json.dumps(str(native_codex.FAKE_APP_SERVER))})
     from scenario import Scenario
-    from server import FakeAppServer
-    fake = FakeAppServer(
+    import server as server_module
+    if control.get("probe_gate"):
+        original_response = server_module.FakeAppServer.build_response
+        def wait_then_respond(self, request_id, respond):
+            wait_at_gate(control["probe_gate"])
+            return original_response(self, request_id, respond)
+        server_module.FakeAppServer.build_response = wait_then_respond
+    fake = server_module.FakeAppServer(
         pathlib.Path(target[len("unix://"):]),
         Scenario.load(pathlib.Path({json.dumps(str(scenario))}),
                       {{"codex_home": {json.dumps(str(codex_home.resolve()))}}}),
@@ -163,10 +185,20 @@ def create_script_codex(path: pathlib.Path) -> None:
     path.chmod(0o755)
 
 
-def set_mode(path: pathlib.Path, *, version: str | None = None, schema: str = "ok") -> None:
-    mode = {"schema": schema}
+def set_mode(
+    path: pathlib.Path, *, version: str | None = None, schema: str = "ok",
+    startup_gate: pathlib.Path | None = None, startup_fail: bool = False,
+    probe_gate: pathlib.Path | None = None,
+) -> None:
+    mode: dict[str, str | bool] = {"schema": schema}
     if version is not None:
         mode["version"] = version
+    if startup_gate is not None:
+        mode["startup_gate"] = str(startup_gate)
+    if startup_fail:
+        mode["startup_fail"] = True
+    if probe_gate is not None:
+        mode["probe_gate"] = str(probe_gate)
     path.with_name("codex-mode.json").write_text(
         json.dumps(mode), encoding="utf-8"
     )

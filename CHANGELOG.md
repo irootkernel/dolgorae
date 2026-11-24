@@ -85,6 +85,7 @@ development commits.
 ### Fixed
 
 - Keep ordinary Codex Runs compatible with new settings and SemVer versions through digest-only configuration and additive schema checks, and retain session and per-Turn reasoning overrides through verified settings no-ops.
+- Automatically roll over a quiescent shared Profile Server on eligible new Run and review starts when the requested Codex version is the same or newer.
 - Harden dedicated-lane startup child-process ancestry verification, `ReconcileStartOperation` closure/lookup handling, transient lookup retryability, and `force_delete_after_close` policy enforcement in the final H3 candidate (`8fb6a3578ae3`, superseding `8d529950e597`).
 - Accept equivalent integral floating-point Profile metadata during startup and recovery while preserving numeric precision-loss checks and canonical idempotency identities.
 - Reconcile unknown pre-allocation Starts through an authenticated public operation, preserving existing acceptance or durably closing the original key without redispatch.

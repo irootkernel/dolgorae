@@ -217,7 +217,7 @@ pub(crate) fn execute_with_source_contract(
             view,
             root.clone(),
             binding,
-            Some(&review_owner),
+            crate::semantic::ReviewerServerReadiness::Owned(&review_owner),
         )?;
         if let Some(instructions) = instructions {
             let role = instructions.role.name.clone();

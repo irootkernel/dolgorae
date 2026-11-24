@@ -114,8 +114,10 @@ an explicitly documented recovery action.
   downgrades (including pre-policy legacy recovery against a newer idle server),
   live or orphan members, `profile doctor --launch-probe`,
   `--confirm-server-key`, and retained qualified/successor Run bindings never
-  roll over automatically. Do not kill a process or remove a lock, socket,
-  journal, or registry entry manually.
+  roll over automatically. On `PROFILE_MIGRATION_REQUIRED`, use the reported
+  keys to inspect the newer incumbent and the requested binding. An explicitly
+  authorized stop or migration can clear that conflict. Do not kill a process
+  or remove a lock, socket, journal, or registry entry manually.
 - Bare `profile doctor` is offline. Use `--launch-probe`, server control,
   membership tombstone, state reset, or operator-authorized migration only when
   that exact intervention is requested and its current preconditions are known.

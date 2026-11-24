@@ -958,22 +958,22 @@ bindings retain their original observations and digests; later runtime-mutable
 observations MUST NOT prevent reuse of the same launch contract.
 The key remains fixed for the lifetime; a later process-static
 change fixes that lifetime to its recorded snapshot. A generation-starting
-command MAY replace it automatically only after complete membership and exact
-process evidence prove that no Run remains attached (under `TASK-096`,
-additionally requiring `candidate_version >= incumbent_version` across both
-qualified/successor `UpgradeWhenQuiescent` and generic `Allow` rollovers);
-otherwise the change requires operator migration. Pinned probes own the
-classification and hot-reload verdict for every field used by v1.
+command with rollover authority MAY replace it automatically only after complete
+membership and exact process evidence prove that no Run remains attached. Both
+qualified/successor `UpgradeWhenQuiescent` and generic `Allow` require
+`candidate_version >= incumbent_version`. Other changes require operator
+migration. Pinned probes own the classification and hot-reload verdict for
+every field used by v1.
 
 The singleton `server_key` is the domain-separated SHA-256 of that object, never
 the profile display name or incidental caller state. A compatible profile
 MUST reuse its live singleton across workspaces and runs. A different contract
 for the same canonical home MUST NOT start a second shared singleton or silently
-fall back to a reader-per-run server. If the recorded Dolgorae singleton is
-`ready`, its membership journal and index are complete, it has no live or orphan
-Run member, and its exact process and socket identities verify, the starting
-command MUST retire it and atomically migrate the home to the requested contract
-without an operator credential. Any live member, incomplete evidence, lifecycle
+fall back to a reader-per-run server. A start with automatic rollover authority
+MUST use the durable migration to retire a `ready` incumbent when the requested
+version has the same or higher SemVer precedence, both keys have complete and
+quiescent membership, and the incumbent's recorded process group, log drainer,
+and socket identities verify. Any live member, incomplete evidence, lifecycle
 transition, or identity mismatch fails closed and leaves the incumbent running.
 The durable migration ID owns both its stop and start reservations: unrelated
 lifecycle commands MUST reject the active fence, and a migration MUST NOT
@@ -1245,17 +1245,19 @@ concrete provisioning blockers without requiring per-version approval.
 Original-key replay, release, closure and recovery retain the accepted binding,
 including qualified 0.159.3, 0.164.0 and 0.167.2 records. Existing snapshots are
 never resealed. Actual executable and process identities remain checked against
-that binding. Under `EPIC-024` (`TASK-096`), new qualified and successor
-server-starting admissions (new caller-workspace/Orchestrated Session `StartRun`,
-new qualified external/brokered Specialist `StartRun`, fresh MCP
-`dolgorae_review`, and fresh CLI `specialist review` with `ReviewServerOwnership`
-threaded through migration into `Reserved`/`Ready`/`Preexisting` states; offline
-provisioning validate/install starts no server) permit automatic zero-member
-quiescent rollover on the same canonical `CODEX_HOME` when the incumbent
-singleton is `ready`, complete membership on both keys and exact
-process/drainer/socket proofs establish zero live, starting, uncertain, or
-orphan members, no stop reservation or `migration_blocked` fence exists, and
-SemVer §11 precedence satisfies `candidate_version >= incumbent_version`.
+that binding. Fresh caller-workspace and Orchestrated Session `StartRun`,
+qualified external and brokered Specialist typed `StartRun`, Specialist Review
+MCP adapter preparation, and fresh CLI `specialist review` can roll over a
+quiescent singleton. The incumbent must be `ready` on the same canonical
+`CODEX_HOME`. A stop reservation or an unresolved or corrupt migration record
+blocks rollover. Both keys need complete membership records with zero live,
+starting, uncertain, or orphan members. The recorded process group, log drainer,
+and socket must match their live identities. SemVer §11 precedence must satisfy
+`candidate_version >= incumbent_version`.
+CLI review ownership follows the requested generation through `Reserved` and
+`Ready`. A review attaching to an already-ready winner records `Preexisting`.
+The legacy MCP adapter retains its `mcp_unavailable` tool disposition.
+Provisioning validate/install remains offline.
 Version downgrades (`candidate_version < incumbent_version`), live or orphan
 members, `profile doctor --launch-probe`, explicit `--confirm-server-key`
 lifecycle selection, and retained qualified/successor execution
@@ -1924,7 +1926,7 @@ normative:
 | `PROFILE_ALREADY_EXISTS` | 4 | `profile add` | the name already exists; replacement is never implicit |
 | `PROFILE_SERVER_BUSY` | 4 | profile lifecycle and run connect/recovery | another serialized profile operation or active-member condition temporarily blocks the command |
 | `PROFILE_LAUNCH_CONFLICT` | 4 | `profile doctor/server start`, `run start/resume/recover/fork` | the canonical `CODEX_HOME` already has a different active launch contract |
-| `PROFILE_MIGRATION_REQUIRED` | 4 | generation-starting run commands | compatible accepted drift changes the shared server key and requires operator-authorized profile migration |
+| `PROFILE_MIGRATION_REQUIRED` | 4 | Profile, Run, and review operations that permit automatic rollover | the requested version is older than the incumbent and requires an Operator stop or migration |
 | `PROFILE_MEMBERSHIP_INCOMPLETE` | 4 | profile lifecycle, migration, and membership repair | the manager cannot prove its durable membership journal complete; details name the operator repair action when available |
 | `PROFILE_SERVER_EPOCH_MISMATCH` | 4 | run attach/recovery and writer operations | a connection or writer record names a different selected shared/dedicated lane-server epoch |
 | `WORKSPACE_INITIALIZATION_CONFLICT` | 4 | `init` | re-init, nesting, Git mode, partial-layout, or policy-file facts conflict |
